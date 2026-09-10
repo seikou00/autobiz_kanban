@@ -549,6 +549,8 @@ def validate_task_artifact_refs(
     task: dict[str, Any],
     cache: dict[str, bool] | None = None,
     design_contract: dict[str, Any] | None = None,
+    *,
+    check_design_artifact: bool = True,
 ) -> list[dict[str, Any]]:
     """Validate all artifact references in a task.
 
@@ -563,12 +565,20 @@ def validate_task_artifact_refs(
 
     contract = design_contract
 
-    # Validate designRefs
+    # Validate designRefs.  Design owns validation of design.md itself.  Plan
+    # consumes the locked contract snapshot and therefore can validate the
+    # logical ref shape/ID without reopening the Design artifact.
     for index, ref in enumerate(task.get("designRefs", [])):
         if not isinstance(ref, str):
             continue
         try:
-            validate_artifact_ref(base, ref, design=True, cache=None)
+            raw_path, anchor = _split_ref(ref)
+            if not (anchor.startswith("API-") or anchor.startswith("DATA-") or anchor.startswith("D-")):
+                raise ArtifactRefError("invalid_artifact_ref_type", f"designRefs 只允许 API/DATA/D anchor: {ref}")
+            if not check_design_artifact and raw_path not in {"", "design.md"}:
+                raise ArtifactRefError("invalid_artifact_ref_format", f"designRefs 必须引用 design.md: {ref}")
+            if check_design_artifact:
+                validate_artifact_ref(base, ref, design=True, cache=None)
         except ArtifactRefError as exc:
             errors.append({
                 "reason": exc.reason,
@@ -579,7 +589,6 @@ def validate_task_artifact_refs(
                 "repairTarget": "task_detail",
             })
             continue
-        _, _, anchor = ref.partition("#")
         kind = "API" if anchor.startswith("API-") else "DATA" if anchor.startswith("DATA-") else "D"
         if contract is not None:
             if kind == "API" and contract.get("noHttpApi") is True:

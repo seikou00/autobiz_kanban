@@ -20,28 +20,14 @@ from hooks import artifact_sync, artifact_sync_execute_hook, sync_artifacts  # n
 EXPECTED_OUTPUT_METADATA = {
     "PRD.md": ("requirement", "final"),
     "UI_CONTEXT.json": ("ui_context", "final"),
-    "source-context.json": ("requirement_source", "final"),
     "proposal.md": ("behavior_proposal", "final"),
     "specs/**/*.md": ("behavior_spec", "final"),
-    "SPECS_REVIEW.md": ("review_report", "evidence"),
     "design.md": ("technical_design", "process"),
+    ".design-contract.lock.json": ("technical_design_contract", "process"),
     "PLAN.md": ("implementation_plan", "process"),
     "plan.json": ("implementation_plan", "final"),
     "DETAIL_DESIGN.md": ("technical_detail", "process"),
     "evidence/EVIDENCE.jsonl": ("evidence_stream", "evidence"),
-    "REQUIREMENTS_EVAL.md": ("review_report", "evidence"),
-    "UNIT_TEST_REPORT.md": ("unit_test_report", "evidence"),
-    "UNIT_TEST_RESULT.json": ("unit_test_result", "evidence"),
-    "test-output.log": ("log", "log"),
-    "E2E_TEST_CASES.yaml": ("e2e_cases", "evidence"),
-    "E2E_REPORT.md": ("e2e_report", "evidence"),
-    "E2E_RESULT.json": ("e2e_result", "evidence"),
-    "E2E_QUALITY_SCAN.json": ("e2e_quality_scan", "evidence"),
-    "e2e-diagnostics/**/*": ("e2e_diagnostic", "evidence"),
-    "FIX_REQUEST.json": ("fix_request", "process"),
-    "e2e-run.log": ("log", "log"),
-    "VERIFY_REPORT.md": ("verify_report", "final"),
-    "VERIFY_DECISION.json": ("verify_decision", "final"),
 }
 
 
@@ -108,17 +94,6 @@ class ArtifactCatalogContractTest(unittest.TestCase):
         self.assertEqual(original_entry["category"], "source_reference")
         self.assertEqual(original_entry["lifecycle"], "reference")
         self.assertEqual(original_entry["status_reason"], "file_size_exceeds_5mb")
-
-        source_snapshot = artifact_sync.catalog_entry(
-            path="sources/SRC-001/payment.docx",
-            stage="biz.prd",
-            upload_status="uploaded",
-            size=12,
-            sha256="def",
-        )
-        self.assertEqual(source_snapshot["source"], "extra")
-        self.assertEqual(source_snapshot["category"], "requirement_source_snapshot")
-        self.assertEqual(source_snapshot["lifecycle"], "reference")
 
     def test_catalog_writer_uses_required_fields_and_excludes_itself(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,14 +215,13 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             self.assertEqual(event["source_stage"], "dev.plan")
             self.assertEqual(
                 [item["path"] for item in event["artifacts"]],
-                ["PLAN.md", "design.md", "plan.json", artifact_sync.CATALOG_FILE_NAME],
+                ["PLAN.md", "plan.json", artifact_sync.CATALOG_FILE_NAME],
             )
             for item in event["artifacts"]:
                 self.assertTrue(item["upload_path"].startswith("P001/DEV/Features/alpha"))
 
             catalog = json.loads((feature_dir / artifact_sync.CATALOG_FILE_NAME).read_text(encoding="utf-8"))
             catalog_entries = {item["path"]: item for item in catalog["artifacts"]}
-            self.assertEqual(catalog_entries["design.md"]["category"], "technical_design")
             self.assertEqual(catalog_entries["PLAN.md"]["category"], "implementation_plan")
             self.assertEqual(catalog_entries["plan.json"]["category"], "implementation_plan")
 
@@ -257,12 +231,8 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             original_dir = feature_dir / "prd_original"
             original_dir.mkdir(parents=True)
-            source_dir = feature_dir / "sources" / "SRC-001"
-            source_dir.mkdir(parents=True)
             (feature_dir / "PRD.md").write_text("# 需求正式稿\n", encoding="utf-8")
-            (feature_dir / "source-context.json").write_text('{"version": 1}\n', encoding="utf-8")
             (original_dir / "source.docx").write_bytes(b"source")
-            (source_dir / "payment.docx").write_bytes(b"payment")
             state_path = workspace / ".autobizdevops" / "state.json"
             state_path.write_text(
                 json.dumps(
@@ -302,21 +272,13 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             self.assertEqual(event["source_skill"], "autobiz-requirement-discuss")
             self.assertEqual(
                 [item["path"] for item in event["artifacts"]],
-                [
-                    "PRD.md",
-                    "prd_original/source.docx",
-                    "source-context.json",
-                    "sources/SRC-001/payment.docx",
-                    artifact_sync.CATALOG_FILE_NAME,
-                ],
+                ["PRD.md", "prd_original/source.docx", artifact_sync.CATALOG_FILE_NAME],
             )
 
             catalog = json.loads((feature_dir / artifact_sync.CATALOG_FILE_NAME).read_text(encoding="utf-8"))
             by_path = {item["path"]: item for item in catalog["artifacts"]}
             self.assertEqual(by_path["PRD.md"]["stage"], "biz.prd")
-            self.assertEqual(by_path["source-context.json"]["stage"], "biz.prd")
             self.assertEqual(by_path["prd_original/source.docx"]["stage"], "biz.prd")
-            self.assertEqual(by_path["sources/SRC-001/payment.docx"]["stage"], "biz.prd")
 
     def test_read_status_migrates_retryable_discuss_events_and_retires_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

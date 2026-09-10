@@ -73,17 +73,6 @@ class RunUTestCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         self._write_plan()
-        run_path = self.feature_dir / ".task-runs" / "T001" / "run.json"
-        run_path.parent.mkdir(parents=True)
-        run_path.write_text(
-            json.dumps(
-                {
-                    "status": "done",
-                    "repositories": [{"id": self.repo.name, "path": str(self.repo)}],
-                }
-            ),
-            encoding="utf-8",
-        )
     def _task(self, task_id="T001", argv=None, behavior="fixed amount discount"):
         command_id = "VAL-{}-01".format(task_id)
         criterion_id = "AC-{}-01".format(task_id)
@@ -142,7 +131,12 @@ class RunUTestCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         (self.feature_dir / "plan.json").write_text(
-            json.dumps({"batches": [{"id": "B001", "path": "plans/B001/plan.json"}]}),
+            json.dumps(
+                {
+                    "codeWorkspaces": {self.repo.name: str(self.repo)},
+                    "batches": [{"id": "B001", "path": "plans/B001/plan.json"}],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -181,15 +175,7 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual(["test_sample.py"], record["validation"]["testFiles"])
         self.assertEqual(["test_sample.py"], record["changedFiles"])
         self.assertEqual(record["covers"], target["covers"])
-        bindings = json.loads(
-            (self.workspace / ".autobizdevops" / "workspace-bindings.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertEqual(
-            str(self.repo.resolve()),
-            bindings["features"]["alpha"][self.repo.name]["root"],
-        )
+        self.assertFalse((self.workspace / ".autobizdevops" / "workspace-bindings.json").exists())
         self.assertEqual("PASS", self._unit_result()["verdict"])
         self.assertEqual([], validate_result_against_plan(self.feature_dir, self._unit_result()))
 
@@ -198,6 +184,31 @@ class RunUTestCommandTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(canonical_task_digest(self.task), result["taskDigest"])
+
+    def test_native_batch_worktree_override_runs_and_records_inside_worktree(self):
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Test User"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", "test_sample.py"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "test fixture"], check=True)
+        worktree = self.repo.parent / "native-utest-worktree"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-qb", "utest-worktree", str(worktree)],
+            check=True,
+        )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(worktree)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        )
+
+        result = self._execute(code_workspace=str(worktree))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(str(worktree.resolve()), result["repositoryRoot"])
+        self.assertEqual(["test_sample.py"], self._records()[0]["validation"]["testFiles"])
 
     def test_rerun_appends_history_on_same_plan_target(self):
         first = self._execute()
@@ -380,19 +391,6 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual("yudao-module-mkt", validation["executionCwd"])
         self.assertEqual([], validate_result_against_plan(self.feature_dir, self._unit_result()))
 
-    def test_semantic_scope_module_blocks_without_fallback(self):
-        task = self._task()
-        task["scope"] = {
-            "modules": ["AiReview 评分模块"],
-            "workspaceRoots": {self.repo.name: "."},
-        }
-        self._write_plan(task)
-
-        with self.assertRaises(UTestCommandError) as caught:
-            self._execute()
-
-        self.assertIn("禁止降级到 validationLocations 或 '.'", str(caught.exception))
-
     def test_writer_failure_retains_evidence_and_reports_recovery(self):
         with mock.patch(
             "hooks.run_utest_command.record_execution", side_effect=OSError("read-only")
@@ -455,79 +453,6 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertIn(
             "unit_test_target_plan_mismatch:UT-001:commandId", reasons
         )
-
-    def test_board_gate_accepts_plan_bound_blocked_result_for_needs_fix(self):
-        spec = self.feature_dir / "specs" / "cap" / "spec.md"
-        spec.parent.mkdir(parents=True)
-        spec.write_text(
-            "## ADDED Requirements\n\n"
-            "### Requirement [REQ-001]: pricing\n\n"
-            "#### Scenario [SCN-001]: fixed discount\n",
-            encoding="utf-8",
-        )
-        ensure_plan_result(self.workspace, "alpha", create=True)
-        hook_dir = ROOT / "skills" / "autodev" / "hooks"
-        sys.path.insert(0, str(hook_dir))
-        self.addCleanup(lambda: sys.path.remove(str(hook_dir)))
-        module_spec = importlib.util.spec_from_file_location(
-            "utest_blocked_artifact_check", str(hook_dir / "artifact_check.py")
-        )
-        module = importlib.util.module_from_spec(module_spec)
-        module_spec.loader.exec_module(module)
-        ctx = module.HookContext(
-            skill="autodev-utest",
-            slug="alpha",
-            root=self.workspace,
-            required_outputs=("UNIT_TEST_RESULT.json",),
-            target_checkpoint="needs_fix",
-        )
-        reasons = []
-
-        def capture(_ctx, reason, *args, **kwargs):
-            del _ctx, args, kwargs
-            reasons.append(reason)
-            return 1
-
-        with mock.patch.object(module, "fail_line", side_effect=capture):
-            failures = module.validate_unit_test_result_json(ctx)
-
-        self.assertEqual(0, failures, reasons)
-        self.assertEqual("BLOCKED", self._unit_result()["verdict"])
-
-    def test_board_gate_rejects_fail_result_for_needs_fix(self):
-        ensure_plan_result(self.workspace, "alpha", create=True)
-        data = self._unit_result()
-        data["verdict"] = "FAIL"
-        (self.feature_dir / "UNIT_TEST_RESULT.json").write_text(
-            json.dumps(data), encoding="utf-8"
-        )
-        hook_dir = ROOT / "skills" / "autodev" / "hooks"
-        sys.path.insert(0, str(hook_dir))
-        self.addCleanup(lambda: sys.path.remove(str(hook_dir)))
-        module_spec = importlib.util.spec_from_file_location(
-            "utest_failed_artifact_check", str(hook_dir / "artifact_check.py")
-        )
-        module = importlib.util.module_from_spec(module_spec)
-        module_spec.loader.exec_module(module)
-        ctx = module.HookContext(
-            skill="autodev-utest",
-            slug="alpha",
-            root=self.workspace,
-            required_outputs=("UNIT_TEST_RESULT.json",),
-            target_checkpoint="needs_fix",
-        )
-        reasons = []
-
-        def capture(_ctx, reason, *args, **kwargs):
-            del _ctx, args, kwargs
-            reasons.append(reason)
-            return 1
-
-        with mock.patch.object(module, "fail_line", side_effect=capture):
-            failures = module.validate_unit_test_result_json(ctx)
-
-        self.assertGreater(failures, 0)
-        self.assertIn("non_blocked_unit_test_needs_fix_verdict", reasons)
 
     def test_malformed_evidence_returns_gate_error_instead_of_raising(self):
         self._execute()

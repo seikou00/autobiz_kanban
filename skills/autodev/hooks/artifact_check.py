@@ -67,12 +67,18 @@ from hooks.artifact_ref_validator import (  # noqa: E402
     validate_plan_source_coverage,
     validate_task_artifact_refs,
 )
+from hooks.design_contract_lock import (  # noqa: E402
+    load_confirmed_design_contract,
+    validate_design_contract_lock as validate_locked_design_contract,
+)
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
+    load_plan_bundle,
     plan_json_path,
     unfinished_tasks,
 )
+from hooks.parallel_validation_ownership import validation_ownership_errors  # noqa: E402
 from hooks.code_task_context import resolve_task_refs  # noqa: E402
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 from hooks.utest_plan_contract import validate_result_against_plan  # noqa: E402
@@ -1075,6 +1081,15 @@ def _validate_design_source_references(ctx: HookContext, design_text: str) -> in
             f" ids={','.join(missing_api_refs)}",
             target=",".join(missing_api_refs),
         )
+    return failures
+
+
+def validate_design_contract_lock(ctx: HookContext) -> int:
+    """Require the Design-owned snapshot to match the validated design artifact."""
+
+    failures = 0
+    for issue in validate_locked_design_contract(ctx.feature_dir, ctx.slug):
+        failures += _emit_artifact_issue(ctx, issue, ".design-contract.lock.json")
     return failures
 
 
@@ -2651,7 +2666,9 @@ def _emit_artifact_issue(ctx: HookContext, issue: dict, fallback: str) -> int:
 def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
     failures = 0
     spec_ids, spec_failures = collect_spec_definition_index(ctx)
-    design_contract, design_issues = load_design_contract(ctx.feature_dir)
+    # dev.design already validated and locked design.md.  Plan consumes the
+    # snapshot instead of reopening the upstream artifact.
+    design_contract, design_issues = load_confirmed_design_contract(ctx.feature_dir, ctx.slug)
     failures += spec_failures
     for issue in design_issues:
         failures += _emit_artifact_issue(ctx, issue, "design.md")
@@ -2694,6 +2711,7 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
             ctx.feature_dir,
             task,
             design_contract=design_contract,
+            check_design_artifact=False,
         ):
             failures += _emit_artifact_issue(ctx, issue, task_id)
     for issue in validate_plan_design_coverage(design_contract, raw_tasks):
@@ -2867,6 +2885,28 @@ def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
         failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
     if data is not None and not errors and data.get("taskSetStatus") != "finalized":
         failures += fail_line(ctx, "plan_task_set_not_finalized", target="plan.json.taskSetStatus")
+    return failures
+
+
+def validate_parallel_batch_pipeline_contract(ctx: HookContext) -> int:
+    """Require the per-Batch UTest plus E2E-only pipeline contract."""
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        info(ctx, "parallel_batch_pipeline_not_in_contract_degrade")
+        return 0
+    try:
+        bundle = load_plan_bundle(ctx.feature_dir)
+    except Exception as exc:  # plan_json_contract reports the structural cause too.
+        return fail_line(ctx, "invalid_parallel_batch_pipeline", f" detail={exc}")
+
+    failures = 0
+    for error in validation_ownership_errors(bundle.root, bundle.batches):
+        failures += fail_line(
+            ctx,
+            "invalid_parallel_batch_pipeline",
+            f" detail={error}",
+            target=error,
+        )
     return failures
 
 
@@ -3260,8 +3300,10 @@ VALIDATORS = {
     "capability_spec_correspondence": validate_capability_spec_correspondence,
     "ui_context_json": validate_ui_context_json,
     "design_contract": validate_design_contract,
+    "design_contract_lock": validate_design_contract_lock,
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
+    "parallel_batch_pipeline_contract": validate_parallel_batch_pipeline_contract,
     "plan_task_granularity": validate_plan_task_granularity,
     "plan_scenario_coverage": validate_plan_scenario_coverage,
     "plan_ref_resolution": validate_plan_ref_resolution,

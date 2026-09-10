@@ -168,4 +168,5 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 返回行为按 `Review execution mode` 分支：
 
 - `independent_task`：把控制权交还主 agent，不得要求主 agent 停止当前回合或等待用户。主 agent 会在同一回合读取 verdict 并继续父技能分支。
+- `fixed_code_workflow`：这是固定 Code Workflow 的内部 Review。不得调用 `request_user_input`、不得要求用户确认或把控制权交给用户；只返回持久化的 verdict。`FAIL` 由同一 Workflow 的受控返工分支处理；缺少非关键审查信息时按 warning 记录，继续当前 Workflow。
 - `inline_main_agent`：必须停止当前回合，明确告知用户平台未提供 task 工具、本次由主 agent 内联执行 reviewer 角色，并请用户确认是否在下一回合切回 executor 角色继续。未获得确认前，不得执行 verdict 分支、修复或 checkpoint 推进。

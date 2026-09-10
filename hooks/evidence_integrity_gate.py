@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from evidence_store import (  # noqa: E402
 )
 from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
+    batch_compile_is_not_configured_for_frontend,
     blocked_tasks,
     defer_to_test_stages_enabled,
     failed_tasks,
@@ -70,16 +72,10 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
             if evidence_id != _expected_evidence_id(line_no):
                 errors.append(f"non_sequential_evidence_id:line={line_no}:id={evidence_id}")
         task_id = record.get("taskId")
-        is_batch_validation = (
-            record.get("action") == "batch_validation"
-            and task_id == "__batch__"
-            and isinstance(record.get("batchId"), str)
-        )
         if (
             isinstance(task_id, str)
             and task_id
             and task_id != "__project__"
-            and not is_batch_validation
             and not task_id.startswith("T")
         ):
             errors.append(f"line={line_no}:invalid_task_id:{task_id}")
@@ -105,7 +101,7 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
-    if record.get("action") not in {"validation", "batch_validation", "project_check"}:
+    if record.get("action") not in {"validation", "batch_compile", "project_check"}:
         return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
@@ -139,16 +135,11 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     for record in records:
         task_id = record.get("taskId")
         is_project_check = record.get("action") == "project_check" and task_id == "__project__"
-        is_batch_validation = (
-            record.get("action") == "batch_validation"
-            and task_id == "__batch__"
-        )
         if (
             isinstance(task_id, str)
             and task_id
             and task_id not in known_tasks
             and not is_project_check
-            and not is_batch_validation
         ):
             errors.append(f"unknown_evidence_task_id:{task_id}")
     for task in tasks(plan):
@@ -174,35 +165,12 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
                 errors.append(f"unknown_project_check_evidence_id:{evidence_id}")
             elif record.get("action") != "project_check" or record.get("taskId") != "__project__":
                 errors.append(f"invalid_project_check_evidence_id:{evidence_id}")
-    batch_plans = plan.get("_bundleBatches")
-    if isinstance(batch_plans, dict):
-        records_by_id = {
-            str(record.get("evidenceId")): record
-            for record in records
-            if isinstance(record.get("evidenceId"), str)
-        }
-        for batch_id, batch in batch_plans.items():
-            validation = batch.get("batchValidation") if isinstance(batch, dict) else None
-            evidence_ids = validation.get("evidenceIds") if isinstance(validation, dict) else None
-            for evidence_id in evidence_ids or []:
-                record = records_by_id.get(str(evidence_id))
-                if record is None:
-                    errors.append(f"{batch_id}.unknown_batch_validation_evidence_id:{evidence_id}")
-                elif (
-                    record.get("action") != "batch_validation"
-                    or record.get("taskId") != "__batch__"
-                    or record.get("batchId") != batch_id
-                ):
-                    errors.append(f"{batch_id}.invalid_batch_validation_evidence_id:{evidence_id}")
     return errors
 
 
 def check_code_done(target_feature_dir: Path) -> list[str]:
     errors = check_integrity(target_feature_dir, require_index=True)
     plan_path = plan_json_path(target_feature_dir)
-    if (target_feature_dir / "BATCH_HANDOFF.json").exists():
-        errors.append("unresolved_batch_handoff")
-
     if not errors:
         errors.extend(check_plan_evidence_refs(target_feature_dir))
 
@@ -345,7 +313,7 @@ def _check_completion(
             for field in ("argv", "cwd", "kind", "required", "repo"):
                 if validation.get(field) != planned.get(field):
                     errors.append(f"{task_id}.validation_command_mismatch:{command_id}:{field}")
-    errors.extend(_check_batch_completion(plan, by_id))
+    errors.extend(_check_batch_completion(plan, by_id, feature_dir=feature_dir))
     return errors
 
 
@@ -358,6 +326,8 @@ def _check_completion(
 def _check_batch_completion(
     plan: dict[str, Any],
     by_id: dict[str, dict[str, Any]],
+    *,
+    feature_dir: Path | None = None,
 ) -> list[str]:
     """Validate the batch compile closure used by Code done gate."""
     errors: list[str] = []
@@ -374,30 +344,25 @@ def _check_batch_completion(
         if not isinstance(compile_result, dict):
             errors.append(f"{batch_id}.batch_compile_contract_missing")
             continue
-        if compile_result.get("status") != "passed":
-            status = compile_result.get("status")
-            if status == "failed":
-                errors.append(f"{batch_id}.batch_compile_failed")
-            else:
-                errors.append(f"{batch_id}.batch_compile_not_passed:{status}")
+        compile_status = compile_result.get("status")
+        if compile_status == "skipped":
+            if not batch_compile_is_not_configured_for_frontend(batch):
+                errors.append(f"{batch_id}.batch_compile_skip_not_allowed")
+            continue
+        if compile_status not in {"passed", "failed"}:
+            errors.append(f"{batch_id}.batch_compile_not_recorded:{compile_status}")
             continue
         command_id = compile_result.get("commandId")
         if not isinstance(command_id, str) or not command_id.strip():
             errors.append(f"{batch_id}.batch_compile_commandId_missing_or_empty")
             continue
-        batch_validation = batch.get("batchValidation")
-        commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-        compile_command = next(
-            (
-                command for command in commands
-                if isinstance(command, dict)
-                and command.get("kind") == "compile"
-                and command.get("required") is True
-                and command.get("id") == command_id
-            ),
-            None,
-        )
-        if compile_command is None:
+        compile_command = batch.get("compileCommand")
+        if not (
+            isinstance(compile_command, dict)
+            and compile_command.get("kind") == "compile"
+            and compile_command.get("required") is True
+            and compile_command.get("id") == command_id
+        ):
             errors.append(f"{batch_id}.batch_compile_commandId_not_found_in_plan:{command_id}")
             continue
         expected_evidence = {
@@ -414,6 +379,38 @@ def _check_batch_completion(
         }
         if compile_result.get("implementationRevisionByTask") != expected_revisions:
             errors.append(f"{batch_id}.batch_compile_implementation_revision_mismatch")
+
+    # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
+    # A compile result is insufficient here: only the merger records the
+    # delivery and transitions the task from implemented to done.  Requiring a
+    # succeeded runtime manifest prevents a manually edited plan from bypassing
+    # the merge and final verification barriers.
+    if len(batch_plans) > 1:
+        run_ids: set[str] = set()
+        for batch_id, batch in batch_plans.items():
+            if not isinstance(batch, dict):
+                continue
+            merge_sha = batch.get("mergeCommitSha")
+            if not isinstance(merge_sha, str) or not merge_sha.strip():
+                errors.append(f"{batch_id}.parallel_merge_commit_missing")
+            run_id = batch.get("deliveryRunId")
+            if not isinstance(run_id, str) or not run_id.strip():
+                errors.append(f"{batch_id}.parallel_delivery_run_missing")
+            else:
+                run_ids.add(run_id)
+        if feature_dir is None:
+            errors.append("parallel_delivery_feature_dir_missing")
+        else:
+            for run_id in sorted(run_ids):
+                manifest_path = feature_dir / ".parallel-runs" / run_id / "manifest.json"
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    errors.append(f"parallel_delivery_manifest_missing:{run_id}")
+                    continue
+                verification = manifest.get("finalVerification") if isinstance(manifest, dict) else None
+                if manifest.get("status") != "succeeded" or not isinstance(verification, dict) or verification.get("passed") is not True:
+                    errors.append(f"parallel_delivery_not_verified:{run_id}")
     return errors
 
 

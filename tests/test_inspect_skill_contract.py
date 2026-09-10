@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from board_core.state_store import write_state_records
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.inspect_skill_contract import (
     ROOT,
@@ -27,22 +26,8 @@ class InspectSkillContractPlainTest(unittest.TestCase):
     def _create_feature(self, feature: str, *, workflow_template: str = "standard") -> None:
         create_feature(self.workspace, feature, workflow_template=workflow_template)
 
-    def _create_legacy_lean_feature(self, feature: str) -> None:
-        (self.workspace / ".autobizdevops" / "features" / feature).mkdir(parents=True)
-        write_state_records(
-            self.workspace,
-            {
-                feature: {
-                    "checkpoint": "specs_in_progress",
-                    "workflowProfile": "standard",
-                    "workflowDecisions": {},
-                    "workflowTemplate": "lean",
-                }
-            },
-        )
-
     def _plain(self, skill: str, feature: str) -> str:
-        contract, workflow_context, extra_skipped_inputs = _find_feature_contract(
+        contract, workflow_context, extra_missing_inputs = _find_feature_contract(
             ROOT,
             skill=skill,
             feature=feature,
@@ -52,13 +37,13 @@ class InspectSkillContractPlainTest(unittest.TestCase):
             contract,
             workflow_context,
             _resolve_feature_dir(self.workspace, feature),
-            extra_skipped_inputs=extra_skipped_inputs,
+            extra_missing_inputs=extra_missing_inputs,
         )
 
     def test_standard_prd_contract_uses_merged_requirement_skill(self) -> None:
         feature = "merged-prd"
         self._create_feature(feature)
-        contract, _, extra_skipped = _find_feature_contract(
+        contract, _, extra_missing = _find_feature_contract(
             ROOT,
             skill="autobiz-requirement-discuss",
             feature=feature,
@@ -72,33 +57,53 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertEqual(extra_missing, ())
         self.assertEqual(self._plain("autobiz-requirement-discuss", feature), "")
 
-    def test_plain_legacy_lean_workflow_marks_dropped_entry_inputs_as_skipped(self) -> None:
+    def test_standard_design_and_plan_contracts_have_a_hard_handoff(self) -> None:
+        feature = "design-plan-handoff"
+        self._create_feature(feature)
+
+        design, _, _ = _find_feature_contract(
+            ROOT,
+            skill="autodev-design",
+            feature=feature,
+            workspace=self.workspace,
+        )
+        plan, _, _ = _find_feature_contract(
+            ROOT,
+            skill="autodev-plan",
+            feature=feature,
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(design.node_id, "dev.design")
+        self.assertEqual(design.checkpoints, ("design_in_progress", "design_done"))
+        self.assertEqual(design.required_outputs, ("design.md", ".design-contract.lock.json"))
+        self.assertEqual(plan.node_id, "dev.plan")
+        self.assertEqual(plan.checkpoints, ("plan_in_progress", "plan_done"))
+        self.assertEqual(plan.required_outputs, ("PLAN.md", "plan.json"))
+        self.assertIn("design.md", plan.required_inputs)
+        self.assertIn(".design-contract.lock.json", plan.required_inputs)
+
+    def test_plain_lean_workflow_requires_prd_only(self) -> None:
         feature = "lean-entry"
-        self._create_legacy_lean_feature(feature)
+        self._create_feature(feature, workflow_template="lean")
 
         output = self._plain("autodev-specs", feature)
 
         self.assertIn("PRD.md", output)
-        self.assertIn("裁剪前必需，status: `skipped`", output)
-        self.assertIn("source-context.json", output)
-        self.assertNotIn("无 PRD 时基于用户描述直接澄清行为契约", output)
-        self.assertNotIn("自动降级", output)
+        self.assertIn("无 PRD 时基于用户描述直接澄清行为契约", output)
         self.assertIn("UI_CONTEXT.json", output)
 
-    def test_plain_legacy_lean_archive_reports_nothing_to_handle(self) -> None:
+    def test_plain_lean_archive_reports_nothing_to_handle(self) -> None:
         # ops.archive's only input is produced by ops.cicd, which lean drops from
         # the chain: it can never exist here, so it is not a missing artifact.
         feature = "lean-archive"
-        self._create_legacy_lean_feature(feature)
+        self._create_feature(feature, workflow_template="lean")
 
-        self.assertEqual(
-            self._plain("autoops-archive", feature),
-            "## 输入产物（state: `ready`）\n- 无\n",
-        )
+        self.assertEqual(self._plain("autoops-archive", feature), "")
 
-    def test_plain_legacy_lean_code_omits_inputs_of_dropped_upstream_nodes(self) -> None:
+    def test_plain_lean_code_omits_inputs_of_dropped_upstream_nodes(self) -> None:
         feature = "lean-code"
-        self._create_legacy_lean_feature(feature)
+        self._create_feature(feature, workflow_template="lean")
 
         output = self._plain("autodev-code", feature)
 
@@ -108,23 +113,6 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertNotIn("PRD.md", output)
         self.assertNotIn("design.md", output)
         self.assertNotIn("plan.json", output)
-
-    def test_plain_code_separates_optional_detail_design_from_missing_inputs(self) -> None:
-        feature = "code-without-detail-design"
-        self._create_feature(feature)
-        feature_dir = _resolve_feature_dir(self.workspace, feature)
-        for relative_path in ("proposal.md", "PRD.md", "design.md", "plan.json"):
-            (feature_dir / relative_path).write_text("content\n", encoding="utf-8")
-        spec = feature_dir / "specs" / "capability" / "spec.md"
-        spec.parent.mkdir(parents=True, exist_ok=True)
-        spec.write_text("content\n", encoding="utf-8")
-
-        output = self._plain("autodev-code", feature)
-
-        self.assertIn("state: `ready`", output)
-        self.assertIn("`proposal.md`：变更提案（必需，status: `present`）", output)
-        self.assertIn("`DETAIL_DESIGN.md`：详细设计参考（可选，status: `missing`）", output)
-        self.assertIn("自动降级：无 DETAIL_DESIGN 时", output)
 
 if __name__ == "__main__":
     unittest.main()

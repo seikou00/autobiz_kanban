@@ -65,9 +65,6 @@ class RollbackStageTest(unittest.TestCase):
         batch["status"] = "in_progress"
         batch["startedAt"] = "2026-08-18T10:00:00Z"
         batch["batchCompile"] = {"status": "passed", "runId": "compile-1"}
-        batch["batchValidation"]["status"] = "passed"
-        batch["batchValidation"]["evidenceIds"] = ["EV-COMPILE"]
-        batch["batchValidation"]["latestPassEvidenceIds"] = ["EV-COMPILE"]
 
         root = root_plan(batches=[batch_entry("B001", ["T001", "T002"])])
         root["featureId"] = self.feature
@@ -99,6 +96,59 @@ class RollbackStageTest(unittest.TestCase):
         )
         return repository
 
+    def _create_parallel_runtime_resource(self, repository: Path, *, run_id: str = "cw-rollback-001") -> tuple[Path, Path, str, Path]:
+        """Create the plugin-owned Git resources a Code rollback must tear down."""
+        worktree = self.feature_dir / ".parallel-runs" / run_id / "worktrees" / "default" / "B001"
+        worktree.parent.mkdir(parents=True)
+        branch = f"autodev/{self.feature}/{run_id}/B001"
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+        run_dir = self.feature_dir / ".parallel-runs" / run_id
+        lease = run_dir / "leases" / "B001.json"
+        lease.parent.mkdir(parents=True, exist_ok=True)
+        lease.write_text(
+            json.dumps({"ownerToken": "test-owner", "expiresEpoch": 4_000_000_000}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        base_branch = subprocess.run(
+            ["git", "-C", str(repository), "branch", "--show-current"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        (run_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "runId": run_id,
+                    "feature": self.feature,
+                    "status": "running",
+                    "isolation": {"mode": "native_git_worktrees"},
+                    "repositories": {
+                        "default": {"gitRoot": str(repository), "baseBranch": base_branch}
+                    },
+                    "batches": {
+                        "B001": {
+                            "batchId": "B001",
+                            "repositoryRef": "default",
+                            "status": "leased",
+                            "lease": {"ownerToken": "redacted"},
+                            "worktreePath": str(worktree),
+                            "branchName": branch,
+                            "worktreeOwner": "plugin",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return repository, worktree, branch, lease
+
     def _write_task_run(self, repository: Path) -> None:
         run_dir = self.feature_dir / ".task-runs" / "T001"
         run_dir.mkdir(parents=True)
@@ -126,38 +176,27 @@ class RollbackStageTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_deletes_target_and_downstream_outputs_then_updates_state(self) -> None:
-        self._set_checkpoint("verify_done")
+    def test_rolls_back_code_and_downstream_outputs_then_updates_state(self) -> None:
+        self._set_checkpoint("code_done")
         keep = {
             "PRD.md": "prd",
-            "UNIT_TEST_REPORT.md": "unit",
-            "test-output.log": "unit log",
+            "PLAN.md": "plan",
         }
         delete = {
-            "E2E_TEST_CASES.yaml": "cases",
-            "E2E_QUALITY_SCAN.json": "quality",
-            "E2E_REPORT.md": "e2e",
-            "e2e-run.log": "e2e log",
-            "VERIFY_REPORT.md": "verify",
             "CICD_CHECKLIST.md": "cicd",
             "PR_BODY.md": "pr",
         }
         for name, content in {**keep, **delete}.items():
             (self.feature_dir / name).write_text(content, encoding="utf-8")
-        diagnostics = self.feature_dir / "e2e-diagnostics" / "round-1"
-        diagnostics.mkdir(parents=True)
-        (diagnostics / "report.json").write_text("{}\n", encoding="utf-8")
-        diagnostics_lock = self.feature_dir / "e2e-diagnostics" / "e2e-run.lock"
-        diagnostics_lock.write_text("0", encoding="utf-8")
 
         plan = prepare_stage_rollback(
             workspace=self.project,
             feature=self.feature,
-            stage="dev.e2e",
+            stage="dev.code",
             updated_at="2026-07-29 12:00:00",
         )
         self.assertTrue(plan.ok, plan.errors)
-        self.assertEqual(plan.new_checkpoint, "unit_test_done")
+        self.assertEqual(plan.new_checkpoint, "plan_done")
 
         result = execute_stage_rollback(plan)
 
@@ -166,12 +205,10 @@ class RollbackStageTest(unittest.TestCase):
             self.assertTrue((self.feature_dir / name).exists(), name)
         for name in delete:
             self.assertFalse((self.feature_dir / name).exists(), name)
-        self.assertFalse((diagnostics / "report.json").exists())
-        self.assertFalse(diagnostics_lock.exists())
         records, errors, _ = load_state_json_records(self.project)
         self.assertEqual(errors, [])
-        self.assertEqual(records[self.feature]["checkpoint"], "unit_test_done")
-        self.assertNotEqual(records[self.feature]["stage"], "verify_done")
+        self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
+        self.assertNotEqual(records[self.feature]["stage"], "code_done")
 
     def test_glob_removes_only_declared_files_and_prunes_empty_directories(self) -> None:
         self._set_checkpoint("plan_done")
@@ -448,10 +485,13 @@ class RollbackStageTest(unittest.TestCase):
         task_runs = self.feature_dir / ".task-runs" / "T001"
         task_runs.mkdir(parents=True)
         (task_runs / "run.json").write_text("{}\n", encoding="utf-8")
-        (self.feature_dir / "BATCH_HANDOFF.json").write_text("{}\n", encoding="utf-8")
         evidence = self.feature_dir / "evidence"
         evidence.mkdir()
         (evidence / "EVIDENCE.index.json").write_text("{}\n", encoding="utf-8")
+        (evidence / "EVIDENCE.jsonl").write_text("{}\n", encoding="utf-8")
+        parallel_run = self.feature_dir / ".parallel-runs" / "cw-test-001"
+        parallel_run.mkdir(parents=True)
+        (parallel_run / "manifest.json").write_text("{}\n", encoding="utf-8")
 
         plan = prepare_stage_rollback(
             workspace=self.project,
@@ -467,11 +507,13 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(result.ok, result.errors)
 
         self.assertFalse((self.feature_dir / ".task-runs").exists())
-        self.assertFalse((self.feature_dir / "BATCH_HANDOFF.json").exists())
-        self.assertFalse((evidence / "EVIDENCE.index.json").exists())
+        self.assertFalse((self.feature_dir / "evidence").exists())
+        self.assertFalse((self.feature_dir / ".parallel-runs").exists())
         self.assertFalse(stale_batch.exists())
         history = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id
         self.assertTrue((history / "artifacts" / ".task-runs" / "T001" / "run.json").is_file())
+        self.assertTrue((history / "artifacts" / "evidence" / "EVIDENCE.jsonl").is_file())
+        self.assertTrue((history / "artifacts" / ".parallel-runs" / "cw-test-001" / "manifest.json").is_file())
         self.assertTrue((history / "plan" / "plans" / "B999" / "plan.json").is_file())
         self.assertTrue((history / "state-before.json").is_file())
         self.assertTrue((history / "state-after.json").is_file())
@@ -483,19 +525,153 @@ class RollbackStageTest(unittest.TestCase):
         self.assertEqual(root["status"], "todo")
         self.assertEqual(root["projectCheckEvidenceIds"], [])
         self.assertNotIn("batchCompile", batch)
-        self.assertEqual(batch["batchValidation"]["status"], "pending")
         self.assertEqual([item["status"] for item in batch["tasks"]], ["todo", "todo"])
         self.assertTrue(all(item["evidenceIds"] == [] for item in batch["tasks"]))
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
 
-    def test_code_source_restore_uses_session_baseline_and_removes_created_files(self) -> None:
+    def test_code_rollback_removes_parallel_worktree_branch_and_lease_before_archiving_runtime(self) -> None:
         self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
         repository = self._create_code_repository()
-        session = capture_code_session_baseline(
+        _, worktree, branch, lease = self._create_parallel_runtime_resource(repository)
+
+        plan = prepare_stage_rollback(
             workspace=self.project,
             feature=self.feature,
-            code_workspaces=[repository],
+            stage="dev.code",
+        )
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(worktree.exists())
+        self.assertFalse(lease.exists())
+        branch_exists = subprocess.run(
+            ["git", "-C", str(repository), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            capture_output=True,
+        )
+        self.assertNotEqual(branch_exists.returncode, 0)
+        archived_manifest = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id / "artifacts" / ".parallel-runs" / "cw-rollback-001" / "manifest.json"
+        archived_batch = json.loads(archived_manifest.read_text(encoding="utf-8"))["batches"]["B001"]
+        self.assertIsNone(archived_batch["worktreePath"])
+        self.assertIsNone(archived_batch["branchName"])
+        self.assertIsNone(archived_batch["lease"])
+        self.assertEqual(archived_batch["removedBranchName"], branch)
+
+    def test_code_rollback_archives_feature_owned_workflow_runtime_and_keeps_other_features(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        feature_runtime = self.project / ".cmbdevclaw" / "workflows" / self.feature
+        script = feature_runtime / "code-batched-execution.workflow.js"
+        journal = feature_runtime / "run.journal"
+        lock = feature_runtime / ".lock"
+        feature_runtime.mkdir(parents=True)
+        script.write_text("export const fixed = true;\n", encoding="utf-8")
+        journal.write_text("generated by workflow\n", encoding="utf-8")
+        lock.write_text("", encoding="utf-8")
+        other_runtime = self.project / ".cmbdevclaw" / "workflows" / "other-feature" / "run.journal"
+        other_runtime.parent.mkdir(parents=True)
+        other_runtime.write_text("must remain\n", encoding="utf-8")
+
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(feature_runtime.exists())
+        self.assertEqual(
+            result.archived_workflow_runtime,
+            f".cmbdevclaw/workflows/{self.feature}",
+        )
+        self.assertTrue(other_runtime.is_file())
+        archived_runtime = (
+            self.project
+            / ".autobizdevops"
+            / "rollback"
+            / "history"
+            / plan.rollback_id
+            / "workflow-runtime"
+        )
+        self.assertEqual((archived_runtime / script.name).read_text(encoding="utf-8"), "export const fixed = true;\n")
+        self.assertEqual((archived_runtime / journal.name).read_text(encoding="utf-8"), "generated by workflow\n")
+        self.assertTrue((archived_runtime / lock.name).is_file())
+
+    def test_code_rollback_removes_branch_when_manifest_worktree_path_is_already_stale(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        repository = self._create_code_repository()
+        _, worktree, branch, lease = self._create_parallel_runtime_resource(repository, run_id="cw-stale-001")
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "remove", "--force", str(worktree)],
+            check=True,
+            capture_output=True,
+        )
+        self.assertFalse(worktree.exists())
+
+        result = execute_stage_rollback(
+            prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(lease.exists())
+        branch_exists = subprocess.run(
+            ["git", "-C", str(repository), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            capture_output=True,
+        )
+        self.assertNotEqual(branch_exists.returncode, 0)
+
+    def test_code_rollback_does_not_reset_feature_when_parallel_cleanup_fails(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        runtime_manifest = self.feature_dir / ".parallel-runs" / "cw-failed-cleanup" / "manifest.json"
+        runtime_manifest.parent.mkdir(parents=True)
+        runtime_manifest.write_text("{}\n", encoding="utf-8")
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+
+        with patch(
+            "hooks.rollback_stage.cleanup_feature_runs_for_code_rollback",
+            side_effect=ValueError("parallel_run_cleanup_failed:cw-failed-cleanup:branch_still_exists"),
+        ):
+            result = execute_stage_rollback(plan)
+
+        self.assertFalse(result.ok)
+        self.assertIn("parallel_run_cleanup_failed", result.errors[0])
+        self.assertTrue(runtime_manifest.exists())
+        root = json.loads((self.feature_dir / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(root["status"], "in_progress")
+        records, _, _ = load_state_json_records(self.project)
+        self.assertEqual(records[self.feature]["checkpoint"], "code_done")
+
+    def test_code_source_restore_reuses_clean_git_blob_and_removes_created_files(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        with patch("hooks.rollback_stage._baseline_entry") as stored_entry:
+            session = capture_code_session_baseline(
+                workspace=self.project,
+                feature=self.feature,
+                code_workspaces=[repository],
+            )
+        stored_entry.assert_not_called()
+        self.assertEqual(session["version"], 2)
+        baseline = session["repositories"][repository.name]
+        self.assertEqual(baseline["storage"], {"gitBlobFiles": 1, "objectFiles": 0})
+        entry = baseline["files"]["app.txt"]
+        self.assertEqual(entry["storage"], "git_blob")
+        self.assertEqual(
+            entry["gitSha"],
+            subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD:app.txt"],
+                text=True,
+            ).strip(),
+        )
+        self.assertFalse(
+            (
+                self.project
+                / ".autobizdevops"
+                / "rollback"
+                / "baselines"
+                / self.feature
+                / "objects"
+            ).exists()
         )
         (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
         (repository / "new.txt").write_text("new feature file\n", encoding="utf-8")
@@ -530,6 +706,132 @@ class RollbackStageTest(unittest.TestCase):
         )
         self.assertEqual(active["sessionId"], session["sessionId"])
         self.assertEqual(active["status"], "rolled_back")
+
+    def test_code_source_restore_preserves_dirty_baseline_with_stored_object(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        (repository / "app.txt").write_text("user baseline change\n", encoding="utf-8")
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+        baseline = session["repositories"][repository.name]
+        self.assertEqual(baseline["storage"], {"gitBlobFiles": 0, "objectFiles": 1})
+        entry = baseline["files"]["app.txt"]
+        self.assertEqual(entry["storage"], "baseline_object")
+        self.assertTrue(
+            (
+                self.project
+                / ".autobizdevops"
+                / "rollback"
+                / "baselines"
+                / self.feature
+                / "objects"
+                / entry["objectSha256"]
+            ).is_file()
+        )
+
+        (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
+        (repository / "new.txt").write_text("new feature file\n", encoding="utf-8")
+        self._write_task_run(repository)
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.code",
+            code_source="restore",
+        )
+
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual((repository / "app.txt").read_text(encoding="utf-8"), "user baseline change\n")
+
+    def test_code_session_preserves_tracked_file_deleted_before_capture(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        (repository / "app.txt").unlink()
+
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+
+        baseline = session["repositories"][repository.name]
+        self.assertNotIn("app.txt", baseline["files"])
+
+        (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
+        (repository / "new.txt").write_text("new feature file\n", encoding="utf-8")
+        self._write_task_run(repository)
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.code",
+            code_source="restore",
+        )
+
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse((repository / "app.txt").exists())
+        self.assertFalse((repository / "new.txt").exists())
+
+    def test_code_session_stores_staged_content_outside_git_blob_reference(self) -> None:
+        repository = self._create_code_repository()
+        (repository / "app.txt").write_text("staged baseline change\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repository), "add", "app.txt"], check=True)
+
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+
+        entry = session["repositories"][repository.name]["files"]["app.txt"]
+        self.assertEqual(entry["storage"], "baseline_object")
+
+    def test_code_session_stores_untracked_content_outside_git_blob_reference(self) -> None:
+        repository = self._create_code_repository()
+        (repository / "local-only.txt").write_text("untracked baseline content\n", encoding="utf-8")
+
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+
+        baseline = session["repositories"][repository.name]
+        self.assertEqual(baseline["storage"], {"gitBlobFiles": 1, "objectFiles": 1})
+        entry = baseline["files"]["local-only.txt"]
+        self.assertEqual(entry["storage"], "baseline_object")
+        self.assertTrue(entry["objectSha256"])
+
+    def test_code_session_rejects_active_pre_v2_baseline(self) -> None:
+        repository = self._create_code_repository()
+        capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+        active_path = (
+            self.project
+            / ".autobizdevops"
+            / "rollback"
+            / "baselines"
+            / self.feature
+            / "active.json"
+        )
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        active["version"] = 1
+        active_path.write_text(json.dumps(active, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "基线版本不受支持"):
+            capture_code_session_baseline(
+                workspace=self.project,
+                feature=self.feature,
+                code_workspaces=[repository],
+            )
 
     def test_code_source_restore_blocks_when_file_changed_after_task_snapshot(self) -> None:
         self._set_checkpoint("code_done")

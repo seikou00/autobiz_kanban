@@ -147,7 +147,7 @@ python "${pluginPath}/hooks/run_e2e_command.py" run \
 |---|---|---|
 | `test_bug` | 只修 spec、fixture、Page Object、mock、测试辅助、测试数据或 E2E 配置 | 不生成 |
 | `source_bug` | 当前 feature 最小源码修复；越界停止 | `implementation_bug` → `code_in_progress` |
-| `contract_gap` | 不猜测预期，回流规格或设计 | `spec_gap` / `requirement_ambiguous` → `specs_in_progress`；`design_conflict` → `plan_in_progress` |
+| `contract_gap` | 不猜测预期，回流规格或设计 | `spec_gap` / `requirement_ambiguous` → `specs_in_progress`；`design_conflict` → `design_in_progress` |
 | `environment` | 记录服务、依赖、浏览器、命令证据 | `environment_issue` → `cicd_in_progress` |
 | `auth` | 记录身份、方法、缺失权限，不记录敏感值 | `permission_issue` → `cicd_in_progress`，`humanActionRequired: true` |
 | `data` | 记录缺失数据与最小准备条件 | `dependency_issue` → `cicd_in_progress` |

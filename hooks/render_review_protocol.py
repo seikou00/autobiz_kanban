@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_PATH = ROOT / "skills" / "references" / "review-protocol.md"
 
-STAGES = ("dev.specs", "dev.plan", "dev.code")
+STAGES = ("dev.specs", "dev.design", "dev.plan", "dev.code")
 ALL_STAGES = "*"
 
 # <!-- section: 名称 | stages: dev.specs,dev.plan -->

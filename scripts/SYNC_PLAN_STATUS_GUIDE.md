@@ -226,7 +226,7 @@ todo → in_progress → done
 
 ### 功能状态流转
 ```
-todo → in_progress → awaiting_next_conversation → done
+todo → in_progress → done
                ↓
             failed
 ```

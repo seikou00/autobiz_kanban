@@ -18,6 +18,7 @@ declare -a items=()
 [[ -d "hooks" ]] && items+=("hooks")
 [[ -d "skills" ]] && items+=("skills")
 [[ -d "agents" ]] && items+=("agents")
+[[ -d "workflows" ]] && items+=("workflows")
 
 while IFS= read -r file; do
   items+=("$file")

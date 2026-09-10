@@ -1,0 +1,17 @@
+{
+  "parallelSchedulingMode": "optimistic",
+  "maxParallel": 4,
+  "conflictResolution": {
+    "maxAttempts": 2,
+    "enableAutoResolve": true,
+    "notifyOnManualRequired": true,
+    "autoResolveStrategies": [
+      "append_only",
+      "local_modification"
+    ]
+  },
+  "monitoring": {
+    "enableMetrics": true,
+    "logConflicts": true
+  }
+}

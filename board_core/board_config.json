@@ -13,11 +13,7 @@
       "dialogTips": "发起知识沉淀"
     }
   },
-  "supported_deploy_units": [
-    "LA64.05_UEX",
-    "LB47.05",
-    "LA64.05"
-  ],
+  "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",
@@ -31,7 +27,7 @@
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path ${pluginPath}/sys"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
     },
     "linux": {
       "knowledge_path": "${pluginPath}/sys",
@@ -45,7 +41,7 @@
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path ${pluginPath}/sys"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
     },
     "win32": {
       "knowledge_path": "${pluginPath}\\sys",
@@ -59,7 +55,7 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}\\sys"
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
     }
   },
   "workflow": {
@@ -71,6 +67,16 @@
         "kind": "profile",
         "label": "标准",
         "description": "完整主干流程（Biz→Dev→Ops），不含可选动态节点；动态节点可在流程中按需开启。"
+      },
+      "lean": {
+        "kind": "nodeSubset",
+        "label": "精简路线",
+        "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
+        "nodes": [
+          "dev.specs",
+          "dev.code",
+          "ops.archive"
+        ]
       }
     },
     "profiles": {
@@ -165,6 +171,7 @@
       "initial": [
         "prd_in_progress",
         "specs_in_progress",
+        "design_in_progress",
         "plan_in_progress",
         "cicd_in_progress"
       ],
@@ -179,6 +186,12 @@
           "specs_done"
         ],
         "specs_done": [
+          "design_in_progress"
+        ],
+        "design_in_progress": [
+          "design_done"
+        ],
+        "design_done": [
           "plan_in_progress"
         ],
         "plan_in_progress": [
@@ -191,32 +204,6 @@
           "code_done"
         ],
         "code_done": [
-          "requirements_eval_in_progress"
-        ],
-        "requirements_eval_in_progress": [
-          "requirements_eval_done"
-        ],
-        "requirements_eval_done": [
-          "unit_test_in_progress"
-        ],
-        "unit_test_in_progress": [
-          "unit_test_done"
-        ],
-        "unit_test_done": [
-          "e2e_in_progress"
-        ],
-        "e2e_in_progress": [
-          "e2e_done",
-          "needs_fix"
-        ],
-        "e2e_done": [
-          "verify_in_progress"
-        ],
-        "verify_in_progress": [
-          "verify_done",
-          "needs_fix"
-        ],
-        "verify_done": [
           "cicd_in_progress"
         ],
         "cicd_in_progress": [
@@ -228,9 +215,9 @@
         "needs_fix": [
           "prd_in_progress",
           "specs_in_progress",
+          "design_in_progress",
           "plan_in_progress",
           "code_in_progress",
-          "unit_test_in_progress",
           "cicd_in_progress"
         ],
         "archived": []
@@ -240,18 +227,12 @@
         "prd_done": "Biz / PRD",
         "specs_in_progress": "Specs",
         "specs_done": "Specs 完成",
+        "design_in_progress": "技术设计",
+        "design_done": "技术设计完成",
         "plan_in_progress": "Plan",
         "plan_done": "Plan 完成",
         "code_in_progress": "Code",
         "code_done": "Code 完成",
-        "requirements_eval_in_progress": "Requirements Review",
-        "requirements_eval_done": "Requirements Review 完成",
-        "unit_test_in_progress": "Unit Test",
-        "unit_test_done": "Unit Test 完成",
-        "e2e_in_progress": "E2E",
-        "e2e_done": "E2E 完成",
-        "verify_in_progress": "Verify",
-        "verify_done": "Verify 完成",
         "cicd_in_progress": "CI/CD",
         "cicd_done": "CI/CD 完成",
         "needs_fix": "需要修复",
@@ -273,7 +254,7 @@
             }
           }
         },
-        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）；存在外部资料时生成 sources/ 快照与 source-context.json",
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）",
         "states": [
           {
             "nodeStatus": "not_started",
@@ -323,8 +304,7 @@
               "artifactType": "json",
               "path": "UI_CONTEXT.json",
               "required": true
-            },
-            { "id": "source_context", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false }
+            }
           ]
         },
         "validators": [
@@ -360,7 +340,6 @@
             "customSubagentFiles": [
               "agents/explore.md",
               "agents/critic.md"
-              ,"agents/critic_autodev_zh.md","agents/specs-gate-fixer.md"
             ]
           }
         },
@@ -388,9 +367,9 @@
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-plan",
-              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：技术设计与计划。"
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
             }
           }
         ],
@@ -408,10 +387,6 @@
               "required": true,
               "extract": {
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
-              } },
-            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
-              "extract": {
-                "degrade": "无外部资料时跳过；存在时 targets 含 spec 的要求必须进入 Requirement 或 Scenario"
               }
             },
             {
@@ -446,23 +421,21 @@
               "artifactType": "json",
               "path": "UI_CONTEXT.json",
               "required": true
-            },
-            { "id": "specs_review", "label": "规格回检结论", "artifactType": "file", "path": "SPECS_REVIEW.md", "required": true }
+            }
           ]
         },
         "validators": [
           "proposal_contract",
           "specs_contract",
           "capability_spec_correspondence",
-          "ui_context_json",
-          "specs_review_verdict"
+          "ui_context_json"
         ]
       },
       {
-        "id": "dev.plan",
-        "label": "技术设计与计划",
+        "id": "dev.design",
+        "label": "技术设计",
         "group": "Dev",
-        "skill": "autodev-plan",
+        "skill": "autodev-design",
         "order": 40,
         "runtimePolicy": {
           "agentMode": "multi",
@@ -472,43 +445,49 @@
             }
           },
           "subagentConfig": {
-            "disabledBuiltinSubagents": ["Explore","critic"],
-            "customSubagentFiles": ["agents/explore.md","agents/critic_autodev_plan_zh.md"]
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic.md"
+            ]
           }
         },
-        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",
+        "description": "探索并生成技术设计 \n 产物：design.md 与 .design-contract.lock.json（已校验的 API/数据/技术决策快照）",
         "states": [
           {
             "nodeStatus": "not_started",
             "label": "未开始",
             "nextAction": {
-              "slashSkill": "autodev-plan",
-              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：技术设计与计划。"
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
             }
           },
           {
             "nodeStatus": "in_progress",
             "label": "进行中",
             "nextAction": {
-              "slashSkill": "autodev-plan",
-              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：技术设计与计划。"
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
             }
           },
           {
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-code",
-              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。"
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
             }
           }
         ],
         "checkpoints": [
-          "plan_in_progress",
-          "plan_done"
+          "design_in_progress",
+          "design_done"
         ],
         "artifacts": {
           "inputs": [
@@ -539,17 +518,9 @@
               "path": "UI_CONTEXT.json",
               "required": true,
               "extract": {
-                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 范围"
               }
-            },
-            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
-              "extract": {
-                "degrade": "无 PRD 时以 proposal/specs 设计；存在来源快照时以 source-context.json 与 sources/ 为准，只有从未取得资料时才阻断"
-              } },
-            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
-              "extract": {
-                "degrade": "无外部资料时跳过；存在时按 targets 写入 design，并把 plan/code 要求绑定到 task sourceRefs"
-              } }
+            }
           ],
           "outputs": [
             {
@@ -559,6 +530,133 @@
               "path": "design.md",
               "required": true
             },
+            {
+              "id": "design_contract_lock",
+              "label": "设计契约锁",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "design_contract",
+          "design_contract_lock",
+          "ui_context_json"
+        ]
+      },
+      {
+        "id": "dev.plan",
+        "label": "执行计划",
+        "group": "Dev",
+        "skill": "autodev-plan",
+        "order": 50,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic.md"
+            ]
+          }
+        },
+        "description": "基于已确认设计生成可执行任务计划 \n 产物：plan.json（任务 DAG 机器事实源）、PLAN.md（执行计划投影视图）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "plan_in_progress",
+          "plan_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时回到 /autodev-design 补齐设计依据，再重新生成计划"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时回到 /autodev-specs 补齐行为契约，不能只凭 design.md 拆任务"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
+              }
+            },
+            {
+              "id": "design",
+              "label": "已确认技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design.md 时回到 /autodev-design 生成并确认技术设计，不能直接生成计划"
+              }
+            },
+            {
+              "id": "design_contract_lock",
+              "label": "Design 已锁定契约",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true,
+              "extract": {
+                "degrade": "缺少设计契约锁说明 /autodev-design 未完成；回到 Design 校验并生成锁后再进入 Plan"
+              }
+            }
+          ],
+          "outputs": [
             {
               "id": "plan",
               "label": "执行计划",
@@ -576,11 +674,10 @@
           ]
         },
         "validators": [
-          "design_contract",
           "ui_context_json",
           "plan_json_contract",
           "plan_json_initial_tasks",
-          "plan_ref_resolution",
+          "parallel_batch_pipeline_contract",
           "plan_task_granularity",
           "plan_scenario_coverage"
         ],
@@ -595,7 +692,7 @@
         "label": "代码实现",
         "group": "Dev",
         "skill": "autodev-code",
-        "order": 50,
+        "order": 60,
         "runtimePolicy": {
           "agentMode": "multi",
           "toolCustomConfig": {
@@ -642,9 +739,9 @@
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-reviewer",
-              "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：需求实现评审。"
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。批次内 review、test、quality gate、B-INT、B-E2E 与证据汇总已完成，不重复执行。"
             }
           }
         ],
@@ -672,16 +769,24 @@
               "required": true,
               "extract": {
                 "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
-              } },
-            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
+              }
+            },
+            {
+              "id": "prd_optional",
+              "label": "PRD参考",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": false,
               "extract": {
-                "degrade": "无 PRD 时以已有产物理解需求；存在来源上下文时按当前 TASK 的 resolvedSourceRefs 与快照实现"
-              } },
-            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
-              "extract": {
-                "degrade": "无外部资料时跳过；存在时只使用当前 task 的 resolvedSourceRefs，不从摘要反查或重新索取已有快照"
-              } },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+                "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "design",
+              "label": "技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
               "extract": {
                 "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               }
@@ -745,768 +850,12 @@
         ],
         "rollback": {
           "archive": [
+            ".parallel-runs",
             ".task-runs",
-            "BATCH_HANDOFF.json",
-            "evidence/EVIDENCE.index.json",
+            "evidence",
             "FRONTEND_ROUTE.json"
           ]
         }
-      },
-      {
-        "id": "dev.review",
-        "label": "需求实现评审",
-        "group": "Dev",
-        "skill": "autodev-reviewer",
-        "runtimePolicy": {
-          "agentMode": "multi",
-          "toolCustomConfig": {
-            "task": {
-              "enabled": true
-            }
-          },
-          "subagentConfig": {
-            "disabledBuiltinSubagents": [],
-            "customSubagentFiles": [
-              "agents/reviewer.md"
-            ]
-          }
-        },
-        "order": 60,
-        "description": "评审代码实现是否满足规格 \n 产物：REQUIREMENTS_EVAL.md（需求实现评审报告：实现对规格的覆盖结论与发现项）",
-        "states": [
-          {
-            "nodeStatus": "not_started",
-            "label": "未开始",
-            "nextAction": {
-              "slashSkill": "autodev-reviewer",
-              "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：需求实现评审。"
-            }
-          },
-          {
-            "nodeStatus": "in_progress",
-            "label": "进行中",
-            "nextAction": {
-              "slashSkill": "autodev-reviewer",
-              "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：需求实现评审。"
-            }
-          },
-          {
-            "nodeStatus": "done",
-            "label": "已完成",
-            "nextAction": {
-              "slashSkill": "autodev-utest",
-              "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：单元测试。"
-            }
-          }
-        ],
-        "checkpoints": [
-          "requirements_eval_in_progress",
-          "requirements_eval_done"
-        ],
-        "artifacts": {
-          "inputs": [
-            {
-              "id": "proposal",
-              "label": "变更提案",
-              "artifactType": "file",
-              "path": "proposal.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 proposal 时以 specs 与用户需求描述界定评审范围"
-              }
-            },
-            {
-              "id": "specs",
-              "label": "行为规格",
-              "artifactType": "file",
-              "path": "specs/**/*.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 specs 时对照 proposal 与用户确认的行为预期评审，并在报告中标注基准缺失"
-              } },
-            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
-              "extract": {
-                "degrade": "无 PRD 时直接跳过；存在来源上下文时 reviewer 以 source-context.json 与 sources/ 快照逐项核对"
-              } },
-            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
-              "extract": {
-                "degrade": "无外部资料时跳过；存在时 reviewer 必须逐项核对 targets 含 reviewer 的要求 ID"
-              } },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
-              "extract": {
-                "degrade": "无 design 时按现有代码模式评审实现合理性，并在报告中记录设计基准缺失"
-              }
-            },
-            {
-              "id": "plan_json",
-              "label": "计划机器事实源",
-              "artifactType": "json",
-              "path": "plan.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
-              }
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true,
-              "extract": {
-                "degrade": "缺失时回到 code 阶段补齐证据流，不能用 Markdown 报告替代"
-              }
-            },
-            {
-              "id": "ui_context_json",
-              "label": "UI范围机器事实源",
-              "artifactType": "json",
-              "path": "UI_CONTEXT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 范围"
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "id": "requirements_eval",
-              "label": "需求实现评审报告",
-              "artifactType": "file",
-              "path": "REQUIREMENTS_EVAL.md",
-              "required": true
-            }
-          ]
-        },
-        "validators": [
-          "ui_context_json",
-          "requirements_eval_verdict"
-        ]
-      },
-      {
-        "id": "dev.utest",
-        "label": "单元测试",
-        "group": "Dev",
-        "skill": "autodev-utest",
-        "order": 70,
-        "runtimePolicy": {
-          "agentMode": "multi",
-          "toolCustomConfig": {
-            "task": {
-              "enabled": true
-            }
-          },
-          "subagentConfig": {
-            "disabledBuiltinSubagents": [
-              "test-engineer"
-            ],
-            "customSubagentFiles": [
-              "agents/test-engineer.md"
-            ]
-          }
-        },
-        "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_REPORT.md（单元测试报告：用例结果、覆盖与风险）、test-output.log（单测运行原始输出日志）",
-        "states": [
-          {
-            "nodeStatus": "not_started",
-            "label": "未开始",
-            "nextAction": {
-              "slashSkill": "autodev-utest",
-              "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：单元测试。"
-            }
-          },
-          {
-            "nodeStatus": "in_progress",
-            "label": "进行中",
-            "nextAction": {
-              "slashSkill": "autodev-utest",
-              "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：单元测试。"
-            }
-          },
-          {
-            "nodeStatus": "done",
-            "label": "已完成",
-            "nextAction": {
-              "slashSkill": "autodev-e2e",
-              "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：E2E 测试。"
-            }
-          }
-        ],
-        "checkpoints": [
-          "unit_test_in_progress",
-          "unit_test_done"
-        ],
-        "artifacts": {
-          "inputs": [
-            {
-              "id": "proposal",
-              "label": "变更提案",
-              "artifactType": "file",
-              "path": "proposal.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 proposal 时以本轮代码 diff 界定测试范围"
-              }
-            },
-            {
-              "id": "specs",
-              "label": "行为规格",
-              "artifactType": "file",
-              "path": "specs/**/*.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 specs 时以现有实现行为与用户确认预期生成测试，并标注行为基准缺失"
-              }
-            },
-            {
-              "id": "prd_optional",
-              "label": "PRD参考",
-              "artifactType": "file",
-              "path": "PRD.md",
-              "required": false,
-              "extract": {
-                "degrade": "无 PRD 时直接跳过"
-              }
-            },
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 design 时按现有代码结构定位被测单元"
-              }
-            },
-            {
-              "id": "plan_json",
-              "label": "计划机器事实源",
-              "artifactType": "json",
-              "path": "plan.json",
-              "required": true,
-              "extract": {
-                "degrade": "Source Bundle 未列出 plan.json 时使用本阶段轻量任务 ID 组织测试覆盖；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成，不能以 PLAN.md 替代机器事实源；存在 deferredValidationIssues 时必须作为 Code 未解决项进入单测计划或扩大验证"
-              }
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true,
-              "extract": {
-                "degrade": "缺失时先补齐 code 阶段证据，不能用 Markdown 报告替代；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
-              }
-            },
-            {
-              "id": "requirements_eval",
-              "label": "需求实现评审报告",
-              "artifactType": "file",
-              "path": "REQUIREMENTS_EVAL.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响机器流程"
-              }
-            },
-            {
-              "id": "ui_context_json",
-              "label": "UI范围机器事实源",
-              "artifactType": "json",
-              "path": "UI_CONTEXT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 范围"
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "id": "unit_test_report",
-              "label": "单元测试报告",
-              "artifactType": "file",
-              "path": "UNIT_TEST_REPORT.md",
-              "required": true
-            },
-            {
-              "id": "unit_test_result_json",
-              "label": "结构化单测结果",
-              "artifactType": "json",
-              "path": "UNIT_TEST_RESULT.json",
-              "required": true
-            },
-            {
-              "id": "test_output",
-              "label": "测试输出日志",
-              "artifactType": "file",
-              "path": "test-output.log",
-              "required": true
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true
-            }
-          ]
-        },
-        "validators": [
-          "ui_context_json",
-          "unit_test_result_json",
-          "fix_request_json",
-          "evidence_integrity"
-        ]
-      },
-      {
-        "id": "dev.e2e",
-        "label": "E2E 测试",
-        "group": "Dev",
-        "skill": "autodev-e2e",
-        "runtimePolicy": {
-          "agentMode": "multi",
-          "toolCustomConfig": {
-            "task": {
-              "enabled": true
-            }
-          },
-          "subagentConfig": {
-            "disabledBuiltinSubagents": [],
-            "customSubagentFiles": []
-          }
-        },
-        "order": 80,
-        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（唯一用例计划）、E2E_QUALITY_SCAN.json（质量门禁）、E2E_RESULT.json（机器结论）、e2e-run.log（JSONL 运行事实）、evidence/EVIDENCE.jsonl（可信执行证据）、e2e-diagnostics/**/*（诊断产物），可选 E2E_REPORT.md 与失败回流 FIX_REQUEST.json",
-        "states": [
-          {
-            "nodeStatus": "not_started",
-            "label": "未开始",
-            "nextAction": {
-              "slashSkill": "autodev-e2e",
-              "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：E2E 测试。"
-            }
-          },
-          {
-            "nodeStatus": "in_progress",
-            "label": "进行中",
-            "nextAction": {
-              "slashSkill": "autodev-e2e",
-              "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：E2E 测试。"
-            }
-          },
-          {
-            "nodeStatus": "done",
-            "label": "已完成",
-            "nextAction": {
-              "slashSkill": "autodev-verify",
-              "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：验收汇总。"
-            }
-          }
-        ],
-        "checkpoints": [
-          "e2e_in_progress",
-          "e2e_done"
-        ],
-        "artifacts": {
-          "inputs": [
-            {
-              "id": "proposal",
-              "label": "变更提案",
-              "artifactType": "file",
-              "path": "proposal.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 proposal 时以 specs 场景界定主链路"
-              }
-            },
-            {
-              "id": "specs",
-              "label": "行为规格",
-              "artifactType": "file",
-              "path": "specs/**/*.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 specs 时与用户确认主链路预期后生成用例"
-              } },
-            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
-              "extract": {
-                "degrade": "无 PRD 时直接跳过；存在来源上下文时 E2E 以 source-context.json 与 sources/ 快照生成用例"
-              } },
-            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
-              "extract": {
-                "degrade": "无外部资料时跳过；存在时 targets 含 e2e 的要求必须进入 E2E 用例来源"
-              } },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
-              "extract": {
-                "degrade": "无 design 时从现有路由/入口探索驱动方式"
-              }
-            },
-            {
-              "id": "plan_json",
-              "label": "计划机器事实源",
-              "artifactType": "json",
-              "path": "plan.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源；存在 deferredValidationIssues 时必须映射到 E2E 用例、环境复核或 manual/missing 结论"
-              }
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true,
-              "extract": {
-                "degrade": "缺失时先补齐证据流，不能用 Markdown 报告替代；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
-              }
-            },
-            {
-              "id": "requirements_eval",
-              "label": "需求实现评审报告",
-              "artifactType": "file",
-              "path": "REQUIREMENTS_EVAL.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响机器流程"
-              }
-            },
-            {
-              "id": "unit_test_report",
-              "label": "单元测试报告",
-              "artifactType": "file",
-              "path": "UNIT_TEST_REPORT.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响机器流程"
-              }
-            },
-            {
-              "id": "unit_test_result_json",
-              "label": "结构化单测结果",
-              "artifactType": "json",
-              "path": "UNIT_TEST_RESULT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
-              }
-            },
-            {
-              "id": "test_output",
-              "label": "测试输出日志",
-              "artifactType": "file",
-              "path": "test-output.log",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过"
-              }
-            },
-            {
-              "id": "ui_context_json",
-              "label": "UI范围机器事实源",
-              "artifactType": "json",
-              "path": "UI_CONTEXT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 测试范围"
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "id": "e2e_cases",
-              "label": "E2E 测试用例",
-              "artifactType": "file",
-              "path": "E2E_TEST_CASES.yaml",
-              "required": true
-            },
-            {
-              "id": "e2e_report",
-              "label": "E2E 测试报告",
-              "artifactType": "file",
-              "path": "E2E_REPORT.md",
-              "required": false
-            },
-            {
-              "id": "e2e_result_json",
-              "label": "结构化 E2E 结果",
-              "artifactType": "json",
-              "path": "E2E_RESULT.json",
-              "required": true
-            },
-            {
-              "id": "fix_request_json",
-              "label": "结构化修复回流请求",
-              "artifactType": "json",
-              "path": "FIX_REQUEST.json",
-              "required": false
-            },
-            {
-              "id": "e2e_quality_scan",
-              "label": "E2E 质量门禁",
-              "artifactType": "json",
-              "path": "E2E_QUALITY_SCAN.json",
-              "required": false
-            },
-            {
-              "id": "e2e_diagnostics",
-              "label": "E2E 诊断产物",
-              "artifactType": "file",
-              "path": "e2e-diagnostics/**/*",
-              "required": false
-            },
-            {
-              "id": "e2e_log",
-              "label": "E2E 运行日志",
-              "artifactType": "file",
-              "path": "e2e-run.log",
-              "required": true
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true
-            }
-          ]
-        },
-        "validators": [
-          "ui_context_json",
-          "e2e_result_json",
-          "e2e_cases_contract",
-          "fix_request_json",
-          "evidence_integrity"
-        ]
-      },
-      {
-        "id": "dev.verify",
-        "label": "验收汇总",
-        "group": "Dev",
-        "skill": "autodev-verify",
-        "order": 90,
-        "description": "验收汇总 \n 产物：VERIFY_REPORT.md（验收报告：逐项行为验收汇总与最终结论）",
-        "states": [
-          {
-            "nodeStatus": "not_started",
-            "label": "未开始",
-            "nextAction": {
-              "slashSkill": "autodev-verify",
-              "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：验收汇总。"
-            }
-          },
-          {
-            "nodeStatus": "in_progress",
-            "label": "进行中",
-            "nextAction": {
-              "slashSkill": "autodev-verify",
-              "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：验收汇总。"
-            }
-          },
-          {
-            "nodeStatus": "done",
-            "label": "已完成",
-            "nextAction": {
-              "slashSkill": "autoops-cicd",
-              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：CI/CD。"
-            }
-          }
-        ],
-        "checkpoints": [
-          "verify_in_progress",
-          "verify_done"
-        ],
-        "artifacts": {
-          "inputs": [
-            {
-              "id": "proposal",
-              "label": "变更提案",
-              "artifactType": "file",
-              "path": "proposal.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 proposal 时以 specs 与实际交付物界定验收范围"
-              }
-            },
-            {
-              "id": "specs",
-              "label": "行为规格",
-              "artifactType": "file",
-              "path": "specs/**/*.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 specs 时以各阶段报告结论汇总验收，并标注行为基准缺失"
-              }
-            },
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": true,
-              "extract": {
-                "degrade": "无 design 时跳过设计核对，记录基准缺失"
-              }
-            },
-            {
-              "id": "plan_json",
-              "label": "计划机器事实源",
-              "artifactType": "json",
-              "path": "plan.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
-              }
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true,
-              "extract": {
-                "degrade": "缺失时先补齐证据流，不能给出完整通过结论"
-              }
-            },
-            {
-              "id": "unit_test_report",
-              "label": "单元测试报告",
-              "artifactType": "file",
-              "path": "UNIT_TEST_REPORT.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响机器流程"
-              }
-            },
-            {
-              "id": "unit_test_result_json",
-              "label": "结构化单测结果",
-              "artifactType": "json",
-              "path": "UNIT_TEST_RESULT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
-              }
-            },
-            {
-              "id": "test_output",
-              "label": "测试输出日志",
-              "artifactType": "file",
-              "path": "test-output.log",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过"
-              }
-            },
-            {
-              "id": "e2e_cases",
-              "label": "E2E 测试用例",
-              "artifactType": "file",
-              "path": "E2E_TEST_CASES.yaml",
-              "required": true,
-              "extract": {
-                "degrade": "缺失时在验收报告中记为缺项"
-              }
-            },
-            {
-              "id": "e2e_report",
-              "label": "E2E 测试报告",
-              "artifactType": "file",
-              "path": "E2E_REPORT.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响机器流程"
-              }
-            },
-            {
-              "id": "e2e_result_json",
-              "label": "结构化 E2E 结果",
-              "artifactType": "json",
-              "path": "E2E_RESULT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 E2E_RESULT.json 时回到 E2E 阶段补齐结构化结果"
-              }
-            },
-            {
-              "id": "e2e_log",
-              "label": "E2E 运行日志",
-              "artifactType": "file",
-              "path": "e2e-run.log",
-              "required": true,
-              "extract": {
-                "degrade": "缺失时在验收报告中记为缺项"
-              }
-            },
-            {
-              "id": "fix_request_json",
-              "label": "结构化修复回流请求",
-              "artifactType": "json",
-              "path": "FIX_REQUEST.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时 verify 根据本阶段裁决重新生成"
-              }
-            },
-            {
-              "id": "ui_context_json",
-              "label": "UI范围机器事实源",
-              "artifactType": "json",
-              "path": "UI_CONTEXT.json",
-              "required": true,
-              "extract": {
-                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 验收范围"
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "id": "verify_report",
-              "label": "验收报告",
-              "artifactType": "file",
-              "path": "VERIFY_REPORT.md",
-              "required": false
-            },
-            {
-              "id": "verify_decision_json",
-              "label": "结构化验收决策",
-              "artifactType": "json",
-              "path": "VERIFY_DECISION.json",
-              "required": true
-            },
-            {
-              "id": "fix_request_json",
-              "label": "结构化修复回流请求",
-              "artifactType": "json",
-              "path": "FIX_REQUEST.json",
-              "required": false
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true
-            }
-          ]
-        },
-        "validators": [
-          "ui_context_json",
-          "verify_decision_json",
-          "fix_request_json",
-          "evidence_integrity"
-        ]
       },
       {
         "id": "ops.cicd",
@@ -1551,23 +900,13 @@
         "artifacts": {
           "inputs": [
             {
-              "id": "verify_report",
-              "label": "验收报告",
-              "artifactType": "file",
-              "path": "VERIFY_REPORT.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响机器流程"
-              }
-            },
-            {
-              "id": "verify_decision_json",
-              "label": "结构化验收决策",
+              "id": "evidence_stream",
+              "label": "批次流水线验证证据",
               "artifactType": "json",
-              "path": "VERIFY_DECISION.json",
+              "path": "evidence/EVIDENCE.jsonl",
               "required": true,
               "extract": {
-                "degrade": "无 VERIFY_DECISION.json 时回到 verify 阶段补齐结构化验收决策"
+                "degrade": "缺失时回到 Code 的 Batch 流水线补齐 review、test、quality gate、B-INT 与 B-E2E 证据"
               }
             },
             {
@@ -1671,9 +1010,20 @@
         }
       },
       {
-        "id": "specs-to-plan",
+        "id": "specs-to-design",
         "from": {
           "nodeId": "dev.specs",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "dev.design",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "design-to-plan",
+        "from": {
+          "nodeId": "dev.design",
           "state": "done"
         },
         "to": {
@@ -1693,53 +1043,9 @@
         }
       },
       {
-        "id": "code-to-review",
+        "id": "code-to-cicd",
         "from": {
           "nodeId": "dev.code",
-          "state": "done"
-        },
-        "to": {
-          "nodeId": "dev.review",
-          "state": "in_progress"
-        }
-      },
-      {
-        "id": "review-to-utest",
-        "from": {
-          "nodeId": "dev.review",
-          "state": "done"
-        },
-        "to": {
-          "nodeId": "dev.utest",
-          "state": "in_progress"
-        }
-      },
-      {
-        "id": "utest-to-e2e",
-        "from": {
-          "nodeId": "dev.utest",
-          "state": "done"
-        },
-        "to": {
-          "nodeId": "dev.e2e",
-          "state": "in_progress"
-        }
-      },
-      {
-        "id": "e2e-to-verify",
-        "from": {
-          "nodeId": "dev.e2e",
-          "state": "done"
-        },
-        "to": {
-          "nodeId": "dev.verify",
-          "state": "in_progress"
-        }
-      },
-      {
-        "id": "verify-to-cicd",
-        "from": {
-          "nodeId": "dev.verify",
           "state": "done"
         },
         "to": {

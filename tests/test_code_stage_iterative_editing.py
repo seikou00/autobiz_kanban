@@ -85,17 +85,14 @@ def test_plan(feature_dir):
                         "status": "todo",
                     }
                 ],
-                "batchValidation": {
-                    "commands": [
-                        {
-                            "id": "compile-1",
-                            "kind": "compile",
-                            "required": True,
-                            "argv": ["python", "-m", "py_compile", "src/main.py"],
-                            "cwd": ".",
-                        }
-                    ]
+                "compileCommand": {
+                    "id": "compile-1",
+                    "kind": "compile",
+                    "required": True,
+                    "argv": ["python", "-m", "py_compile", "src/main.py"],
+                    "cwd": ".",
                 },
+                "qualityGateCommands": [],
             }
         },
     }

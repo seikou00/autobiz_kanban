@@ -113,7 +113,7 @@ class AutodevTemplatesAreCleanTest(unittest.TestCase):
     TEMPLATES = (
         "skills/autodev/autodev-specs/templates/proposal.md",
         "skills/autodev/autodev-specs/templates/spec.md",
-        "skills/autodev/autodev-plan/templates/design.md",
+        "skills/autodev/autodev-design/templates/design.md",
         "skills/autodev/autodev-plan/templates/plan.md",
     )
 

@@ -30,6 +30,7 @@ from hooks.render_review_protocol import (  # noqa: E402
 CODE_SKILL = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
 SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
 PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
+DESIGN_SKILL = ROOT / "skills" / "autodev" / "autodev-design" / "SKILL.md"
 SIMPLIFIER_AGENT = ROOT / "agents" / "code-simplifier.md"
 EXPLORE_AGENT = ROOT / "agents" / "explore.md"
 VERIFICATION_AGENT = ROOT / "agents" / "verification.md"
@@ -39,6 +40,7 @@ PROTOCOL = ROOT / "skills" / "references" / "review-protocol.md"
 
 SKILL_BY_STAGE = {
     "dev.specs": SPECS_SKILL,
+    "dev.design": DESIGN_SKILL,
     "dev.plan": PLAN_SKILL,
     "dev.code": CODE_SKILL,
 }
@@ -144,7 +146,7 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
 
     def test_upstream_stages_bind_to_critic_section_names(self) -> None:
         """严重度必须用 critic 的原文分节名，否则与 code-reviewer 的词表混淆。"""
-        for stage in ("dev.specs", "dev.plan"):
+        for stage in ("dev.specs", "dev.design", "dev.plan"):
             with self.subTest(stage=stage):
                 output = render(stage)
 
@@ -190,11 +192,11 @@ class CodeReviewIsReadOnlyTest(unittest.TestCase):
         # 丢失的旧指令：回检后直接修代码。恢复它等于恢复绕过 runner 的裸改。
         self.assertNotIn("如任一子代理返回有问题，则需要修复代码", output)
 
-    def test_code_stage_hands_findings_to_named_downstream_stages(self) -> None:
+    def test_code_stage_hands_findings_to_the_batch_pipeline(self) -> None:
         output = render("dev.code")
 
         self.assertIn("交接下游", output)
-        for target in ("dev.review", "dev.utest", "dev.e2e"):
+        for target in ("review", "test", "quality_gate", "B-E2E"):
             self.assertIn(target, output)
 
     def test_code_review_does_not_normalize_severity(self) -> None:
@@ -259,8 +261,8 @@ class ExploreRoleIsResolvableTest(unittest.TestCase):
         self.assertIn("Explore", subagents["disabledBuiltinSubagents"])
 
 
-class BatchValidationRoleIsResolvableTest(unittest.TestCase):
-    """Code 阶段批次验证角色必须可被宿主解析。"""
+class BatchCompileRoleIsResolvableTest(unittest.TestCase):
+    """Code 阶段批次编译角色必须可被宿主解析。"""
 
     def test_agent_name_matches_runner_directive(self) -> None:
         self.assertIn("name: verification-autodev", _read(VERIFICATION_AGENT))

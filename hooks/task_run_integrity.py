@@ -33,6 +33,7 @@ TASK_RUN_INTEGRITY_FIELDS = (
 TASK_RUN_OPTIONAL_INTEGRITY_FIELDS = (
     "repairContext",
     "executionMode",
+    "parallelRunId",
 )
 
 STRICT_TASK_RUN_STRING_FIELDS = (

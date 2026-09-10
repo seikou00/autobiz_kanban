@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -58,7 +59,9 @@ from hooks.paths import (  # noqa: E402
     get_plugin_output_workspace,
     resolve_env_feature,
 )
+from hooks.parallel_batch_lifecycle import cleanup_feature_runs_for_code_rollback  # noqa: E402
 from hooks.repository_snapshot import (  # noqa: E402
+    capture_untracked_files,
     capture_repository_snapshot,
     resolve_repositories,
 )
@@ -73,6 +76,11 @@ ROLLBACK_STATE_MODES = (
     ROLLBACK_STATE_TARGET_IN_PROGRESS,
     ROLLBACK_STATE_PREVIOUS_DONE,
 )
+_PLATFORM_RUNTIME_EXCLUDE = ":(exclude).cmbdevclaw/**"
+_PLATFORM_RUNTIME_PREFIX = ".cmbdevclaw/"
+_WORKFLOW_ARTIFACT_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
+_GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
+CODE_SESSION_BASELINE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -112,6 +120,7 @@ class RollbackResult:
     ok: bool
     plan: RollbackPlan
     deleted_artifacts: tuple[str, ...] = ()
+    archived_workflow_runtime: str | None = None
     restored_active_dir: bool = False
     errors: tuple[str, ...] = ()
 
@@ -211,7 +220,7 @@ def _store_baseline_object(session_root: Path, content: bytes) -> str:
     return digest
 
 
-def _baseline_entry(session_root: Path, path: Path, snapshot_sha256: object) -> dict[str, Any]:
+def _baseline_entry(session_root: Path, path: Path) -> dict[str, Any]:
     mode = stat.S_IMODE(path.lstat().st_mode)
     if path.is_symlink():
         kind = "symlink"
@@ -224,9 +233,159 @@ def _baseline_entry(session_root: Path, path: Path, snapshot_sha256: object) -> 
     return {
         "kind": kind,
         "mode": mode,
+        "storage": "baseline_object",
         "objectSha256": _store_baseline_object(session_root, content),
-        "snapshotSha256": snapshot_sha256,
     }
+
+
+def _git_bytes(repository: Path, *args: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *args],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip().replace("\n", " ")
+        raise ValueError(f"Code Session Git 命令失败: {repository}:{' '.join(args)}:{detail}")
+    return completed.stdout
+
+
+def _nul_paths(raw: bytes) -> set[str]:
+    return {
+        value.decode("utf-8", "surrogateescape")
+        for value in raw.split(b"\0")
+        if value
+    }
+
+
+def _head_blob_entries(repository: Path, head_commit: object) -> dict[str, tuple[int, str]]:
+    if not isinstance(head_commit, str) or head_commit.startswith("unborn:"):
+        return {}
+    raw = _git_bytes(
+        repository,
+        "ls-tree",
+        "-r",
+        "-z",
+        head_commit,
+    )
+    entries: dict[str, tuple[int, str]] = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, encoded_path = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[1] != b"blob":
+            raise ValueError(f"Code Session 不支持的 Git tree 条目: {repository}")
+        try:
+            mode = int(fields[0], 8)
+            blob_sha = fields[2].decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError(f"Code Session Git tree 条目无效: {repository}") from exc
+        if len(blob_sha) not in _GIT_OBJECT_ID_LENGTHS or any(char not in "0123456789abcdef" for char in blob_sha.lower()):
+            raise ValueError(f"Code Session Git blob SHA 无效: {repository}")
+        relative = encoded_path.decode("utf-8", "surrogateescape")
+        if relative.startswith(_PLATFORM_RUNTIME_PREFIX):
+            continue
+        entries[relative] = (mode, blob_sha)
+    return entries
+
+
+def _index_paths(repository: Path) -> set[str]:
+    raw = _git_bytes(
+        repository,
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        ".",
+        _PLATFORM_RUNTIME_EXCLUDE,
+    )
+    paths: set[str] = set()
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        _metadata, separator, encoded_path = record.partition(b"\t")
+        if not separator:
+            raise ValueError(f"Code Session Git index 条目无效: {repository}")
+        paths.add(encoded_path.decode("utf-8", "surrogateescape"))
+    return paths
+
+
+def _dirty_against_head_paths(repository: Path, head_commit: object) -> set[str]:
+    if not isinstance(head_commit, str) or head_commit.startswith("unborn:"):
+        return _index_paths(repository)
+    return _nul_paths(
+        _git_bytes(
+            repository,
+            "diff",
+            "--name-only",
+            "-z",
+            head_commit,
+            "--",
+            ".",
+            _PLATFORM_RUNTIME_EXCLUDE,
+        )
+    )
+
+
+def _git_blob_baseline_entry(mode: int, blob_sha: str) -> dict[str, Any]:
+    if mode == 0o120000:
+        kind = "symlink"
+    elif mode in {0o100644, 0o100755}:
+        kind = "file"
+    else:
+        raise ValueError(f"Code Session 不支持的 Git 文件模式: {mode:o}")
+    return {
+        "kind": kind,
+        "mode": mode & 0o7777,
+        "storage": "git_blob",
+        "gitSha": blob_sha,
+    }
+
+
+def _capture_repository_baseline_entries(
+    *,
+    session_root: Path,
+    repository: Path,
+    head_commit: object,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Use HEAD blobs for clean files and persist only local working content.
+
+    A Code Session must be able to restore pre-existing staged, unstaged, and
+    untracked changes.  Those contents may stop being reachable from Git after
+    the user changes the index, so only files that match HEAD are referenced
+    directly from Git's immutable object store.
+    """
+
+    head_entries = _head_blob_entries(repository, head_commit)
+    dirty_paths = _dirty_against_head_paths(repository, head_commit)
+    index_paths = _index_paths(repository)
+    untracked_paths = set(capture_untracked_files(repository))
+    files: dict[str, dict[str, Any]] = {}
+    git_blob_files = 0
+    object_files = 0
+
+    for relative, (mode, blob_sha) in sorted(head_entries.items()):
+        candidate = repository / relative
+        if relative not in dirty_paths:
+            files[relative] = _git_blob_baseline_entry(mode, blob_sha)
+            git_blob_files += 1
+        elif candidate.exists() or candidate.is_symlink():
+            files[relative] = _baseline_entry(session_root, candidate)
+            object_files += 1
+
+    # Index-only paths are staged additions or unmerged entries.  Their
+    # contents cannot be recovered safely from the baseline commit, so retain
+    # the current working-tree version just as the legacy baseline did.
+    for relative in sorted((index_paths - set(head_entries)) | untracked_paths):
+        if relative in files:
+            continue
+        candidate = repository / relative
+        if candidate.exists() or candidate.is_symlink():
+            files[relative] = _baseline_entry(session_root, candidate)
+            object_files += 1
+
+    return files, {"gitBlobFiles": git_blob_files, "objectFiles": object_files}
 
 
 def _rollback_feature_lock(workspace: Path, feature: str) -> FileLock:
@@ -264,9 +423,11 @@ def _capture_code_session_baseline_locked(
     repositories = resolve_repositories(code_workspaces)
     root = _session_root(workspace, feature)
     active = _load_active_code_session(workspace, feature)
+    if active is not None and active.get("status") == "active" and active.get("version") != CODE_SESSION_BASELINE_VERSION:
+        raise ValueError("当前 Code Session 基线版本不受支持；请先完成回退清理后重新捕获基线")
     if active is None or active.get("status") != "active":
         active = {
-            "version": 1,
+            "version": CODE_SESSION_BASELINE_VERSION,
             "featureId": feature,
             "sessionId": f"code-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}",
             "status": "active",
@@ -280,17 +441,18 @@ def _capture_code_session_baseline_locked(
             if Path(str(existing.get("path", ""))).resolve() != repository.resolve():
                 raise ValueError(f"Code Session 仓库 ID 冲突: {repository_id}")
             continue
-        snapshot = capture_repository_snapshot(repository)
-        files: dict[str, dict[str, Any]] = {}
-        for relative, digest in sorted(snapshot.get("files", {}).items()):
-            candidate = repository / relative
-            if candidate.exists() or candidate.is_symlink():
-                files[relative] = _baseline_entry(root, candidate, digest)
+        snapshot = capture_repository_snapshot(repository, include_files=False)
+        files, storage = _capture_repository_baseline_entries(
+            session_root=root,
+            repository=repository,
+            head_commit=snapshot.get("headCommit"),
+        )
         repository_records[repository_id] = {
             "path": str(repository.resolve()),
             "headCommit": snapshot.get("headCommit"),
             "indexTree": snapshot.get("indexTree"),
             "files": files,
+            "storage": storage,
             "capturedAt": _utc_now(),
         }
     active["updatedAt"] = _utc_now()
@@ -400,6 +562,11 @@ def prepare_code_source_restore(workspace: Path, feature: str, feature_dir: Path
             ok=False,
             errors=("当前 Feature 没有 Code Session 基线；只能使用 --code-source keep",),
         )
+    if baseline.get("version") != CODE_SESSION_BASELINE_VERSION:
+        return CodeSourcePlan(
+            ok=False,
+            errors=("当前 Code Session 基线版本不受支持；请先完成回退清理后重新捕获基线",),
+        )
     expected, owned, run_errors = _code_owned_final_files(
         feature_dir,
         require_final_snapshots=True,
@@ -478,25 +645,6 @@ def _prepare_code_execution_reset(workspace: Path, feature: str) -> CodeResetPla
         batch.pop("batchCompile", None)
         batch["startedAt"] = None
         batch["completedAt"] = None
-        validation = batch.get("batchValidation")
-        if isinstance(validation, dict):
-            validation["status"] = "pending"
-            for field_name in (
-                "activeRunId",
-                "lastRunId",
-                "currentTaskId",
-                "batchSnapshotSha256",
-            ):
-                validation[field_name] = None
-            for field_name in (
-                "completedTaskIds",
-                "evidenceIds",
-                "latestPassEvidenceIds",
-                "deferredTaskIds",
-                "deferredIssues",
-            ):
-                validation[field_name] = []
-            validation["latestPassEvidenceByTask"] = {}
     # Rebuild the batch projection from the preserved task contracts. Keeping
     # old assignments here can resurrect stale batches after a plan rebuild.
     data["batches"] = []
@@ -1191,6 +1339,27 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
+def _feature_workflow_runtime_dir(workspace: Path, feature: str) -> Path:
+    """Return the Feature-owned Workflow host runtime directory.
+
+    The feature is validated by ``prepare_stage_rollback`` before execution,
+    allowing a Code rollback to archive only its copied script and platform
+    sidecars without touching another Feature's Workflow state.
+    """
+    return workspace / _WORKFLOW_ARTIFACT_RUNTIME_DIRECTORY / feature
+
+
+def _prune_empty_runtime_parents(workspace: Path, path: Path) -> None:
+    """Remove empty runtime parents, stopping before the artifact root."""
+    current = path.parent
+    while current != workspace:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
 def prune_rollback_history(
     *,
     workspace: Path,
@@ -1368,21 +1537,32 @@ def _execute_source_restore(workspace: Path, feature: str, plan: CodeSourcePlan)
             _remove_path(target)
             entry = files.get(relative)
             if isinstance(entry, dict):
-                object_path = root / "objects" / str(entry.get("objectSha256", ""))
-                if not object_path.is_file():
-                    raise ValueError(f"Code Session 基线对象缺失: {repository_id}:{relative}")
-                object_content = object_path.read_bytes()
-                if _sha256(object_content) != str(entry.get("objectSha256", "")):
-                    raise ValueError(f"Code Session 基线对象校验失败: {repository_id}:{relative}")
+                storage = entry.get("storage")
+                if storage == "git_blob":
+                    blob_sha = entry.get("gitSha")
+                    if not isinstance(blob_sha, str) or len(blob_sha) not in _GIT_OBJECT_ID_LENGTHS or any(
+                        char not in "0123456789abcdef" for char in blob_sha.lower()
+                    ):
+                        raise ValueError(f"Code Session Git blob 引用无效: {repository_id}:{relative}")
+                    object_content = _git_bytes(repository, "cat-file", "blob", blob_sha)
+                elif storage == "baseline_object":
+                    object_path = root / "objects" / str(entry.get("objectSha256", ""))
+                    if not object_path.is_file():
+                        raise ValueError(f"Code Session 基线对象缺失: {repository_id}:{relative}")
+                    object_content = object_path.read_bytes()
+                    if _sha256(object_content) != str(entry.get("objectSha256", "")):
+                        raise ValueError(f"Code Session 基线对象校验失败: {repository_id}:{relative}")
+                else:
+                    raise ValueError(f"Code Session 基线存储类型无效: {repository_id}:{relative}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if entry.get("kind") == "symlink":
                     target.symlink_to(object_content.decode("utf-8", "surrogateescape"))
                 else:
                     target.write_bytes(object_content)
-                try:
-                    target.chmod(int(entry.get("mode", 0o644)))
-                except OSError:
-                    pass
+                    try:
+                        target.chmod(int(entry.get("mode", 0o644)))
+                    except OSError:
+                        pass
             restored.append(f"{repository_id}:{relative}")
     return tuple(restored)
 
@@ -1427,6 +1607,8 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
     source_backup_manifest: dict[str, Any] | None = None
     active_session_backup = transaction_dir / "active-session.json"
     active_session_path = _active_session_path(plan.workspace, plan.feature)
+    workflow_runtime_dir = _feature_workflow_runtime_dir(plan.workspace, plan.feature)
+    workflow_runtime_backup = transaction_dir / "workflow-runtime"
     if active_session_path.is_file():
         _copy_path(active_session_path, active_session_backup)
     atomic_write_json(
@@ -1444,9 +1626,26 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
     )
     atomic_write_json(transaction_dir / "state-before.json", plan.old_records)
     moved_artifacts: list[Path] = []
+    moved_workflow_runtime = False
     moved_to_active = False
     restored_source_files: tuple[str, ...] = ()
+    parallel_cleanup: list[dict[str, Any]] = []
     try:
+        # ``.parallel-runs`` is an artifact of Code, but it owns native Git
+        # worktrees outside the Feature directory.  Never archive/reset it
+        # until the lifecycle manager has removed those worktrees, temporary
+        # branches, and leases and verified the cleanup completed.
+        if plan.code_in_scope:
+            parallel_cleanup = cleanup_feature_runs_for_code_rollback(plan.workspace, plan.feature)
+            # The launcher materializes the fixed script below a
+            # Feature-owned artifact path. Archive that script with platform
+            # journals, sidecars, and lock files created alongside it. Never
+            # remove the shared .cmbdevclaw root because another Feature may
+            # still have an active Workflow there.
+            if workflow_runtime_dir.exists() or workflow_runtime_dir.is_symlink():
+                workflow_runtime_backup.parent.mkdir(parents=True, exist_ok=True)
+                workflow_runtime_dir.replace(workflow_runtime_backup)
+                moved_workflow_runtime = True
         plan_backup_paths = _backup_plan_bundle(plan.workspace, plan.feature, plan_backup_dir)
         source_plan = (
             prepare_code_source_restore(plan.workspace, plan.feature, feature_dir)
@@ -1502,6 +1701,12 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
                 "deletedArtifacts": [path.relative_to(feature_dir).as_posix() for path in plan.artifact_paths],
                 "restoredSourceFiles": list(restored_source_files),
                 "codeResetTasks": list(plan.code_reset_tasks),
+                "parallelRunCleanup": parallel_cleanup,
+                "archivedWorkflowRuntime": (
+                    str(workflow_runtime_dir.relative_to(plan.workspace))
+                    if moved_workflow_runtime
+                    else None
+                ),
             },
         )
     except (Exception, KeyboardInterrupt) as exc:
@@ -1516,6 +1721,12 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
             _restore_moved_artifacts(feature_dir, artifact_backup_dir, moved_artifacts)
         except (Exception, KeyboardInterrupt) as recovery_exc:
             recovery_errors.append(f"产物恢复失败: {recovery_exc}")
+        if moved_workflow_runtime and (workflow_runtime_backup.exists() or workflow_runtime_backup.is_symlink()):
+            try:
+                workflow_runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+                workflow_runtime_backup.replace(workflow_runtime_dir)
+            except (Exception, KeyboardInterrupt) as recovery_exc:
+                recovery_errors.append(f"Workflow 运行态恢复失败: {recovery_exc}")
         if source_backup_manifest is not None:
             try:
                 _restore_source_backup(source_backup_dir, source_backup_manifest)
@@ -1573,6 +1784,8 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         for path in plan.artifact_paths
     )
     _prune_empty_parents(effective_feature_dir, effective_deleted_paths)
+    if moved_workflow_runtime:
+        _prune_empty_runtime_parents(plan.workspace, workflow_runtime_dir)
     deleted = tuple(
         path.relative_to(effective_feature_dir).as_posix()
         for path in effective_deleted_paths
@@ -1596,6 +1809,11 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         ok=True,
         plan=plan,
         deleted_artifacts=deleted,
+        archived_workflow_runtime=(
+            str(workflow_runtime_dir.relative_to(plan.workspace))
+            if moved_workflow_runtime
+            else None
+        ),
         restored_active_dir=moved_to_active,
         errors=(),
     )
@@ -1630,6 +1848,7 @@ def _result_payload(
         "dryRun": dry_run,
         "plannedArtifacts": planned_artifacts,
         "deletedArtifacts": list(result.deleted_artifacts),
+        "archivedWorkflowRuntime": result.archived_workflow_runtime,
         "restoredActiveDir": result.restored_active_dir,
         "rollbackId": plan.rollback_id,
         "codeInScope": plan.code_in_scope,
@@ -1859,6 +2078,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         for path in result.deleted_artifacts:
             print(f"  - deleted {path}")
+        if result.archived_workflow_runtime:
+            print(f"  - archived {result.archived_workflow_runtime}")
     return 0 if result.ok else 1
 
 

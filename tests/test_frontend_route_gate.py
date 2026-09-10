@@ -233,14 +233,16 @@ def sealed_task_run(*, execution_mode: str = "code") -> dict:
 
 
 def write_task_run(workspace: Path, run: dict) -> Path:
+    task_id = run.get("taskId") if isinstance(run.get("taskId"), str) and run.get("taskId") else "T001"
+    run_id = run.get("runId") if isinstance(run.get("runId"), str) and run.get("runId") else "run-1"
     path = (
         workspace
         / ".autobizdevops"
         / "features"
         / "alpha"
         / ".task-runs"
-        / "T001"
-        / "run-1.json"
+        / task_id
+        / f"{run_id}.json"
     )
     write_json(path, run)
     return path
@@ -260,7 +262,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(payload["route"], ROUTE_NONE)
         self.assertFalse(payload["uiRequired"])
 
-    def test_frontend_code_write_blocks_without_active_task_run(self) -> None:
+    def test_code_task_run_write_blocks_without_active_task_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             output = io.StringIO()
@@ -268,7 +270,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
             with contextlib.redirect_stdout(output):
                 with contextlib.redirect_stderr(error):
-                    result = frontend_route_write_guard.validate_frontend_code_write(
+                    result = frontend_route_write_guard.validate_code_task_run_write(
                         workspace,
                         "alpha",
                     )
@@ -277,33 +279,65 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertIn("exactly one active task run", error.getvalue())
         self.assertIn("block", output.getvalue())
 
-    def test_frontend_code_write_allows_sealed_run(self) -> None:
+    def test_code_task_run_write_allows_sealed_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_task_run(workspace, sealed_task_run())
 
-            result = frontend_route_write_guard.validate_frontend_code_write(
+            result = frontend_route_write_guard.validate_code_task_run_write(
                 workspace,
                 "alpha",
             )
 
         self.assertEqual(result, 0)
 
-    def test_frontend_code_write_allows_integrity_digest_drift(self) -> None:
+    def test_code_task_run_write_selects_parallel_run_for_target_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace = make_workspace(Path(tmp))
-            run = sealed_task_run()
-            run["taskContractSha256"] = "changed-contract"
-            write_task_run(workspace, run)
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            first_worktree = root / "worktrees" / "B001"
+            second_worktree = root / "worktrees" / "B002"
+            first_worktree.mkdir(parents=True)
+            second_worktree.mkdir(parents=True)
 
-            result = frontend_route_write_guard.validate_frontend_code_write(
+            first = sealed_task_run()
+            first.update({
+                "parallelRunId": "parallel-1",
+                "codeWorkspace": str(first_worktree),
+                "requestedCodeWorkspaces": [str(first_worktree)],
+                "resolvedGitRoots": [str(first_worktree)],
+                "workspacePrefixes": [""],
+                "scopeWorkspaces": [{"repository": "code", "resolvedGitRoot": str(first_worktree)}],
+                "repositories": [{"id": "code", "path": str(first_worktree), "snapshot": {}}],
+            })
+            first["integritySha256"] = task_run_integrity_sha256(first)
+            write_task_run(workspace, first)
+
+            second = sealed_task_run()
+            second.update({
+                "parallelRunId": "parallel-1",
+                "runId": "run-2",
+                "batchId": "B002",
+                "taskId": "T002",
+                "codeWorkspace": str(second_worktree),
+                "requestedCodeWorkspaces": [str(second_worktree)],
+                "resolvedGitRoots": [str(second_worktree)],
+                "workspacePrefixes": [""],
+                "scopeWorkspaces": [{"repository": "code", "resolvedGitRoot": str(second_worktree)}],
+                "repositories": [{"id": "code", "path": str(second_worktree), "snapshot": {}}],
+            })
+            second["integritySha256"] = task_run_integrity_sha256(second)
+            write_task_run(workspace, second)
+
+            result = frontend_route_write_guard.validate_code_task_run_write(
                 workspace,
                 "alpha",
+                target_path=first_worktree / "src" / "Service.java",
             )
 
         self.assertEqual(result, 0)
 
-    def test_frontend_code_write_rejects_legacy_run_with_repair_context(self) -> None:
+    def test_code_task_run_write_rejects_legacy_run_with_repair_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             run = sealed_task_run()
@@ -314,7 +348,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
             error = io.StringIO()
 
             with contextlib.redirect_stderr(error):
-                result = frontend_route_write_guard.validate_business_code_write(
+                result = frontend_route_write_guard.validate_code_task_run_write(
                     workspace,
                     "alpha",
                 )
@@ -322,7 +356,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
         self.assertIn("task_run_version_invalid", error.getvalue())
 
-    def test_frontend_code_write_rejects_missing_task_id_with_repair_context(self) -> None:
+    def test_code_task_run_write_rejects_missing_task_id_with_repair_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             run = sealed_task_run()
@@ -333,7 +367,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
             error = io.StringIO()
 
             with contextlib.redirect_stderr(error):
-                result = frontend_route_write_guard.validate_business_code_write(
+                result = frontend_route_write_guard.validate_code_task_run_write(
                     workspace,
                     "alpha",
                 )
@@ -348,7 +382,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
             error = io.StringIO()
 
             with contextlib.redirect_stderr(error):
-                result = frontend_route_write_guard.validate_business_code_write(
+                result = frontend_route_write_guard.validate_code_task_run_write(
                     workspace,
                     "alpha",
                 )
@@ -1079,7 +1113,7 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
 
         self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
 
-    def test_main_applies_exploration_gate_to_backend_source(self) -> None:
+    def test_main_applies_task_run_gate_to_backend_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             payload = json.dumps({"tool_input": {"file_path": "/tmp/Service.java"}})

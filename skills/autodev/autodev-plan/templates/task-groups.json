@@ -1,10 +1,13 @@
 {
   "featureId": "[feature]",
+  "writeOwnershipRule": "同一 workspaceRef 下每个 touches 路径只能由一个自动 Batch 拥有；共享 SQL、路由或全局配置由前置 owner group 一次性修改，消费者只用 deps 依赖它。",
   "groups": [
     {
       "id": "T001",
       "title": "[single observable behavior]",
       "executionMode": "code",
+      "executionStage": "parallel",
+      "touches": ["[backend-repository-id]:src/path/to/owned-file"],
       "deps": [],
       "uiRequired": false,
       "workspaceRef": "[backend-repository-id]",
@@ -23,6 +26,8 @@
     "id": "T001",
     "title": "[single observable UI behavior]",
     "executionMode": "code",
+    "executionStage": "parallel",
+    "touches": ["[frontend-repository-id]:src/path/to/owned-file"],
     "deps": [],
     "uiRequired": true,
     "workspaceRef": "[frontend-repository-id]",
@@ -52,6 +57,8 @@
     "id": "T001",
     "title": "[shared observable matrix behavior]",
     "executionMode": "code",
+    "executionStage": "parallel",
+    "touches": ["[backend-repository-id]:src/path/to/owned-file"],
     "deps": [],
     "uiRequired": false,
     "workspaceRef": "[backend-repository-id]",
@@ -75,13 +82,15 @@
     ],
     "apiIds": [],
     "validationBoundary": "one request returns the complete matrix and one executable assertion validates it",
-    "splitRationale": "SCN-001, SCN-003, and SCN-006 share the same request, response assertion, and validation loop, so they cannot be validated independently."
+    "splitRationale": "specs/[capability]/spec.md#SCN-001, specs/[capability]/spec.md#SCN-003, specs/[capability]/spec.md#SCN-006 共享同一请求、同一个响应断言和同一验证闭环，不能独立验证。"
   },
   "externalDependencyExample": {
     "when": "the observable outcome is owned and executable only in a repository or system outside this Feature",
     "id": "T001",
     "title": "[record externally owned outcome]",
     "executionMode": "external_dependency",
+    "executionStage": "parallel",
+    "touches": [],
     "externalDependency": {
       "system": "[external-system-or-repository]",
       "owner": "[owning-team-or-person]",

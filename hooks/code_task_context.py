@@ -27,6 +27,7 @@ from hooks.json_writer_common import (  # noqa: E402
 )
 from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
+    defer_to_test_stages_enabled,
     load_plan,
     validate_batch_plan_data,
     validate_plan_data,
@@ -37,7 +38,6 @@ from hooks.repository_snapshot import (  # noqa: E402
     resolve_repositories,
     unignored_runtime_artifact_paths,
 )
-from hooks.source_context import resolve_source_requirement_refs  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -106,21 +106,12 @@ def _resolve_path(base: Path, ref: str, anchor: str, *, design: bool) -> Path:
 
 
 def _extract_spec_snippet(text: str, anchor: str) -> tuple[str, int] | None:
-    end_re = re.compile(
-        r"^(?:####\s+Scenario\s+(?:\[SCN-\d{3}\]|SCN-\d{3})|"
-        r"###\s+Requirement\s+(?:\[REQ-\d{3}\]|REQ-\d{3})):",
-        re.MULTILINE,
-    )
     if anchor.startswith("REQ-"):
-        start_re = re.compile(
-            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
-            re.MULTILINE,
-        )
+        start_re = re.compile(rf"^###\s+Requirement\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
+        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
     elif anchor.startswith("SCN-"):
-        start_re = re.compile(
-            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
-            re.MULTILINE,
-        )
+        start_re = re.compile(rf"^####\s+Scenario\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
+        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
     else:
         return None
 
@@ -209,6 +200,44 @@ def resolve_task_refs(base: Path, task: dict[str, Any]) -> tuple[list[dict[str, 
     return resolved_specs, resolved_design, spec_errors + design_errors
 
 
+def _context_argv(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspaces: list[Path],
+) -> list[str]:
+    argv = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--workspace",
+        str(workspace),
+        "--feature",
+        feature,
+        "--task-id",
+        task_id,
+    ]
+    for code_workspace in code_workspaces:
+        argv.extend(["--code-workspace", str(code_workspace)])
+    return argv
+
+
+def _start_argv(workspace: Path, feature: str, task_id: str, code_workspace: Path | None) -> list[str]:
+    argv = [
+        sys.executable,
+        str(Path(__file__).with_name("task_runner.py").resolve()),
+        "start",
+        "--workspace",
+        str(workspace),
+        "--feature",
+        feature,
+        "--task-id",
+        task_id,
+    ]
+    if code_workspace is not None:
+        argv.extend(["--code-workspace", str(code_workspace)])
+    return argv
+
+
 def build_context(
     *,
     workspace: Path,
@@ -234,8 +263,20 @@ def build_context(
     active_batch_id = data.get("activeBatchId")
     if not isinstance(active_batch_id, str):
         next_batch_id = data.get("nextBatchId")
-        reason = "batch_handoff_required" if data.get("status") == "awaiting_next_conversation" else "no_active_batch"
-        return fail(reason, str(next_batch_id or ""), path=plan_path)
+        # Parallel Code runs intentionally leave the activeBatchId
+        # pointer empty.  Resolve the task's owning unfinished batch locally
+        # instead of forcing a serial pointer into the root Plan.
+        candidates = [
+            str(item.get("id"))
+            for item in data.get("batches", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and item.get("status") not in {"done", "failed"}
+            and task_id in (item.get("taskIds") or [])
+        ]
+        if len(candidates) != 1:
+            return fail("no_active_batch", str(next_batch_id or ""), path=plan_path)
+        active_batch_id = candidates[0]
     active_entry = next(
         (item for item in data.get("batches", []) if isinstance(item, dict) and item.get("id") == active_batch_id),
         None,
@@ -270,6 +311,10 @@ def build_context(
         expected_feature_id=feature,
         expected_batch_id=active_batch_id,
         known_task_ids=known_task_ids,
+        # batch-compile is execution state written by the Code runner.  It is
+        # valid only for the root Plan's deferred-validation policy, which is
+        # also the policy that allows task repair after a sealed Batch.
+        defer_to_test_stages=defer_to_test_stages_enabled(data),
     )
     if batch_errors:
         return WriterResult(
@@ -287,9 +332,6 @@ def build_context(
         return fail("task_not_found", task_id, path=plan_path)
 
     resolved_specs, resolved_design, errors = resolve_task_refs(base, task)
-    source_refs = [ref for ref in task.get("sourceRefs", []) if isinstance(ref, str)]
-    resolved_sources, source_errors = resolve_source_requirement_refs(base, source_refs)
-    errors.extend(source_errors)
 
     data_out = {
         "feature": feature,
@@ -310,13 +352,16 @@ def build_context(
             "base": "artifactFeatureDir",
             "specRefs": "relative-to-artifactFeatureDir",
             "designRefs": "relative-to-artifactFeatureDir",
-            "sourceRefs": "requirement-ids-in-source-context.json",
             "codeWorkspace": "current working directory / project repository",
         },
         "task": task,
         "taskContract": {
             "goal": task.get("goal"),
             "scope": task.get("scope"),
+            # These are the machine facts the Batch agent uses to decide
+            # whether the frontend Route protocol applies to this Task.
+            "uiRequired": task.get("uiRequired") is True,
+            "uiRefs": task.get("uiRefs") if isinstance(task.get("uiRefs"), dict) else {},
             "workspaceRef": task.get("workspaceRef"),
             "implementationPoints": task.get("implementationPoints"),
             "acceptanceCriteria": task.get("acceptanceCriteria"),
@@ -324,14 +369,75 @@ def build_context(
             "nonGoals": task.get("nonGoals"),
             "splitRationale": task.get("splitRationale", ""),
             "validationCommands": task.get("validationCommands"),
-            "sourceRefs": task.get("sourceRefs"),
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
-        "resolvedSourceRefs": resolved_sources,
     }
-    data_out["implementationAllowed"] = not errors
-    data_out["startAllowed"] = not errors
+    if code_workspaces:
+        try:
+            repositories = resolve_repositories(code_workspaces)
+            runtime_ignore_issues = [
+                {
+                    "repositoryId": repository_id,
+                    "repositoryRoot": str(repository_root),
+                    "path": path,
+                    "code": "runtime_artifact_path_not_ignored",
+                    "expected": "git_ignored",
+                }
+                for repository_id, repository_root in repositories.items()
+                for path in unignored_runtime_artifact_paths(repository_root)
+            ]
+        except RepositorySnapshotError as exc:
+            return with_result_data(
+                fail("code_workspace_resolution_failed", str(exc), path=active_plan_path),
+                requiredAction="repair_code_workspace_and_retry_context",
+                retryContextArgv=_context_argv(workspace, feature, task_id, code_workspaces),
+                implementationAllowed=False,
+                startAllowed=False,
+            )
+        if runtime_ignore_issues:
+            return WriterResult(
+                ok=False,
+                path=active_plan_path,
+                errors=[
+                    *errors,
+                    {
+                        "reason": "runtime_artifact_path_not_ignored",
+                        "detail": ",".join(
+                            f"{item['repositoryId']}:{item['path']}" for item in runtime_ignore_issues
+                        ),
+                    },
+                ],
+                data={
+                    **data_out,
+                    "requiredAction": "configure_git_ignore_and_retry_context",
+                    "runtimeIgnoreIssues": runtime_ignore_issues,
+                    "runtimeIgnoreRequirements": {
+                        "requiredPaths": list(REQUIRED_IGNORED_RUNTIME_PATHS),
+                        "allowedFiles": [".gitignore", ".git/info/exclude"],
+                    },
+                    "retryContextArgv": _context_argv(workspace, feature, task_id, code_workspaces),
+                    "implementationAllowed": False,
+                    "startAllowed": False,
+                },
+            )
+    start_allowed = not errors and bool(code_workspaces)
+    data_out["requiredAction"] = (
+        "start_task"
+        if start_allowed
+        else "provide_code_workspace_and_retry_context"
+        if not code_workspaces
+        else "repair_context_errors_before_start"
+    )
+    data_out["retryContextArgv"] = _context_argv(workspace, feature, task_id, code_workspaces or [])
+    data_out["startArgv"] = _start_argv(
+        workspace,
+        feature,
+        task_id,
+        code_workspaces[0] if code_workspaces else None,
+    )
+    data_out["implementationAllowed"] = start_allowed
+    data_out["startAllowed"] = start_allowed
     return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)
 
 

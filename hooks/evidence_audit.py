@@ -147,7 +147,6 @@ def reset_invalid_tasks(feature_dir: Path, invalid_tasks: set[str]) -> bool:
                 root["activeBatchId"] = None
                 root["nextBatchId"] = None
             root["latestProjectCheckEvidenceId"] = None
-            unlink_if_exists(feature_dir / "BATCH_HANDOFF.json")
             atomic_write_json(plan_path, root)
         return changed
 

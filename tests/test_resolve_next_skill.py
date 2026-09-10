@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from board_core.state_store import load_state_json_records, write_state_records
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.resolve_next_skill import main
 
@@ -30,6 +31,15 @@ class ResolveNextSkillCliTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def _set_checkpoint(self, checkpoint: str, stage: str) -> None:
+        records, errors, exists = load_state_json_records(self.project)
+        self.assertTrue(exists)
+        self.assertEqual(errors, [])
+        record = dict(records["feature-a"])
+        record.update({"checkpoint": checkpoint, "stage": stage})
+        records["feature-a"] = record
+        write_state_records(self.project, records)
+
     def test_resolves_workspace_and_feature_from_environment(self) -> None:
         stdout = io.StringIO()
         with patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(stdout):
@@ -39,6 +49,19 @@ class ResolveNextSkillCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["feature"], "feature-a")
+
+    def test_specs_done_routes_to_design_before_plan(self) -> None:
+        """The UI continuation must not bypass the Design handoff."""
+        self._set_checkpoint("specs_done", "Specs 完成")
+        stdout = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(stdout):
+            exit_code = main(["--json"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["allowedNextCheckpoints"], ["design_in_progress"])
+        self.assertEqual(payload["recommendedNextSkill"], "autodev-design")
+        self.assertEqual(payload["nextAction"]["slashSkill"], "autodev-design")
 
     def test_rejects_external_workspace_and_feature_arguments(self) -> None:
         invalid_arguments = (

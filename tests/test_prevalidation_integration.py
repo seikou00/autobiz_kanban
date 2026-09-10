@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from hooks.plan_json import task_contract_sha256
+from hooks.design_contract_lock import sync_design_contract_lock
+
 
 def _state_record(checkpoint: str = "plan_in_progress") -> dict:
     return {
@@ -90,6 +93,9 @@ def _write_design(feature_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    result = sync_design_contract_lock(feature_dir.parents[2], feature_dir.name)
+    if not result.ok:
+        raise AssertionError(result.errors)
 
 
 def _plan_task_body(task_id: str = "T001", *, scenario: str = "SCN-001") -> dict:
@@ -214,12 +220,97 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
         )
         self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+        compile_added = _run(
+            "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+            "--feature", "alpha", "--lane", "backend",
+            "--command", f"{sys.executable} -c \"print('compile')\"",
+        )
+        self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
+        project_added = _run(
+            "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+            "--feature", "alpha", "--command", f"{sys.executable} -c \"print('integration')\"",
+        )
+        self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
         finalized = _run(
             "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
             "--feature", "alpha",
         )
         self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
         return workspace, feature_dir, task
+
+    def test_reopen_reconfigures_engineering_commands_and_rematerializes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, _ = self._finalize_single_task(root)
+
+            locked = _run(
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend",
+                "--command", f"{sys.executable} -c \"print('replacement compile')\"",
+            )
+            self.assertNotEqual(locked.returncode, 0)
+            self.assertIn("task_draft_finalized", locked.stdout)
+
+            diagnosis = _run(
+                "plan_writer.py", "diagnose-plan-repair", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(diagnosis.returncode, 0, diagnosis.stdout + diagnosis.stderr)
+            self.assertEqual(
+                json.loads(diagnosis.stdout)["diagnosis"]["recommendedCommand"],
+                "reopen-finalized-draft",
+            )
+            reopened = _run(
+                "plan_writer.py", "reopen-finalized-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--reason", "replace engineering commands",
+            )
+            self.assertEqual(reopened.returncode, 0, reopened.stdout + reopened.stderr)
+
+            compile_replaced = _run(
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend",
+                "--command", f"{sys.executable} -c \"print('replacement compile')\"",
+            )
+            self.assertEqual(compile_replaced.returncode, 0, compile_replaced.stdout + compile_replaced.stderr)
+            project_replaced = _run(
+                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--command", f"{sys.executable} -c \"print('replacement integration')\"",
+            )
+            self.assertEqual(project_replaced.returncode, 0, project_replaced.stdout + project_replaced.stderr)
+            quality_added = _run(
+                "plan_writer.py", "add-quality-gate-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend",
+                "--command", f"{sys.executable} -c \"print('quality one')\"",
+            )
+            self.assertEqual(quality_added.returncode, 0, quality_added.stdout + quality_added.stderr)
+            quality_replaced = _run(
+                "plan_writer.py", "add-quality-gate-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend", "--replace",
+                "--command", f"{sys.executable} -c \"print('quality replacement')\"",
+            )
+            self.assertEqual(quality_replaced.returncode, 0, quality_replaced.stdout + quality_replaced.stderr)
+
+            preflight = _run(
+                "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+            rematerialized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--force",
+            )
+            self.assertEqual(rematerialized.returncode, 0, rematerialized.stdout + rematerialized.stderr)
+
+            root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            compile_commands = root_plan["compileProfiles"]["backend"]["commands"]
+            project_commands = root_plan["projectValidationCommands"]
+            quality_commands = root_plan["qualityGateProfiles"]["backend"]["commands"]
+            self.assertEqual(len(compile_commands), 1)
+            self.assertIn("replacement compile", compile_commands[0]["argv"][-1])
+            self.assertEqual(len(project_commands), 1)
+            self.assertIn("replacement integration", project_commands[0]["argv"][-1])
+            self.assertEqual(len(quality_commands), 1)
+            self.assertIn("quality replacement", quality_commands[0]["argv"][-1])
 
     def test_group_rejects_unknown_api_as_plan_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,7 +332,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertFalse(issue["designMutationAllowed"])
             self.assertEqual(issue["currentValue"], "API-999")
 
-    def test_prepare_cannot_remint_design_lock_after_tmp_draft_is_deleted(self) -> None:
+    def test_prepare_consumes_design_lock_without_rechecking_design_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
@@ -264,15 +355,39 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 "--feature", "alpha", "--group-file", str(group_file),
                 "--code-workspace", str(ROOT),
             )
-            self.assertNotEqual(second.returncode, 0)
-            self.assertIn("confirmed_design_changed_without_reconfirmation", second.stdout)
-            confirmed = _run(
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertFalse((feature_dir / ".design-contract.lock.json").read_text(encoding="utf-8").find("initial_plan_prepare") >= 0)
+
+            shutil.rmtree(feature_dir / ".tmp" / "plan_writer")
+            result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(result.ok, result.errors)
+            refreshed = _run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
-                "--code-workspace", str(ROOT), "--design-revision-confirmed",
-                "--reason", "Design revision confirmed in plan gate",
+                "--code-workspace", str(ROOT),
             )
-            self.assertEqual(confirmed.returncode, 0, confirmed.stdout + confirmed.stderr)
+            self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+
+    def test_prepare_refuses_missing_design_lock_without_reminting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            lock_path = feature_dir / ".design-contract.lock.json"
+            lock_path.unlink()
+            task = _plan_task_body()
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("design_contract_lock_missing", result.stdout)
+            self.assertFalse(lock_path.exists())
 
     def test_detail_rejects_unknown_data_and_decision_but_allows_empty_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -376,7 +491,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("missing_ref_anchor", result.stdout)
+            self.assertIn("unknown_plan_json_api_ref", result.stdout)
 
     def test_set_draft_task_detail_allows_shared_test_selector_as_intent(self) -> None:
         """Test-stage ownership is deferred, so Plan may preserve shared selectors as intent."""
@@ -499,6 +614,8 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 design_path.read_text(encoding="utf-8").replace("D-001", "D-002"),
                 encoding="utf-8",
             )
+            lock_result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(lock_result.ok, lock_result.errors)
             preflight = _run(
                 "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha",
@@ -585,6 +702,17 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                     "--feature", "alpha", "--task-id", task["id"], "--body-file", str(detail_path),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            compile_added = _run(
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend",
+                "--command", f"{sys.executable} -c \"print('compile')\"",
+            )
+            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
+            project_added = _run(
+                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--command", f"{sys.executable} -c \"print('integration')\"",
+            )
+            self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
             repairs = {
                 "repairs": [
                     {"taskId": "T001", "patch": {"goal": "repaired first goal"}},
@@ -644,6 +772,8 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 design_path.read_text(encoding="utf-8").replace("D-001", "D-002"),
                 encoding="utf-8",
             )
+            lock_result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(lock_result.ok, lock_result.errors)
 
             diagnosis = _run(
                 "plan_writer.py", "diagnose-plan-repair", "--workspace", str(workspace),

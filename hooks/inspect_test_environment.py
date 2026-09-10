@@ -435,7 +435,7 @@ def _status_for_targets(targets):
     return "ready" if statuses and all(value == "ready" for value in statuses) else "unsupported"
 
 
-def inspect_feature_environments(workspace, feature, task_ids=None):
+def inspect_feature_environments(workspace, feature, task_ids=None, *, code_workspace=None):
     artifact_workspace = resolve_workspace(workspace)
     feature = resolve_feature(feature)
     feature_dir = artifact_workspace / ".autobizdevops" / "features" / feature
@@ -466,7 +466,12 @@ def inspect_feature_environments(workspace, feature, task_ids=None):
     bindings = {}
     location_warnings = []
     for task_id in selected_task_ids:
-        context = resolve_task_workspace(artifact_workspace, feature, task_id)
+        context = resolve_task_workspace(
+            artifact_workspace,
+            feature,
+            task_id,
+            code_workspace=code_workspace,
+        )
         bindings[context["workspaceRef"]] = context["binding"]
         for warning in context.get("locationWarnings", []):
             if warning not in location_warnings:
@@ -541,6 +546,11 @@ def main(argv=None):
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--feature", required=True)
     parser.add_argument("--task-id", action="append")
+    parser.add_argument(
+        "--batch-worktree",
+        dest="code_workspace",
+        help="仅 Workflow 内使用：当前 Batch 的原生 Git Worktree。",
+    )
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON（默认格式）")
     parser.add_argument(
         "--record-blocked",
@@ -550,7 +560,12 @@ def main(argv=None):
     args = None
     try:
         args = parser.parse_args(argv)
-        result = inspect_feature_environments(args.workspace, args.feature, args.task_id)
+        result = inspect_feature_environments(
+            args.workspace,
+            args.feature,
+            args.task_id,
+            code_workspace=args.code_workspace,
+        )
     except UTestWorkspaceBindingError as exc:
         payload = _record_blocked_if_requested(args, exc.payload())
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False))

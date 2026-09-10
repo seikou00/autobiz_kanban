@@ -57,7 +57,7 @@ class EvidenceAuditTest(unittest.TestCase):
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root["batches"][0]["status"], "todo")
 
-    def test_reset_invalid_tasks_clears_handoff_and_reactivates_reset_batch(self) -> None:
+    def test_reset_invalid_tasks_reactivates_reset_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -77,7 +77,7 @@ class EvidenceAuditTest(unittest.TestCase):
                 json.dumps(
                     {
                         "featureId": "alpha",
-                        "status": "awaiting_next_conversation",
+                        "status": "in_progress",
                         "taskSetStatus": "finalized",
                         "activeBatchId": None,
                         "nextBatchId": "B002",
@@ -88,7 +88,7 @@ class EvidenceAuditTest(unittest.TestCase):
                             "maxTestStageRepairAttempts": 3,
                         },
                         "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-                        "batchValidationProfiles": {
+                        "compileProfiles": {
                             "backend": {
                                 "commands": [
                                     {
@@ -100,6 +100,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 ]
                             }
                         },
+                        "qualityGateProfiles": {},
                         "batches": [
                             {
                                 "id": "B001",
@@ -149,22 +150,14 @@ class EvidenceAuditTest(unittest.TestCase):
                             "taskCount": 1,
                             "completedTaskCount": completed_count,
                             "completionEvidenceIds": [],
-                            "batchValidation": {
-                                "profile": "backend",
-                                "status": "passed" if status == "done" else "pending",
-                                "commands": [
-                                    {
-                                        "id": f"BATCH-{batch_id}-VAL-001",
-                                        "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
-                                        "cwd": ".",
-                                        "kind": "compile",
-                                        "required": True,
-                                    }
-                                ],
-                                "evidenceIds": [],
-                                "latestPassEvidenceIds": [],
-                                "activeRunId": None,
+                            "compileCommand": {
+                                "id": f"BATCH-{batch_id}-COMPILE",
+                                "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
+                                "cwd": ".",
+                                "kind": "compile",
+                                "required": True,
                             },
+                            "qualityGateCommands": [],
                             "startedAt": None,
                             "completedAt": completed_at,
                             "tasks": [batch_task],
@@ -175,11 +168,6 @@ class EvidenceAuditTest(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
-            (feature_dir / "BATCH_HANDOFF.json").write_text(
-                json.dumps({"status": "awaiting_next_conversation", "nextBatchId": "B002"}),
-                encoding="utf-8",
-            )
-
             result = _run("audit", "--feature-dir", str(feature_dir), "--reset-invalid-tasks")
 
             self.assertNotEqual(result.returncode, 0)
@@ -187,7 +175,6 @@ class EvidenceAuditTest(unittest.TestCase):
             self.assertEqual(root["status"], "in_progress")
             self.assertEqual(root["activeBatchId"], "B001")
             self.assertEqual(root["nextBatchId"], "B002")
-            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
 
 
 if __name__ == "__main__":

@@ -18,6 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
+PLAN_TASK_PLANNING = PLAN_SKILL.parent / "references" / "task-planning.md"
+
+
+def _plan_skill_docs() -> str:
+    """Load the Plan entrypoint with the reference it requires before planning."""
+    return "\n".join((
+        PLAN_SKILL.read_text(encoding="utf-8"),
+        PLAN_TASK_PLANNING.read_text(encoding="utf-8"),
+    ))
+
+
 def _board_config() -> dict:
     return json.loads((ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8"))
 
@@ -74,31 +87,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             offenders,
             [],
             "the external flag was removed (drop semantics); offending artifacts: "
-            + ", ".join(offenders),
-        )
-
-    def test_every_workflow_skill_invokes_its_input_contract_once(self) -> None:
-        offenders: list[str] = []
-        skills = {
-            node.get("skill")
-            for _, node in _iter_nodes(_board_config())
-            if isinstance(node, dict) and isinstance(node.get("skill"), str)
-        }
-        for skill in sorted(skills):
-            group = skill.split("-", 1)[0]
-            relative_path = Path("skills") / group / skill / "SKILL.md"
-            content = (ROOT / relative_path).read_text(encoding="utf-8")
-            command = (
-                'python "${pluginPath}/hooks/inspect_skill_contract.py" '
-                f'{skill} --feature "${{feature}}" --plain'
-            )
-            count = content.count(command)
-            if count != 1:
-                offenders.append(f"{relative_path}: invocation_count={count}")
-        self.assertEqual(
-            offenders,
-            [],
-            "every workflow skill must load its board input contract exactly once: "
             + ", ".join(offenders),
         )
 
@@ -194,24 +182,53 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
-    def test_e2e_stage_declares_trust_gate_and_diagnostics_outputs(self) -> None:
-        nodes = [node for _, node in _iter_nodes(_board_config()) if node.get("id") == "dev.e2e"]
-        self.assertEqual(1, len(nodes))
-        outputs = nodes[0]["artifacts"]["outputs"]
-        by_path = {artifact["path"]: artifact for artifact in outputs}
-        self.assertIn("E2E_QUALITY_SCAN.json", by_path)
-        self.assertFalse(by_path["E2E_QUALITY_SCAN.json"]["required"])
-        self.assertIn("e2e-diagnostics/**/*", by_path)
-        self.assertFalse(by_path["e2e-diagnostics/**/*"]["required"])
+    def test_design_and_plan_are_separate_workflow_nodes(self) -> None:
+        nodes = {
+            node.get("id"): node
+            for _, node in _iter_nodes(_board_config())
+            if isinstance(node, dict)
+        }
+        design = nodes["dev.design"]
+        plan = nodes["dev.plan"]
+
+        self.assertEqual(design.get("skill"), "autodev-design")
+        self.assertEqual(design.get("checkpoints"), ["design_in_progress", "design_done"])
         self.assertEqual(
-            [
-                "ui_context_json",
-                "e2e_result_json",
-                "e2e_cases_contract",
-                "fix_request_json",
-                "evidence_integrity",
-            ],
-            nodes[0]["validators"],
+            [item.get("path") for item in design["artifacts"]["outputs"]],
+            ["design.md", ".design-contract.lock.json"],
+        )
+        self.assertIn("design_contract", design.get("validators", []))
+        self.assertIn("design_contract_lock", design.get("validators", []))
+
+        self.assertEqual(plan.get("skill"), "autodev-plan")
+        self.assertEqual(plan.get("checkpoints"), ["plan_in_progress", "plan_done"])
+        self.assertEqual(
+            [item.get("path") for item in plan["artifacts"]["outputs"]],
+            ["PLAN.md", "plan.json"],
+        )
+        design_input = next(item for item in plan["artifacts"]["inputs"] if item.get("path") == "design.md")
+        self.assertTrue(design_input.get("required"))
+        lock_input = next(
+            item for item in plan["artifacts"]["inputs"]
+            if item.get("path") == ".design-contract.lock.json"
+        )
+        self.assertTrue(lock_input.get("required"))
+        self.assertNotIn("design_contract", plan.get("validators", []))
+        self.assertNotIn("plan_ref_resolution", plan.get("validators", []))
+        self.assertIn("plan_json_contract", plan.get("validators", []))
+
+    def test_batch_pipeline_stages_are_not_duplicated_as_board_nodes(self) -> None:
+        config = _board_config()
+        node_ids = {node.get("id") for _, node in _iter_nodes(config)}
+        self.assertNotIn("dev.review", node_ids)
+        self.assertNotIn("dev.utest", node_ids)
+        self.assertNotIn("dev.e2e", node_ids)
+        self.assertNotIn("dev.verify", node_ids)
+        transitions = config["workflow"]["transitions"]
+        transition_ids = {transition["id"] for transition in transitions}
+        self.assertEqual(
+            {"prd-to-specs", "specs-to-design", "design-to-plan", "plan-to-code", "code-to-cicd", "cicd-to-archive"},
+            transition_ids,
         )
 
 
@@ -320,28 +337,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`",
             skill,
         )
-
-    def test_utest_skill_has_deterministic_blocked_exit(self) -> None:
-        skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        required = [
-            "--record-blocked",
-            "locationWarnings",
-            "blockedArtifacts",
-            "blockedArtifactError",
-            "--checkpoint needs_fix",
-            "没有环境变更或用户选择时不重跑检查器",
-            "`scope.modules` 无法解析不是 `contract_gap`",
-            "当前没有 pending ambiguity 时不得传 `--select-candidate`",
-        ]
-        missing = [phrase for phrase in required if phrase not in skill]
-        self.assertEqual(missing, [])
-
-        config = _board_config()
-        transitions = config["workflow"]["checkpoints"]["transitions"]
-        self.assertIn("needs_fix", transitions["unit_test_in_progress"])
-        self.assertIn("unit_test_in_progress", transitions["needs_fix"])
 
     def test_skill_output_sections_never_declare_global_state_files(self) -> None:
         state_files = (".autobizdevops/state.json", ".autobizdevops/STATE.md")
@@ -479,12 +474,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertIn("validationBoundary", group_exception)
 
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        content = _plan_skill_docs()
         required = [
             "templates/task-detail-input.json",
             "templates/task-groups.json",
+            "[任务拆分与计划语义](references/task-planning.md)",
             "add-task-contract",
-            "每次 Plan 会话准备 Draft 前只执行一次",
             ".tmp/plan_writer/draft/plan.json",
             ".tmp/plan_writer/task-groups.json",
             "preflight-task-groups",
@@ -493,16 +488,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "preflight-task-draft",
             "finalize-task-draft",
             "rebuild-task-draft",
-            "task_group_changed_after_draft_created",
             "workspaceRef",
-            "失败时不写任何正式产物",
-            "禁止使用 `python -c`",
-            "不得通过 validator 失败来探索 schema",
+            "不写任何正式产物",
+            "不得直接编辑根 / Batch JSON",
             "不得读取 writer 源码来发现参数或枚举值",
-            "required AC 覆盖校验",
-            "`scope.pages` 由 writer 从分组 UI refs 投影",
-            "不得把缺失 Scenario 添加到标题相近",
-            "taskSetDigest",
+            "详情不得改写 group-owned 字段",
+            "scope.pages",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -512,16 +503,16 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         )
 
     def test_plan_skill_requires_targeted_draft_repair_loop(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        content = _plan_skill_docs()
         required = [
             "validation.issues",
             "validation.invalidTaskIds",
+            "repairTarget=task_detail",
+            "repairTarget=task_group",
             "repair-draft-task",
             "repair-draft-tasks",
-            "批量修复在任一 patch 不合法时整体不落盘",
-            "不得因为 task detail",
             "删除 `.tmp/plan_writer`",
-            "不得删除 Draft 或全量重填 task",
+            "不得为了规避错误删除",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -531,22 +522,18 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         )
 
     def test_plan_skill_keeps_ui_task_generation_guidance(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        content = _plan_skill_docs()
         required = [
             "templates/task-detail-input.json",
-            "不得先自由生成再依赖 validator 反复修字段",
-            "按本 Feature 内页面与交互出现顺序自行分配",
-            "`visualSourceRefs` 写空数组",
-            "`frontendRoute` 写 `spec-driven-ui`",
-            "模板中的 API/Data/Decision ID 都是占位示例",
-            "不要为了过校验强行编造",
+            "UI_CONTEXT.json",
+            "不得按出现顺序新编 PAGE/UIX",
+            "不得为了预检虚构 UI task",
+            "visualSourceRefs",
+            "frontendRoute",
             "空数组 `[]`",
-            "x-auto-no-http-api: true",
-            "x-auto-no-sql: true",
-            "`uiRequired` 是 task 顶层 bool 字段",
-            "不在 `uiRefs` 内部",
-            "不得为通过分组预检虚构 PAGE/UIX",
-            "必须显式写 `uiRequired:false`",
+            "uiRequired",
+            "uiRefs",
+            "uiRequired:false",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -556,17 +543,17 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         )
 
     def test_plan_skill_requires_plan_markdown_projection(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        content = _plan_skill_docs()
         # 钉机制不钉字面：同一条要求给若干可接受写法，命中任一即算满足。
         # 措辞由人把关，测试只保证「PLAN.md 由 plan.json 投影产生」这条主线还在。
         required = [
-            ("要求同时产出两份", ("plan.json + PLAN.md",)),
-            ("PLAN.md 是必须产物", ("本阶段必须生成", "必须生成完整的 plan.json + PLAN.md")),
+            ("要求同时产出两份", ("生成 `plan.json`、所有 `plans/Bxxx/plan.json` 和 `PLAN.md`",)),
+            ("PLAN.md 是必须产物", ("所有 Batch 计划与 `PLAN.md`",)),
             (
                 "PLAN.md 由 plan.json 投影而来",
                 ("`PLAN.md` 必须从 `plan.json` 投影", "`PLAN.md` 必须由 `plan_writer.py"),
             ),
-            ("PLAN.md 要落盘", ("PLAN.md` 文件已写入磁盘",)),
+            ("PLAN.md 要落盘", ("一次性写入根 `plan.json`、所有 Batch 计划与 `PLAN.md`",)),
         ]
         missing = [
             name for name, variants in required if not any(v in content for v in variants)
@@ -587,49 +574,36 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(offenders, [], "autodev-plan skill must not treat PLAN.md as optional")
 
     def test_plan_skill_requires_prewrite_task_splitting_algorithm(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        content = _plan_skill_docs()
         required = [
-            "Plan Task 拆分算法（生成 plan.json 前必走）",
             "一个 task = 一个公开入口 + 一个用户可观察结果 + 一个可运行验证命令",
-            "默认先按 vertical slice 拆开",
+            "vertical slice",
             "implementationScope",
-            "建立 Scenario 覆盖矩阵",
             "SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam",
             "候选任务分组表",
-            "不得边补 task detail 边重新拆分",
-            "最终候选任务分组表",
+            "不要一边补 task detail 一边重新拆分",
             "连续 `T001`、`T002`、`T003`",
-            "禁止 `T003a`",
             "完整 specRefs 清单",
-            "不同 spec 文件里的同号 `SCN-001` 必须按不同场景分别计数",
-            "不得用 `SCN-007~SCN-016`",
-            "跨 spec 同号场景必须点名完整路径",
+            "不同 spec 文件里的同号 `SCN-001` 是不同场景",
             "拆分结论",
             "需拆分",
             "可合并(附 splitRationale)",
             "splitRationale 草稿",
-            "必须先在候选分组表证明共享验证闭环",
-            "任务超过软阈值时默认继续拆分",
+            "SCN `<=5`",
+            "SCN `12`",
             "mergedScenarioRefs",
-            "taskGroupMatrixExceptionExample",
-            "uiRequiredExample",
-            "禁止看到 6-12 个 SCN 就为所有 group 自动补",
-            "禁止按连续 SCN 编号机械切块",
             "用户动作 + 公开 seam + 自动化验证边界",
             "只允许一次拆分",
-            "不得输出 `v2`、`v3`",
-            "最终候选任务分组表不得包含 `拆分结论=需拆分` 的行",
             "基础能力可以单独成 task",
-            "validationCommands` 必须验证下游公开 seam",
-            "只有共享同一验证闭环时才允许合并",
-            "不得通过完整 task 的内容校验失败来探索如何拆分",
-            "必须按 DAG 拓扑序编号",
-            "`preflight-task-groups` 成功后只运行一次 `prepare-task-draft`",
-            "不得创建独立 `Txxx.json`",
-            "回 Scenario 覆盖矩阵定位遗漏并重新分组",
-            "运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`",
-            "分组 digest 变化时运行 `rebuild-task-draft`",
-            "对 finalized 计划不原地解封",
+            "公开 seam",
+            "共享同一验证闭环",
+            "oversized_plan_task_must_split",
+            "missing_plan_task_split_rationale",
+            "invalid_plan_task_split_rationale",
+            "DAG 拓扑序",
+            "回覆盖矩阵定位遗漏并重新分组",
+            "rebuild-task-draft",
+            "reopen-finalized-draft",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -638,25 +612,25 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
         )
 
-    def test_code_skill_requires_compile_only_batch_session_actions(self) -> None:
+    def test_code_skill_requires_compile_only_fixed_workflow(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "task_runner.py\" code-session",
-            "每次进入 Code 阶段或在新对话恢复 Code 时",
-            "execute_active_batch",
-            "run_batch_compile",
-            "start_batch_compile_repair",
-            "continue_batch_compile_repair",
-            "code_done_ready",
-            "stop_and_open_new_conversation",
-            "不得在同一对话再次调用 `code-session`",
-            "task_runner.py\" start",
+            "workflow_launcher.py",
+            "唯一的 Code 启动入口",
+            "不得调用 `task_runner.py code-session`",
+            "固定 Workflow",
+            "batch-compile",
+            "start-batch-compile-repair",
+            "原生 Git Worktree",
+            "Task Run 的 Git 快照",
+            "batchExecutionPlan",
+            "展示给用户",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
             missing,
             [],
-            "autodev-code must enforce compile-only Code session actions: " + ", ".join(missing),
+            "autodev-code must enforce compile-only fixed Workflow execution: " + ", ".join(missing),
         )
 
     def test_code_skill_requires_same_batch_continuation(self) -> None:
@@ -678,6 +652,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_code_skill_protects_task_runner_snapshot_baseline(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
+            ".cmbdevclaw/large_tool_results/",
             "task_runner.py\" resume",
             "staging / unstaging",
             "同一个 run",
@@ -709,15 +684,28 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must define transient validation file handling: " + ", ".join(missing),
         )
 
+    def test_code_skill_displays_batch_execution_plan_before_starting_workflow(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "batchExecutionPlan",
+            "逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集",
+            "按 `waves` 展示",
+            "实际后续 Wave 只会在上游合并成功后释放",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-code must display the batch execution plan: " + ", ".join(missing),
+        )
+
     def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
-        plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        plan = _plan_skill_docs()
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         plan_required = [
             "`scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生",
             "`scope.paths` 只写相对该 workspace 的提示性路径",
             "`validationCommands[].cwd` 保持 Git 根相对路径",
-            "DTO、domain、resources、迁移或配置",
-            "测试文件和跨 workspace 变更仍然拒绝",
             "`repoId:relative/path`",
         ]
         code_required = [
@@ -736,9 +724,19 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(missing),
         )
 
-    def test_plan_skill_points_batch_resume_to_code_session(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("task_runner.py code-session", content)
+    def test_code_exploration_cache_is_not_a_code_output(self) -> None:
+        code = next(
+            item
+            for context, item in _iter_nodes(_board_config())
+            if context == "workflow.nodes" and item.get("id") == "dev.code"
+        )
+        outputs = code["artifacts"]["outputs"]
+        self.assertNotIn("cache/code-exploration/**/*.json", [item.get("path") for item in outputs])
+
+    def test_plan_skill_points_batch_resume_to_parallel_scheduler(self) -> None:
+        content = _plan_skill_docs()
+        self.assertIn("未知写集保守串行", content)
+        self.assertIn("依赖不得前向或跨批成环", content)
         self.assertNotIn("task_runner.py activate-batch", content)
 
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:

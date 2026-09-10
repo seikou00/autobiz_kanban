@@ -348,6 +348,11 @@ CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
         "lifecycle": "process",
         "description": "技术设计文档。",
     },
+    ".design-contract.lock.json": {
+        "category": "technical_design_contract",
+        "lifecycle": "process",
+        "description": "由技术设计阶段锁定的 Plan 契约快照。",
+    },
     "PLAN.md": {
         "category": "implementation_plan",
         "lifecycle": "process",

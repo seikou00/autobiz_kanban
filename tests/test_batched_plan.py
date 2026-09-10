@@ -15,14 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.code_task_context import build_context  # noqa: E402
-from hooks.plan_json import _validate_command_workspace_root  # noqa: E402
-from hooks.plan_writer import (  # noqa: E402
-    PlanWriterInputError,
-    _code_workspace_contexts,
-    _draft_task_workspace_roots,
-)
-from hooks.implementation_scope import write_scope  # noqa: E402
-from hooks.plan_scope import write_partition  # noqa: E402
+from hooks.design_contract_lock import sync_design_contract_lock  # noqa: E402
 from hooks.evidence_store import append_evidence, main as evidence_store_main  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
@@ -31,8 +24,8 @@ from hooks.plan_json import (  # noqa: E402
     load_and_validate_plan,
     load_plan_bundle,
     task_set_digest,
-    validate_plan_bundle_data,
     validate_plan_data,
+    validate_plan_bundle_data,
     write_plan_json,
 )
 
@@ -90,7 +83,6 @@ def task(
         "blockers": [],
     }
     if ui_required:
-        item["expectedFiles"] = ["src/views/feature/index.vue"]
         item["uiRefs"] = {
             "pageRefs": ["PAGE-001"],
             "interactionRefs": ["UIX-001"],
@@ -116,7 +108,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         },
         "batchPolicy": {"maxTasks": 5, "strategy": BATCH_STRATEGY},
         "batches": batches,
-        "batchValidationProfiles": {
+        "compileProfiles": {
             "backend": {
                 "commands": [
                     {
@@ -138,6 +130,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
                 ]
             },
         },
+        "qualityGateProfiles": {},
         "projectValidationCommands": [
             {
                 "id": "PROJECT-VAL-001",
@@ -173,7 +166,7 @@ def batch_entry(
 
 def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = "backend") -> dict:
     command = {
-        "id": f"BATCH-{batch_id}-VAL-001",
+        "id": f"BATCH-{batch_id}-COMPILE",
         "argv": [
             sys.executable,
             "-c",
@@ -192,14 +185,8 @@ def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = 
         "taskCount": len(batch_tasks),
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
-        "batchValidation": {
-            "profile": execution_lane,
-            "status": "pending",
-            "commands": [command],
-            "evidenceIds": [],
-            "latestPassEvidenceIds": [],
-            "activeRunId": None,
-        },
+        "compileCommand": {**command, "id": f"BATCH-{batch_id}-COMPILE"},
+        "qualityGateCommands": [],
         "startedAt": None,
         "completedAt": None,
         "tasks": batch_tasks,
@@ -245,6 +232,29 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_bundle_rejects_shared_write_path_across_tasks(self) -> None:
+        first = task("T001")
+        second = task("T002")
+        first["scope"]["paths"] = ["sql/marketing.sql"]
+        second["expectedFiles"] = ["sql/marketing.sql"]
+        root = root_plan(batches=[
+            batch_entry("B001", ["T001"]),
+            batch_entry("B002", ["T002"]),
+        ])
+
+        errors = validate_plan_bundle_data(
+            root,
+            {
+                "B001": batch_plan("B001", [first]),
+                "B002": batch_plan("B002", [second]),
+            },
+        )
+
+        self.assertIn(
+            "shared_write_path_requires_single_owner:workspace=default:path=sql/marketing.sql:taskIds=T001,T002",
+            errors,
+        )
+
     def test_load_plan_bundle_rejects_task_outside_implementation_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "feature"
@@ -263,20 +273,20 @@ class BatchedPlanContractTest(unittest.TestCase):
 
     def test_batch_and_project_commands_reject_noop_validation(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
-        root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "compile"]
+        root["compileProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "compile"]
         root["projectValidationCommands"][0]["argv"] = ["echo", "integration"]
 
         errors = validate_plan_data(root, require_backend_compile=True)
 
         self.assertIn(
-            "batchValidationProfiles.backend.commands[0].validation_command_noop",
+            "compileProfiles.backend.commands[0].validation_command_noop",
             errors,
         )
         self.assertIn("projectValidationCommands[0].validation_command_noop", errors)
 
     def test_backend_batch_requires_compile_or_build_beyond_lint(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
-        root["batchValidationProfiles"]["backend"]["commands"] = [
+        root["compileProfiles"]["backend"]["commands"] = [
             {
                 "argv": ["ruff", "check", "."],
                 "cwd": ".",
@@ -287,35 +297,12 @@ class BatchedPlanContractTest(unittest.TestCase):
 
         errors = validate_plan_data(root, require_backend_compile=True)
 
-        self.assertIn("batchValidationProfiles.backend.backend_compile_command_missing", errors)
+        self.assertIn("compileProfiles.backend.compile_command_missing", errors)
 
-    def test_frontend_batch_allows_empty_compile_profile(self) -> None:
-        frontend_task = task("T001", ui_required=True)
-        root = root_plan(batches=[batch_entry("B001", ["T001"], execution_lane="frontend")])
-        root["batchValidationProfiles"]["frontend"]["mode"] = "commands"
-        root["batchValidationProfiles"]["frontend"]["commands"] = []
-        batch = batch_plan("B001", [frontend_task], execution_lane="frontend")
-        batch["batchValidation"]["mode"] = "commands"
-        batch["batchValidation"]["commands"] = []
-
-        self.assertEqual(
-            validate_plan_bundle_data(
-                root,
-                {"B001": batch},
-                require_initial_status=True,
-                require_backend_compile=True,
-            ),
-            [],
-        )
-
-    def test_explicit_commands_mode_preserves_legacy_task_set_digest(self) -> None:
+    def test_compile_and_quality_commands_are_bound_to_task_set_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
         batch = batch_plan("B001", [task("T001")])
         legacy_digest = task_set_digest(root, {"B001": batch})
-
-        root["batchValidationProfiles"]["backend"]["mode"] = "commands"
-        batch["batchValidation"]["mode"] = "commands"
-        batch["batchValidation"]["coverageCommandIds"] = []
 
         self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
 
@@ -328,7 +315,7 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertNotEqual(task_set_digest(root, {"B001": batch}), policy_digest)
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
-    def test_finalized_plan_requires_batch_validation_contract(self) -> None:
+    def test_finalized_plan_requires_compile_and_quality_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -336,20 +323,20 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
-            root.pop("batchValidationProfiles")
+            root.pop("compileProfiles")
             write_plan_json(root_path, root)
 
-            with self.assertRaisesRegex(PlanJsonError, "batch_validation_contract_requires_rebuild"):
+            with self.assertRaisesRegex(PlanJsonError, "batch_compile_contract_requires_rebuild"):
                 load_plan_bundle(feature_dir)
 
-            root["batchValidationProfiles"] = root_plan(batches=[])["batchValidationProfiles"]
+            root["compileProfiles"] = root_plan(batches=[])["compileProfiles"]
             write_plan_json(root_path, root)
             batch_path = batch_plan_path(feature_dir, "B001")
             batch = json.loads(batch_path.read_text(encoding="utf-8"))
-            batch.pop("batchValidation")
+            batch.pop("compileCommand")
             write_plan_json(batch_path, batch)
 
-            with self.assertRaisesRegex(PlanJsonError, "batch_validation_contract_requires_rebuild"):
+            with self.assertRaisesRegex(PlanJsonError, "batch_compile_contract_requires_rebuild"):
                 load_plan_bundle(feature_dir)
 
     def test_project_validation_rejects_batch_kinds_and_profile_duplicates(self) -> None:
@@ -378,7 +365,7 @@ class BatchedPlanContractTest(unittest.TestCase):
         for profile_cwd, project_cwd in [(".", "./"), ("src", "src/")]:
             with self.subTest(profile_cwd=profile_cwd, project_cwd=project_cwd):
                 equivalent = root_plan(batches=[batch_entry("B001", ["T001"])])
-                equivalent["batchValidationProfiles"]["backend"]["commands"][0]["cwd"] = profile_cwd
+                equivalent["compileProfiles"]["backend"]["commands"][0]["cwd"] = profile_cwd
                 equivalent["projectValidationCommands"] = [
                     {
                         "id": "PROJECT-VAL-001",
@@ -392,12 +379,49 @@ class BatchedPlanContractTest(unittest.TestCase):
                     "projectValidationCommands[0].duplicates_batch_profile:backend",
                     validate_plan_data(equivalent),
                 )
-    def test_plan_writer_projects_lane_batch_validation_commands(self) -> None:
+
+    def test_bundle_rejects_generated_command_projection_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            write_bundle(feature_dir, [[task("T001")]])
+            batch_path = batch_plan_path(feature_dir, "B001")
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            batch["compileCommand"]["argv"] = [sys.executable, "-c", "print('manual drift')"]
+            write_plan_json(batch_path, batch)
+
+            with self.assertRaisesRegex(PlanJsonError, "B001.compileCommand_profile_projection_mismatch"):
+                load_plan_bundle(feature_dir)
+    def test_plan_writer_projects_lane_compile_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
             write_plan_state(workspace)
+            subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True)
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "\n".join([
+                    "## ADDED Requirements",
+                    "### Requirement [REQ-001]: capability",
+                    "#### Scenario [SCN-001]: happy path",
+                ]),
+                encoding="utf-8",
+            )
+            (feature_dir / "design.md").write_text(
+                "\n".join([
+                    "# Design",
+                    "- x-auto-no-http-api: true",
+                    "- x-auto-no-sql: true",
+                    "| ID | Decision |",
+                    "|----|----------|",
+                    "| D-001 | implementation choice |",
+                ]),
+                encoding="utf-8",
+            )
+            lock_result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(lock_result.ok, lock_result.errors)
 
             def writer(*args: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -416,27 +440,94 @@ class BatchedPlanContractTest(unittest.TestCase):
                     check=False,
                 )
 
-            self.assertEqual(writer("init").returncode, 0)
             body = Path(tmp) / "T001.json"
             body.write_text(json.dumps(task("T001")), encoding="utf-8")
-            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+            group_file = Path(tmp) / "task-groups.json"
+            group_file.write_text(
+                json.dumps({
+                    "featureId": "alpha",
+                    "groups": [{
+                        "id": "T001",
+                        "title": "task T001",
+                        "executionMode": "code",
+                        "deps": [],
+                        "uiRequired": False,
+                        "workspaceRef": "default",
+                        "specRefs": [
+                            "specs/cap/spec.md#REQ-001",
+                            "specs/cap/spec.md#SCN-001",
+                        ],
+                        "mergedScenarioRefs": [],
+                        "apiIds": [],
+                        "validationBoundary": "public behavior seam validated by the task command",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            prepared = writer(
+                "prepare-task-draft",
+                "--group-file", str(group_file),
+                "--code-workspace", str(workspace),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+
+            detail = task("T001")
+            detail["scope"].pop("pages", None)
+            detail = {
+                "goal": detail["goal"],
+                "scope": detail["scope"],
+                "implementationPoints": detail["implementationPoints"],
+                "acceptanceCriteria": [{
+                    "text": detail["acceptanceCriteria"][0]["text"],
+                    "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                }],
+                "nonGoals": detail["nonGoals"],
+                "designRefs": detail["designRefs"],
+                "dataIds": detail["dataIds"],
+                "decisionIds": detail["decisionIds"],
+                "validationCommands": [{
+                    **{key: value for key, value in detail["validationCommands"][0].items() if key != "id"},
+                    "covers": [1],
+                }],
+                "expectedFiles": detail["expectedFiles"],
+                "blockers": detail["blockers"],
+            }
+            body.write_text(json.dumps(detail), encoding="utf-8")
+            detailed = writer("set-draft-task-detail", "--task-id", "T001", "--body-file", str(body))
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
 
             added = writer(
-                "add-batch-validation-command",
+                "add-compile-command",
                 "--lane",
                 "backend",
                 "--command",
                 f"{sys.executable} -c \"print('backend compile')\"",
-                "--kind",
-                "compile",
             )
 
             self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            quality_added = writer(
+                "add-quality-gate-command",
+                "--lane",
+                "backend",
+                "--command",
+                f"{sys.executable} -c \"print('backend static check')\"",
+            )
+
+            self.assertEqual(quality_added.returncode, 0, quality_added.stdout + quality_added.stderr)
+            project_added = writer(
+                "add-project-validation-command",
+                "--command",
+                f"{sys.executable} -c \"print('project integration')\"",
+            )
+            self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
+            finalized = writer("finalize-task-draft")
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(root["batchValidationProfiles"]["backend"]["commands"][0]["kind"], "compile")
-            self.assertEqual(batch["batchValidation"]["commands"][0]["id"], "BATCH-B001-VAL-001")
-            self.assertEqual(batch["batchValidation"]["status"], "pending")
+            self.assertEqual(root["compileProfiles"]["backend"]["commands"][0]["kind"], "compile")
+            self.assertEqual(batch["compileCommand"]["id"], "BATCH-B001-COMPILE")
+            self.assertEqual(root["qualityGateProfiles"]["backend"]["commands"][0]["kind"], "static_check")
+            self.assertEqual(batch["qualityGateCommands"][0]["id"], "BATCH-B001-QUALITY-001")
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
@@ -486,7 +577,7 @@ class BatchedPlanContractTest(unittest.TestCase):
                 bypass_errors,
             )
 
-    def test_bundle_rejects_batch_validation_cwd_outside_task_workspace(self) -> None:
+    def test_bundle_rejects_compile_command_cwd_outside_task_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -501,7 +592,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
             self.assertIn(
-                "B001.batchValidation.commands[0].cwd_outside_workspace_root:backend/service",
+                "B001.compileCommand.cwd_outside_workspace_root:backend/service",
                 errors,
             )
 
@@ -512,10 +603,10 @@ class BatchedPlanContractTest(unittest.TestCase):
             write_bundle(feature_dir, [[task("T001")]])
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
-            del root["batchValidationProfiles"]["backend"]
+            del root["compileProfiles"]["backend"]
             write_plan_json(root_path, root)
 
-            with self.assertRaisesRegex(PlanJsonError, "batchValidationProfiles_missing_lane:backend"):
+            with self.assertRaisesRegex(PlanJsonError, "compileProfiles_missing_lane:backend"):
                 load_plan_bundle(feature_dir, require_initial_status=True)
 
     def test_root_plan_requires_task_set_status(self) -> None:
@@ -652,8 +743,8 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual([entry["id"] for entry in root["batches"]], ["B001", "B002"])
             self.assertEqual(len(first["tasks"]), 5)
             self.assertEqual(len(second["tasks"]), 1)
-            self.assertEqual(root["activeBatchId"], "B001")
-            self.assertEqual(root["nextBatchId"], "B002")
+            self.assertIsNone(root["activeBatchId"])
+            self.assertIsNone(root["nextBatchId"])
 
     def test_plan_writer_starts_frontend_task_in_new_batch_for_same_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -717,7 +808,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual([entry["taskIds"] for entry in root["batches"]], [["T001"], ["T002"]])
 
-    def test_lane_order_warns_at_task_level_and_blocks_at_batch_level(self) -> None:
+    def test_plan_writer_rejects_backend_task_after_frontend_collection_started(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             write_plan_state(workspace)
@@ -741,21 +832,8 @@ class BatchedPlanContractTest(unittest.TestCase):
             body.write_text(json.dumps(task("T003", deps=["T001"])), encoding="utf-8")
             added = writer("add-task", "--body-file", str(body))
 
-            # Task-level lane order is advisory; the batch chain still enforces it,
-            # because batch execution order is derived from batch position.
             self.assertNotEqual(added.returncode, 0)
-            payload = json.loads(added.stdout)
-            self.assertEqual(
-                [error["reason"] for error in payload["errors"]],
-                ["backend_batch_after_frontend:B003"],
-            )
-            self.assertEqual(
-                [
-                    (warning["reason"], warning["severity"])
-                    for warning in payload["warnings"]
-                ],
-                [("backend_task_after_frontend", "warning")],
-            )
+            self.assertIn("backend_task_after_frontend", added.stdout + added.stderr)
 
     def test_plan_writer_finalizes_only_after_complete_scenario_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -767,9 +845,9 @@ class BatchedPlanContractTest(unittest.TestCase):
                 "\n".join(
                     [
                         "## ADDED Requirements",
-                        "### Requirement REQ-001: capability",
-                        "#### Scenario SCN-001: happy path",
-                        "#### Scenario SCN-002: alternate path",
+                        "### Requirement [REQ-001]: capability",
+                        "#### Scenario [SCN-001]: happy path",
+                        "#### Scenario [SCN-002]: alternate path",
                     ]
                 ),
                 encoding="utf-8",
@@ -800,18 +878,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             second_body = Path(tmp) / "T002.json"
             second_body.write_text(json.dumps(second), encoding="utf-8")
             self.assertEqual(writer("add-task", "--body-file", str(second_body)).returncode, 0)
-            self.assertEqual(
-                writer(
-                    "add-batch-validation-command",
-                    "--lane",
-                    "backend",
-                    "--command",
-                    f"{sys.executable} -m compileall -q hooks",
-                    "--kind",
-                    "compile",
-                ).returncode,
-                0,
-            )
 
             finalized = writer("finalize-task-set")
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
@@ -830,111 +896,6 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             runtime_update = writer("set-status", "--task-id", "T002", "failed")
             self.assertEqual(runtime_update.returncode, 0, runtime_update.stdout + runtime_update.stderr)
-
-    def test_plan_writer_finalizes_with_deferred_scenarios_out_of_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            spec_dir = feature_dir / "specs" / "cap"
-            spec_dir.mkdir(parents=True)
-            (spec_dir / "spec.md").write_text(
-                "\n".join(
-                    [
-                        "## ADDED Requirements",
-                        "### Requirement REQ-001: capability",
-                        "#### Scenario SCN-001: happy path",
-                        "#### Scenario SCN-002: next round",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            write_plan_state(workspace)
-            write_scope(feature_dir, "full_stack")
-            _, partition_errors = write_partition(feature_dir, {
-                "includedScenarioRefs": ["specs/cap/spec.md#SCN-001"],
-                "deferredScenarioRefs": ["specs/cap/spec.md#SCN-002"],
-            })
-            self.assertEqual(partition_errors, [])
-
-            def writer(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-            self.assertEqual(writer("init").returncode, 0)
-            body = Path(tmp) / "T001.json"
-            body.write_text(json.dumps(task("T001")), encoding="utf-8")
-            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
-            self.assertEqual(
-                writer(
-                    "add-batch-validation-command",
-                    "--lane",
-                    "backend",
-                    "--command",
-                    f"{sys.executable} -m compileall -q hooks",
-                    "--kind",
-                    "compile",
-                ).returncode,
-                0,
-            )
-
-            finalized = writer("finalize-task-set")
-
-            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(root["taskSetStatus"], "finalized")
-            self.assertEqual([item["id"] for item in root["batches"]], ["B001"])
-
-    def test_plan_writer_still_requires_included_scenarios(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            spec_dir = feature_dir / "specs" / "cap"
-            spec_dir.mkdir(parents=True)
-            (spec_dir / "spec.md").write_text(
-                "\n".join(
-                    [
-                        "## ADDED Requirements",
-                        "### Requirement REQ-001: capability",
-                        "#### Scenario SCN-001: happy path",
-                        "#### Scenario SCN-002: also this round",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            write_plan_state(workspace)
-            write_scope(feature_dir, "full_stack")
-            write_partition(feature_dir, {
-                "includedScenarioRefs": [
-                    "specs/cap/spec.md#SCN-001",
-                    "specs/cap/spec.md#SCN-002",
-                ],
-                "deferredScenarioRefs": [],
-            })
-
-            def writer(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-            self.assertEqual(writer("init").returncode, 0)
-            body = Path(tmp) / "T001.json"
-            body.write_text(json.dumps(task("T001")), encoding="utf-8")
-            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
-
-            incomplete = writer("finalize-task-set")
-
-            self.assertNotEqual(incomplete.returncode, 0)
-            self.assertIn("missing_plan_scenario_coverage", incomplete.stdout + incomplete.stderr)
-            self.assertIn("SCN-002", incomplete.stdout + incomplete.stderr)
 
     def test_plan_writer_finalization_scans_all_spec_markdown_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1176,122 +1137,6 @@ class BatchRunnerContractTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("invalid choice: 'start-batch-task-validation'", result.stderr)
-
-class MonorepoWorkspaceTest(unittest.TestCase):
-    """A monorepo registers one workspace per sub-path, not one per git root."""
-
-    @staticmethod
-    def _monorepo(root: Path) -> Path:
-        repo = root / "ruoyi-vue-pro"
-        (repo / "yudao-ui" / "yudao-ui-admin-vue3").mkdir(parents=True)
-        for args in (
-            ("init", "-b", "main"),
-            ("config", "user.email", "test@example.com"),
-            ("config", "user.name", "Test"),
-        ):
-            subprocess.run(
-                ["git", *args],
-                cwd=repo,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-        return repo
-
-    def test_backend_and_frontend_subpaths_register_together(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = self._monorepo(Path(tmp))
-            frontend = repo / "yudao-ui" / "yudao-ui-admin-vue3"
-
-            contexts = _code_workspace_contexts([str(repo), str(frontend)])
-
-        self.assertEqual(
-            [(item["repo"], item["workspaceRoot"]) for item in contexts],
-            [
-                ("ruoyi-vue-pro", "."),
-                ("yudao-ui-admin-vue3", "yudao-ui/yudao-ui-admin-vue3"),
-            ],
-        )
-        self.assertEqual(
-            {item["repositoryId"] for item in contexts},
-            {"ruoyi-vue-pro"},
-        )
-
-    def test_lone_submodule_workspace_keeps_the_repository_name(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = self._monorepo(Path(tmp))
-            module = repo / "yudao-ui" / "yudao-ui-admin-vue3"
-
-            contexts = _code_workspace_contexts([str(module)])
-
-        self.assertEqual(
-            [(item["repo"], item["workspaceRoot"]) for item in contexts],
-            [("ruoyi-vue-pro", "yudao-ui/yudao-ui-admin-vue3")],
-        )
-
-    def test_repeating_the_same_workspace_is_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = self._monorepo(Path(tmp))
-
-            contexts = _code_workspace_contexts([str(repo), str(repo)])
-
-        self.assertEqual([item["repo"] for item in contexts], ["ruoyi-vue-pro"])
-
-    def test_two_paths_claiming_one_ref_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = self._monorepo(Path(tmp))
-            (repo / "packages" / "yudao-ui-admin-vue3").mkdir(parents=True)
-
-            with self.assertRaises(PlanWriterInputError) as ctx:
-                _code_workspace_contexts([
-                    str(repo / "yudao-ui" / "yudao-ui-admin-vue3"),
-                    str(repo / "packages" / "yudao-ui-admin-vue3"),
-                ])
-
-        self.assertEqual(ctx.exception.reason, "code_workspace_ref_conflict")
-
-    def test_each_lane_keeps_its_own_workspace_ref(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = self._monorepo(Path(tmp))
-            frontend = repo / "yudao-ui" / "yudao-ui-admin-vue3"
-            contexts = _code_workspace_contexts([str(repo), str(frontend)])
-
-            backend_group = {"id": "T001", "workspaceRef": "ruoyi-vue-pro"}
-            frontend_group = {"id": "T002", "workspaceRef": "yudao-ui-admin-vue3"}
-
-            self.assertEqual(
-                _draft_task_workspace_roots(backend_group, contexts),
-                {"ruoyi-vue-pro": "."},
-            )
-            self.assertEqual(
-                _draft_task_workspace_roots(frontend_group, contexts),
-                {"yudao-ui-admin-vue3": "yudao-ui/yudao-ui-admin-vue3"},
-            )
-
-    def test_validation_command_cwd_still_cannot_leave_its_workspace(self) -> None:
-        workspace_roots = {"yudao-ui-admin-vue3": "yudao-ui/yudao-ui-admin-vue3"}
-        errors: list[str] = []
-
-        _validate_command_workspace_root(
-            errors,
-            {"repo": "yudao-ui-admin-vue3", "cwd": "yudao-module-promotion"},
-            context="T002.validationCommands[0]",
-            workspace_roots=workspace_roots,
-        )
-        self.assertEqual(
-            errors,
-            ["T002.validationCommands[0].cwd_outside_workspace_root:yudao-ui/yudao-ui-admin-vue3"],
-        )
-
-        inside: list[str] = []
-        _validate_command_workspace_root(
-            inside,
-            {"repo": "yudao-ui-admin-vue3", "cwd": "yudao-ui/yudao-ui-admin-vue3"},
-            context="T002.validationCommands[0]",
-            workspace_roots=workspace_roots,
-        )
-        self.assertEqual(inside, [])
-
 
 if __name__ == "__main__":
     unittest.main()
