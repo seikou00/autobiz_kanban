@@ -94,105 +94,73 @@ def _visual_source_type_zh(source_type: str) -> str:
     return type_map.get(source_type, source_type)
 
 
-def _capability_id_to_zh(cap_id: str) -> str:
-    """将capability ID转换为中文描述"""
-    # 常见的能力名称映射
-    mapping = {
-        "navigation-bar": "导航栏",
-        "product-module": "产品模块",
-        "scene-module": "场景模块",
-        "course-card": "课程卡片",
-        "category-filter": "分类筛选",
-        "scene-filter": "场景筛选",
-        "pagination": "分页",
-        "user-info": "用户信息",
-        "login": "登录",
-        "logout": "登出",
-        "register": "注册",
-        "profile": "个人资料",
-        "settings": "设置",
-        "dashboard": "仪表盘",
-        "search": "搜索",
-        "filter": "筛选",
-        "sort": "排序",
-        "header": "页头",
-        "footer": "页脚",
-        "sidebar": "侧边栏",
-        "menu": "菜单",
-        "form": "表单",
-        "button": "按钮",
-        "modal": "弹窗",
-        "dialog": "对话框",
-        "table": "表格",
-        "list": "列表",
-        "card": "卡片",
-        "tab": "标签页",
-        "breadcrumb": "面包屑",
-        "notification": "通知",
-        "alert": "警告",
-        "tooltip": "提示",
-        "dropdown": "下拉菜单",
-    }
+def _load_plan_tasks(workspace: Path, feature: str) -> list[dict[str, Any]]:
+    """Best-effort load of formal Plan tasks for the generated Markdown view."""
+    feature_dir = _path(workspace, feature).parent
+    plan_path = feature_dir / "plan.json"
+    if not plan_path.is_file():
+        return []
 
-    # 尝试直接匹配
-    if cap_id in mapping:
-        return f"{mapping[cap_id]} ({cap_id})"
+    try:
+        root = load_json(plan_path)
+    except Exception:
+        return []
+    if not isinstance(root, dict):
+        return []
 
-    # 尝试部分匹配
-    for key, value in mapping.items():
-        if key in cap_id:
-            return f"{value}相关 ({cap_id})"
+    # Compatibility with the former monolithic plan format.
+    root_tasks = root.get("tasks")
+    if isinstance(root_tasks, list):
+        return [task for task in root_tasks if isinstance(task, dict)]
 
-    # 默认：将kebab-case转为更易读的格式
-    words = cap_id.split('-')
-    if len(words) > 1:
-        return f"{' '.join(words).title()} ({cap_id})"
-
-    return cap_id
+    tasks: list[dict[str, Any]] = []
+    batches = root.get("batches")
+    if not isinstance(batches, list):
+        return tasks
+    for batch in batches:
+        if not isinstance(batch, dict):
+            continue
+        batch_id = batch.get("id")
+        if not isinstance(batch_id, str) or not batch_id.startswith("B") or not batch_id[1:].isdigit():
+            continue
+        try:
+            batch_plan = load_json(feature_dir / "plans" / batch_id / "plan.json")
+        except Exception:
+            continue
+        if not isinstance(batch_plan, dict):
+            continue
+        batch_tasks = batch_plan.get("tasks")
+        if isinstance(batch_tasks, list):
+            tasks.extend(task for task in batch_tasks if isinstance(task, dict))
+    return tasks
 
 
-def _find_capability_by_visual_source(capabilities: list[dict], source_id: str) -> dict | None:
-    """根据visualSourceRef找到对应的capability"""
-    for cap in capabilities:
-        if isinstance(cap, dict):
-            refs = cap.get("visualSourceRefs", [])
-            if source_id in refs:
-                return cap
-    return None
+def _task_display_for_visual_source(tasks: list[dict[str, Any]], source_id: str) -> str:
+    """Render exact Plan task IDs and titles bound to a visual source."""
+    labels: list[str] = []
+    seen_task_ids: set[str] = set()
+    for task in tasks:
+        ui_refs = task.get("uiRefs")
+        visual_source_refs = ui_refs.get("visualSourceRefs") if isinstance(ui_refs, dict) else None
+        if not isinstance(visual_source_refs, list) or source_id not in visual_source_refs:
+            continue
+        raw_task_id = task.get("id")
+        raw_title = task.get("title")
+        task_id = raw_task_id.strip() if isinstance(raw_task_id, str) else ""
+        title = raw_title.strip() if isinstance(raw_title, str) else ""
+        if not task_id or task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(task_id)
+        labels.append(f"{task_id}: {title}" if title else task_id)
+    return "<br>".join(labels) if labels else "待Plan阶段关联"
 
 
-def _get_capability_display_name(capability: dict, pages: list[dict]) -> str:
-    """获取capability的显示名称（从关联页面推断中文名）"""
-    if not capability:
-        return "待Plan阶段关联"  # 改为更明确的提示
-
-    cap_id = capability.get("capabilityId", "")
-    page_refs = capability.get("pageRefs", [])
-
-    # 如果有关联页面，用页面名称生成显示名
-    if page_refs and pages:
-        page_names = []
-        for page_ref in page_refs:
-            for page in pages:
-                if isinstance(page, dict) and page.get("pageId") == page_ref:
-                    page_name = page.get("name", "")
-                    if page_name:
-                        page_names.append(page_name)
-                    break
-
-        if page_names:
-            # 如果只有一个页面，直接用页面名
-            if len(page_names) == 1:
-                return f"{page_names[0]}相关功能"
-            # 多个页面，取第一个页面名并标注
-            else:
-                return f"{page_names[0]}等{len(page_names)}个页面功能"
-
-    # 如果没有页面信息，返回capability ID
-    return cap_id or "待Plan阶段关联"
-
-
-def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
+def _generate_ui_context_md(
+    data: dict[str, Any],
+    feature: str,
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> str:
     """生成面向前端人员的UI_CONTEXT.md文档
 
     文档结构固定为：
@@ -210,6 +178,7 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
     visual_sources = data.get('visualSources', [])
     capabilities = data.get('capabilities', [])
     interactions = data.get('interactions', [])
+    plan_tasks = tasks or []
 
     # ========== 1. 视觉资源与还原路径 ==========
     lines.extend([
@@ -230,9 +199,8 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             route = vs.get('route', 'N/A')
             required = '是' if vs.get('required') else '否'
 
-            # 查找关联的任务并获取中文显示名
-            related_cap = _find_capability_by_visual_source(capabilities, source_id)
-            task_name = _get_capability_display_name(related_cap, pages)
+            # 精确展示引用该视觉资源的正式 Plan Task。
+            task_name = _task_display_for_visual_source(plan_tasks, source_id)
 
             lines.append(f"| {source_id} | {task_name} | {vs_type_zh} | `{path}` | `{route}` | {required} |")
         lines.append("")
@@ -260,15 +228,6 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
     ])
 
     if pages:
-        # 构建能力到视觉资源的映射
-        capability_to_resources = {}
-        if capabilities:
-            for cap in capabilities:
-                cap_id = cap.get('capabilityId', '')
-                visual_source_refs = cap.get('visualSourceRefs', [])
-                if cap_id:
-                    capability_to_resources[cap_id] = visual_source_refs
-
         # 构建页面到能力的映射
         page_to_capabilities = {}
         if capabilities:
@@ -304,21 +263,10 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             route_hint_display = f"`{route_hint}`" if route_hint else '-'
             states_display = ', '.join(states) if states else '-'
 
-            # 构建关联能力字符串（英文-中文格式，每条换行）
+            # 只展示稳定 capabilityId，不生成可能失真的中文映射。
             capabilities_display = '-'
             if page_id in page_to_capabilities:
-                cap_ids = page_to_capabilities[page_id]
-                cap_descriptions = []
-                for cap_id in cap_ids:
-                    cap_zh = _capability_id_to_zh(cap_id)
-                    # 提取中文描述部分
-                    if '(' in cap_zh:
-                        zh_part = cap_zh.split('(')[0].strip()
-                    else:
-                        zh_part = cap_zh
-                    # 格式：英文ID-中文描述
-                    cap_descriptions.append(f"{cap_id}-{zh_part}")
-                capabilities_display = '<br>'.join(cap_descriptions)
+                capabilities_display = '<br>'.join(page_to_capabilities[page_id])
 
             # 构建交互列表字符串（不显示ID，每条换行）
             interactions_display = '-'
@@ -341,11 +289,35 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
     return "\n".join(lines)
 
 
-def _write_md(workspace: Path, feature: str, data: dict[str, Any]) -> None:
+def _write_md(
+    workspace: Path,
+    feature: str,
+    data: dict[str, Any],
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> None:
     """写入UI_CONTEXT.md文件"""
     md_path = _path(workspace, feature).parent / "UI_CONTEXT.md"
-    md_content = _generate_ui_context_md(data, feature)
+    plan_tasks = _load_plan_tasks(workspace, feature) if tasks is None else tasks
+    md_content = _generate_ui_context_md(data, feature, tasks=plan_tasks)
     md_path.write_text(md_content, encoding="utf-8")
+
+
+def refresh_ui_context_md(
+    workspace: Path,
+    feature: str,
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Refresh UI_CONTEXT.md when UI context exists; return whether it ran."""
+    context_path = _path(workspace, feature)
+    if not context_path.is_file():
+        return False
+    data = load_json(context_path)
+    if not isinstance(data, dict):
+        return False
+    _write_md(workspace, feature, data, tasks=tasks)
+    return True
 
 
 def _write(
