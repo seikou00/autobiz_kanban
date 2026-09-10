@@ -2179,6 +2179,31 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
             run_paths = list((feature_dir / ".task-runs" / "T001").glob("*.json"))
             self.assertEqual(len(run_paths), 2)
+
+    def test_abort_preserves_logical_workspace_ref_for_native_worktree(self) -> None:
+        """A Batch-named worktree must not lose its logical repository key on abort."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--workspace-ref", "LF39.05_MarketUI",
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            run_id = json.loads(started.stdout)["runId"]
+
+            # Before the fix abort re-resolved this repository as ``code``
+            # (the native worktree directory name) and rejected the run whose
+            # durable repository key is LF39.05_MarketUI.
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--workspace-ref", "LF39.05_MarketUI",
+                "--run-id", run_id,
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+            run = json.loads((feature_dir / ".task-runs" / "T001" / f"{run_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(run["status"], "aborted")
     def test_task_start_rejects_multiple_requested_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

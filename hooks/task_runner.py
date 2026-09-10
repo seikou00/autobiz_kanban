@@ -2487,6 +2487,7 @@ def _abort_task_unlocked(
     *,
     force_with_changes: bool,
     abort_why: str | None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     path, state = _load_run(feature_dir, task_id, run_id)
@@ -2501,7 +2502,11 @@ def _abort_task_unlocked(
     requested_workspaces = (
         [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
     )
-    repositories = _resolve_repositories(requested_workspaces)
+    # A native Workflow worktree is named after its Batch (for example B006),
+    # whereas the task-run contract is keyed by its logical workspaceRef.  The
+    # same mapping is already used by start/finish/resume; abort must preserve
+    # it too or an automatic retry can never clear an interrupted task run.
+    repositories = _resolve_repositories(requested_workspaces, workspace_ref)
     _assert_repositories_match(state, repositories)
     _assert_requested_workspaces_match(state, requested_workspaces, repositories)
     file_changes, final_repositories = _repository_changes(state, repositories)
@@ -3000,6 +3005,7 @@ def abort_task(
     *,
     force_with_changes: bool,
     abort_why: str | None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
@@ -3011,6 +3017,7 @@ def abort_task(
             run_id,
             force_with_changes=force_with_changes,
             abort_why=abort_why,
+            workspace_ref=workspace_ref,
         )
 
 
@@ -3820,6 +3827,7 @@ def _cmd_abort(args: argparse.Namespace) -> int:
             args.run_id,
             force_with_changes=args.force_with_changes,
             abort_why=args.abort_why,
+            workspace_ref=args.workspace_ref,
         )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
