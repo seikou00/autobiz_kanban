@@ -12,6 +12,13 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 4;
 const MAX_SCHEDULER_CYCLES = 100;
+// The scheduler is the authority for the per-Batch retry budget (currently
+// two failure admissions).  Keep one extra pass to let the scheduler turn a
+// legacy retry marker with a zero counter into its explicit exhausted state.
+// The Workflow must keep draining until that budget is consumed or no retry
+// remains; otherwise a retry created by the first final-repair drain is
+// incorrectly left for a manual resume.
+const MAX_FINAL_RETRY_DRAINS = 3;
 // Review findings can receive one targeted implementation repair. Batch UTest
 // failures are durable non-blocking evidence: record them and continue to the
 // quality gate / Merge Train so independent Batch work is never interrupted.
@@ -79,6 +86,41 @@ const REVIEW_STAGE_RESULT_SCHEMA = {
   },
   required: ["status"],
   additionalProperties: true
+};
+// A reviewer may produce prose or lose its final tool output after it has
+// already changed the durable stage state.  The verifier always reads the
+// plugin-owned stage record and normalizes that state before the Workflow
+// decides whether to repair, continue, or ask the reviewer to finish it.
+const REVIEW_VALIDATION_SCHEMA = {
+  type: "object",
+  properties: {
+    success: { type: "boolean" },
+    batchId: { type: "string" },
+    stage: { const: "review" },
+    status: { enum: ["passed", "failed", "needs_triage", "incomplete"] },
+    nextStage: { type: "string" },
+    failure: { type: "object" },
+    evidenceId: { type: "string" },
+    durableState: { type: "string" },
+    error: { type: "string" }
+  },
+  required: ["success", "batchId", "stage", "status"],
+  additionalProperties: true
+};
+const SINGLE_REPAIR_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    ok: { const: true },
+    success: { const: true },
+    batchId: { type: "string" },
+    failedStage: { type: "string" },
+    status: { const: "success" },
+    stage: { type: "string" },
+    stageEvidenceId: { type: "string" },
+    stages: { type: "array", items: { type: "object" } }
+  },
+  required: ["ok", "success", "batchId", "failedStage", "status", "stage", "stages"],
+  additionalProperties: false
 };
 const VERIFICATION_SCHEMA = {
   type: "object",
@@ -229,6 +271,16 @@ function requireSuccess(value, label) {
     throw new Error(`${label} failed: ${JSON.stringify(result)}`);
   }
   return result;
+}
+
+function isFinalReviewDecision(value, batchId) {
+  const result = unwrap(value);
+  return Boolean(
+    result
+    && result.batchId === batchId
+    && result.stage === "review"
+    && ["passed", "failed", "needs_triage"].includes(result.status)
+  );
 }
 
 function usableString(value) {
@@ -935,16 +987,40 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     void stageResult;
   }
   if (!reviewResolvedByRepair) {
-    const review = unwrap(await agent(
-    `对已草稿封存的 Batch ${batchId} 做只读评审。代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。` +
-    `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
-    `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
-    `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
-    `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题：file:line、期望与实际行为、影响及建议修复>"。` +
-    `最终只能原样返回该命令的 stdout JSON：它必须包含 batchId、stage:"review"、status:"failed"、nextStage 及 failure:{type,message,nextStage}，其中 failure.message 必须非空。不得添加 verdict、顶层 failureType，或将 finding 拆成 file/lines/expected/actual/impact/suggestedFix 等自定义字段。可由当前 Batch 生产代码修复时，Workflow 会在同一 Worktree 修复、编译和封存一次，然后直接进入 UTest，不会再次执行 Review。` +
-    `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
-    { label: `stage-review-${batchId}`, phase: "Batch 阶段", schema: REVIEW_STAGE_RESULT_SCHEMA }
-    ));
+    let review;
+    let reviewValidation;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const retryContext = attempt === 1
+        ? ""
+        : "上一次 Review 子 Agent 没有形成可验证的终态。仅修复 Review 阶段的命令执行/返回，先读取当前 durable stage 状态；不得修改业务代码。";
+      const reviewRaw = unwrap(await agent(
+        `对已草稿封存的 Batch ${batchId} 做只读评审。代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。${retryContext}` +
+        `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
+        `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
+        `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
+        `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题：file:line、期望与实际行为、影响及建议修复>"。` +
+        `最后必须执行 python "${stagePath}" validate-review-result --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"，并且只原样返回它的 stdout JSON。不得信任或返回此前命令的原始文本；该脚本会验证并规范化 durable Review 结果。可由当前 Batch 生产代码修复时，Workflow 会在同一 Worktree 修复、跳过编译记录并封存一次，然后直接进入 UTest，不会再次执行 Review。` +
+        `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
+        { label: `stage-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_STAGE_RESULT_SCHEMA }
+      ));
+      // The reviewer itself is prompted to validate its result. Re-run the
+      // validator in a read-only child so a prose/raw-JSON response cannot
+      // bypass the plugin-owned state machine.
+      reviewValidation = unwrap(await agent(
+        `只验证 Batch ${batchId} 已持久化的 Review 阶段，不评审代码、不修改任何文件、不运行 TASK。执行 python "${stagePath}" validate-review-result --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。只返回 JSON。`,
+        { label: `validate-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_VALIDATION_SCHEMA }
+      ));
+      if (isFinalReviewDecision(reviewValidation, batchId)) {
+        review = reviewValidation;
+        break;
+      }
+      // Preserve the raw reviewer output only as diagnostic context. The next
+      // attempt is driven entirely by the durable validator result.
+      review = reviewRaw;
+    }
+    if (!isFinalReviewDecision(review, batchId)) {
+      throw new Error(`review_stage_not_finalized:${batchId}:${JSON.stringify(reviewValidation || review)}`);
+    }
     if (requiresImplementationRework(review)) {
       return recoverImplementationRework(batchResult, "review", review);
     }
@@ -1028,9 +1104,6 @@ async function recordSingleRepairResolution(recovery, repaired) {
   if (!SINGLE_REPAIRABLE_STAGES.has(failedStage)) {
     throw new Error(`single_repair_stage_invalid:${batchId}:${String(failedStage)}`);
   }
-  const stages = failedStage === "review"
-    ? ["prepare", "implement", "review"]
-    : ["prepare", "implement", "review", "test"];
   const metadata = JSON.stringify({
     batchCommit: repaired.commitSha,
     worktreePath: repaired.worktreePath,
@@ -1040,9 +1113,9 @@ async function recordSingleRepairResolution(recovery, repaired) {
   });
   return requireSuccess(await agent(
     `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复、跳过编译记录和封存。` +
-    `不重新执行 ${failedStage}；只依次为 ${JSON.stringify(stages)} 执行 stage start 和 stage complete，metadata-json 使用 '${metadata}'。` +
-    `这会把新 commit 的 stage evidence 记录为 single_repair_accepted，随后 Workflow 直接推进到下一个阶段。只返回最后一个 JSON。`,
-    { label: `record-single-repair-${failedStage}-${batchId}`, phase: "Batch 阶段" }
+    `不得让模型串行拼接多个 stage start/complete，也不得根据原始文本判断是否收口。只执行 python "${stagePath}" record-single-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failedStage}" --metadata-json '${metadata}'。` +
+    `该插件命令会以单个、幂等的受控入口写入 prepare/implement/review evidence，并验证最终 Review evidence 的 single_repair_accepted 标记。只原样返回 JSON。`,
+    { label: `record-single-repair-${failedStage}-${batchId}`, phase: "Batch 阶段", schema: SINGLE_REPAIR_RESULT_SCHEMA }
   ), `record single repair ${failedStage} ${batchId}`);
 }
 
@@ -1113,7 +1186,8 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const builtRaw = unwrap(await agent(
         `构建 Batch ${batchId} 的独立 Merge Train 候选（候选序号 ${wave}，第 ${attempt} 次）。执行 python "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
-        `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。该命令在一次候选构建中只能执行一次：本地终端超时或中断时，禁止后台运行或再次执行 build-candidate；立即返回失败，由 Workflow 的受控恢复处理残留候选。只返回 JSON。`,
+        `这是可能超过 60 秒的 Git 候选构建：若当前 execute 支持 run_in_background，必须只启动一次 execute({command:<上述命令>,run_in_background:true})，保存 task_id 并在同一子 Agent 内反复 task_output（每次可 timeout:120000）直至获得最终退出结果；task_output 的等待超时不是构建失败，禁止重启该命令。若当前为托管前台会话，则只执行一次并等待其最终结果。子 Agent 在 task_output 得到终态前不得结束，否则平台会清理其后台进程。` +
+        `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。build-candidate 在同一 wave 中只能真正启动一次；只能轮询同一 task_id，不得因本地终端超时或中断再次执行。只返回最终命令 JSON。`,
         { label: `build-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
       ));
 
@@ -1817,31 +1891,51 @@ async function runFinalRepairAndReport() {
   }
 
   let repairState = await readSchedulerState("final-repair-before-retry", "最终修复与报告");
-  if (repairState && retryPendingBatchesOf(repairState).length > 0) {
-    try {
-      repairState = await recoverPendingRetries(repairState, "final-repair-resume-retry-pending");
-      applySchedulerState(repairState);
-      const rescheduled = new Set([
-        ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
-        ...normalizeScheduledGroups(repairState.scheduledGroups || []).flat(),
-        ...(repairState.mergeableBatches || []),
-        ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
-      ].filter(isValidBatchId));
-      for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
-      finalRepairResults.push({
-        kind: "resume_retry_pending",
-        status: repairState.status,
-        rescheduledBatchIds: [...rescheduled],
-      });
-    } catch (error) {
-      recordSchedulerFailure("final-repair-resume-retry-pending", error);
-      finalRepairResults.push({ kind: "resume_retry_pending", status: "failed", error: errorText(error) });
+  let retryDrain = 0;
+  while (repairState) {
+    const retryPending = retryPendingBatchesOf(repairState);
+    if (retryPending.length) {
+      if (retryDrain >= MAX_FINAL_RETRY_DRAINS) {
+        finalRepairResults.push({
+          kind: "resume_retry_pending",
+          status: "automatic_retry_budget_exhausted",
+          retryDrain,
+          retryPendingBatchIds: retryPending,
+        });
+        break;
+      }
+      retryDrain += 1;
+      try {
+        repairState = await recoverPendingRetries(repairState, `final-repair-resume-retry-pending-${retryDrain}`);
+        applySchedulerState(repairState);
+        const rescheduled = new Set([
+          ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
+          ...normalizeScheduledGroups(repairState.scheduledGroups || []).flat(),
+          ...(repairState.mergeableBatches || []),
+          ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
+        ].filter(isValidBatchId));
+        for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
+        finalRepairResults.push({
+          kind: "resume_retry_pending",
+          status: repairState.status,
+          retryDrain,
+          rescheduledBatchIds: [...rescheduled],
+        });
+      } catch (error) {
+        recordSchedulerFailure(`final-repair-resume-retry-pending-${retryDrain}`, error);
+        finalRepairResults.push({ kind: "resume_retry_pending", retryDrain, status: "failed", error: errorText(error) });
+        break;
+      }
     }
-  }
 
-  // This is the only retry drain.  A new failure remains pending for the final
-  // report instead of recursively retrying forever in the same workflow run.
-  await drainRunnableLifecycles("final-repair");
+    // Run once even when there was no retry at entry: a candidate repaired
+    // above may have made a dependent Batch runnable. A retry can likewise
+    // uncover another transient failure while recovered work is draining.
+    const drain = await drainRunnableLifecycles(`final-repair-${retryDrain || "initial"}`);
+    finalRepairResults.push({ kind: "drain_recovered_batches", retryDrain, ...drain });
+    repairState = await readSchedulerState(`final-repair-after-drain-${retryDrain}`, "最终修复与报告");
+    if (!repairState || !retryPendingBatchesOf(repairState).length) break;
+  }
   return readSchedulerState("final-report-snapshot", "最终修复与报告");
 }
 

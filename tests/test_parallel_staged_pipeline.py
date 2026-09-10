@@ -10,7 +10,16 @@ from pathlib import Path
 from hooks.json_writer_common import atomic_write_json
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import create_run as _create_run, mark_batch, schedule
-from hooks.parallel_batch_stage import complete_stage, defer_stage, fail_stage, gate_batch, record_test_failure, start_stage
+from hooks.parallel_batch_stage import (
+    complete_stage,
+    defer_stage,
+    fail_stage,
+    gate_batch,
+    record_single_repair_resolution,
+    record_test_failure,
+    start_stage,
+    validate_review_result,
+)
 from hooks.parallel_evidence_aggregate import aggregate_evidence
 from hooks.parallel_merge_train import _remove_candidate, begin_e2e, build_candidate, finish_e2e, promote_candidate
 from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease
@@ -347,6 +356,67 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                     "resolvedAt": state["review"]["completedAt"],
                 },
             )
+
+    def test_review_validator_and_single_repair_cli_keep_model_output_out_of_control_plane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=provisioned["worktreePath"],
+                branchName=provisioned["branchName"],
+                commitSha="repaired-commit",
+                compileStatus="skipped",
+            )
+            for stage in ("prepare", "implement"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": "old-commit"})
+            start_stage(workspace, "alpha", run_id, "B001", "review")
+            fail_stage(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "review",
+                failure_type="implementation",
+                message="src/auth.py:42 authorization is missing",
+            )
+
+            # The persisted state is intentionally reset to pending for a
+            # rework, but the validator exposes the logical failed decision.
+            validated = validate_review_result(workspace, "alpha", run_id, "B001")
+            self.assertTrue(validated["success"])
+            self.assertEqual(validated["status"], "failed")
+            self.assertEqual(validated["durableState"], "pending")
+            self.assertEqual(validated["failure"]["message"], "src/auth.py:42 authorization is missing")
+
+            recorded = record_single_repair_resolution(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                failed_stage="review",
+                metadata={
+                    "batchCommit": "repaired-commit",
+                    "worktreePath": provisioned["worktreePath"],
+                    "branchName": provisioned["branchName"],
+                },
+            )
+            self.assertTrue(recorded["success"])
+            self.assertEqual(recorded["status"], "success")
+            self.assertEqual(recorded["stage"], "review")
+            self.assertEqual(len(recorded["stages"]), 3)
+            verified = validate_review_result(workspace, "alpha", run_id, "B001")
+            self.assertEqual(verified["status"], "passed")
+            state = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["stageStates"]["review"]
+            self.assertEqual(state["repairResolution"]["disposition"], "single_repair_accepted")
 
     def test_review_draft_is_sealed_before_post_review_compile_lease(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

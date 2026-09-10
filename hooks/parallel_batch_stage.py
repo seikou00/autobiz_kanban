@@ -327,6 +327,113 @@ def complete_stage(
     return {"batchId": batch_id, "stage": stage, "status": "passed", "evidenceId": evidence_id, "evidence": evidence}
 
 
+def validate_review_result(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Return the durable Review decision in one canonical JSON shape.
+
+    Review is made by a model, but the model's prose or tool-return text must
+    never be the source of truth for the next Workflow transition.  In
+    particular, an implementation finding resets Review to ``pending`` so the
+    repaired commit can regenerate all evidence.  The logical decision is
+    nevertheless a failed Review and must retain its original finding.
+    """
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        state = states.get("review")
+        if not isinstance(state, dict):
+            raise ValueError(f"parallel_batch_stage_unknown:{batch_id}:review")
+        state_status = str(state.get("status") or "pending")
+        failure = state.get("failure") if isinstance(state.get("failure"), dict) else None
+        if state_status in {"passed", "skipped", "deferred"}:
+            return {
+                "success": True,
+                "batchId": batch_id,
+                "stage": "review",
+                "status": "passed",
+                "evidenceId": state.get("latestEvidenceId"),
+                "reused": state_status != "passed",
+            }
+        if failure and isinstance(failure.get("type"), str) and isinstance(failure.get("message"), str) and failure["message"].strip():
+            return {
+                "success": True,
+                "batchId": batch_id,
+                "stage": "review",
+                # ``fail_stage`` resets an implementation finding to pending
+                # so the rework can rebuild prepare/implement/review evidence.
+                # Expose the decision, not that transient reset state.
+                "status": "needs_triage" if failure.get("type") == "needs_triage" else "failed",
+                "nextStage": failure.get("nextStage"),
+                "failure": dict(failure),
+                "durableState": state_status,
+            }
+        return {
+            "success": False,
+            "batchId": batch_id,
+            "stage": "review",
+            "status": "incomplete",
+            "durableState": state_status,
+            "error": f"parallel_review_result_not_final:{batch_id}:{state_status}",
+        }
+
+
+def record_single_repair_resolution(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    *,
+    failed_stage: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay the evidence sequence after one accepted repair through one CLI.
+
+    This replaces a model-directed sequence of ``start``/``complete`` calls.
+    A host interruption remains safely retryable because every transition is
+    idempotent and each individual stage has durable evidence.
+    """
+    stages_by_failure = {
+        "review": ("prepare", "implement", "review"),
+    }
+    stages = stages_by_failure.get(failed_stage)
+    if stages is None:
+        raise ValueError(f"parallel_single_repair_stage_invalid:{batch_id}:{failed_stage}")
+    if not isinstance(metadata, dict):
+        raise ValueError("parallel_single_repair_metadata_must_be_object")
+    completed: list[dict[str, Any]] = []
+    for stage in stages:
+        start_stage(workspace, feature, run_id, batch_id, stage)
+        stage_metadata = dict(metadata)
+        if stage == failed_stage:
+            stage_metadata["repairDisposition"] = "single_repair_accepted"
+        completed.append(complete_stage(
+            workspace,
+            feature,
+            run_id,
+            batch_id,
+            stage,
+            metadata=stage_metadata,
+        ))
+    final = completed[-1]
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        review = states.get("review") if isinstance(states.get("review"), dict) else {}
+        resolution = review.get("repairResolution") if isinstance(review.get("repairResolution"), dict) else {}
+        if resolution.get("disposition") != "single_repair_accepted":
+            raise ValueError(f"parallel_single_repair_resolution_missing:{batch_id}:{failed_stage}")
+    return {
+        "success": True,
+        "batchId": batch_id,
+        "failedStage": failed_stage,
+        "status": "success",
+        "stage": final.get("stage"),
+        "stageEvidenceId": final.get("evidenceId"),
+        "stages": completed,
+    }
+
+
 def fail_stage(
     workspace: Path,
     feature: str,
@@ -658,7 +765,7 @@ def triage_failure(workspace: Path, feature: str, run_id: str, batch_id: str, st
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Advance a staged parallel Batch")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("next", "start", "complete", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation"):
+    for name in ("next", "start", "complete", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -680,6 +787,9 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--candidate-sha", required=True)
             item.add_argument("--candidate-base-sha", required=True)
             item.add_argument("--train-id", required=True)
+        if name == "record-single-repair":
+            item.add_argument("--failed-stage", required=True)
+            item.add_argument("--metadata-json", required=True)
     args = parser.parse_args(argv)
     try:
         workspace = resolve_workspace(args.workspace)
@@ -721,6 +831,18 @@ def main(argv: list[str] | None = None) -> int:
                 candidate_sha=args.candidate_sha,
                 candidate_base_sha=args.candidate_base_sha,
                 train_id=args.train_id,
+            )
+        elif args.command == "validate-review-result":
+            result = validate_review_result(workspace, feature, args.run_id, args.batch_id)
+        elif args.command == "record-single-repair":
+            metadata = json.loads(args.metadata_json)
+            result = record_single_repair_resolution(
+                workspace,
+                feature,
+                args.run_id,
+                args.batch_id,
+                failed_stage=args.failed_stage,
+                metadata=metadata,
             )
         else:
             result = gate_batch(workspace, feature, args.run_id, args.batch_id)
