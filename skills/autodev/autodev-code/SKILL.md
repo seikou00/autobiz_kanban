@@ -238,8 +238,6 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 - 当前固定并行 Workflow 已临时停用所有 Batch compile：Review 通过后只能执行 `task_runner.py skip-batch-compile`，写入 `skipReason=workflow_batch_compile_disabled` 后直接进入 UTest；绝不执行 Maven、Gradle、npm build/typecheck、`batch-compile` 或 `revalidate-batch-compile`。parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`。Batch 在同一 Worktree 生成并执行 UTest（随后重新 `seal`），并仅在声明 `qualityGateCommands` 时执行 `quality_gate`，才进入 `ready_to_candidate`；UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
 
-如果固定 Workflow 恢复 Batch 编译且返回 `requiredAction=start_batch_compile_repair`，只能在 Workflow 分配的 Worktree 中使用 `task_runner.py start-batch-compile-repair` 为允许的责任 TASK 建立 repair run，再按该 run 修复生产代码并重新进入同一固定 Workflow；不得把该命令当作旁路启动入口。
-
 不得让用户手工修改，不得自行执行 `mvn compile`、前端 build/typecheck 或其他旁路编译，也不得在 repair 中创建/修改测试或执行测试命令。编译状态只能由固定 Workflow 的 `batch-compile` 或 `revalidate-batch-compile` 记录；无法生成结构化结果、无法写入证据、lease 无效或 seal/release 失败才会中断流程。
 
 `worktree_manager.py seal` 若遇到同一 linked worktree 的 `index.lock`，会先做有限次短暂重试；锁持续存在时，由插件仅清理 Git 为该 linked worktree 解析出的 `index.lock` 并重试原命令，成功则在 `indexLockRecoveries` 中留痕。受控清理后仍不能写入时才返回 `parallel_git_index_lock_busy` 或 `parallel_git_index_lock_recovery_failed`，以 `final-status pending` 释放租约，并由同一 `runId` 的 scheduler `resume` 重试该 Batch。

@@ -612,15 +612,16 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
         )
 
-    def test_code_skill_requires_compile_only_fixed_workflow(self) -> None:
+    def test_code_skill_requires_compile_skipped_fixed_workflow(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
             "workflow_launcher.py",
             "唯一的 Code 启动入口",
             "不得调用 `task_runner.py code-session`",
             "固定 Workflow",
-            "batch-compile",
-            "start-batch-compile-repair",
+            "skip-batch-compile",
+            "workflow_batch_compile_disabled",
+            "绝不执行 Maven、Gradle、npm build/typecheck、`batch-compile` 或 `revalidate-batch-compile`",
             "原生 Git Worktree",
             "Task Run 的 Git 快照",
             "batchExecutionPlan",
@@ -630,7 +631,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(
             missing,
             [],
-            "autodev-code must enforce compile-only fixed Workflow execution: " + ", ".join(missing),
+            "autodev-code must enforce batch-compile-skipped fixed Workflow execution: " + ", ".join(missing),
         )
 
     def test_code_skill_requires_same_batch_continuation(self) -> None:
