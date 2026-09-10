@@ -178,6 +178,10 @@ def test_fixed_workflow_entrypoint():
         "MAX_FINAL_RETRY_DRAINS",
         "drain_recovered_batches",
         "if (!reviewResolvedByRepair && !testResolvedByRepair)",
+        "Review execution mode=fixed_code_workflow",
+        "Code Workflow 已获自主执行授权",
+        "const WORKFLOW_AUTONOMY_PREFIX",
+        "function workflowAgent",
     ]
     missing = [check for check in checks if check not in content]
     if missing:
@@ -188,6 +192,9 @@ def test_fixed_workflow_entrypoint():
         return False
     if "--with-heartbeat" in content or "--require-heartbeat" in content:
         print("✗ 固定脚本仍依赖旧的后台 heartbeat 参数")
+        return False
+    if "await agent(" in content:
+        print("✗ 固定 Workflow 存在绕过自治边界的直接子 Agent 调用")
         return False
     if "compileAlreadyPassed" in content:
         print("✗ rework 仍将已记录的编译失败误判为未通过")
@@ -262,6 +269,9 @@ const reworkStart = source.indexOf("function requiresImplementationRework(");
 const reworkEnd = source.indexOf("function withLatestBatchDelivery(", reworkStart);
 if (helperStart < 0 || inputStart < 0 || reworkStart < 0 || reworkEnd < 0) process.exit(2);
 vm.runInContext(source.slice(helperStart, inputStart), context);
+context.normalizeScheduledGroups = groups => Array.isArray(groups)
+  ? groups.map(group => Array.isArray(group) ? group.filter(value => typeof value === "string" && value) : []).filter(group => group.length)
+  : [];
 vm.runInContext(source.slice(reworkStart, reworkEnd), context);
 const failed = '{"status":"failed","verdict":"FAIL","failureType":"implementation","nextStage":"implement","failure":{"type":"implementation","nextStage":"implement"}}';
 const samples = [
@@ -305,6 +315,39 @@ const structuredFinding = context.implementationReworkRequired(
 );
 if (!structuredFinding.recovery.failureContext.message.includes("file: src/auth.js")) process.exit(8);
 if (!structuredFinding.recovery.failureContext.message.includes("suggestedFix: authorize before writing")) process.exit(9);
+let incompleteSchedulerRejected = false;
+try {
+  context.requireSchedulerResult({
+    runId: "cw-test",
+    status: "running",
+    scheduledGroups: [["B007"]],
+    batchTaskIds: { B007: ["T010"] },
+    // Mirrors an unsafe manual summary using repositoryRef instead of the
+    // Workflow-required workspaceRef.
+    batchWorkspaces: { B007: { repositoryRef: "frontend" } },
+  }, "scheduler status");
+} catch (error) {
+  incompleteSchedulerRejected = String(error).includes("parallel_scheduler_workspace_mapping_incomplete");
+}
+if (!incompleteSchedulerRejected) process.exit(20);
+const schedulerAccepted = context.requireSchedulerResult({
+  runId: "cw-test",
+  status: "running",
+  scheduledGroups: [["B007"]],
+  batchTaskIds: { B007: ["T010"] },
+  batchWorkspaces: {
+    B007: {
+      workspaceRef: "frontend",
+      componentRoots: ["."],
+      executionStage: "parallel",
+      qualityGateRequired: false,
+      requestedPath: "C:/repo/frontend",
+      worktreePath: null,
+      branchName: null,
+    },
+  },
+}, "scheduler status");
+if (schedulerAccepted.batchWorkspaces.B007.workspaceRef !== "frontend") process.exit(21);
 let missingMessageRejected = false;
 try {
   context.implementationReworkRequired(
@@ -470,6 +513,10 @@ def test_skill_integration():
         ("mergeCommitSha", "合并证据保护"),
         ("前端 Route 闸门（按 Task 在 Agent 内执行）", "按 Task 执行 Route 闸门"),
         ("taskContract.uiRequired=true", "Task UI 机器事实"),
+        ("固定 Code Workflow 启动后禁止调用 `request_user_input`", "Code 阶段无用户确认边界"),
+        ("首次启动固定 Workflow 前", "启动前看板 ID 询问边界"),
+        ("只应调用一次 `request_user_input` 向用户索取看板 ID", "启动前看板 ID 获取"),
+        ("Workflow 启动后以及恢复同一 Run 时", "启动后不再询问看板 ID"),
     ]
 
     all_passed = True
@@ -479,6 +526,26 @@ def test_skill_integration():
         else:
             print(f"✗ 缺少 {description}")
             all_passed = False
+
+    forbidden_confirmation_rules = [
+        "使用任何 `request_user_input` 前",
+        "停下用 `request_user_input` 单次确认",
+        "ask-user-question.md",
+    ]
+    present_confirmation_rules = [rule for rule in forbidden_confirmation_rules if rule in content]
+    if present_confirmation_rules:
+        print(f"✗ Code 技能仍保留用户确认规则: {', '.join(present_confirmation_rules)}")
+        all_passed = False
+
+    reviewer = (ROOT / "agents" / "reviewer.md").read_text(encoding="utf-8")
+    if "- `fixed_code_workflow`：" not in reviewer:
+        print("✗ Reviewer 未声明固定 Code Workflow 无确认模式")
+        all_passed = False
+
+    launcher = (ROOT / "hooks" / "workflow_launcher.py").read_text(encoding="utf-8")
+    if 'parser.add_argument("--task-card-id", required=True' not in launcher:
+        print("✗ Launcher 不再要求启动前提供看板 ID")
+        all_passed = False
 
     print()
     return all_passed

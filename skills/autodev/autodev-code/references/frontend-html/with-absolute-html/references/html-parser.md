@@ -182,8 +182,8 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 替换粒度 | 一次只对一个区域做组件替换，逐区评估 |
 | 文档层命中 | 先按项目文档理解用途 / props / 示例，再用真实源码确认导入路径 |
 | 基础组件层 | 项目自身组件体系（前 3 层）无法覆盖时才进入已安装组件库层 |
-| 新依赖 | 缺库时先判断 `npm` / `pnpm`，列出待新增依赖并向用户确认 |
-| 汇报要求 | 如果安装了新依赖，最终汇报中必须列出新增的库 |
+| 新依赖 | 固定 Code Workflow 不安装新依赖也不请求用户确认；复用已有组件或原生实现，并记录非阻断降级 |
+| 汇报要求 | 记录复用或降级方案；新增依赖必须为“不涉及” |
 | 图表场景 | 统一按 `SKILL.md` §图表来源顺序 |
 
 ### 8.2 低风险标准结构组件化口径
@@ -377,7 +377,7 @@ HTML 类型：<type>
 图表来源：project chart rules / local charts / installed chart library / user-specified chart library / default ECharts solution
 图表类型映射：<区域 / 语义 -> 最终图表类型>
 是否触发 ECharts：是 / 否
-新增依赖：<若本次经用户确认后安装了组件库 / 图表库或相关封装，则明确列出新增的包；否则写“不涉及”>
+新增依赖：不涉及（固定 Code Workflow 禁止新增依赖与用户确认）
 统一前端回检输入：target=<生成/修改的源码文件或目录>; sourceHtml=<原始 HTML 路径>; analysis=<.frontend/html-analysis/*.json 或 none>; plan=<PLAN.md 或 none>; uiLibraryTarget=<project|antd|antd-mobile|native>; antdMode=<required|selected|notApplicable>; auditRequired=<true|false>
 验证：通过 / 待修正
 ```

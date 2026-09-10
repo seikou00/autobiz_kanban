@@ -64,7 +64,23 @@ const SCHEDULER_RESULT_SCHEMA = {
       type: "object",
       additionalProperties: { type: "array", items: { type: "string" } }
     },
-    batchWorkspaces: { type: "object" }
+    batchWorkspaces: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        properties: {
+          workspaceRef: { type: "string" },
+          componentRoots: { type: "array", items: { type: "string" } },
+          executionStage: { type: "string" },
+          qualityGateRequired: { type: "boolean" },
+          requestedPath: { type: ["string", "null"] },
+          worktreePath: { type: ["string", "null"] },
+          branchName: { type: ["string", "null"] }
+        },
+        required: ["workspaceRef", "componentRoots", "executionStage", "qualityGateRequired", "requestedPath", "worktreePath", "branchName"],
+        additionalProperties: true
+      }
+    }
   },
   required: ["runId", "status", "scheduledGroups", "batchTaskIds", "batchWorkspaces"],
   additionalProperties: true
@@ -305,6 +321,28 @@ function requireSchedulerResult(value, label) {
       scheduler: result,
     }));
   }
+  // The Workflow keeps this mapping as shared state across parallel Batch
+  // chains. A scheduler child must return the command's complete stdout, not
+  // a hand-written summary that drops workspaceRef and poisons later work.
+  const referencedBatchIds = new Set([
+    ...Object.keys(result.batchTaskIds),
+    ...normalizeScheduledGroups(result.scheduledGroups).flat(),
+    ...(Array.isArray(result.stageRecoveryBatches) ? result.stageRecoveryBatches.map(item => item && item.batchId) : []),
+    ...(Array.isArray(result.mergeableBatches) ? result.mergeableBatches : []),
+  ].filter(usableString));
+  const incompleteWorkspaces = [...referencedBatchIds].filter(batchId => {
+    const workspace = result.batchWorkspaces[batchId];
+    return !isObject(workspace) || !usableString(workspace.workspaceRef);
+  });
+  if (incompleteWorkspaces.length) {
+    throw new Error(JSON.stringify({
+      error: "parallel_scheduler_workspace_mapping_incomplete",
+      label,
+      batchIds: incompleteWorkspaces,
+      runId: result.runId,
+      status: result.status,
+    }));
+  }
   return result;
 }
 
@@ -390,6 +428,14 @@ const utestCommandPath = joinPath(pluginPath, "hooks/run_utest_command.py");
 const utestEnvironmentPath = joinPath(pluginPath, "hooks/inspect_test_environment.py");
 const utestSourceBugPath = joinPath(pluginPath, "hooks/validate_utest_source_bug.py");
 const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
+// Every child below runs after the caller has supplied the task-card ID and
+// started this fixed Workflow. Keep the no-interaction contract at the call
+// boundary so adding a later phase cannot accidentally reintroduce a user
+// confirmation prompt.
+const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。\n";
+function workflowAgent(instruction, options) {
+  return agent(WORKFLOW_AUTONOMY_PREFIX + instruction, options);
+}
 const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py");
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
@@ -421,13 +467,13 @@ try {
   if (resumeMode === "manual" && !usableString(resumeRunId)) {
     throw new Error("manual_resume_run_id_missing");
   }
-  prepared = requireSchedulerResult(await agent(
+  prepared = requireSchedulerResult(await workflowAgent(
     `确保固定 Code DAG run。执行：${prepareCommand}。` +
     (resumeMode === "manual"
       ? `这是用户请求的人工恢复：只重排 scheduler 已识别的 retryable Batch，保留既有 Worktree、证据和 runId；不得恢复 needs_resolution、冲突或取消的 Batch。`
       : `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。`) +
     `必要时允许 scheduler 创建 autodev baseline 提交；不得修改业务文件内容，` +
-    `且不得把 .cmbdevclaw 平台运行文件纳入提交。只返回该命令的 JSON 结果。`,
+    `且不得把 .cmbdevclaw 平台运行文件纳入提交。必须原样返回该命令 stdout 的完整 JSON；不得读取 manifest 后自行概括、重建或省略 batchWorkspaces 的 workspaceRef。`,
     { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), "scheduler ensure");
 } catch (error) {
@@ -457,9 +503,9 @@ async function recoverPendingRetries(scheduler, label) {
   // A normal ensure/resume already performs this transition.  One immediate,
   // explicit retry makes the Workflow resilient to an interrupted lease
   // handoff while still letting the scheduler remain the sole state owner.
-  return requireSchedulerResult(await agent(
+  return requireSchedulerResult(await workflowAgent(
     `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；只返回 JSON。`,
+    `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；必须原样返回该命令 stdout 的完整 JSON，不得自行概括或重建 batchWorkspaces。`,
     { label, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), label);
 }
@@ -628,8 +674,11 @@ function applySchedulerState(scheduler) {
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   retryPendingBatches = retryPendingBatchesOf(scheduler);
-  batchTaskIds = scheduler.batchTaskIds || batchTaskIds;
-  batchWorkspaces = scheduler.batchWorkspaces || batchWorkspaces;
+  // Bindings are immutable within a run. Merge a validated snapshot so a
+  // scoped future response cannot erase coordinates used by an in-flight
+  // Review repair or a newly-unblocked Batch.
+  batchTaskIds = { ...batchTaskIds, ...(scheduler.batchTaskIds || {}) };
+  batchWorkspaces = { ...batchWorkspaces, ...(scheduler.batchWorkspaces || {}) };
   blockedBatches = (scheduler.blockedBatches || []).filter(isValidBatchId);
   for (const batchId of retryPendingBatches) {
     recordUnresolved({ kind: "batch", batchId, status: "retry_pending", durable: true, source: "scheduler" });
@@ -641,9 +690,9 @@ function applySchedulerState(scheduler) {
 
 async function readSchedulerState(label, phaseName = "准备") {
   try {
-    const state = requireSchedulerResult(await agent(
+    const state = requireSchedulerResult(await workflowAgent(
       `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-      `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只返回 JSON。`,
+      `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。必须只原样返回该命令 stdout 的完整 JSON。不得读取 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。`,
       { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
     ), label);
     applySchedulerState(state);
@@ -659,7 +708,7 @@ async function deferBatchForRetry(batchId, batchWorktree, batchBranch, reason) {
   const locationArgs = usableString(batchWorktree) && usableString(batchBranch)
     ? ` --worktree-path "${batchWorktree}" --branch-name "${batchBranch}"`
     : "";
-  const finalized = requireSuccess(await agent(
+  const finalized = requireSuccess(await workflowAgent(
     `将失败的 Batch ${batchId} 标记为可恢复重试，不得打断其他无依赖 Batch。原因：${JSON.stringify(reason)}。` +
     `先执行 python "${leasePath}" reclaim --workspace "${artifactWorkspace}" --feature "${feature}" ` +
     `--run-id "${runId}" --batch-id "${batchId}" --force；再执行 python "${schedulerPath}" mark-batch ` +
@@ -748,7 +797,7 @@ async function cleanupMergedWorktrees(batchIds, label) {
     .filter(batchId => usableString(batchId)))];
   const batchArgs = expected.map(batchId => `--batch-id "${batchId}"`).join(" ");
   try {
-    const cleanup = requireSuccess(await agent(
+    const cleanup = requireSuccess(await workflowAgent(
       `清理已交付 Batch 的插件原生 Worktree。执行 python "${lifecyclePath}" cleanup-merged ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${batchArgs}。` +
       `只允许清理 manifest 中 status=merged 的 Batch：释放残留 lease、删除该 Worktree 与临时分支并更新 manifest；` +
@@ -925,7 +974,7 @@ async function skipBatchCompileForDelivery(batchResult) {
   if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef)) {
     throw new Error(`batch_compile_skip_context_missing:${batchId}`);
   }
-  return requireSuccess(await agent(
+  return requireSuccess(await workflowAgent(
     `Batch ${batchId} 已通过业务 Review。当前插件已临时停用所有 Batch compile：不得执行 Maven、Gradle、npm build/typecheck、task_runner.py batch-compile 或 revalidate-batch-compile。` +
     `只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作，不得修改业务代码。` +
     `依次执行：1) python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --ttl-seconds ${timeoutPerBatch} --lease-guard，并保存真实 ownerToken；` +
@@ -957,7 +1006,7 @@ async function runBatchUtestAndSeal(batchResult) {
     "7) 若任一 UTest 最终仍失败，必须保留本次真实 runner 输出与 run_utest_command Evidence；source_bug 仍可用 validate_utest_source_bug 做分类，但不得在此阶段修复生产代码，也不得执行 stage fail。每次 seal 前都先执行携带 --owner-token <真实token> --require-lease-guard 的 lease check。先用 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 封存新增测试资产；随后执行 python \"" + stagePath + "\" record-test-failure --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --failure-type <implementation|test_definition|documentation|environment|needs_triage> --message \"<必须包含 targetId、commandId、evidenceId、test-output.log 路径、失败断言的 expected/actual 或 stdout/stderr 根因>\" --metadata-json '<包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>'，其中 batchCommit 必须等于刚 seal 返回的新 commitSha。最后以 final-status sealed 释放 lease。该命令会把失败记录成非阻断 issue，Workflow 继续质量门和后续流程。\n" +
     "8) 全部 UTest 通过后，执行 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 取得新的 commitSha；再执行 python \"" + stagePath + "\" complete --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --metadata-json <包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>；最后以 final-status sealed 释放 lease。\n" +
     "成功只返回 {batchId,status:\"success\",testStatus:\"passed\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。记录失败后也返回 status:\"success\"，但必须返回 testStatus:\"deferred\" 与 testFailure；不得返回 failed/timeout 以中断其他 Batch。只有无法写入失败 Evidence 或无法安全释放 lease 时才返回 failed；若能释放 lease，必须使用 final-status pending，禁止 final-status failed，由 Workflow 标记为 retry_pending。不得手工 git add/commit、merge、rebase 或删除 Worktree。";
-  return unwrap(await agent(
+  return unwrap(await workflowAgent(
     prompt,
     { label: "stage-utest-" + batchId, phase: "Batch 阶段", schema: UTEST_STAGE_SCHEMA }
   ));
@@ -976,7 +1025,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   if (!usableString(commitSha)) throw new Error(`sealed_batch_commit_missing:${batchId}`);
   const metadata = JSON.stringify({ batchCommit: commitSha, worktreePath: batchWorktree, branchName: batchBranch });
   if (!reviewResolvedByRepair && !testResolvedByRepair) {
-    const stageResult = requireSuccess(await agent(
+    const stageResult = requireSuccess(await workflowAgent(
       `登记 Batch ${batchId} 已完成的准备与实现阶段。依次执行：` +
       `python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage prepare；` +
       `python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage prepare --metadata-json '${metadata}'；` +
@@ -993,8 +1042,8 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       const retryContext = attempt === 1
         ? ""
         : "上一次 Review 子 Agent 没有形成可验证的终态。仅修复 Review 阶段的命令执行/返回，先读取当前 durable stage 状态；不得修改业务代码。";
-      const reviewRaw = unwrap(await agent(
-        `对已草稿封存的 Batch ${batchId} 做只读评审。代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。${retryContext}` +
+      const reviewRaw = unwrap(await workflowAgent(
+        `对已草稿封存的 Batch ${batchId} 做只读评审。Review execution mode=fixed_code_workflow；代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。不得调用 request_user_input、要求用户确认或等待用户裁定；只返回可执行的阶段结果。${retryContext}` +
         `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
         `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
         `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
@@ -1006,7 +1055,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       // The reviewer itself is prompted to validate its result. Re-run the
       // validator in a read-only child so a prose/raw-JSON response cannot
       // bypass the plugin-owned state machine.
-      reviewValidation = unwrap(await agent(
+      reviewValidation = unwrap(await workflowAgent(
         `只验证 Batch ${batchId} 已持久化的 Review 阶段，不评审代码、不修改任何文件、不运行 TASK。执行 python "${stagePath}" validate-review-result --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。只返回 JSON。`,
         { label: `validate-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_VALIDATION_SCHEMA }
       ));
@@ -1042,7 +1091,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     batchResult = testedDelivery;
   }
   if (qualityGateRequired) {
-    requireSuccess(await agent(
+    requireSuccess(await workflowAgent(
       `执行 Batch ${batchId} 的静态质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
     `该命令只运行 Plan 明确归属本 Batch 的 qualityGateCommands（lint/static check）；Batch compile 已被临时停用，禁止执行任何编译、重复 TASK 测试、projectValidationCommands 或 E2E。` +
       `通过后执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
@@ -1050,7 +1099,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       { label: `stage-quality-gate-${batchId}`, phase: "Batch 阶段" }
     ), `stage quality gate ${batchId}`);
   } else {
-    requireSuccess(await agent(
+    requireSuccess(await workflowAgent(
       `Batch ${batchId} 未声明 qualityGateCommands，质量门不创建空步骤。直接执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
       `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
       { label: `stage-gate-${batchId}`, phase: "Batch 阶段" }
@@ -1087,8 +1136,8 @@ async function reworkDeliveryImplementation(recovery) {
     ? `本次打回的精确问题如下（必须作为修复基线，不能重新猜测原因）：${JSON.stringify(failureContext)}。` +
       (testLogPath ? `这是 UTest 打回；先读取失败原始日志 "${testLogPath}"，并用 failure message 中的 target/command/evidence 锚定问题。` : "")
     : "这是未完成 implement 的中断恢复，没有 review/test 打回上下文；按原 TASK 恢复执行。";
-  return requireSuccess(await agent(
-    `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。${repairBrief}` +
+  return requireSuccess(await workflowAgent(
+    `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。不得调用 request_user_input、要求用户确认或等待用户裁定；按既定契约自动完成最小兼容修复并继续。${repairBrief}` +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取真实 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行启动后台 heartbeat；随后 mark-batch 为 running；` +
     `2) 先清理陈旧 run，再开始任何修复：对 ${JSON.stringify(taskIds)} 中每个真实 TASK 依次执行 task_runner.py inspect（携带 workspace、feature、task-id、code-workspace）；只要发现 parallelRunId="${runId}" 且状态为 started、in_progress 或 implementation_recording 的旧 run，就先用其 inspect 返回的真实 runId 执行 task_runner.py abort --force-with-changes --abort-why "implementation_rework_stale_run"，并携带 --workspace-ref "${batchWorkspaceRef}"。abort 必须保留 Worktree 未提交改动；每次 abort 后再次 inspect 确认该 TASK 已无活动 run。必须先完成全部陈旧 run 清理，禁止一边清理一边 start 新 TASK；其他 parallelRunId 的活动 run、无法 inspect 的 run 或 abort 失败均不得猜测，立即以 final-status pending 释放 lease 并返回 failed。` +
     `3) 严格按依赖拓扑逐个修复，绝不并行或预启动：每次只处理一个 TASK，先 inspect 当前状态并确认其所有 deps 已为 implemented/done；前置 TASK 尚未完成时必须继续完成前置 TASK，禁止尝试 start 当前 TASK。当前 TASK 为 implemented/done 时，读取其真实 latestImplementationEvidenceId，执行 task_runner.py start-task-repair --prior-evidence-id <真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"，记下真实 runId；当前 TASK 为 todo 时执行普通 task_runner.py start（同样携带 parallel-run-id、lease-token、code-workspace、workspace-ref），记下真实 runId。状态仍为 in_progress 时禁止再次 start；应回到步骤 2 处理其陈旧 run。其他状态不得臆造命令，返回 failed。完成当前 TASK 的生产修复后，必须立刻用该真实 runId 执行 finish-implementation：只有 start-task-repair 启动的任务携带 --repair-mode，普通 start 启动的任务禁止携带 --repair-mode。确认 finish 成功且 TASK 已为 implemented/done 后，才可处理其下一个依赖任务；必须完成 ${JSON.stringify(taskIds)} 的全部实际 TASK 后才能进入编译跳过记录。` +
@@ -1111,7 +1160,7 @@ async function recordSingleRepairResolution(recovery, repaired) {
     repairedFromStage: failedStage,
     repairDisposition: "single_repair_accepted",
   });
-  return requireSuccess(await agent(
+  return requireSuccess(await workflowAgent(
     `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复、跳过编译记录和封存。` +
     `不得让模型串行拼接多个 stage start/complete，也不得根据原始文本判断是否收口。只执行 python "${stagePath}" record-single-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failedStage}" --metadata-json '${metadata}'。` +
     `该插件命令会以单个、幂等的受控入口写入 prepare/implement/review evidence，并验证最终 Review evidence 的 single_repair_accepted 标记。只原样返回 JSON。`,
@@ -1184,7 +1233,7 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
     // candidate, because that would sever the evidence-to-SHA relationship.
     let promotion;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const builtRaw = unwrap(await agent(
+      const builtRaw = unwrap(await workflowAgent(
         `构建 Batch ${batchId} 的独立 Merge Train 候选（候选序号 ${wave}，第 ${attempt} 次）。执行 python "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
         `这是可能超过 60 秒的 Git 候选构建：若当前 execute 支持 run_in_background，必须只启动一次 execute({command:<上述命令>,run_in_background:true})，保存 task_id 并在同一子 Agent 内反复 task_output（每次可 timeout:120000）直至获得最终退出结果；task_output 的等待超时不是构建失败，禁止重启该命令。若当前为托管前台会话，则只执行一次并等待其最终结果。子 Agent 在 task_output 得到终态前不得结束，否则平台会清理其后台进程。` +
         `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。build-candidate 在同一 wave 中只能真正启动一次；只能轮询同一 task_id，不得因本地终端超时或中断再次执行。只返回最终命令 JSON。`,
@@ -1196,7 +1245,7 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
         // A candidate's conflict markers are tied to this exact base SHA.
         // Resolve and promote it now, before other same-repository deliveries
         // can advance main and make the retained conflict context stale.
-        const resolved = unwrap(await agent(
+        const resolved = unwrap(await workflowAgent(
           `立即修复刚产生的 Merge Train 冲突候选。执行 python "${mergeTrainPath}" resolve-candidate ` +
           `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
           `只能处理该既有候选 Worktree；成功时返回 status="built"，随后本 Workflow 会立即推广。不得创建新候选、修改 main 或继续其他 Batch。只返回 JSON。`,
@@ -1237,7 +1286,7 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
         throw error;
       }
 
-      const rawPromotion = unwrap(await agent(
+      const rawPromotion = unwrap(await workflowAgent(
       `推广已完成业务 Review 且 UTest 已通过或已记录失败的候选 SHA ${built.candidateSha}。执行 python "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
         `Batch 的 UTest 失败会作为显式 issue 随最终结果保留，但不打断后续流程；合并后唯一的可执行验证是 B-E2E。若返回 stale=true，必须停止本次推广并从当前 main 全量重建候选；禁止 rebase 或直接 merge。只返回 JSON。`,
         { label: `promote-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
@@ -1335,6 +1384,7 @@ async function safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, rea
 
 function implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef) {
   return `在插件创建的原生 Git worktree "${batchWorktree}" 中执行 Batch ${batchId}。Feature=${feature}，runId=${runId}，artifact workspace=${artifactWorkspace}。严格按以下固定顺序执行：\n` +
+    `Code Workflow 已获自主执行授权：不得调用 request_user_input、要求用户确认或等待用户裁定。差异按既定 TASK/规格和现有工程模式作最小兼容实现，并作为非阻断 Evidence 记录；流程必须继续。\n` +
     `1. 执行 cd "${batchWorktree}"（Windows 使用 Set-Location），确认 git rev-parse --show-toplevel 等于该路径、git symbolic-ref --quiet --short HEAD 等于 "${batchBranch}"。禁止 git worktree add/remove、git switch、merge、rebase 或操作其他 checkout。\n` +
     `2. 执行 python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --ttl-seconds ${timeoutPerBatch} --lease-guard；从 JSON 的 lease.ownerToken 保存本 Batch 的 lease token。\n` +
     `3. 将步骤 2 返回的非空 ownerToken 保存为变量，并在后续命令中展开为该真实字符串；命令行中不得出现空字符串、字面量 "LEASE_TOKEN" 或 "<lease-token>"。禁止自行运行 batch_lease_manager.py heartbeat、run_in_background、&、nohup、setsid 或 Start-Process。插件会在每个携带 token 的 task_runner/worktree_manager 命令开始时续租；独立 shell 子进程存活与否不再作为 Batch 失败条件。\n` +
@@ -1356,7 +1406,7 @@ async function runInitialBatchLifecycle(batchId) {
     if (!usableString(batchWorkspaceRef) || !codeWorkspaces[batchWorkspaceRef]) {
       throw new Error(`scheduler did not provide a code workspace for ${batchId}`);
     }
-    const provisioned = requireSuccess(await agent(
+    const provisioned = requireSuccess(await workflowAgent(
       `为 Batch ${batchId} 创建或复用插件托管的原生 Git Worktree。执行 python "${worktreeManagerPath}" --json provision --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。只返回 JSON；不得使用平台 isolation，不得修改业务源码。`,
       { label: `provision-worktree-${batchId}`, phase: "Batch 阶段", schema: WORKTREE_SCHEMA }
     ), `provision worktree ${batchId}`);
@@ -1365,7 +1415,7 @@ async function runInitialBatchLifecycle(batchId) {
     if (!usableString(batchWorktree) || !usableString(batchBranch)) {
       throw new Error(`plugin did not provide native worktree for ${batchId}`);
     }
-    const implemented = unwrap(await agent(
+    const implemented = unwrap(await workflowAgent(
       implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef),
       { label: `fixed-batch-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
     ));
@@ -1802,7 +1852,7 @@ async function attemptFinalCandidateRepair(record) {
     ? record.batchIds
     : (record.batchId ? [record.batchId] : []);
   try {
-    const resolved = unwrap(await agent(
+    const resolved = unwrap(await workflowAgent(
       `所有独立 Batch 已排空。对保留的 Merge Train 候选作最后一次受控自动恢复：执行 python "${mergeTrainPath}" resolve-candidate ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${record.repositoryRef}" --wave ${record.wave}。` +
       `只可处理该既有候选；不得创建新 Worktree、修改 main 或继续其他 Batch。无法自动解决时保留候选和冲突上下文。只返回 JSON。`,
@@ -1830,7 +1880,7 @@ async function attemptFinalCandidateRepair(record) {
       });
       return;
     }
-    const promotion = requireSuccess(await agent(
+    const promotion = requireSuccess(await workflowAgent(
       `推广已在最终修复阶段恢复的候选。执行 python "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${record.repositoryRef}" --wave ${record.wave}。` +
       `仅推广这个已恢复候选；若 stale 或失败，保留其状态供最终报告。只返回 JSON。`,
@@ -1967,12 +2017,12 @@ phase("最终验证");
 let e2eStarted;
 let e2e;
 try {
-  e2eStarted = requireSuccess(await agent(
+  e2eStarted = requireSuccess(await workflowAgent(
     `所有 delivery Batch 已推广后，创建 B-E2E。执行 python "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
     `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch compile 或 UTest。只返回 JSON。`,
     { label: "begin-e2e-validation", phase: "最终验证" }
   ), "begin e2e");
-  e2e = requireSuccess(await agent(
+  e2e = requireSuccess(await workflowAgent(
     `在当前已合并 main 上执行唯一的 B-E2E 验证。Feature=${feature}，runId=${runId}。` +
     `必须只在这些插件创建的临时验证 Worktree 中操作：${JSON.stringify(e2eStarted.worktrees || {})}；不得操作主 checkout。` +
     `先收集可重现环境元数据：environment.version、environment.seedDataDigest、environment.dependencies（对象，含 DB/Redis/MQ 等实际版本或明确的 none），并将其与场景摘要一并作为 JSON metadata。` +
@@ -1995,7 +2045,7 @@ void e2eStarted;
 
 let verification;
 try {
-  verification = unwrap(await agent(
+  verification = unwrap(await workflowAgent(
     `执行 python "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
     `这是只读 evidence aggregate：禁止执行任何编译、测试或 E2E 命令。只返回 JSON。`,
     { label: "aggregate-staged-evidence", phase: "最终验证", schema: VERIFICATION_SCHEMA }

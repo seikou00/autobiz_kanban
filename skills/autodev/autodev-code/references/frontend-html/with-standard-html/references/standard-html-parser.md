@@ -172,7 +172,7 @@ auditRequired=<true|false>
 1. 项目 `AGENTS.md` 或组件说明已有组件库规则时，先遵守项目规则。
 2. 用户明确要求 Ant Design，或 HTML 明显是后台 / 产品 / 管理端 UI 时，使用 Ant Design 映射标准控件。
 3. 新 React 项目中，如果 HTML 包含表单、表格、导航、反馈、仪表盘控件，默认可使用 Ant Design。
-4. 现有项目未安装 Ant Design 且用户未明确要求时，新增依赖前必须按根技能规则向用户确认。
+4. 现有项目未安装 Ant Design 时，固定 Code Workflow 不新增依赖也不请求用户确认；使用项目已有组件或原生 React/CSS 实现，并在 Evidence 中记录降级原因。
 5. 异形视觉、营销内容、文章内容、自定义插画和 Ant Design 会明显降低保真的区域，保留原生 / 自定义 React markup。
 
 状态语义必须保持一致：
@@ -363,7 +363,7 @@ python references/frontend-html/with-standard-html/scripts/audit_antd_coverage.p
 
 - 不要停留在 JSX 语法转换，必须交付工程化 React 代码。
 - 不要把绝对定位 / Figma 导出稿误走本参考；命中强信号时返回 `../../with-absolute-html/SKILL.md`。
-- 不要静默新增依赖；缺少组件库、图标库或图表库时按根技能确认规则执行。
+- 不要新增依赖；缺少组件库、图标库或图表库时复用已有能力或原生实现，并记录降级原因，不得请求用户确认。
 - 不要保留明显可转为项目组件 / AntD / Ant Design Mobile 的后台或移动端产品控件为裸 HTML，除非保真或项目规则要求。
 - 不要在桌面 AntD 转换后留下未审计 / 未说明的原生产品控件、表单、表格、弹窗、反馈、分页、上传、导航或数据面。
 - 不要把自定义视觉内容强行 AntD 化。

@@ -68,7 +68,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFA
 
 进入 Code 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只执行 backend task，`frontend_only` 只执行 frontend task；如果计划中存在相反 lane 的任务，停止并回到 `/autodev-plan` 修复，不得通过手工修改 `uiRequired` 绕过范围门禁。
 
-使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+固定 Code Workflow 启动后禁止调用 `request_user_input`、请求用户确认或等待用户裁定。Code 内的缺失信息、实现差异、依赖不足与冲突必须由既定契约、已有工程依赖和受控恢复策略自主处理；以最小兼容实现继续，并把取舍写入非阻断 Evidence。
 
 ## 缺失产物处理
 
@@ -106,7 +106,7 @@ HTML 分流规则：
 | 高保真 HTML、Figma/MasterGo/低代码导出稿、坐标稿，主体由绝对定位或固定像素尺寸主导 | `references/frontend-html/with-absolute-html/SKILL.md` |
 | 有 UI 任务但没有 HTML/设计稿输入 | `spec-driven-ui`，按 specs/design/plan 直接实现 |
 
-组件、图标与图表来源及收尾要求沿用 `dev_workflow_py` 约束：先遵循项目既有规则和真实依赖；图表使用真实组件；缺少新依赖时按用户确认流程处理；完成页面拆分、公共逻辑抽取和可见样式细节后，必须返回 `/autodev-code` 主流程。两个 HTML route 都必须按各自 SKILL 的清单执行并回传目标源码、原始 HTML、分析产物、`uiLibraryTarget`、`antdMode` 与 `auditRequired`，不得调用独立的 `autodev-frontend` 节点。
+组件、图标与图表来源及收尾要求沿用 `dev_workflow_py` 约束：先遵循项目既有规则和真实依赖；图表使用真实组件；Code 中不得因缺少新依赖请求用户确认，必须复用现有依赖或原生实现并记录非阻断降级，不安装新依赖。完成页面拆分、公共逻辑抽取和可见样式细节后，必须返回 `/autodev-code` 主流程。两个 HTML route 都必须按各自 SKILL 的清单执行并回传目标源码、原始 HTML、分析产物、`uiLibraryTarget`、`antdMode` 与 `auditRequired`，不得调用独立的 `autodev-frontend` 节点。
 
 ## 准入检查
 
@@ -197,10 +197,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的业务范围；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 只读取 `validationTestPlan[].testIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，只有 Review 通过后才由 Workflow 执行一次 `batch-compile`。
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-7. **实现差异协议**：实现中遇到以下任一情况，停下用 `request_user_input` 单次确认，展示「design/spec 说 X，代码/实现是 Y」，拿到裁定前不得继续，也不得先调用 `finish-implementation` 收口：
-   - **`EVD` / design 依据与代码现实不符** → 裁定后回写 `artifactFeatureDir` 下 `design.md` 的对应行（注明「code 阶段修订」）再继续；不得改写业务代码仓库 cwd 下的同名文件。
-   - **必须偏离 `API` / `DATA` / `D` 已定形态**（定的做不了或明显更差）→ 同上，偏离经裁定回写 `design.md` 后才可按新形态实现；「实现细节自由度」不覆盖已定的接口/数据/技术决策形态。
-   - **实现将违反 `REQ` / `SCN` 行为契约** → 停止编码，不得实现一个违反行为契约的版本；按下方阻断口径记录原因与建议回流阶段（specs/plan），回流 `/autodev-plan` 修订契约后重新进入。TASK 状态由 runner 负责流转，不得手工置「失败」。
+7. **实现差异协议**：固定 Code Workflow 内不得为以下差异发起用户确认或创建阻断。`EVD` / design 与代码现实不符，或必须偏离 `API` / `DATA` / `D` 形态时，始终采用不违反 `REQ` / `SCN` 的最小兼容实现并在非阻断 Evidence 中记录差异。行为契约存在歧义时，按明确的 `REQ` / `SCN`、再按 Plan、最后按现有工程模式确定实现；TASK 状态由 runner 负责流转，不得手工置「失败」。
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
 
 ```bash
@@ -331,7 +328,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 ### 看板 ID 提交上下文
 
-启动某个 Feature 的固定 Workflow 前，先按 `${pluginPath}/skills/references/ask-user-question.md` 使用 `request_user_input` 直接询问用户本次看板 ID。用户只需在该次启动前提供一次；将该值作为唯一 `taskCardId` 传给 launcher，插件写入 `.parallel-runs/<runId>/manifest.json` 并用于本次 Run 的全部提交。恢复同一 Run 时直接使用 manifest 中已保存的 ID，不再询问、回查平台或比较新旧 ID。必须校验 ID 仅由字母、数字、`.`、`_`、`-` 组成；未拿到有效 ID 时不得调用 launcher 或创建 Workflow。向用户说明所有插件托管提交将使用：`<看板ID> #comment <提交说明>`。
+首次启动固定 Workflow 前，`taskCardId` 必须作为已确定的启动参数传入；若用户尚未提供有效 ID，此时可以且只应调用一次 `request_user_input` 向用户索取看板 ID。校验 ID 仅由字母、数字、`.`、`_`、`-` 组成；无效时仍停留在启动前，不创建 Workflow。拿到有效 ID 后，插件将它写入 `.parallel-runs/<runId>/manifest.json` 并用于本次 Run 的全部提交。Workflow 启动后以及恢复同一 Run 时，直接使用 manifest 中已保存的 ID，不再询问、回查平台或比较新旧 ID。向用户说明所有插件托管提交将使用：`<看板ID> #comment <提交说明>`。
 
 先调用 launcher：
 
