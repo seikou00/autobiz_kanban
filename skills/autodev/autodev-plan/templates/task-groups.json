@@ -1,6 +1,7 @@
 {
   "featureId": "[feature]",
   "writeOwnershipRule": "同一 workspaceRef 下每个 touches 路径只能由一个自动 Batch 拥有；共享 SQL、路由或全局配置由前置 owner group 一次性修改，消费者只用 deps 依赖它。",
+  "atomicGroupRule": "默认一任务一 Batch。只有任一任务单独实现、验收或合并会破坏闭环时，才在每个成员上使用相同 atomicGroup（2-3 个任务、同 workspaceRef/lane/stage）；依赖或文件重叠不会自动成组。",
   "groups": [
     {
       "id": "T001",

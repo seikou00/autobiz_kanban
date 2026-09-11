@@ -55,6 +55,7 @@ from hooks.plan_json import (  # noqa: E402
     TASK_EXECUTION_MODES,
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
+    atomic_group_errors,
     batch_compile_is_not_configured_for_frontend,
     batch_compile_skip_is_allowed,
     batch_plan_path,
@@ -140,6 +141,7 @@ DRAFT_GROUP_OWNED_FIELDS = {
     "executionMode",
     "externalDependency",
     "executionStage",
+    "atomicGroup",
     "touches",
 }
 DRAFT_DETAIL_FIELDS = {
@@ -456,6 +458,9 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
         raise PlanWriterInputError("monolithic_plan_requires_rebuild")
     if "version" in root or "taskDetailVersion" in root:
         raise PlanWriterInputError("legacy_plan_requires_rebuild")
+    policy = root.get("batchPolicy")
+    if isinstance(policy, dict) and policy.get("strategy") != BATCH_STRATEGY:
+        raise PlanWriterInputError("batch_policy_requires_rebuild", str(policy.get("strategy")))
     finalized = root.get("taskSetStatus") == "finalized"
     if finalized and "compileProfiles" not in root:
         raise PlanWriterInputError("batch_compile_contract_requires_rebuild", "compileProfiles")
@@ -505,20 +510,7 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
                     assignments[str(task["id"])] = batch_id
     if data.get("taskSetDigest") is not None:
         current_digest = task_set_digest(data, batch_plans)
-        # Older writer versions implicitly chained every Batch to the previous
-        # one.  Accept that historical digest once, while all newly projected
-        # plans use only explicit Task-derived dependencies.
-        legacy_data = copy.deepcopy(data)
-        legacy_entries = legacy_data.get("batches", [])
-        if isinstance(legacy_entries, list):
-            for index, entry in enumerate(legacy_entries):
-                if index > 0 and isinstance(entry, dict):
-                    deps = entry.get("deps") if isinstance(entry.get("deps"), list) else []
-                    previous = str(legacy_entries[index - 1].get("id"))
-                    if previous not in deps:
-                        entry["deps"] = sorted([*deps, previous])
-        legacy_digest = task_set_digest(legacy_data, batch_plans)
-        if data.get("taskSetDigest") not in {current_digest, legacy_digest}:
+        if data.get("taskSetDigest") != current_digest:
             raise PlanWriterInputError(
                 "task_set_digest_mismatch",
                 "formal plan artifacts were modified outside plan_writer",
@@ -732,6 +724,20 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         execution_stage = raw_group.get("executionStage", "parallel")
         if execution_stage not in PARALLEL_EXECUTION_STAGES:
             errors.append({"reason": f"{task_id}.executionStage_invalid"})
+        atomic_group = raw_group.get("atomicGroup")
+        if atomic_group is not None:
+            if not isinstance(atomic_group, dict):
+                errors.append({"reason": f"{task_id}.atomicGroup_must_be_object"})
+            else:
+                unknown = sorted(set(atomic_group) - {"id", "rationale"})
+                if unknown:
+                    errors.append({"reason": f"{task_id}.atomicGroup_unknown_fields:{','.join(unknown)}"})
+                group_id = atomic_group.get("id")
+                rationale = atomic_group.get("rationale")
+                if not isinstance(group_id, str) or not re.fullmatch(r"AG\d{3}", group_id):
+                    errors.append({"reason": f"{task_id}.atomicGroup.id_invalid"})
+                if not isinstance(rationale, str) or len(rationale.strip()) < 10:
+                    errors.append({"reason": f"{task_id}.atomicGroup.rationale_missing_or_too_short"})
         if "touches" in raw_group:
             _group_string_list(errors, raw_group, task_id, "touches", required=False)
         execution_mode = task_execution_mode(raw_group)
@@ -837,6 +843,9 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(workspace_ref, str) or not REPOSITORY_ID_RE.fullmatch(workspace_ref):
             errors.append({"reason": f"{task_id}.workspaceRef_invalid"})
         prior_ids.add(task_id)
+    errors.extend({"reason": reason} for reason in atomic_group_errors(
+        [item for item in raw_groups if isinstance(item, dict)],
+    ))
     return errors
 
 
@@ -966,6 +975,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "workspaceRef": item.get("workspaceRef"),
         "executionMode": item.get("executionMode", "code"),
         "executionStage": item.get("executionStage", "parallel"),
+        "atomicGroup": copy.deepcopy(item.get("atomicGroup")) if isinstance(item.get("atomicGroup"), dict) else None,
         "externalDependency": (
             copy.deepcopy(item.get("externalDependency"))
             if isinstance(item.get("externalDependency"), dict)
@@ -1112,49 +1122,52 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
     used_ids = set(existing_ids)
+    next_batch_number = max(
+        (int(value[1:]) for value in used_ids if re.fullmatch(r"B\d{3}", value)),
+        default=0,
+    ) + 1
+
+    def allocate_batch_id() -> str:
+        """Allocate deterministically without rescanning all existing IDs."""
+
+        nonlocal next_batch_number
+        while True:
+            batch_id = f"B{next_batch_number:03d}"
+            next_batch_number += 1
+            if batch_id not in used_ids:
+                used_ids.add(batch_id)
+                return batch_id
+
+    # Default to one independently deliverable Task per Batch.  Similarity of
+    # capability, route, workspace, or write set is not a reason to co-deliver.
+    # The only grouping signal is an explicit atomicGroup id on every member.
+    delivery_units: dict[str, list[dict[str, Any]]] = {}
     for task in tasks_view:
-        task_stage = str(task.get("executionStage") or "parallel")
-        if task_stage not in PARALLEL_EXECUTION_STAGES:
-            raise PlanWriterInputError("invalid_batch_execution_stage", f"task={task.get('id')};stage={task_stage}")
-        task.pop("touches", None)
-        task_id = str(task.get("id", ""))
-        batch_id = assignments.get(task_id)
-        if batch_id is None:
-            primary = _primary_spec_root(task)
-            execution_lane = task_execution_lane(task)
-            workspace_contract = _batch_workspace_contract(task)
-            frontend_route = _batch_frontend_route(task)
-            last_batch = sorted(groups)[-1] if groups else None
-            can_append_to_last = bool(
-                last_batch
-                and spec_roots.get(str(last_batch)) == primary
-                and execution_lanes.get(str(last_batch)) == execution_lane
-                and execution_stages.get(str(last_batch)) == task_stage
-                and workspace_contracts.get(str(last_batch)) == workspace_contract
-                and frontend_routes.get(str(last_batch)) == frontend_route
-                and len(groups[str(last_batch)]) < MAX_BATCH_TASKS
-            )
-            batch_id = str(last_batch) if can_append_to_last else _next_batch_id(used_ids)
-            used_ids.add(batch_id)
-            assignments[task_id] = batch_id
-        elif batch_id in execution_stages and execution_stages[batch_id] != task_stage:
-            raise PlanWriterInputError("batch_execution_stage_mismatch", f"batch={batch_id};task={task_id}")
-        group = groups.setdefault(batch_id, [])
-        if len(group) >= MAX_BATCH_TASKS:
-            new_batch = _next_batch_id(used_ids)
-            used_ids.add(new_batch)
-            assignments[task_id] = new_batch
-            batch_id = new_batch
-            group = groups.setdefault(batch_id, [])
-        group.append(task)
-        spec_roots.setdefault(batch_id, _primary_spec_root(task))
-        execution_lanes.setdefault(batch_id, task_execution_lane(task))
-        execution_stages.setdefault(batch_id, task_stage)
-        workspace_contracts.setdefault(
-            batch_id,
-            _batch_workspace_contract(task),
-        )
-        frontend_routes.setdefault(batch_id, _batch_frontend_route(task))
+        raw_atomic = task.get("atomicGroup")
+        atomic_id = raw_atomic.get("id") if isinstance(raw_atomic, dict) else None
+        unit_key = f"atomic:{atomic_id}" if isinstance(atomic_id, str) else f"task:{task.get('id')}"
+        delivery_units.setdefault(unit_key, []).append(task)
+
+    for unit_tasks in delivery_units.values():
+        assigned = sorted({
+            str(assignments[str(task.get("id"))])
+            for task in unit_tasks
+            if str(task.get("id")) in assignments
+        })
+        batch_id = assigned[0] if assigned else allocate_batch_id()
+        used_ids.add(batch_id)
+        for task in unit_tasks:
+            assignments[str(task.get("id", ""))] = batch_id
+            task_stage = str(task.get("executionStage") or "parallel")
+            if task_stage not in PARALLEL_EXECUTION_STAGES:
+                raise PlanWriterInputError("invalid_batch_execution_stage", f"task={task.get('id')};stage={task_stage}")
+            task.pop("touches", None)
+            groups.setdefault(batch_id, []).append(task)
+            spec_roots.setdefault(batch_id, _primary_spec_root(task))
+            execution_lanes.setdefault(batch_id, task_execution_lane(task))
+            execution_stages.setdefault(batch_id, task_stage)
+            workspace_contracts.setdefault(batch_id, _batch_workspace_contract(task))
+            frontend_routes.setdefault(batch_id, _batch_frontend_route(task))
 
     ordered_ids = sorted(groups)
     root = {
@@ -1227,6 +1240,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         status = _batch_status(batch_tasks, batch_compile)
         execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
+        atomic_group = batch_tasks[0].get("atomicGroup") if batch_tasks else None
+        is_atomic_group = isinstance(atomic_group, dict)
+        delivery_kind = "atomic_group" if is_atomic_group else "single_task"
+        atomic_group_id = atomic_group.get("id") if is_atomic_group else None
+        batch_rationale = atomic_group.get("rationale") if is_atomic_group else None
         projected[batch_id] = {
             "featureId": root.get("featureId"),
             "batchId": batch_id,
@@ -1238,6 +1256,8 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             "completedTaskCount": sum(normalize_status(task.get("status")) == "done" for task in batch_tasks),
             "completionEvidenceIds": completion_ids,
             "taskIds": task_ids_list,
+            "deliveryKind": delivery_kind,
+            **({"atomicGroupId": atomic_group_id, "batchRationale": batch_rationale} if is_atomic_group else {}),
             "compileCommand": compile_command,
             "qualityGateCommands": quality_commands,
             **({"batchCompile": previous.get("batchCompile")} if "batchCompile" in previous else {}),
@@ -1266,6 +1286,8 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 **({"workspaceRef": workspace_ref} if workspace_ref else {}),
                 "deps": sorted(cross_deps),
                 "taskIds": [str(task.get("id")) for task in batch_tasks],
+                "deliveryKind": delivery_kind,
+                **({"atomicGroupId": atomic_group_id, "batchRationale": batch_rationale} if is_atomic_group else {}),
                 "status": status,
                 **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
                 **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
@@ -1630,6 +1652,8 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         task["uiRefs"] = ui_refs
     if execution_mode == "external_dependency":
         task["externalDependency"] = copy.deepcopy(group.get("externalDependency"))
+    if isinstance(group.get("atomicGroup"), dict):
+        task["atomicGroup"] = copy.deepcopy(group["atomicGroup"])
     rationale = group.get("splitRationale")
     if isinstance(rationale, str) and rationale.strip():
         task["splitRationale"] = rationale
@@ -4075,17 +4099,13 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "batchConcurrency": 1,
                         "taskConcurrency": 1,
                         "requiresNewConversationBetweenBatches": True,
-                        "primaryCapabilitySource": "first_spec_ref_file",
-                        "executionLaneSource": "uiRequired",
-                        "executionLaneMapping": {
-                            "uiRequired_false": "backend",
-                            "uiRequired_true": "frontend",
+                        "defaultDeliveryKind": "single_task",
+                        "atomicGroup": {
+                            "required": "explicit_on_every_member",
+                            "maxTasks": 3,
+                            "requiresSame": ["workspaceRef", "executionLane", "executionStage"],
+                            "forbiddenImplicitSignals": ["deps", "writeSet", "spec", "route"],
                         },
-                        "executionLaneOrder": ["backend", "frontend"],
-                        "appendRule": (
-                            "same_primary_capability_execution_lane_and_workspace_as_"
-                            "immediately_preceding_batch_frontend_route_and_not_full"
-                        ),
                     },
                     "taskSetFinalization": {
                         "groupingPreflightCommand": "preflight-task-groups --group-file <file>",

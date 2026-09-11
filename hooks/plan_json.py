@@ -35,6 +35,7 @@ from hooks.plan_write_ownership import write_ownership_error_codes
 
 TASK_ID_RE = re.compile(r"^T\d{3}$")
 BATCH_ID_RE = re.compile(r"^B\d{3}$")
+ATOMIC_GROUP_ID_RE = re.compile(r"^AG\d{3}$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 API_ID_RE = re.compile(r"^API-\d{3}$")
@@ -76,8 +77,11 @@ PROJECT_VALIDATION_KINDS = {
     "static_check",
 }
 VALIDATION_KINDS = TASK_VALIDATION_KINDS | COMPILE_PROFILE_KINDS | QUALITY_GATE_KINDS
-MAX_BATCH_TASKS = 5
-BATCH_STRATEGY = "spec_capability_execution_lane_topological"
+# A Batch remains the delivery/recovery boundary.  New Plans default to one
+# Task per Batch; only an explicitly declared, inseparable delivery loop may
+# contain two or three Tasks.
+MAX_BATCH_TASKS = 3
+BATCH_STRATEGY = "minimal_closed_delivery_v2"
 EXECUTION_LANES = {"backend", "frontend"}
 IMPLEMENTATION_SCOPES = {"full_stack", "backend_only", "frontend_only"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
@@ -371,10 +375,16 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "title": raw_entry.get("title"),
             "specRoots": raw_entry.get("specRoots"),
             "executionLane": raw_entry.get("executionLane"),
+            "deliveryKind": raw_entry.get("deliveryKind"),
+            "atomicGroupId": raw_entry.get("atomicGroupId"),
+            "batchRationale": raw_entry.get("batchRationale"),
             "deps": raw_entry.get("deps"),
             "taskIds": raw_entry.get("taskIds"),
             "batchTitle": batch.get("title") if isinstance(batch, dict) else None,
             "batchExecutionLane": batch.get("executionLane") if isinstance(batch, dict) else None,
+            "batchDeliveryKind": batch.get("deliveryKind") if isinstance(batch, dict) else None,
+            "batchAtomicGroupId": batch.get("atomicGroupId") if isinstance(batch, dict) else None,
+            "batchRationale": batch.get("batchRationale") if isinstance(batch, dict) else None,
             "compileCommand": batch.get("compileCommand") if isinstance(batch, dict) else None,
             "qualityGateCommands": batch.get("qualityGateCommands") if isinstance(batch, dict) else None,
             # P1-7: 新策略包含 batchCompile 在 digest 中
@@ -735,6 +745,52 @@ def _validate_tasks_container(
     return errors
 
 
+def atomic_group_errors(
+    task_items: list[dict[str, Any]],
+    *,
+    allow_incomplete: bool = False,
+) -> list[str]:
+    """Validate the cross-Task contract for explicit atomic delivery groups."""
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for task in task_items:
+        raw = task.get("atomicGroup")
+        if raw is None:
+            continue
+        task_id = str(task.get("id", "task"))
+        if not isinstance(raw, dict):
+            continue  # The per-Task validator reports the shape error.
+        group_id = raw.get("id")
+        if isinstance(group_id, str) and ATOMIC_GROUP_ID_RE.fullmatch(group_id):
+            groups.setdefault(group_id, []).append(task)
+
+    errors: list[str] = []
+    for group_id, members in groups.items():
+        member_ids = ",".join(str(item.get("id")) for item in members)
+        if len(members) == 1 and not allow_incomplete:
+            errors.append(f"atomicGroup.{group_id}_requires_two_or_three_tasks:taskIds={member_ids}")
+            continue
+        if len(members) > MAX_BATCH_TASKS:
+            errors.append(f"atomicGroup.{group_id}_task_limit_exceeded:{len(members)}>{MAX_BATCH_TASKS}")
+        workspace_refs = {item.get("workspaceRef") for item in members}
+        lanes = {task_execution_lane(item) for item in members}
+        stages = {str(item.get("executionStage") or "parallel") for item in members}
+        rationales = {
+            str(item.get("atomicGroup", {}).get("rationale")).strip()
+            for item in members
+            if isinstance(item.get("atomicGroup"), dict)
+        }
+        if len(workspace_refs) > 1:
+            errors.append(f"atomicGroup.{group_id}_workspaceRef_mismatch:taskIds={member_ids}")
+        if len(lanes) > 1:
+            errors.append(f"atomicGroup.{group_id}_executionLane_mismatch:taskIds={member_ids}")
+        if len(stages) > 1:
+            errors.append(f"atomicGroup.{group_id}_executionStage_mismatch:taskIds={member_ids}")
+        if len(rationales) > 1:
+            errors.append(f"atomicGroup.{group_id}_rationale_mismatch:taskIds={member_ids}")
+    return errors
+
+
 def validate_plan_data(
     data: Any,
     *,
@@ -777,9 +833,11 @@ def validate_plan_data(
     if not isinstance(policy, dict):
         errors.append("plan_json_batchPolicy_missing")
     else:
-        if policy.get("maxTasks") != MAX_BATCH_TASKS:
-            errors.append(f"plan_json_batchPolicy_maxTasks_must_be:{MAX_BATCH_TASKS}")
-        if policy.get("strategy") != BATCH_STRATEGY:
+        strategy = policy.get("strategy")
+        if strategy == BATCH_STRATEGY:
+            if policy.get("maxTasks") != MAX_BATCH_TASKS:
+                errors.append(f"plan_json_batchPolicy_maxTasks_must_be:{MAX_BATCH_TASKS}")
+        else:
             errors.append(f"plan_json_batchPolicy_strategy_must_be:{BATCH_STRATEGY}")
     _validate_task_validation_policy(errors, data)
 
@@ -816,7 +874,24 @@ def validate_plan_data(
                 errors.append(f"{batch_id}.executionStage_invalid")
             _validate_string_list(errors, entry, batch_id, "specRoots", required=True)
             _validate_string_list(errors, entry, batch_id, "deps", required=False, item_re=BATCH_ID_RE)
-            _validate_string_list(errors, entry, batch_id, "taskIds", required=True, item_re=TASK_ID_RE)
+            task_ids = _validate_string_list(errors, entry, batch_id, "taskIds", required=True, item_re=TASK_ID_RE)
+            delivery_kind = entry.get("deliveryKind")
+            if delivery_kind not in {"single_task", "atomic_group"}:
+                errors.append(f"{batch_id}.deliveryKind_invalid")
+            elif delivery_kind == "single_task":
+                if len(task_ids) != 1:
+                    errors.append(f"{batch_id}.single_task_requires_one_task")
+                if "atomicGroupId" in entry or "batchRationale" in entry:
+                    errors.append(f"{batch_id}.single_task_atomic_fields_forbidden")
+            else:
+                group_id = entry.get("atomicGroupId")
+                rationale = entry.get("batchRationale")
+                if not isinstance(group_id, str) or not ATOMIC_GROUP_ID_RE.fullmatch(group_id):
+                    errors.append(f"{batch_id}.atomicGroupId_invalid")
+                if not isinstance(rationale, str) or len(rationale.strip()) < 10:
+                    errors.append(f"{batch_id}.batchRationale_missing_or_too_short")
+                if len(task_ids) > MAX_BATCH_TASKS:
+                    errors.append(f"{batch_id}.atomic_group_task_limit_invalid")
             batch_status = entry.get("status")
             if batch_status not in BATCH_STATUSES:
                 errors.append(f"{batch_id}.status_invalid")
@@ -921,6 +996,23 @@ def validate_batch_plan_data(
     )
     if "taskValidation" in data:
         errors.append(f"{batch_id}.taskValidation_forbidden")
+    delivery_kind = data.get("deliveryKind")
+    if delivery_kind not in {"single_task", "atomic_group"}:
+        errors.append(f"{batch_id}.deliveryKind_invalid")
+    elif delivery_kind == "single_task":
+        if len(batch_tasks) != 1:
+            errors.append(f"{batch_id}.single_task_requires_one_task")
+        if "atomicGroupId" in data or "batchRationale" in data:
+            errors.append(f"{batch_id}.single_task_atomic_fields_forbidden")
+    elif delivery_kind == "atomic_group":
+        group_id = data.get("atomicGroupId")
+        rationale = data.get("batchRationale")
+        if not isinstance(group_id, str) or not ATOMIC_GROUP_ID_RE.fullmatch(group_id):
+            errors.append(f"{batch_id}.atomicGroupId_invalid")
+        if not isinstance(rationale, str) or len(rationale.strip()) < 10:
+            errors.append(f"{batch_id}.batchRationale_missing_or_too_short")
+        if len(batch_tasks) > MAX_BATCH_TASKS:
+            errors.append(f"{batch_id}.atomic_group_task_limit_invalid")
     workspace_root_sets = [
         task_workspace_roots(item)
         for item in batch_tasks
@@ -1750,6 +1842,21 @@ def _validate_task_details(
     task: dict[str, Any],
     task_id: str,
 ) -> None:
+    atomic_group = task.get("atomicGroup")
+    if atomic_group is not None:
+        if not isinstance(atomic_group, dict):
+            errors.append(f"{task_id}.atomicGroup_must_be_object")
+        else:
+            unknown = sorted(set(atomic_group) - {"id", "rationale"})
+            if unknown:
+                errors.append(f"{task_id}.atomicGroup_unknown_fields:{','.join(unknown)}")
+            group_id = atomic_group.get("id")
+            rationale = atomic_group.get("rationale")
+            if not isinstance(group_id, str) or not ATOMIC_GROUP_ID_RE.fullmatch(group_id):
+                errors.append(f"{task_id}.atomicGroup.id_invalid")
+            if not isinstance(rationale, str) or len(rationale.strip()) < 10:
+                errors.append(f"{task_id}.atomicGroup.rationale_missing_or_too_short")
+
     raw_execution_mode = task.get("executionMode")
     if raw_execution_mode is not None and raw_execution_mode not in TASK_EXECUTION_MODES:
         errors.append(f"{task_id}.executionMode_invalid")
@@ -2053,6 +2160,12 @@ def _bundle_consistency_errors(
 #         errors.append("task_set_digest_mismatch")
 
     known_task_ids = set(task_batches)
+    strategy = root.get("batchPolicy", {}).get("strategy") if isinstance(root.get("batchPolicy"), dict) else None
+    if strategy == BATCH_STRATEGY:
+        errors.extend(atomic_group_errors(
+            all_tasks,
+            allow_incomplete=root.get("taskSetStatus") == "collecting",
+        ))
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
     task_by_id = {str(item.get("id")): item for item in all_tasks}
     # scope.paths/expectedFiles are the scheduler's physical write set.  More
@@ -2086,11 +2199,33 @@ def _bundle_consistency_errors(
             )
         )
         _validate_batch_execution_command_projection(errors, root, entry, data)
+        if root.get("batchPolicy", {}).get("strategy") == BATCH_STRATEGY:
+            for field in ("deliveryKind",):
+                if entry.get(field) != data.get(field):
+                    errors.append(f"{batch_id}.{field}_projection_mismatch")
+            delivery_kind = entry.get("deliveryKind")
+            if delivery_kind == "atomic_group":
+                for field in ("atomicGroupId", "batchRationale"):
+                    if entry.get(field) != data.get(field):
+                        errors.append(f"{batch_id}.{field}_projection_mismatch")
+            if data.get("deliveryKind") is None:
+                errors.append(f"{batch_id}.deliveryKind_missing")
         actual_ids = [str(item.get("id")) for item in tasks(data)]
         if entry.get("taskIds") != actual_ids:
             errors.append(f"{batch_id}.taskIds_mismatch")
         if entry.get("status") != data.get("status"):
             errors.append(f"{batch_id}.root_status_projection_mismatch")
+        if strategy == BATCH_STRATEGY:
+            task_atomic_ids = {
+                item.get("atomicGroup", {}).get("id")
+                for item in tasks(data)
+                if isinstance(item.get("atomicGroup"), dict)
+            }
+            if entry.get("deliveryKind") == "single_task" and task_atomic_ids:
+                errors.append(f"{batch_id}.single_task_contains_atomic_task")
+            if entry.get("deliveryKind") == "atomic_group":
+                if task_atomic_ids != {entry.get("atomicGroupId")}:
+                    errors.append(f"{batch_id}.atomicGroup_task_membership_mismatch")
         root_lane = entry.get("executionLane")
         batch_lane = data.get("executionLane")
         if root_lane != batch_lane:

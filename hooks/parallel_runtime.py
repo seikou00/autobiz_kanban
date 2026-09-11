@@ -152,6 +152,9 @@ def plan_contract_snapshot(bundle: PlanBundle) -> dict[str, Any]:
                 for task in batch.get("tasks", [])
                 if isinstance(task, dict) and task.get("id")
             ),
+            "deliveryKind": entry.get("deliveryKind"),
+            "atomicGroupId": entry.get("atomicGroupId"),
+            "batchRationale": entry.get("batchRationale"),
             "contractHash": contract_hash,
         }
     return {"schemaVersion": 1, "batchIds": sorted(batches), "batches": batches}
@@ -370,6 +373,9 @@ def create_manifest(
             # workflow must consume these IDs from the scheduler response; it
             # must not rediscover or invent them from the artifact workspace.
             "taskIds": task_ids,
+            "deliveryKind": entry.get("deliveryKind"),
+            "atomicGroupId": entry.get("atomicGroupId"),
+            "batchRationale": entry.get("batchRationale"),
             "executionLane": entry.get("executionLane"),
             "workspaceRef": batch_workspace_ref(batch),
             "componentRoots": list(batch_component_roots(batch)),

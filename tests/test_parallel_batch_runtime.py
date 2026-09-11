@@ -241,6 +241,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                     "conflictResolution": {"maxAttempts": 3, "enableAutoResolve": True},
                 },
             )
+            self.assertEqual(manifest["batches"]["B001"]["deliveryKind"], "single_task")
+            self.assertIsNone(manifest["batches"]["B001"]["atomicGroupId"])
 
     def test_resume_reports_unresolved_merge_train_without_global_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2135,6 +2137,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                     "executionLane": "backend",
                     "deps": [],
                     "taskIds": ["T003"],
+                    "deliveryKind": "single_task",
                     "status": "todo",
                 }
             )

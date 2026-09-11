@@ -200,11 +200,11 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                     "codeGate": "batch_compile_only",
                     "maxTestStageRepairAttempts": 3,
                 },
-                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+                "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
                 "batches": [{
                     "id": "B001", "path": "plans/B001/plan.json", "title": "cap",
                     "specRoots": ["specs/cap/spec.md"], "executionLane": "backend",
-                    "deps": [], "taskIds": ["T001"], "status": "todo",
+                    "deps": [], "taskIds": ["T001"], "deliveryKind": "single_task", "status": "todo",
                 }],
                 "compileProfiles": {
                     "backend": {
@@ -240,6 +240,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "taskCount": 1,
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
+        "deliveryKind": "single_task",
         "compileCommand": {
             "id": "BATCH-B001-COMPILE",
             "argv": [sys.executable, "-c", "print('backend compile')"],
@@ -271,8 +272,12 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
 
 
 def _read_plan_tasks(feature_dir: Path) -> list[dict]:
-    batch = json.loads((feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
-    return batch["tasks"]
+    root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+    return [
+        task
+        for entry in root.get("batches", [])
+        for task in json.loads((feature_dir / entry["path"]).read_text(encoding="utf-8")).get("tasks", [])
+    ]
 
 
 def _write_plan_tasks(feature_dir: Path, tasks: list[dict]) -> None:
@@ -2136,10 +2141,8 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
         self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
-        self.assertEqual(contract["batchAssignment"]["primaryCapabilitySource"], "first_spec_ref_file")
-        self.assertIn("executionLaneSource", contract["batchAssignment"])
-        self.assertIn("executionLaneMapping", contract["batchAssignment"])
-        self.assertIn("executionLaneOrder", contract["batchAssignment"])
+        self.assertEqual(contract["batchAssignment"]["defaultDeliveryKind"], "single_task")
+        self.assertEqual(contract["batchAssignment"]["atomicGroup"]["required"], "explicit_on_every_member")
         self.assertEqual(
             contract["batchAssignment"]["executionOrder"],
             "root_batch_order_then_task_order",
@@ -2147,16 +2150,6 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["batchAssignment"]["batchConcurrency"], 1)
         self.assertEqual(contract["batchAssignment"]["taskConcurrency"], 1)
         self.assertTrue(contract["batchAssignment"]["requiresNewConversationBetweenBatches"])
-        self.assertEqual(contract["batchAssignment"]["executionLaneSource"], "uiRequired")
-        self.assertEqual(
-            contract["batchAssignment"]["executionLaneMapping"],
-            {"uiRequired_false": "backend", "uiRequired_true": "frontend"},
-        )
-        self.assertEqual(contract["batchAssignment"]["executionLaneOrder"], ["backend", "frontend"])
-        self.assertEqual(
-            contract["batchAssignment"]["appendRule"],
-                "same_primary_capability_execution_lane_and_workspace_as_immediately_preceding_batch_frontend_route_and_not_full",
-        )
         self.assertFalse(contract["batchAssignment"]["manualBatchIdSupported"])
         self.assertIn("taskSetFinalization", contract)
         self.assertEqual(

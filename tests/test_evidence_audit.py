@@ -87,7 +87,7 @@ class EvidenceAuditTest(unittest.TestCase):
                             "codeGate": "batch_compile_only",
                             "maxTestStageRepairAttempts": 3,
                         },
-                        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+                        "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
                         "compileProfiles": {
                             "backend": {
                                 "commands": [
@@ -110,6 +110,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 "executionLane": "backend",
                                 "deps": [],
                                 "taskIds": ["T001"],
+                                "deliveryKind": "single_task",
                                 "status": "done",
                             },
                             {
@@ -120,6 +121,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 "executionLane": "backend",
                                 "deps": ["B001"],
                                 "taskIds": ["T002"],
+                                "deliveryKind": "single_task",
                                 "status": "todo",
                             },
                         ],
@@ -150,6 +152,7 @@ class EvidenceAuditTest(unittest.TestCase):
                             "taskCount": 1,
                             "completedTaskCount": completed_count,
                             "completionEvidenceIds": [],
+                            "deliveryKind": "single_task",
                             "compileCommand": {
                                 "id": f"BATCH-{batch_id}-COMPILE",
                                 "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],

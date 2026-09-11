@@ -28,6 +28,7 @@ from hooks.plan_json import (  # noqa: E402
     validate_plan_bundle_data,
     write_plan_json,
 )
+from hooks.plan_writer import _project_batches  # noqa: E402
 
 def task(
     task_id: str,
@@ -106,7 +107,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
             "codeGate": "batch_compile_only",
             "maxTestStageRepairAttempts": 3,
         },
-        "batchPolicy": {"maxTasks": 5, "strategy": BATCH_STRATEGY},
+        "batchPolicy": {"maxTasks": 3, "strategy": BATCH_STRATEGY},
         "batches": batches,
         "compileProfiles": {
             "backend": {
@@ -152,6 +153,7 @@ def batch_entry(
     deps: list[str] | None = None,
     execution_lane: str = "backend",
 ) -> dict:
+    atomic = len(task_ids) > 1
     return {
         "id": batch_id,
         "path": f"plans/{batch_id}/plan.json",
@@ -160,11 +162,14 @@ def batch_entry(
         "executionLane": execution_lane,
         "deps": deps or [],
         "taskIds": task_ids,
+        "deliveryKind": "atomic_group" if atomic else "single_task",
+        **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
         "status": "todo",
     }
 
 
 def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = "backend") -> dict:
+    atomic = len(batch_tasks) > 1
     command = {
         "id": f"BATCH-{batch_id}-COMPILE",
         "argv": [
@@ -185,6 +190,8 @@ def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = 
         "taskCount": len(batch_tasks),
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
+        "deliveryKind": "atomic_group" if atomic else "single_task",
+        **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
         "compileCommand": {**command, "id": f"BATCH-{batch_id}-COMPILE"},
         "qualityGateCommands": [],
         "startedAt": None,
@@ -621,7 +628,7 @@ class BatchedPlanContractTest(unittest.TestCase):
 
         self.assertIn("monolithic_plan_requires_rebuild", validate_plan_data(monolithic))
 
-    def test_bundle_rejects_more_than_five_tasks_in_one_batch(self) -> None:
+    def test_bundle_rejects_more_than_three_tasks_in_one_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -630,7 +637,7 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
-            self.assertIn("B001.batch_task_limit_exceeded:6>5", errors)
+        self.assertIn("B001.atomic_group_task_limit_invalid", errors)
 
     def test_bundle_loads_flat_task_view_without_putting_tasks_in_root_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -683,7 +690,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(result.errors[0]["reason"], "task_not_in_active_batch")
 
-    def test_plan_writer_splits_six_same_spec_tasks_into_five_and_one(self) -> None:
+    def test_plan_writer_projects_six_same_spec_tasks_to_six_single_task_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -740,11 +747,55 @@ class BatchedPlanContractTest(unittest.TestCase):
             second = json.loads(batch_plan_path(feature_dir, "B002").read_text(encoding="utf-8"))
 
             self.assertNotIn("tasks", root)
-            self.assertEqual([entry["id"] for entry in root["batches"]], ["B001", "B002"])
-            self.assertEqual(len(first["tasks"]), 5)
+            self.assertEqual([entry["id"] for entry in root["batches"]], ["B001", "B002", "B003", "B004", "B005", "B006"])
+            self.assertEqual(len(first["tasks"]), 1)
             self.assertEqual(len(second["tasks"]), 1)
             self.assertIsNone(root["activeBatchId"])
             self.assertIsNone(root["nextBatchId"])
+
+    def test_explicit_atomic_group_projects_two_tasks_to_one_auditable_batch(self) -> None:
+        first = task("T001")
+        second = task("T002", deps=["T001"])
+        atomic = {
+            "id": "AG001",
+            "rationale": "Both changes form one state migration that cannot be accepted separately.",
+        }
+        first["atomicGroup"] = atomic
+        second["atomicGroup"] = atomic
+        data = root_plan(batches=[])
+        data["tasks"] = [first, second]
+        data["_batchAssignments"] = {}
+        data["_batchPlans"] = {}
+
+        root, batches = _project_batches(data)
+
+        self.assertEqual(root["batchPolicy"], {"maxTasks": 3, "strategy": BATCH_STRATEGY})
+        self.assertEqual(len(root["batches"]), 1)
+        entry = root["batches"][0]
+        self.assertEqual(entry["taskIds"], ["T001", "T002"])
+        self.assertEqual(entry["deliveryKind"], "atomic_group")
+        self.assertEqual(entry["atomicGroupId"], "AG001")
+        self.assertEqual(entry["batchRationale"], atomic["rationale"])
+        self.assertEqual(batches[entry["id"]]["deliveryKind"], "atomic_group")
+        self.assertEqual(validate_plan_bundle_data(root, batches), [])
+
+    def test_atomic_group_rejects_cross_workspace_members(self) -> None:
+        first = task("T001")
+        second = task("T002")
+        atomic = {
+            "id": "AG001",
+            "rationale": "Both changes form one state migration that cannot be accepted separately.",
+        }
+        first["atomicGroup"] = atomic
+        second["atomicGroup"] = atomic
+        second["workspaceRef"] = "other"
+        second["scope"]["workspaceRoots"] = {"other": "."}
+        root = root_plan(batches=[batch_entry("B001", ["T001", "T002"])])
+        batch = batch_plan("B001", [first, second])
+
+        errors = validate_plan_bundle_data(root, {"B001": batch})
+
+        self.assertIn("atomicGroup.AG001_workspaceRef_mismatch:taskIds=T001,T002", errors)
 
     def test_plan_writer_starts_frontend_task_in_new_batch_for_same_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

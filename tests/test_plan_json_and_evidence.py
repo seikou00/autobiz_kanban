@@ -117,6 +117,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
     all_done = bool(task_items) and all(item.get("status") == "done" for item in task_items)
     batch_status = "done" if all_done else "todo"
     root_status = "done" if all_done else "todo"
+    atomic = len(task_items) > 1
     write_plan_json(
         feature_dir / "plan.json",
         {
@@ -131,7 +132,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 "codeGate": "batch_compile_only",
                 "maxTestStageRepairAttempts": 3,
             },
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
             "compileProfiles": {
                 execution_lane: {
                     "commands": [
@@ -154,6 +155,8 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                     "executionLane": execution_lane,
                     "deps": [],
                     "taskIds": [item["id"] for item in task_items],
+                    "deliveryKind": "atomic_group" if atomic else "single_task",
+                    **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
                     "status": batch_status,
                 }
             ],
@@ -177,6 +180,8 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 for item in task_items
                 for evidence_id in item.get("completionEvidenceIds", [])
             ],
+            "deliveryKind": "atomic_group" if atomic else "single_task",
+            **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
             "compileCommand": {
                 "id": "BATCH-B001-COMPILE",
                 "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
@@ -489,7 +494,7 @@ class PlanJsonTest(unittest.TestCase):
             "taskSetStatus": "finalized",
             "activeBatchId": None,
             "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
             "batches": [{
                 "id": "B001", "path": "plans/B001/plan.json", "title": "capability",
                 "specRoots": ["specs/capability/spec.md"], "executionLane": "backend",

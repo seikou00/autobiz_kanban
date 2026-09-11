@@ -14,9 +14,9 @@
 | `taskSetStatus` | 是 | `collecting`、`finalized` 或完成态。 |
 | `taskSetDigest` | 是 | 根计划和 Batch 投影的一致性摘要。 |
 | `implementationScope` | 是 | `backend_only`、`frontend_only` 或 `full_stack`。 |
-| `batchPolicy` | 是 | 固定策略 `spec_capability_execution_lane_topological` 与最大 5 个 TASK。 |
+| `batchPolicy` | 是 | 固定策略 `minimal_closed_delivery_v2`；默认一 TASK 一 Batch，显式原子组最多 3 个 TASK。 |
 | `taskValidationPolicy` | 是 | 目前固定为 `defer_to_test_stages` / `batch_compile_only`。 |
-| `batches` | 是 | Batch 索引；每项包含 `id`、`path`、`executionLane`、`taskIds`、`deps`、`status`。 |
+| `batches` | 是 | Batch 索引；每项包含 `id`、`path`、`executionLane`、`deliveryKind`、`taskIds`、`deps`、`status`。 |
 | `compileProfiles` | 是 | 按 lane 的编译命令源。每个实际使用的 lane 在 Plan 最终化后必须有一条 required `compile` 命令。 |
 | `qualityGateProfiles` | 是 | 按 lane 的静态检查命令源，可为空。只允许 required `static_check` 命令。 |
 | `projectValidationCommands` | 是 | B-INT 唯一拥有的集成验证命令。 |
@@ -56,6 +56,12 @@ TASK 测试的静态检查。
 | `qualityGateCommands` | 是 | 当前 Batch 的 required `static_check` 命令数组；没有静态检查时为 `[]`。ID 为 `BATCH-Bxxx-QUALITY-nnn`。 |
 | `batchCompile` | 运行时 | 编译执行状态、失败分类及修复次数；不是命令配置。 |
 | `mergeCommitSha`、`deliveryRunId` | 运行时 | Merge Train 推广后的提交与运行引用。 |
+
+`deliveryKind` 为 `single_task` 时，`taskIds` 必须恰好一个。只有 Task 明确携带
+相同的 `atomicGroup: { id, rationale }` 时才允许 `atomic_group`；该组必须有 2–3 个
+Task，且全部同一 `workspaceRef`、执行 lane 与执行阶段。依赖、相同模块/页面或文件
+重叠都不会自动合并 Batch；共享写入必须指定唯一 owner，不能指定 owner 时才可声明原子组。
+旧的自动聚合策略不再兼容；其 Plan 必须重新生成，不能在运行中改写 Batch 映射。
 
 `compileCommand` 在每个 Batch 的 `review` 通过后（或 Review 的一次定向修复
 完成后）首次执行。它是生产编译，不运行 TASK 测试；若 Review 修复了生产代码，

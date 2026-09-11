@@ -172,6 +172,11 @@ def _workspace(
     }
     tasks = [task]
     if deps:
+        atomic = {
+            "id": "AG001",
+            "rationale": "Test fixture keeps the dependency pair in one inseparable delivery loop.",
+        }
+        task["atomicGroup"] = atomic
         tasks.insert(
             0,
             {
@@ -195,6 +200,7 @@ def _workspace(
                 ],
             },
         )
+    is_atomic = len(tasks) > 1
     root_plan = {
         "featureId": "alpha",
         "status": "todo",
@@ -207,7 +213,7 @@ def _workspace(
             "codeGate": "batch_compile_only",
             "maxTestStageRepairAttempts": 3,
         },
-        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+        "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
         "compileProfiles": {
             "backend": {
                 "commands": [
@@ -230,6 +236,8 @@ def _workspace(
                 "executionLane": "backend",
                 "deps": [],
                 "taskIds": [item["id"] for item in tasks],
+                "deliveryKind": "atomic_group" if is_atomic else "single_task",
+                **({"atomicGroupId": "AG001", "batchRationale": "Test fixture keeps the dependency pair in one inseparable delivery loop."} if is_atomic else {}),
                 "status": "todo",
             }
         ],
@@ -261,6 +269,8 @@ def _workspace(
             "taskCount": len(tasks),
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
+            "deliveryKind": "atomic_group" if is_atomic else "single_task",
+            **({"atomicGroupId": "AG001", "batchRationale": "Test fixture keeps the dependency pair in one inseparable delivery loop."} if is_atomic else {}),
             "compileCommand": {
                 "id": "BATCH-B001-COMPILE",
                 "argv": [sys.executable, "-c", "print('batch compile')"],
@@ -413,6 +423,7 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
             "taskIds": ["T002"],
+            "deliveryKind": "single_task",
             "startedAt": None,
             "completedAt": None,
             "tasks": [second_task],
@@ -440,6 +451,7 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "executionLane": "backend",
             "deps": ["B001"],
             "taskIds": ["T002"],
+            "deliveryKind": "single_task",
             "status": "todo",
         }
     )
@@ -2252,6 +2264,13 @@ class TaskRunnerTest(unittest.TestCase):
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             plan["batches"][0]["taskIds"].append("T002")
+            atomic = {"id": "AG001", "rationale": "Test fixture keeps both active-run checks in one delivery loop."}
+            for item in batch["tasks"]:
+                item["atomicGroup"] = atomic
+            for item in (batch, plan["batches"][0]):
+                item["deliveryKind"] = "atomic_group"
+                item["atomicGroupId"] = "AG001"
+                item["batchRationale"] = atomic["rationale"]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
             _refresh_parallel_pipeline(feature_dir)
@@ -2284,6 +2303,13 @@ class TaskRunnerTest(unittest.TestCase):
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             plan["batches"][0]["taskIds"].append("T002")
+            atomic = {"id": "AG001", "rationale": "Test fixture keeps both active-run checks in one delivery loop."}
+            for item in batch["tasks"]:
+                item["atomicGroup"] = atomic
+            for item in (batch, plan["batches"][0]):
+                item["deliveryKind"] = "atomic_group"
+                item["atomicGroupId"] = "AG001"
+                item["batchRationale"] = atomic["rationale"]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
             _refresh_parallel_pipeline(feature_dir)

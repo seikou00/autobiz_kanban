@@ -90,7 +90,7 @@ def write_plan_route(
             "taskSetStatus": "finalized",
             "activeBatchId": "B001",
             "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
             "batches": [
                 {
                     "id": "B001",
