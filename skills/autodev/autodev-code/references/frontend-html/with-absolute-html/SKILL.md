@@ -116,7 +116,12 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 进入本 route 后，先把下面这组 write_todos 视为主流程骨架；**未完成前不得提前转交 `references/html-parser.md`**。脚本仍然默认必跑，任何异常都按 §7 降级处理，不阻塞后续步骤。
 
+### 步骤 1: 读取 HTML 来源
+
 - [ ] 读取 HTML 来源。
+
+### 步骤 2: 读取项目文档
+
 - [ ] 写出页面模块清单（write_todos）。
   - [ ] 读取项目 `AGENTS.md`
   - [ ] 读取项目 `architecture/`
@@ -124,18 +129,17 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - [ ] 读取相似页面 / 相似模块
   - [ ] 读取真实源码证据，例如 import、实际使用方式、路由 / 菜单 / API helper / 样式文件
   - [ ] 将以上证据与原始 HTML / 脚本产物交叉核对，再继续后续实现
-  - [ ] 这份清单是固定前置检查，不会因为原稿是高保真 HTML 就省略；只有当项目里确实不存在对应资料时，才把该项标记为“无可用证据”并继续下一项。
+  - [ ] 这份清单是固定前置检查，不会因为原稿是高保真 HTML 就省略；只有当项目里确实不存在对应资料时，才把该项标记为”无可用证据”并继续下一项。
   - [ ] 页面模块清单只负责实现范围盘点，不承担脚本执行。
+
+### 步骤 3: 执行脚本
+
 - [ ] 写出脚本清单（write_todos）。
   - [ ] 建立独立的脚本清单，不并入页面模块清单
   - [ ] 确认 `--project-root`、`--task-stem`、`--html-file` 参数完整
   - [ ] 确认 HTML 来源可读，且多片段输入已按页面模块合并
   - [ ] 执行 `prepare_html_analysis.py`
-  - [ ] 检查 `.frontend/html-analysis/<task-stem>.md`
-  - [ ] 检查 `.frontend/html-analysis/<task-stem>.json`
-  - [ ] 检查 `.frontend/html-analysis/<task-stem>-checklist.md`
-  - [ ] 若脚本失败，保留失败原因并切回降级路径
-  - [ ] 脚本清单必须和页面模块清单同时存在，最低粒度至少要覆盖 `参数确认 / 执行脚本 / 检查产物 / 失败降级` 四类事项，不能只用一句“脚本执行”代替。
+  - [ ] 脚本清单必须和页面模块清单同时存在，最低粒度至少要覆盖 `参数确认 / 执行脚本 / 检查产物 / 失败降级` 四类事项，不能只用一句”脚本执行”代替。
   - [ ] 使用完整命令模板，参数齐全后再执行：
     - `autodev-code` 技能根目录：
       ```
@@ -155,15 +159,42 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
     - 同一页面多个 HTML 片段时，重复 `--html-file` 或用逗号分隔。
     - 对多片段输入，脚本会生成 merged analysis input 做聚合分析；但原始 HTML 仍然是视觉真相。
     - 只要原始 HTML 与脚本结论冲突，就优先相信原始 HTML。
+
+### 步骤 4: 读取脚本产物
+
 - [ ] 读取上下文。
+  - [ ] 检查 `.frontend/html-analysis/<task-stem>.md`
+  - [ ] 检查 `.frontend/html-analysis/<task-stem>.json`
+  - [ ] 检查 `.frontend/html-analysis/<task-stem>-checklist.md`
+  - [ ] 若脚本失败，保留失败原因并切回降级路径
   - [ ] 若脚本产物齐全：先读取 `<task-stem>-checklist.md`，再读取 `<task-stem>.md`（完整版 handoff），最后回到原始高保真 HTML 做主判断。
   - [ ] 若走降级路径：直接以原始高保真 HTML 为主。
   - [ ] 若 checklist / handoff 标记 `componentizationMode=conservative` 或 `analysisConfidence.level != high`：先锁定原始 HTML 的宏观布局、模块边界、表格/图表/时间线/上传等所有权，再把脚本产物仅用于缺项点查与 whole-section 保留，不要让 `replacementSlots` 主导大块组件化。
+
+### 步骤 5: 处理 assets 资源
+
+当高保真 HTML 压缩包中包含 `assets/` 文件夹时，必须执行 `../references/assets-processing-guide.md` 中定义的完整流程：
+
+1. 检查并扫描 assets 目录
+2. 对每个被 HTML 引用的 asset 执行四级优先级判定
+3. 创建 assets 使用映射表
+4. 复制必要的 assets 到项目目录
+5. 输出 assets 处理总结
+
+Assets 处理总结将作为后续”编码前简报”的输入材料。详细规则和实施步骤参见 `../references/assets-processing-guide.md`。
+
+**重要：** 仅处理 HTML 中实际引用的资源文件，未被引用的文件无需处理。
+
+### 步骤 6: 转交 parser
+
 - [ ] 转交 `references/html-parser.md`。
   - [ ] `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
   - [ ] `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
+
+### 步骤 7: 生成代码
+
 - [ ] 完成主线代码生成、页面拆分 / 抽取与最低校验。
-- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进；不得发起独立回检选择。
+- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明”已跳过 Stage 1 脚本及原因”），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进；不得发起独立回检选择。
 
 ## 5. 转交规则
 

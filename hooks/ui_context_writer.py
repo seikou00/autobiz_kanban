@@ -81,6 +81,245 @@ def _structure_errors(data: dict[str, Any], feature: str) -> list[str]:
     ]
 
 
+def _visual_source_type_zh(source_type: str) -> str:
+    """将visualSource类型转换为中文"""
+    type_map = {
+        "high_fidelity_html": "高保真HTML",
+        "standard_html": "标准HTML",
+        "design_link": "设计链接",
+        "prototype_link": "原型链接",
+        "image": "图片",
+        "other": "其他"
+    }
+    return type_map.get(source_type, source_type)
+
+
+def _load_plan_tasks(workspace: Path, feature: str) -> list[dict[str, Any]]:
+    """Best-effort load of formal Plan tasks for the generated Markdown view."""
+    feature_dir = _path(workspace, feature).parent
+    plan_path = feature_dir / "plan.json"
+    if not plan_path.is_file():
+        return []
+
+    try:
+        root = load_json(plan_path)
+    except Exception:
+        return []
+    if not isinstance(root, dict):
+        return []
+
+    # Compatibility with the former monolithic plan format.
+    root_tasks = root.get("tasks")
+    if isinstance(root_tasks, list):
+        return [task for task in root_tasks if isinstance(task, dict)]
+
+    tasks: list[dict[str, Any]] = []
+    batches = root.get("batches")
+    if not isinstance(batches, list):
+        return tasks
+    for batch in batches:
+        if not isinstance(batch, dict):
+            continue
+        batch_id = batch.get("id")
+        if not isinstance(batch_id, str) or not batch_id.startswith("B") or not batch_id[1:].isdigit():
+            continue
+        try:
+            batch_plan = load_json(feature_dir / "plans" / batch_id / "plan.json")
+        except Exception:
+            continue
+        if not isinstance(batch_plan, dict):
+            continue
+        batch_tasks = batch_plan.get("tasks")
+        if isinstance(batch_tasks, list):
+            tasks.extend(task for task in batch_tasks if isinstance(task, dict))
+    return tasks
+
+
+def _task_display_for_visual_source(tasks: list[dict[str, Any]], source_id: str) -> str:
+    """Render exact Plan task IDs and titles bound to a visual source."""
+    labels: list[str] = []
+    seen_task_ids: set[str] = set()
+    for task in tasks:
+        ui_refs = task.get("uiRefs")
+        visual_source_refs = ui_refs.get("visualSourceRefs") if isinstance(ui_refs, dict) else None
+        if not isinstance(visual_source_refs, list) or source_id not in visual_source_refs:
+            continue
+        raw_task_id = task.get("id")
+        raw_title = task.get("title")
+        task_id = raw_task_id.strip() if isinstance(raw_task_id, str) else ""
+        title = raw_title.strip() if isinstance(raw_title, str) else ""
+        if not task_id or task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(task_id)
+        labels.append(f"{task_id}: {title}" if title else task_id)
+    return "<br>".join(labels) if labels else "待Plan阶段关联"
+
+
+def _generate_ui_context_md(
+    data: dict[str, Any],
+    feature: str,
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> str:
+    """生成面向前端人员的UI_CONTEXT.md文档
+
+    文档结构固定为：
+    1. 视觉资源与还原路径
+    2. 页面与能力映射
+    """
+    lines = [
+        f"# UI Context - {feature}",
+        "",
+        "本文档基于 UI_CONTEXT.json 生成，聚焦前端开发关注的内容。",
+        "",
+    ]
+
+    pages = data.get('pages', [])
+    visual_sources = data.get('visualSources', [])
+    capabilities = data.get('capabilities', [])
+    interactions = data.get('interactions', [])
+    plan_tasks = tasks or []
+
+    # ========== 1. 视觉资源与还原路径 ==========
+    lines.extend([
+        "## 视觉资源与还原路径",
+        "",
+    ])
+
+    if visual_sources:
+        lines.extend([
+            "| 资源ID | 关联任务 | 类型 | 路径 | 还原路径 | 是否必需 |",
+            "| ------ | -------- | ---- | ---- | -------- | -------- |",
+        ])
+        for vs in visual_sources:
+            source_id = vs.get('sourceId', 'N/A')
+            vs_type = vs.get('type', 'N/A')
+            vs_type_zh = _visual_source_type_zh(vs_type)
+            path = vs.get('path', 'N/A')
+            route = vs.get('route', 'N/A')
+            required = '是' if vs.get('required') else '否'
+
+            # 精确展示引用该视觉资源的正式 Plan Task。
+            task_name = _task_display_for_visual_source(plan_tasks, source_id)
+
+            lines.append(f"| {source_id} | {task_name} | {vs_type_zh} | `{path}` | `{route}` | {required} |")
+        lines.append("")
+
+        # 还原路径说明
+        lines.extend([
+            "### 还原路径说明",
+            "",
+            "- **absolute-html**: 使用高保真HTML进行像素级还原",
+            "- **standard-html**: 使用标准HTML作为参考",
+            "- **spec-driven-ui**: 基于需求规格说明驱动UI开发",
+            "- **missing-html**: 缺少HTML资源",
+            "",
+        ])
+    else:
+        lines.extend([
+            "暂无视觉资源。",
+            "",
+        ])
+
+    # ========== 2. 页面与能力映射 ==========
+    lines.extend([
+        "## 页面与能力映射",
+        "",
+    ])
+
+    if pages:
+        # 构建页面到能力的映射
+        page_to_capabilities = {}
+        if capabilities:
+            for cap in capabilities:
+                cap_id = cap.get('capabilityId', '')
+                page_refs = cap.get('pageRefs', [])
+                for page_ref in page_refs:
+                    if page_ref not in page_to_capabilities:
+                        page_to_capabilities[page_ref] = []
+                    page_to_capabilities[page_ref].append(cap_id)
+
+        # 按页面组织交互列表
+        interactions_by_page = {}
+        for interaction in interactions:
+            page_id = interaction.get('pageId', 'N/A')
+            if page_id not in interactions_by_page:
+                interactions_by_page[page_id] = []
+            interactions_by_page[page_id].append(interaction)
+
+        # 页面表格（包含能力列）
+        lines.extend([
+            "| 页面ID | 页面名称 | 页面目标 | 路由提示 | 状态 | 关联能力 | 交互 |",
+            "| ------ | -------- | -------- | -------- | ---- | -------- | ---- |",
+        ])
+
+        for page in pages:
+            page_id = page.get('pageId', 'N/A')
+            name = page.get('name', 'N/A')
+            goal = page.get('goal', 'N/A')
+            route_hint = page.get('routeHint', '')
+            states = page.get('states', [])
+
+            route_hint_display = f"`{route_hint}`" if route_hint else '-'
+            states_display = ', '.join(states) if states else '-'
+
+            # 只展示稳定 capabilityId，不生成可能失真的中文映射。
+            capabilities_display = '-'
+            if page_id in page_to_capabilities:
+                capabilities_display = '<br>'.join(page_to_capabilities[page_id])
+
+            # 构建交互列表字符串（不显示ID，每条换行）
+            interactions_display = '-'
+            if page_id in interactions_by_page:
+                interaction_items = []
+                for interaction in interactions_by_page[page_id]:
+                    summary = interaction.get('summary', 'N/A')
+                    interaction_items.append(summary)
+                interactions_display = '<br>'.join(interaction_items)
+
+            lines.append(f"| {page_id} | {name} | {goal} | {route_hint_display} | {states_display} | {capabilities_display} | {interactions_display} |")
+
+        lines.append("")
+    else:
+        lines.extend([
+            "暂无页面定义。",
+            "",
+        ])
+
+    return "\n".join(lines)
+
+
+def _write_md(
+    workspace: Path,
+    feature: str,
+    data: dict[str, Any],
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> None:
+    """写入UI_CONTEXT.md文件"""
+    md_path = _path(workspace, feature).parent / "UI_CONTEXT.md"
+    plan_tasks = _load_plan_tasks(workspace, feature) if tasks is None else tasks
+    md_content = _generate_ui_context_md(data, feature, tasks=plan_tasks)
+    md_path.write_text(md_content, encoding="utf-8")
+
+
+def refresh_ui_context_md(
+    workspace: Path,
+    feature: str,
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Refresh UI_CONTEXT.md when UI context exists; return whether it ran."""
+    context_path = _path(workspace, feature)
+    if not context_path.is_file():
+        return False
+    data = load_json(context_path)
+    if not isinstance(data, dict):
+        return False
+    _write_md(workspace, feature, data, tasks=tasks)
+    return True
+
+
 def _write(
     workspace: Path,
     feature: str,
@@ -102,6 +341,14 @@ def _write(
     if errors:
         return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
     changed = atomic_write_json(path, data)
+
+    # 同时生成UI_CONTEXT.md
+    try:
+        _write_md(workspace, feature, data)
+    except Exception as exc:
+        # MD生成失败不影响JSON写入结果，但记录警告
+        print(f"Warning: Failed to generate UI_CONTEXT.md: {exc}", file=sys.stderr)
+
     return WriterResult(ok=True, path=path, changed=changed)
 
 
@@ -405,6 +652,200 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return render_result(WriterResult(ok=True, path=_path(workspace, feature), data={"summary": summary}))
 
 
+def _parse_md_section(lines: list[str], start_marker: str) -> tuple[int, list[str]]:
+    """提取Markdown中某个section的内容"""
+    start = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith(start_marker):
+            start = i
+            break
+    if start == -1:
+        return -1, []
+
+    # 找到下一个同级或更高级标题
+    level = len(start_marker.split()[0])  # ## 是2级
+    content = []
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if line.strip().startswith("#"):
+            # 检查标题级别
+            header_level = len(line.split()[0])
+            if header_level <= level:
+                break
+        content.append(line)
+
+    return start, content
+
+
+def _parse_pages_from_md(lines: list[str]) -> list[dict[str, Any]]:
+    """从MD解析页面列表"""
+    _, section = _parse_md_section(lines, "## 页面列表")
+    if not section:
+        return []
+
+    pages = []
+    current_page = None
+
+    for line in section:
+        line = line.strip()
+        if line.startswith("### "):
+            # 新页面: ### PAGE-001: 订单列表页
+            if current_page:
+                pages.append(current_page)
+            parts = line[4:].split(":", 1)
+            if len(parts) == 2:
+                page_id = parts[0].strip()
+                name = parts[1].strip()
+                current_page = {"pageId": page_id, "name": name, "goal": ""}
+        elif line.startswith("**目标**:") and current_page:
+            current_page["goal"] = line.split(":", 1)[1].strip()
+        elif line.startswith("**路由提示**:") and current_page:
+            route_hint = line.split(":", 1)[1].strip().strip("`")
+            if route_hint:
+                current_page["routeHint"] = route_hint
+        elif line.startswith("**状态**:") and current_page:
+            states_str = line.split(":", 1)[1].strip()
+            states = [s.strip() for s in states_str.split(",")]
+            if states:
+                current_page["states"] = states
+
+    if current_page:
+        pages.append(current_page)
+
+    return pages
+
+
+def _parse_interactions_from_md(lines: list[str]) -> list[dict[str, Any]]:
+    """从MD解析交互列表"""
+    _, section = _parse_md_section(lines, "## 交互列表")
+    if not section:
+        return []
+
+    interactions = []
+    current_interaction = None
+
+    for line in section:
+        line = line.strip()
+        if line.startswith("### "):
+            # 新交互: ### UIX-001: 点击订单行跳转到详情页
+            if current_interaction:
+                interactions.append(current_interaction)
+            parts = line[4:].split(":", 1)
+            if len(parts) == 2:
+                interaction_id = parts[0].strip()
+                summary = parts[1].strip()
+                current_interaction = {"interactionId": interaction_id, "summary": summary, "pageId": ""}
+        elif line.startswith("**所属页面**:") and current_interaction:
+            current_interaction["pageId"] = line.split(":", 1)[1].strip()
+        elif line.startswith("**关联状态**:") and current_interaction:
+            states_str = line.split(":", 1)[1].strip()
+            states = [s.strip() for s in states_str.split(",")]
+            if states:
+                current_interaction["stateRefs"] = states
+
+    if current_interaction:
+        interactions.append(current_interaction)
+
+    return interactions
+
+
+def _parse_capabilities_from_md(lines: list[str]) -> list[dict[str, Any]]:
+    """从MD解析能力列表"""
+    _, section = _parse_md_section(lines, "## 能力与资源映射关系")
+    if not section:
+        return []
+
+    capabilities = []
+    current_capability = None
+
+    for line in section:
+        line = line.strip()
+        if line.startswith("### ") and not line.startswith("### 还原路径说明"):
+            # 新能力: ### order-list-ui
+            if current_capability:
+                capabilities.append(current_capability)
+            capability_id = line[4:].strip()
+            current_capability = {
+                "capabilityId": capability_id,
+                "pageRefs": [],
+                "interactionRefs": [],
+                "visualSourceRefs": [],
+                "specRefs": []
+            }
+        elif line.startswith("**UI需求**:") and current_capability:
+            ui_req_str = line.split(":", 1)[1].strip()
+            current_capability["uiRequired"] = ui_req_str == "是"
+        elif line.startswith("**关联页面**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and refs != "无":
+                current_capability["pageRefs"] = [r.strip() for r in refs.split(",")]
+        elif line.startswith("**关联交互**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and refs != "无":
+                current_capability["interactionRefs"] = [r.strip() for r in refs.split(",")]
+        elif line.startswith("**视觉资源**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and not refs.startswith("无"):
+                current_capability["visualSourceRefs"] = [r.strip() for r in refs.split(",")]
+        elif line.startswith("**规格引用**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and refs != "无":
+                current_capability["specRefs"] = [r.strip() for r in refs.split(",")]
+
+    if current_capability:
+        capabilities.append(current_capability)
+
+    return capabilities
+
+
+def _cmd_sync_from_md(args: argparse.Namespace) -> int:
+    """从UI_CONTEXT.md同步内容到UI_CONTEXT.json"""
+    workspace, feature = _resolve(args)
+
+    # 读取MD文件
+    md_path = _path(workspace, feature).parent / "UI_CONTEXT.md"
+    if not md_path.exists():
+        return render_result(fail("md_file_not_found", f"UI_CONTEXT.md 不存在: {md_path}"))
+
+    try:
+        md_content = md_path.read_text(encoding="utf-8")
+        md_lines = md_content.split("\n")
+    except Exception as exc:
+        return render_result(fail("md_read_failed", str(exc)))
+
+    # 读取现有JSON数据（保留MD中没有的字段）
+    data = _load(workspace, feature)
+
+    # 解析MD中的基本信息
+    ui_required = None
+    for line in md_lines:
+        if "**UI需求**:" in line:
+            ui_required = "是" in line
+            break
+
+    if ui_required is not None:
+        data["uiRequired"] = ui_required
+
+    # 解析并更新pages、interactions、capabilities
+    try:
+        pages = _parse_pages_from_md(md_lines)
+        if pages:
+            data["pages"] = pages
+
+        interactions = _parse_interactions_from_md(md_lines)
+        if interactions:
+            data["interactions"] = interactions
+
+        capabilities = _parse_capabilities_from_md(md_lines)
+        if capabilities:
+            data["capabilities"] = capabilities
+    except Exception as exc:
+        return render_result(fail("md_parse_failed", f"解析MD失败: {exc}"))
+
+    # 写入JSON（会触发MD重新生成）
+    return render_result(_write(workspace, feature, data))
+
+
 def _resolve(args: argparse.Namespace) -> tuple[Path, str]:
     return resolve_workspace(args.workspace), resolve_feature(args.feature)
 
@@ -527,6 +968,10 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(show)
     show.add_argument("--summary", action="store_true")
     show.set_defaults(func=_cmd_show)
+
+    sync = sub.add_parser("sync-from-md")
+    _add_common(sync)
+    sync.set_defaults(func=_cmd_sync_from_md)
 
     args = parser.parse_args(argv)
     try:

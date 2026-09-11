@@ -4,6 +4,26 @@
 leaving Biz stages, and use this reference before creating or editing the file.
 Do not infer UI scope from Markdown after this file exists.
 
+## UI_CONTEXT.md Auto-Generation
+
+When `UI_CONTEXT.json` is written or updated, a human-readable `UI_CONTEXT.md`
+is automatically generated in the same directory. This Markdown file:
+
+- Focuses on frontend developer concerns: pages, interactions, visual sources, and restoration paths
+- Shows the relationship between capabilities, HTML resources, and restoration routes
+- Renders `capabilityId` values directly; it does not invent Chinese translations for capability names
+- Shows a visual source's formal Plan tasks as `T00X: task title` when `uiRefs.visualSourceRefs` binds them; before Plan exists it shows `待Plan阶段关联`
+- Includes a visual tree diagram mapping tasks → HTML → paths
+- Can be manually edited and synced back to JSON using `sync-from-md` command
+- Serves as a quick reference for frontend teams to review UI scope and implementation strategy
+
+**Synchronization**:
+- JSON → MD: automatic (on every JSON write)
+- Plan → MD: automatic (on every formal Plan write, to refresh exact task IDs and titles)
+- MD → JSON: manual (using `python hooks/ui_context_writer.py sync-from-md --feature <feature>`)
+
+See `docs/ui-context-md-generation.md` for detailed documentation.
+
 ## Required Root Fields
 
 - `version`: must be `1`.

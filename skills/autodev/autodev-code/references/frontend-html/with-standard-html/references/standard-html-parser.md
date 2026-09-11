@@ -48,30 +48,54 @@ auditRequired=<true|false>
 
 本节消费上层 `write_todos` 产物，不重新发明一套路线判定。若上层清单缺失，先补齐清单，再继续。
 
-1. 读取原始 HTML 文件或用户提供的 HTML 内容。
-2. 从 HTML 来源目录和目标工程目录向上查找并读取 `AGENT.md` / `AGENTS.md`，更近的规则优先。
-3. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
-4. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
-5. 对照页面模块清单确认入口、分区、局部组件、复用逻辑、样式文件和资产范围。
-6. 对照转换清单确认项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略，并消费 `uiLibraryTarget`。
-7. 当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
-8. 当 `uiLibraryTarget=antd-mobile` 时，不读取桌面 Ant Design 转换参考，不运行桌面 Ant Design 覆盖审计；按项目移动端组件规则或 code 根技能 React + Ant Design Mobile 兜底继续。
-9. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户本轮提供的接口材料。
+上层路线 SKILL 已在转交前完成 HTML 读取、项目文档读取和 assets 资源处理（若存在）。本参考消费这些产物，直接开始组件映射和代码生成。
+
+### 3.1 Assets 资源检查与处理
+
+执行 `../../references/assets-processing-guide.md` 中定义的完整流程。
+
+若 HTML 压缩包包含 `assets/` 目录：
+1. 检查并扫描 assets 目录
+2. 提取 HTML 中所有 assets 引用（仅处理被引用的文件）
+3. 对每个被引用的 asset 执行四级优先级判定
+4. 创建 assets 使用映射表并写入 `.frontend/html-analysis/<task-stem>-assets-mapping.json`
+5. 复制必要的 assets 到项目目录
+6. 输出 assets 处理总结
+
+**映射表位置：** `.frontend/html-analysis/<task-stem>-assets-mapping.json`
+
+若上层路线已生成映射表，直接读取并消费；若未生成，在编码前简报阶段执行一次完整 assets 处理。
+
+Assets 处理总结将作为编码前简报的输入材料。
+
+### 3.2 项目上下文读取
+
+1. 从 HTML 来源目录和目标工程目录向上查找并读取 `AGENT.md` / `AGENTS.md`，更近的规则优先。
+2. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
+3. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
+4. 对照页面模块清单确认入口、分区、局部组件、复用逻辑、样式文件和资产范围。
+5. 对照转换清单确认项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略，并消费 `uiLibraryTarget`。
+6. 当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
+7. 当 `uiLibraryTarget=antd-mobile` 时，不读取桌面 Ant Design 转换参考，不运行桌面 Ant Design 覆盖审计；按项目移动端组件规则或 code 根技能 React + Ant Design Mobile 兜底继续。
+8. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户本轮提供的接口材料。
 
 ## 4. Craft：编码前简报
 
 写代码前先形成一个短实现简报，并据此落地。这个简报必须消费上层 `write_todos`，不能跳过页面模块清单、转换清单或已启用的 Ant Design 审计清单。
 
+编码前简报必须包含：
+
 1. 源 HTML 范围、依赖、外部资源和可用资产。
-2. 目标工程位置、路由位置和文件组织。
-3. 组件边界与抽取标准。
-4. 页面模块清单：入口、分区、局部组件、复用逻辑、样式文件和资产。
-5. 项目组件 / Ant Design / Ant Design Mobile / 原生 HTML 的映射计划；当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，必须补充 Ant Design 映射矩阵。
-6. 样式策略：CSS Modules、Less、Tailwind、普通 CSS、styled-components 或项目既有方案。
-7. 需要保留或重建的交互：tab、展开收起、表单提交、分页、筛选、弹窗、上传、排序等。
-8. 需要支持的状态：默认、loading、empty、error、disabled、hover/focus、responsive。
-9. `uiLibraryTarget`、`antdMode` 与 `auditRequired`，以及审计命令和候选项处理方式。
-10. 验证计划：静态检查、构建、运行、浏览器预览、响应式检查。
+2. **Assets 处理结果**（若上层路线已处理 assets）：消费 assets 使用映射表，直接引用已复制的文件和图标库映射。
+3. 目标工程位置、路由位置和文件组织。
+4. 组件边界与抽取标准。
+5. 页面模块清单：入口、分区、局部组件、复用逻辑、样式文件和资产。
+6. 项目组件 / Ant Design / Ant Design Mobile / 原生 HTML 的映射计划；当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，必须补充 Ant Design 映射矩阵。
+7. 样式策略：CSS Modules、Less、Tailwind、普通 CSS、styled-components 或项目既有方案。
+8. 需要保留或重建的交互：tab、展开收起、表单提交、分页、筛选、弹窗、上传、排序等。
+9. 需要支持的状态：默认、loading、empty、error、disabled、hover/focus、responsive。
+10. `uiLibraryTarget`、`antdMode` 与 `auditRequired`，以及审计命令和候选项处理方式。
+11. 验证计划：静态检查、构建、运行、浏览器预览、响应式检查。
 
 若用户要求像素级或高保真迁移，源 HTML 就是设计简报；不要主动归一化成 AntD 默认外观。若用户要求工程化清理或后台产品 UI，允许在不丢失语义和业务层级的前提下把标准控件映射到项目组件或 Ant Design。
 

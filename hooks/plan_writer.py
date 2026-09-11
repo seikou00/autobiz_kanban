@@ -1376,6 +1376,15 @@ def _write(
         changed = write_text(_md_path(workspace, feature), plan_markdown) or changed
     if transaction_path is not None:
         unlink_if_exists(transaction_path)
+    try:
+        # UI_CONTEXT.md exists before Plan. Refresh its derived task labels
+        # whenever the formal Plan changes so it does not keep page summaries.
+        from hooks.ui_context_writer import refresh_ui_context_md
+
+        refresh_ui_context_md(workspace, feature, tasks=_tasks(data))
+    except Exception as exc:
+        # A human-readable sidecar must not invalidate a committed Plan.
+        print(f"Warning: Failed to refresh UI_CONTEXT.md from Plan: {exc}", file=sys.stderr)
     return WriterResult(ok=True, path=path, changed=changed)
 
 
