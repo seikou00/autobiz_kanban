@@ -747,6 +747,41 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(result.ok, result.errors)
         self.assertEqual((repository / "app.txt").read_text(encoding="utf-8"), "user baseline change\n")
 
+    def test_code_source_restore_allows_stored_object_digest_drift(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        (repository / "app.txt").write_text("user baseline change\n", encoding="utf-8")
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+        entry = session["repositories"][repository.name]["files"]["app.txt"]
+        object_path = (
+            self.project
+            / ".autobizdevops"
+            / "rollback"
+            / "baselines"
+            / self.feature
+            / "objects"
+            / entry["objectSha256"]
+        )
+        object_path.write_text("modified baseline object\n", encoding="utf-8")
+        (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
+        self._write_task_run(repository)
+
+        result = execute_stage_rollback(
+            prepare_stage_rollback(
+                workspace=self.project,
+                feature=self.feature,
+                stage="dev.code",
+                code_source="restore",
+            )
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual((repository / "app.txt").read_text(encoding="utf-8"), "modified baseline object\n")
+
     def test_code_session_preserves_tracked_file_deleted_before_capture(self) -> None:
         self._set_checkpoint("code_done")
         repository = self._create_code_repository()

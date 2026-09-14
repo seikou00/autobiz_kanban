@@ -1550,8 +1550,6 @@ def _execute_source_restore(workspace: Path, feature: str, plan: CodeSourcePlan)
                     if not object_path.is_file():
                         raise ValueError(f"Code Session 基线对象缺失: {repository_id}:{relative}")
                     object_content = object_path.read_bytes()
-                    if _sha256(object_content) != str(entry.get("objectSha256", "")):
-                        raise ValueError(f"Code Session 基线对象校验失败: {repository_id}:{relative}")
                 else:
                     raise ValueError(f"Code Session 基线存储类型无效: {repository_id}:{relative}")
                 target.parent.mkdir(parents=True, exist_ok=True)
