@@ -197,7 +197,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 "taskValidationPolicy": {
                     "mode": "defer_to_test_stages",
                     "orchestration": "inline",
-                    "codeGate": "batch_compile_only",
+                    "codeGate": "review_only",
                     "maxTestStageRepairAttempts": 3,
                 },
                 "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
@@ -206,18 +206,6 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                     "specRoots": ["specs/cap/spec.md"], "executionLane": "backend",
                     "deps": [], "taskIds": ["T001"], "deliveryKind": "single_task", "status": "todo",
                 }],
-                "compileProfiles": {
-                    "backend": {
-                        "commands": [
-                            {
-                                "argv": [sys.executable, "-c", "print('backend compile')"],
-                                "cwd": ".",
-                                "kind": "compile",
-                                "required": True,
-                            }
-                        ]
-                    }
-                },
                 "qualityGateProfiles": {},
                 "projectValidationCommands": [
                     {
@@ -241,13 +229,6 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
         "deliveryKind": "single_task",
-        "compileCommand": {
-            "id": "BATCH-B001-COMPILE",
-            "argv": [sys.executable, "-c", "print('backend compile')"],
-            "cwd": ".",
-            "kind": "compile",
-            "required": True,
-        },
         "qualityGateCommands": [],
         "startedAt": None,
         "completedAt": None,

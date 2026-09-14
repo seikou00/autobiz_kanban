@@ -129,22 +129,10 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             "taskValidationPolicy": {
                 "mode": "defer_to_test_stages",
                 "orchestration": "inline",
-                "codeGate": "batch_compile_only",
+                "codeGate": "review_only",
                 "maxTestStageRepairAttempts": 3,
             },
             "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
-            "compileProfiles": {
-                execution_lane: {
-                    "commands": [
-                        {
-                            "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
-                            "cwd": ".",
-                            "kind": "compile",
-                            "required": True,
-                        }
-                    ]
-                }
-            },
             "qualityGateProfiles": {},
             "batches": [
                 {
@@ -182,13 +170,6 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             ],
             "deliveryKind": "atomic_group" if atomic else "single_task",
             **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
-            "compileCommand": {
-                "id": "BATCH-B001-COMPILE",
-                "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
-                "cwd": ".",
-                "kind": "compile",
-                "required": True,
-            },
             "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
@@ -1333,9 +1314,12 @@ class EvidenceGateTest(unittest.TestCase):
                 "taskValidationPolicy": {
                     "mode": "defer_to_test_stages",
                     "orchestration": "inline",
-                    "codeGate": "batch_compile_only",
+                    "codeGate": "review_only",
                 },
-                "_bundleBatches": {"B001": dict(batch), "B002": dict(batch)},
+                "_bundleBatches": {
+                    "B001": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
+                    "B002": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
+                },
             }
 
             errors = _check_batch_completion(plan, {}, feature_dir=feature_dir)

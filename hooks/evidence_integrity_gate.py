@@ -29,7 +29,6 @@ from evidence_store import (  # noqa: E402
 )
 from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
-    batch_compile_is_not_configured_for_frontend,
     blocked_tasks,
     defer_to_test_stages_enabled,
     failed_tasks,
@@ -211,7 +210,7 @@ def _check_completion(
     *,
     feature_dir: Path | None = None,
 ) -> list[str]:
-    """Validate Code completion evidence for the compile-only policy."""
+    """Validate Code completion evidence for deferred validation."""
     errors: list[str] = []
     by_id = {
         str(record.get("evidenceId")): record
@@ -301,50 +300,8 @@ def _check_batch_completion(
     for batch_id, batch in batch_plans.items():
         if not isinstance(batch, dict):
             continue
-        # Current Plans have no batch compilation surface.  Preserve the
-        # stricter checks only for finalized legacy artifacts that still carry
-        # the old command/state pair while they complete migration.
-        if "compileCommand" not in batch and "batchCompile" not in batch:
-            continue
-        compile_result = batch.get("batchCompile")
-        if not isinstance(compile_result, dict):
-            errors.append(f"{batch_id}.batch_compile_contract_missing")
-            continue
-        compile_status = compile_result.get("status")
-        if compile_status == "skipped":
-            if not batch_compile_is_not_configured_for_frontend(batch):
-                errors.append(f"{batch_id}.batch_compile_skip_not_allowed")
-            continue
-        if compile_status not in {"passed", "failed"}:
-            errors.append(f"{batch_id}.batch_compile_not_recorded:{compile_status}")
-            continue
-        command_id = compile_result.get("commandId")
-        if not isinstance(command_id, str) or not command_id.strip():
-            errors.append(f"{batch_id}.batch_compile_commandId_missing_or_empty")
-            continue
-        compile_command = batch.get("compileCommand")
-        if not (
-            isinstance(compile_command, dict)
-            and compile_command.get("kind") == "compile"
-            and compile_command.get("required") is True
-            and compile_command.get("id") == command_id
-        ):
-            errors.append(f"{batch_id}.batch_compile_commandId_not_found_in_plan:{command_id}")
-            continue
-        expected_evidence = {
-            str(task.get("id")): task.get("latestImplementationEvidenceId")
-            for task in batch.get("tasks", [])
-            if isinstance(task, dict) and isinstance(task.get("id"), str)
-        }
-        if compile_result.get("implementationEvidenceByTask") != expected_evidence:
-            errors.append(f"{batch_id}.batch_compile_implementation_evidence_mismatch")
-        expected_revisions = {
-            str(task.get("id")): task.get("implementationRevision")
-            for task in batch.get("tasks", [])
-            if isinstance(task, dict) and isinstance(task.get("id"), str)
-        }
-        if compile_result.get("implementationRevisionByTask") != expected_revisions:
-            errors.append(f"{batch_id}.batch_compile_implementation_revision_mismatch")
+        if "compileCommand" in batch or "batchCompile" in batch:
+            errors.append(f"{batch_id}.batch_compile_retired")
 
     # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
     # Only the merger records the delivery and transitions the task from

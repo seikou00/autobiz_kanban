@@ -220,12 +220,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
         )
         self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
-        compile_added = _run(
-            "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-            "--feature", "alpha", "--lane", "backend",
-            "--command", f"{sys.executable} -c \"print('compile')\"",
-        )
-        self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
         project_added = _run(
             "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
             "--feature", "alpha", "--command", f"{sys.executable} -c \"print('integration')\"",
@@ -238,15 +232,15 @@ class PrevalidationIntegrationTests(unittest.TestCase):
         self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
         return workspace, feature_dir, task
 
-    def test_reopen_reconfigures_engineering_commands_and_rematerializes(self) -> None:
+    def test_reopen_reconfigures_review_owned_commands_and_rematerializes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, _ = self._finalize_single_task(root)
 
             locked = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "plan_writer.py", "add-quality-gate-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('replacement compile')\"",
+                "--command", f"{sys.executable} -c \"print('quality replacement')\"",
             )
             self.assertNotEqual(locked.returncode, 0)
             self.assertIn("task_draft_finalized", locked.stdout)
@@ -266,12 +260,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(reopened.returncode, 0, reopened.stdout + reopened.stderr)
 
-            compile_replaced = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('replacement compile')\"",
-            )
-            self.assertEqual(compile_replaced.returncode, 0, compile_replaced.stdout + compile_replaced.stderr)
             project_replaced = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", f"{sys.executable} -c \"print('replacement integration')\"",
@@ -302,11 +290,9 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertEqual(rematerialized.returncode, 0, rematerialized.stdout + rematerialized.stderr)
 
             root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            compile_commands = root_plan["compileProfiles"]["backend"]["commands"]
             project_commands = root_plan["projectValidationCommands"]
             quality_commands = root_plan["qualityGateProfiles"]["backend"]["commands"]
-            self.assertEqual(len(compile_commands), 1)
-            self.assertIn("replacement compile", compile_commands[0]["argv"][-1])
+            self.assertNotIn("compileProfiles", root_plan)
             self.assertEqual(len(project_commands), 1)
             self.assertIn("replacement integration", project_commands[0]["argv"][-1])
             self.assertEqual(len(quality_commands), 1)
@@ -702,12 +688,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                     "--feature", "alpha", "--task-id", task["id"], "--body-file", str(detail_path),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            compile_added = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('compile')\"",
-            )
-            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
             project_added = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", f"{sys.executable} -c \"print('integration')\"",

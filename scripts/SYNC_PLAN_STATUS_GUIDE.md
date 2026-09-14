@@ -349,15 +349,15 @@ git commit -m "chore: sync plan status after manual task completion"
 `taskSetDigest` 基于以下内容计算 SHA256：
 - 所有批次的元数据（id、title、executionLane 等）
 - 所有任务的契约（contract）字段（排除运行时字段）
-- batchCompile 状态（如果启用）
 - taskValidationPolicy 配置
 
 ### defer_to_test_stages 策略
 
 当 plan 启用 `defer_to_test_stages` 验证策略时：
 - 任务 `done` 状态不强制要求 `completionEvidenceIds`
-- 依赖 `batchCompile.status == "passed"` 作为完成证据
-- 脚本会自动识别并适配此策略
+- 当前 `review_only` Plan 不创建 `batchCompile`；实现完成后交由 Review/UTest/Merge Train 形成完成证据
+- 出现 `batch_compile_only`、`compileCommand` 或 `batchCompile` 时必须重建 Plan
+- 同步脚本仅处理此当前策略，不迁移或补全废弃字段
 
 ## 更新日志
 

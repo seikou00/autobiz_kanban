@@ -26,12 +26,9 @@ class EngineeringCommandValidationTest(unittest.TestCase):
 
         self.assertEqual(_validate_draft_engineering_commands(data), [])
 
-    def test_legacy_compile_profiles_are_ignored_during_migration(self) -> None:
+    def test_draft_validation_has_no_cross_task_compile_requirement(self) -> None:
         data = {
             "tasks": [{"id": "T001", "workspaceRef": "default", "executionMode": "code"}],
-            "compileProfiles": {
-                "backend": {"commands": [{"argv": ["mvn", "compile"], "repo": None}]}
-            },
         }
 
         self.assertEqual(_validate_draft_engineering_commands(data), [])

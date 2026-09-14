@@ -84,22 +84,10 @@ class EvidenceAuditTest(unittest.TestCase):
                         "taskValidationPolicy": {
                             "mode": "defer_to_test_stages",
                             "orchestration": "inline",
-                            "codeGate": "batch_compile_only",
+                            "codeGate": "review_only",
                             "maxTestStageRepairAttempts": 3,
                         },
                         "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
-                        "compileProfiles": {
-                            "backend": {
-                                "commands": [
-                                    {
-                                        "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
-                                        "cwd": ".",
-                                        "kind": "compile",
-                                        "required": True,
-                                    }
-                                ]
-                            }
-                        },
                         "qualityGateProfiles": {},
                         "batches": [
                             {
@@ -153,13 +141,6 @@ class EvidenceAuditTest(unittest.TestCase):
                             "completedTaskCount": completed_count,
                             "completionEvidenceIds": [],
                             "deliveryKind": "single_task",
-                            "compileCommand": {
-                                "id": f"BATCH-{batch_id}-COMPILE",
-                                "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
-                                "cwd": ".",
-                                "kind": "compile",
-                                "required": True,
-                            },
                             "qualityGateCommands": [],
                             "startedAt": None,
                             "completedAt": completed_at,

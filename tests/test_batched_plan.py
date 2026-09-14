@@ -104,33 +104,11 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         "taskValidationPolicy": {
             "mode": "defer_to_test_stages",
             "orchestration": "inline",
-            "codeGate": "batch_compile_only",
+            "codeGate": "review_only",
             "maxTestStageRepairAttempts": 3,
         },
         "batchPolicy": {"maxTasks": 3, "strategy": BATCH_STRATEGY},
         "batches": batches,
-        "compileProfiles": {
-            "backend": {
-                "commands": [
-                    {
-                        "argv": [sys.executable, "-c", "print('backend compile')"],
-                        "cwd": ".",
-                        "kind": "compile",
-                        "required": True,
-                    }
-                ]
-            },
-            "frontend": {
-                "commands": [
-                    {
-                        "argv": [sys.executable, "-c", "print('frontend build')"],
-                        "cwd": ".",
-                        "kind": "compile",
-                        "required": True,
-                    }
-                ]
-            },
-        },
         "qualityGateProfiles": {},
         "projectValidationCommands": [
             {
@@ -170,17 +148,6 @@ def batch_entry(
 
 def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = "backend") -> dict:
     atomic = len(batch_tasks) > 1
-    command = {
-        "id": f"BATCH-{batch_id}-COMPILE",
-        "argv": [
-            sys.executable,
-            "-c",
-            "print('frontend build')" if execution_lane == "frontend" else "print('backend compile')",
-        ],
-        "cwd": ".",
-        "kind": "compile",
-        "required": True,
-    }
     return {
         "featureId": "alpha",
         "batchId": batch_id,
@@ -192,7 +159,6 @@ def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = 
         "completionEvidenceIds": [],
         "deliveryKind": "atomic_group" if atomic else "single_task",
         **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
-        "compileCommand": {**command, "id": f"BATCH-{batch_id}-COMPILE"},
         "qualityGateCommands": [],
         "startedAt": None,
         "completedAt": None,
@@ -280,7 +246,6 @@ class BatchedPlanContractTest(unittest.TestCase):
 
     def test_batch_and_project_commands_reject_noop_validation(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
-        root["compileProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "compile"]
         root["projectValidationCommands"][0]["argv"] = ["echo", "integration"]
 
         errors = validate_plan_data(root, require_backend_compile=True)
@@ -293,14 +258,6 @@ class BatchedPlanContractTest(unittest.TestCase):
 
     def test_backend_batch_does_not_require_a_compile_profile(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
-        root["compileProfiles"]["backend"]["commands"] = [
-            {
-                "argv": ["ruff", "check", "."],
-                "cwd": ".",
-                "kind": "lint",
-                "required": True,
-            }
-        ]
 
         errors = validate_plan_data(root, require_backend_compile=True)
 
@@ -322,7 +279,7 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertNotEqual(task_set_digest(root, {"B001": batch}), policy_digest)
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
-    def test_finalized_plan_allows_legacy_compile_fields_to_be_absent(self) -> None:
+    def test_finalized_plan_rejects_retired_compile_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -330,72 +287,32 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
-            root.pop("compileProfiles")
-            write_plan_json(root_path, root)
-
             load_plan_bundle(feature_dir)
 
-            root["compileProfiles"] = root_plan(batches=[])["compileProfiles"]
+            root["compileProfiles"] = {"backend": {"commands": []}}
             write_plan_json(root_path, root)
-            batch_path = batch_plan_path(feature_dir, "B001")
-            batch = json.loads(batch_path.read_text(encoding="utf-8"))
-            batch.pop("compileCommand")
-            write_plan_json(batch_path, batch)
+            with self.assertRaisesRegex(PlanJsonError, "compileProfiles_retired"):
+                load_plan_bundle(feature_dir)
 
-            load_plan_bundle(feature_dir)
-
-    def test_project_validation_rejects_batch_kinds_and_profile_duplicates(self) -> None:
+    def test_project_validation_rejects_batch_kinds(self) -> None:
         base = root_plan(batches=[batch_entry("B001", ["T001"])])
         base["projectValidationCommands"][0]["kind"] = "compile"
         errors = validate_plan_data(base)
 
         self.assertIn("projectValidationCommands[0].kind_invalid", errors)
 
-        duplicate = root_plan(batches=[batch_entry("B001", ["T001"])])
-        duplicate["projectValidationCommands"] = [
-            {
-                "id": "PROJECT-VAL-001",
-                "argv": [sys.executable, "-c", "print('backend compile')"],
-                "cwd": ".",
-                "kind": "static_check",
-                "required": True,
-            }
-        ]
-
-        self.assertIn(
-            "projectValidationCommands[0].duplicates_batch_profile:backend",
-            validate_plan_data(duplicate),
-        )
-
-        for profile_cwd, project_cwd in [(".", "./"), ("src", "src/")]:
-            with self.subTest(profile_cwd=profile_cwd, project_cwd=project_cwd):
-                equivalent = root_plan(batches=[batch_entry("B001", ["T001"])])
-                equivalent["compileProfiles"]["backend"]["commands"][0]["cwd"] = profile_cwd
-                equivalent["projectValidationCommands"] = [
-                    {
-                        "id": "PROJECT-VAL-001",
-                        "argv": [sys.executable, "-c", "print('backend compile')"],
-                        "cwd": project_cwd,
-                        "kind": "static_check",
-                        "required": True,
-                    }
-                ]
-                self.assertIn(
-                    "projectValidationCommands[0].duplicates_batch_profile:backend",
-                    validate_plan_data(equivalent),
-                )
-
-    def test_bundle_ignores_legacy_compile_projection_drift(self) -> None:
+    def test_bundle_rejects_retired_compile_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
             write_bundle(feature_dir, [[task("T001")]])
             batch_path = batch_plan_path(feature_dir, "B001")
             batch = json.loads(batch_path.read_text(encoding="utf-8"))
-            batch["compileCommand"]["argv"] = [sys.executable, "-c", "print('manual drift')"]
+            batch["compileCommand"] = {"id": "BATCH-B001-COMPILE", "kind": "compile", "required": True}
             write_plan_json(batch_path, batch)
 
-            load_plan_bundle(feature_dir)
+            with self.assertRaisesRegex(PlanJsonError, "B001.compileCommand_retired"):
+                load_plan_bundle(feature_dir)
     def test_plan_writer_omits_lane_compile_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -598,9 +515,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             write_bundle(feature_dir, [[task("T001")]])
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
-            del root["compileProfiles"]["backend"]
-            write_plan_json(root_path, root)
-
             load_plan_bundle(feature_dir, require_initial_status=True)
 
     def test_root_plan_requires_task_set_status(self) -> None:

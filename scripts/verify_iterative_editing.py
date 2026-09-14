@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""验证 Code 阶段迭代修改功能的快速测试"""
+"""快速验证当前 Code 阶段的 deferred-validation 策略。"""
 
 import sys
 from pathlib import Path
@@ -9,92 +9,35 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from hooks.task_runner import TaskRunnerError
+from hooks.plan_json import defer_to_test_stages_enabled
 
 
 def test_modified_logic():
-    """验证修改后的逻辑是否正确"""
+    """只允许 Review/UTest 接管的当前策略。"""
 
-    # 模拟场景：任务状态为 implemented，不是 compile repair
-    task_status = "implemented"
-    is_compile_repair = False
-
-    # 场景 1: batch compile 状态为 pending（应该允许）
-    compile_status = "pending"
-    try:
-        # 模拟修改后的逻辑
-        if task_status == "implemented" and not is_compile_repair:
-            if compile_status != "pending":
-                raise TaskRunnerError(
-                    f"task_implementation_already_ready:T1",
-                    requiredAction="task_locked_after_compile",
-                    batchCompileStatus=compile_status,
-                )
-        print("✅ 场景 1 通过: batch compile pending 时允许重新启动")
-    except TaskRunnerError as e:
-        print(f"❌ 场景 1 失败: {e}")
-        return False
-
-    # 场景 2: batch compile 状态为 passed（应该拒绝）
-    compile_status = "passed"
-    try:
-        if task_status == "implemented" and not is_compile_repair:
-            if compile_status != "pending":
-                raise TaskRunnerError(
-                    f"task_implementation_already_ready:T1",
-                    requiredAction="task_locked_after_compile",
-                    batchCompileStatus=compile_status,
-                )
-        print("❌ 场景 2 失败: 应该抛出错误但没有")
-        return False
-    except TaskRunnerError as e:
-        if "task_implementation_already_ready" in str(e):
-            print("✅ 场景 2 通过: batch compile passed 时正确拒绝")
-        else:
-            print(f"❌ 场景 2 失败: 错误信息不正确: {e}")
-            return False
-
-    # 场景 3: batch compile 状态为 failed（应该在其他地方处理）
-    compile_status = "failed"
-    try:
-        if task_status == "implemented" and not is_compile_repair:
-            if compile_status != "pending":
-                raise TaskRunnerError(
-                    f"task_implementation_already_ready:T1",
-                    requiredAction="task_locked_after_compile",
-                    batchCompileStatus=compile_status,
-                )
-        print("❌ 场景 3 失败: 应该抛出错误但没有")
-        return False
-    except TaskRunnerError as e:
-        if "task_implementation_already_ready" in str(e):
-            print("✅ 场景 3 通过: batch compile failed 时正确拒绝")
-        else:
-            print(f"❌ 场景 3 失败: 错误信息不正确: {e}")
-            return False
-
-    # 场景 4: 是 compile repair（应该不受影响）
-    is_compile_repair = True
-    compile_status = "failed"
-    try:
-        if task_status == "implemented" and not is_compile_repair:
-            if compile_status != "pending":
-                raise TaskRunnerError(
-                    f"task_implementation_already_ready:T1",
-                    requiredAction="task_locked_after_compile",
-                    batchCompileStatus=compile_status,
-                )
-        print("✅ 场景 4 通过: compile repair 场景不受影响")
-    except TaskRunnerError as e:
-        print(f"❌ 场景 4 失败: {e}")
-        return False
-
+    current = {
+        "taskValidationPolicy": {
+            "mode": "defer_to_test_stages",
+            "orchestration": "inline",
+            "codeGate": "review_only",
+        }
+    }
+    retired = {
+        "taskValidationPolicy": {
+            "mode": "defer_to_test_stages",
+            "orchestration": "inline",
+            "codeGate": "batch_compile_only",
+        }
+    }
+    assert defer_to_test_stages_enabled(current)
+    assert not defer_to_test_stages_enabled(retired)
+    print("✅ 仅 review_only Plan 可进入 Code 阶段")
     return True
 
 
 def main():
     print("=" * 60)
-    print("验证 Code 阶段迭代修改功能")
+    print("验证 Code 阶段 Plan 策略")
     print("=" * 60)
     print()
 

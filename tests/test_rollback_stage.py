@@ -64,8 +64,6 @@ class RollbackStageTest(unittest.TestCase):
         batch["featureId"] = self.feature
         batch["status"] = "in_progress"
         batch["startedAt"] = "2026-08-18T10:00:00Z"
-        batch["batchCompile"] = {"status": "passed", "runId": "compile-1"}
-
         root = root_plan(batches=[batch_entry("B001", ["T001", "T002"])])
         root["featureId"] = self.feature
         root["status"] = "in_progress"

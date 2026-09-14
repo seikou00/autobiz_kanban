@@ -217,13 +217,13 @@ def task_execution_mode(task: dict[str, Any]) -> str:
 
 
 def defer_to_test_stages_enabled(data: dict[str, Any]) -> bool:
-    """Return whether the only supported Code validation policy is complete."""
+    """Return whether the current Review/UTest validation policy is enabled."""
     policy = data.get("taskValidationPolicy")
     return (
         isinstance(policy, dict)
         and policy.get("mode") == "defer_to_test_stages"
         and policy.get("orchestration") == "inline"
-        and policy.get("codeGate") == "batch_compile_only"
+        and policy.get("codeGate") == "review_only"
     )
 
 
@@ -385,29 +385,7 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "batchDeliveryKind": batch.get("deliveryKind") if isinstance(batch, dict) else None,
             "batchAtomicGroupId": batch.get("atomicGroupId") if isinstance(batch, dict) else None,
             "batchRationale": batch.get("batchRationale") if isinstance(batch, dict) else None,
-            "compileCommand": batch.get("compileCommand") if isinstance(batch, dict) else None,
             "qualityGateCommands": batch.get("qualityGateCommands") if isinstance(batch, dict) else None,
-            # P1-7: 新策略包含 batchCompile 在 digest 中
-            **(
-                {
-                    "batchCompileStatus": batch.get("batchCompile", {}).get("status"),
-                    "batchCompileCommandId": batch.get("batchCompile", {}).get("commandId"),
-                    "batchCompileRepairAttempts": batch.get("batchCompile", {}).get("repairAttempts"),
-                    "batchCompileMaxRepairAttempts": batch.get("batchCompile", {}).get("maxRepairAttempts"),
-                    "batchCompileRepairTaskId": batch.get("batchCompile", {}).get("repairTaskId"),
-                    "batchCompileWorkspaceSnapshotSha256": batch.get("batchCompile", {}).get(
-                        "workspaceSnapshotSha256"
-                    ),
-                    "batchCompileImplementationEvidenceByTask": batch.get("batchCompile", {}).get(
-                        "implementationEvidenceByTask"
-                    ),
-                    "batchCompileImplementationRevisionByTask": batch.get("batchCompile", {}).get(
-                        "implementationRevisionByTask"
-                    ),
-                }
-                if isinstance(batch, dict) and "batchCompile" in batch
-                else {}
-            ),
             "tasks": [
                 {"id": task.get("id"), "contractSha256": task_contract_sha256(task)}
                 for task in batch_tasks
@@ -645,8 +623,8 @@ def _validate_tasks_container(
         ):
             errors.append(f"{task_id}.latestPassEvidenceId_invalid")
         if require_all_done:
-            # 新策略：defer_to_test_stages 下任务 done 不强制要求 completion evidence
-            # 而是依赖已记录的 batchCompile 结果（后端 passed、前端可为 skipped）
+            # defer_to_test_stages 下任务 done 不强制要求 completion evidence；
+            # Review/UTest/Merge Train 负责后续验证闭环。
             validation_deferred = isinstance(disposition, dict)
             defer_to_test = defer_to_test_stages
 
@@ -913,9 +891,8 @@ def validate_plan_data(
         and entry.get("workspaceRef")
     }
     _validate_code_workspace_bindings(errors, data, batch_workspace_refs)
-    # Batch compilation is retired from the Plan contract.  Older Plans may
-    # still contain ``compileProfiles`` while they are being migrated, but the
-    # field no longer contributes a required validation surface.
+    if "compileProfiles" in data:
+        errors.append("compileProfiles_retired")
     _validate_quality_gate_profiles(errors, data)
 
     known_batches = set(batch_ids)
@@ -983,6 +960,11 @@ def validate_batch_plan_data(
         str(batch_id),
         require_backend_compile=require_backend_compile,
     )
+    if defer_to_test_stages:
+        if "compileCommand" in data:
+            errors.append(f"{batch_id}.compileCommand_retired")
+        if "batchCompile" in data:
+            errors.append(f"{batch_id}.batchCompile_retired")
     if "taskValidation" in data:
         errors.append(f"{batch_id}.taskValidation_forbidden")
     delivery_kind = data.get("deliveryKind")
@@ -1621,9 +1603,7 @@ def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) ->
 
     if policy.get("orchestration") != "inline":
         errors.append("taskValidationPolicy.orchestration_must_be_inline")
-    # Accept the retired value only to read historical artifacts.  New Plans
-    # use ``review_only`` and do not expose a batch compile gate.
-    if policy.get("codeGate") not in {"review_only", "batch_compile_only"}:
+    if policy.get("codeGate") != "review_only":
         errors.append("taskValidationPolicy.codeGate_must_be_review_only")
     if policy.get("maxTestStageRepairAttempts") != BATCH_COMPILE_MAX_REPAIR_ATTEMPTS:
         errors.append(
