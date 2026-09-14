@@ -256,14 +256,7 @@ def merge_run(
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
-        plan_path = workspace / ".autobizdevops" / "features" / feature
-        from hooks.plan_json import load_plan_bundle
-        from hooks.parallel_runtime import mergeable_batches, plan_digest, ready_batches
-        bundle = load_plan_bundle(plan_path)
-        if plan_digest(bundle) != manifest.get("planDigest"):
-            manifest["status"] = "blocked"
-            save_manifest(workspace, feature, run_id, manifest)
-            return {"success": False, "merged": [], "failed": [{"error": "parallel_plan_digest_changed"}], "totalConflicts": 0}
+        from hooks.parallel_runtime import mergeable_batches, ready_batches
         mergeable = set(mergeable_batches(manifest))
         if batch_ids:
             ids = list(batch_ids)

@@ -101,6 +101,10 @@ def test_fixed_workflow_entrypoint():
         "function normalizePath",
         "function samePath",
         "function joinPath",
+        "function taskWorkspacePath",
+        "function batchTaskWorkspace",
+        "batch_component_root_invalid",
+        '--code-workspace "${taskWorkspace}"',
         "taskContract.uiRequired",
         "Route resolver",
         "invalid_code_workspace_path",
@@ -238,6 +242,47 @@ def test_fixed_workflow_entrypoint():
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
     print("✓ 每个 Batch 独立完成 review、UTest、合并并重新调度")
+    print()
+    return True
+
+
+def test_workflow_component_root_binding():
+    """Task Runner 必须使用 worktree 内的 Plan 模块根，而非 worktree 根。"""
+    print("测试 4.1: Task workspace 组件根绑定")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {};
+vm.createContext(context);
+const helperStart = source.indexOf("function usableString(");
+const inputStart = source.indexOf("const input = unwrap(args);");
+const componentStart = source.indexOf("function taskWorkspacePath(");
+const componentEnd = source.indexOf("function normalizeScheduledGroups(");
+if (helperStart < 0 || inputStart < 0 || componentStart < 0 || componentEnd < 0) process.exit(2);
+vm.runInContext(source.slice(helperStart, inputStart), context);
+vm.runInContext(source.slice(componentStart, componentEnd), context);
+const worktree = "D:\\autobiz\\worktrees\\B007";
+const component = context.taskWorkspacePath(
+  "B007", worktree, ["后台服务/企业经营/LF39.05_bcentpaireport"]
+);
+if (component !== "D:/autobiz/worktrees/B007/后台服务/企业经营/LF39.05_bcentpaireport") process.exit(3);
+if (context.taskWorkspacePath("B001", worktree, ["."]) !== worktree) process.exit(4);
+for (const roots of [["backend", "frontend"], ["../outside"]]) {
+  let rejected = false;
+  try { context.taskWorkspacePath("B001", worktree, roots); } catch (_) { rejected = true; }
+  if (!rejected) process.exit(5);
+}
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ Task workspace 组件根绑定错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ Task Runner 使用 worktree 内的 Plan 组件根")
+    print("✓ 组件根越界或一个 Batch 绑定多个根会被拒绝")
     print()
     return True
 
@@ -552,6 +597,7 @@ def main():
     tests = [
         ("Workflow Launcher", test_workflow_launcher),
         ("Fixed Workflow Entrypoint", test_fixed_workflow_entrypoint),
+        ("Task Workspace Component Root", test_workflow_component_root_binding),
         ("Structured Output Normalization", test_workflow_structured_output_normalization),
         ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),

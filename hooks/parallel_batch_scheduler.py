@@ -32,7 +32,6 @@ from hooks.parallel_runtime import (
     list_runs,
     load_manifest,
     parallel_plan_errors,
-    plan_drift_details,
     plan_digest,
     mergeable_batches,
     stage_recovery_batches,
@@ -773,27 +772,6 @@ def schedule(
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         bundle = load_plan_bundle(feature_dir(workspace, feature))
-        current_digest = plan_digest(bundle)
-        if current_digest != manifest.get("planDigest"):
-            drift = plan_drift_details(manifest.get("planContract"), bundle)
-            manifest["status"] = "blocked"
-            manifest["planDrift"] = {
-                "reason": "parallel_plan_digest_changed",
-                "expectedDigest": manifest.get("planDigest"),
-                "currentDigest": current_digest,
-                **drift,
-            }
-            save_manifest(workspace, feature, run_id, manifest)
-            append_event(
-                workspace,
-                feature,
-                run_id,
-                "plan_changed",
-                expectedDigest=manifest.get("planDigest"),
-                currentDigest=current_digest,
-                drift=drift,
-            )
-            raise ValueError("parallel_plan_digest_changed:" + json.dumps(drift, ensure_ascii=False, sort_keys=True))
         # A retained per-Batch conflict (or one conflicted Merge Train) owns
         # only the deliveries recorded in that retained state.  Keep those
         # deliveries out of every runnable output so a resume cannot silently
