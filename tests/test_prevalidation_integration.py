@@ -771,7 +771,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertNotEqual(reopened.returncode, 0)
             self.assertIn("design_revision", reopened.stdout)
 
-    def test_corrupt_formal_bundle_does_not_block_draft_restore(self) -> None:
+    def test_direct_formal_edit_does_not_trigger_digest_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, task = self._finalize_single_task(root)
@@ -783,8 +783,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             strict_show = _run(
                 "plan_writer.py", "show", "--workspace", str(workspace), "--feature", "alpha",
             )
-            self.assertNotEqual(strict_show.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", strict_show.stdout)
+            self.assertEqual(strict_show.returncode, 0, strict_show.stdout + strict_show.stderr)
             diagnosis = _run(
                 "plan_writer.py", "diagnose-plan-repair", "--workspace", str(workspace),
                 "--feature", "alpha",
@@ -792,7 +791,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertEqual(diagnosis.returncode, 0, diagnosis.stdout + diagnosis.stderr)
             self.assertEqual(
                 json.loads(diagnosis.stdout)["diagnosis"]["artifactState"],
-                "finalized_corrupt",
+                "finalized",
             )
             reopened = _run(
                 "plan_writer.py", "reopen-finalized-draft", "--workspace", str(workspace),

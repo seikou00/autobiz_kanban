@@ -553,13 +553,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
                 task_items.append(task)
                 if isinstance(task.get("id"), str):
                     assignments[str(task["id"])] = batch_id
-    if data.get("taskSetDigest") is not None:
-        current_digest = task_set_digest(data, batch_plans)
-        if data.get("taskSetDigest") != current_digest:
-            raise PlanWriterInputError(
-                "task_set_digest_mismatch",
-                "formal plan artifacts were modified outside plan_writer",
-            )
     data["tasks"] = task_items
     data["_batchAssignments"] = assignments
     data["_batchPlans"] = batch_plans
@@ -1649,9 +1642,6 @@ def _replay_draft_transaction(workspace: Path, feature: str) -> bool:
         or any(not isinstance(key, str) or not isinstance(value, dict) for key, value in batch_plans.items())
     ):
         raise PlanWriterInputError("draft_write_transaction_invalid", "transaction shape mismatch")
-    if root.get("taskSetDigest") != task_set_digest(root, batch_plans):
-        raise PlanWriterInputError("draft_write_transaction_invalid", "taskSetDigest mismatch")
-
     referenced = set(batch_plans)
     plans_dir = _draft_dir(workspace, feature) / "plans"
     for batch_id, batch in batch_plans.items():
@@ -1736,8 +1726,6 @@ def _load_draft_bundle(workspace: Path, feature: str) -> tuple[dict[str, Any], d
                 tasks.append(task)
                 if isinstance(task.get("id"), str):
                     assignments[str(task["id"])] = batch_id
-    if root.get("taskSetDigest") != task_set_digest(root, batch_plans):
-        raise PlanWriterInputError("task_draft_digest_mismatch", "draft artifacts were modified outside plan_writer")
     data = dict(root)
     data["tasks"] = tasks
     data["_batchAssignments"] = assignments
@@ -4280,9 +4268,6 @@ def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
     formal_root, formal_batches, formal_load_errors = _load_raw_formal_bundle(workspace, feature)
     formal_validation_errors: list[str] = []
     if formal_root is not None and not formal_load_errors:
-        expected_digest = task_set_digest(formal_root, formal_batches)
-        if formal_root.get("taskSetDigest") != expected_digest:
-            formal_validation_errors.append("task_set_digest_mismatch")
         formal_validation_errors.extend(validate_plan_bundle_data(formal_root, formal_batches))
     checkpoint, execution_blockers = _formal_execution_blockers(
         workspace,

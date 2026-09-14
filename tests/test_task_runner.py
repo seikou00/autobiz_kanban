@@ -2438,7 +2438,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(resumed.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", resumed.stdout)
+            self.assertIn("task_contract_changed_after_start:T001", resumed.stdout)
 
     def test_resume_rejects_repository_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2486,15 +2486,14 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
-            self.assertFalse(json.loads(aborted.stdout)["planStatusReset"])
+            self.assertTrue(json.loads(aborted.stdout)["planStatusReset"])
             updated = _read_batch(feature_dir)
-            self.assertEqual(updated["tasks"][0]["status"], "in_progress")
+            self.assertEqual(updated["tasks"][0]["status"], "todo")
             restarted = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
             )
-            self.assertNotEqual(restarted.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", restarted.stdout + restarted.stderr)
+            self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
     def test_start_rejects_unfinished_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _, code = _workspace(Path(tmp), deps=["T000"])

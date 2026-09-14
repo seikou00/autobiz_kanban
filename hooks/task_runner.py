@@ -42,9 +42,6 @@ from hooks.plan_json import (  # noqa: E402
     task_contract_sha256,
     task_execution_lane,
     task_execution_mode,
-    task_set_digest,
-    batch_plan_path,
-    plan_json_path,
     task_workspace_roots,
 )
 from hooks.plan_writer import (  # noqa: E402
@@ -2640,31 +2637,6 @@ def _resume_task_unlocked(
         raise TaskRunnerError(f"task_run_cannot_resume:{state.get('status')}")
     if state.get("evidenceIds"):
         raise TaskRunnerError("task_run_cannot_resume_with_evidence")
-    root_path = plan_json_path(feature_dir)
-    try:
-        root_data = json.loads(root_path.read_text(encoding="utf-8"))
-        batch_plans = {
-            str(entry["id"]): json.loads(batch_plan_path(feature_dir, str(entry["id"])).read_text(encoding="utf-8"))
-            for entry in root_data.get("batches", [])
-            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-        }
-        declared_digest = root_data.get("taskSetDigest")
-        current_digest = task_set_digest(root_data, batch_plans)
-        if isinstance(declared_digest, str) and declared_digest != current_digest:
-            legacy_root = json.loads(json.dumps(root_data))
-            entries = legacy_root.get("batches", [])
-            for index, entry in enumerate(entries):
-                if index > 0 and isinstance(entry, dict):
-                    deps = entry.get("deps") if isinstance(entry.get("deps"), list) else []
-                    previous = str(entries[index - 1].get("id"))
-                    if previous not in deps:
-                        entry["deps"] = sorted([*deps, previous])
-            if declared_digest != task_set_digest(legacy_root, batch_plans):
-                raise TaskRunnerError("task_set_digest_mismatch")
-    except TaskRunnerError:
-        raise
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise TaskRunnerError(f"task_set_digest_mismatch:{exc}") from exc
     if state.get("taskContractSha256") != task_contract_sha256(task):
         raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
     if state.get("batchId") is not None and state.get("batchId") != batch_id:

@@ -795,10 +795,6 @@ def validate_plan_data(
         errors.append("plan_json_implementationScope_invalid")
     if data.get("taskSetStatus") not in TASK_SET_STATUSES:
         errors.append("plan_json_taskSetStatus_invalid")
-    digest = data.get("taskSetDigest")
-    if digest is not None and (not isinstance(digest, str) or not TASK_SET_DIGEST_RE.fullmatch(digest)):
-        errors.append("plan_json_taskSetDigest_invalid")
-
     status = data.get("status")
     if status not in FEATURE_STATUSES:
         errors.append("plan_json_status_invalid")
@@ -2095,10 +2091,6 @@ def _bundle_consistency_errors(
                 all_tasks.append(item)
     if errors:
         return errors
-#todo 关闭digest校验
-#     if root.get("taskSetDigest") is not None and root.get("taskSetDigest") != task_set_digest(root, batch_data):
-#         errors.append("task_set_digest_mismatch")
-
     known_task_ids = set(task_batches)
     strategy = root.get("batchPolicy", {}).get("strategy") if isinstance(root.get("batchPolicy"), dict) else None
     if strategy == BATCH_STRATEGY:

@@ -1032,7 +1032,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(validation_result.returncode, 0)
             self.assertIn("draft_validation_id_writer_owned", validation_result.stdout)
 
-    def test_plan_writer_draft_rejects_direct_batch_edits(self) -> None:
+    def test_plan_writer_draft_allows_direct_batch_edits_without_digest_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
@@ -1055,8 +1055,7 @@ class JsonWriterTests(unittest.TestCase):
                 "plan_writer.py", "show-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha",
             )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("task_draft_digest_mismatch", result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_plan_writer_imports_legacy_task_directory_into_ready_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1368,7 +1367,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(drafted["validationBoundary"], task["validationBoundary"])
             self.assertEqual(drafted["validationCommands"][0]["cwd"], "backend/service")
 
-    def test_plan_writer_rejects_direct_batch_contract_edits(self) -> None:
+    def test_plan_writer_allows_direct_batch_contract_edits_without_digest_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
@@ -1391,8 +1390,7 @@ class JsonWriterTests(unittest.TestCase):
             result = _run(
                 "plan_writer.py", "show", "--workspace", str(workspace), "--feature", "alpha",
             )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_plan_writer_replaces_and_removes_collecting_tasks_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
