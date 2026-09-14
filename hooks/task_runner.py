@@ -718,6 +718,61 @@ def _is_transient_validation_path(path: str) -> bool:
     return any(parts[index : index + 2] == ("src", "test") for index in range(len(parts) - 1))
 
 
+_CODE_STAGE_TEST_CONFIG_FILENAMES = frozenset({
+    "pytest.ini",
+    "tox.ini",
+    ".coveragerc",
+    "phpunit.xml",
+    "testng.xml",
+})
+_CODE_STAGE_TEST_CONFIG_PREFIXES = (
+    "jest.config.",
+    "vitest.config.",
+    "playwright.config.",
+    "cypress.config.",
+    "ava.config.",
+    "karma.conf.",
+    "codecept.conf.",
+    ".mocharc",
+)
+_CODE_STAGE_TEST_ASSET_DIRECTORIES = frozenset({
+    "__tests__",
+    "__mocks__",
+    "__fixtures__",
+    "test-fixtures",
+    "test-fixture",
+})
+
+
+def _is_code_stage_test_asset_path(path: str) -> bool:
+    """Return whether a changed path belongs exclusively to the UTest stage.
+
+    The Code and implementation-rework stages may read existing tests as a
+    contract, but they must not add or alter test sources, fixtures/mocks, or
+    test-runner configuration.  Keep this list deliberately path-based: it is
+    evaluated from Git changes at ``finish-implementation`` and therefore
+    cannot depend on a particular language or build tool being present.
+    """
+    normalized = path.replace("\\", "/").lstrip("./")
+    parts = PurePosixPath(normalized).parts
+    lowered_parts = tuple(part.casefold() for part in parts)
+    if _is_transient_validation_path("/".join(lowered_parts)):
+        return True
+    if any(part in _CODE_STAGE_TEST_ASSET_DIRECTORIES for part in lowered_parts):
+        return True
+    # Root-level fixture and mock trees conventionally exist solely to support
+    # tests.  Do not classify arbitrary production directories named "mock".
+    if lowered_parts and lowered_parts[0] in {"fixtures", "fixture", "mocks"}:
+        return True
+    if len(lowered_parts) != 1:
+        return False
+    filename = lowered_parts[0]
+    return (
+        filename in _CODE_STAGE_TEST_CONFIG_FILENAMES
+        or filename.startswith(_CODE_STAGE_TEST_CONFIG_PREFIXES)
+    )
+
+
 def _partition_transient_validation_changes(
     state: dict[str, Any],
     file_changes: list[dict[str, str]],
@@ -1872,7 +1927,7 @@ def _finish_implementation_unlocked(
         for change in repair_file_changes
         for path in (change.get("path"), change.get("fromPath"))
         if isinstance(path, str)
-        and _is_transient_validation_path(path.split(":", 1)[-1])
+        and _is_code_stage_test_asset_path(path.split(":", 1)[-1])
     })
     if test_asset_changes:
         raise TaskRunnerError(
@@ -2941,7 +2996,7 @@ def start_batch_compile_repair(
                 for change in adopted_file_changes
                 for path in (change.get("path"), change.get("fromPath"))
                 if isinstance(path, str)
-                and _is_transient_validation_path(path.split(":", 1)[-1])
+                and _is_code_stage_test_asset_path(path.split(":", 1)[-1])
             })
             if test_asset_changes:
                 raise TaskRunnerError(

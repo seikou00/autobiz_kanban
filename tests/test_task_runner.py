@@ -1339,6 +1339,31 @@ class TaskRunnerTest(unittest.TestCase):
                 "restore_test_changes_and_continue_production_implementation",
             )
             self.assertEqual(payload["testFiles"], ["src/test/GeneratedTest.java"])
+
+    def test_code_stage_rejects_test_fixture_mock_and_config_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            (code / "fixtures").mkdir()
+            (code / "fixtures" / "response.json").write_text("{}\n", encoding="utf-8")
+            (code / "__mocks__").mkdir()
+            (code / "__mocks__" / "client.js").write_text("module.exports = {};\n", encoding="utf-8")
+            (code / "vitest.config.ts").write_text("export default {};\n", encoding="utf-8")
+
+            result = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error"], "code_stage_test_changes_forbidden")
+            self.assertEqual(
+                payload["testFiles"],
+                ["__mocks__/client.js", "fixtures/response.json", "vitest.config.ts"],
+            )
+
     def test_maven_runner_rejects_project_selector_from_leaf_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = (Path(tmp) / "repo").resolve()

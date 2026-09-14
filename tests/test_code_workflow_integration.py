@@ -179,6 +179,9 @@ def test_fixed_workflow_entrypoint():
         "Review execution mode=fixed_code_workflow",
         "Code Workflow 已获自主执行授权",
         "const WORKFLOW_AUTONOMY_PREFIX",
+        "const CODE_STAGE_TEST_BOUNDARY",
+        "禁止创建、修改或删除测试源码",
+        "所有测试资产和测试命令仅可在 Review 通过后的 UTest 阶段执行",
         "function workflowAgent",
     ]
     missing = [check for check in checks if check not in content]
@@ -196,6 +199,9 @@ def test_fixed_workflow_entrypoint():
         return False
     if "compileAlreadyPassed" in content:
         print("✗ rework 仍保留已废弃的批次编译状态")
+        return False
+    if content.count("CODE_STAGE_TEST_BOUNDARY") < 3:
+        print("✗ 初始实现和修复实现未同时注入 UTest 边界")
         return False
     if "batch-compile" in content or "skip-batch-compile" in content or "compileStatus" in content:
         print("✗ 固定 Workflow 仍保留 Batch compile 路径或状态")
