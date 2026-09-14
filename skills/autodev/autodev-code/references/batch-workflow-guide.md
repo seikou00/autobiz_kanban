@@ -79,6 +79,16 @@ fresh platform Workflow with the same launcher `scriptPath` and `args` (no
 `resumeFromRunId`). `scheduler ensure` then reuses the durable scheduler run
 and reads its current state instead of replaying a completed platform journal.
 
+Before making this call, configure the platform Workflow tool's session
+workspace root to `launcher.workflowWorkspaceRoot`. This is the same absolute
+directory as `launcher.artifactWorkspace`; it is not a business code
+workspace. `launcher.workflowScriptRelativePath` is an audit value proving
+that the fixed script is contained below that root. If the platform mounts a
+different workspace root, stop with `workflow_workspace_root_mismatch` and
+repair the session configuration. Do not copy, move, or symlink the script
+into the mounted workspace: that creates a second runtime owner and breaks
+Feature-scoped rollback and journal ownership.
+
 The Workflow host workspace is not a Worktree source contract. The plugin
 resolves every repository from the complete `codeWorkspaces` mapping and
 provisions its own native Worktree for each Batch. The artifact workspace

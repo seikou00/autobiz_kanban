@@ -93,6 +93,11 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         )
         self.assertEqual(result["workflowScript"], str(runtime_script.resolve()))
         self.assertEqual(result["workflowScriptPath"], str(runtime_script.resolve()))
+        self.assertEqual(result["workflowWorkspaceRoot"], str(artifact_workspace.resolve()))
+        self.assertEqual(
+            result["workflowScriptRelativePath"],
+            ".cmbdevclaw/workflows/three-paths/code-batched-execution.workflow.js",
+        )
         self.assertEqual(result["workflowScriptSource"], str(script.resolve()))
         self.assertNotIn("workflowScriptContent", result)
         self.assertEqual(

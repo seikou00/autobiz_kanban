@@ -159,6 +159,26 @@ def materialize_workflow_script(source: Path, artifact_workspace: str, feature: 
     }
 
 
+def workflow_workspace_contract(artifact_workspace: Path, workflow_script: str) -> dict[str, str]:
+    """Describe the platform workspace that is allowed to load the script.
+
+    The platform Workflow tool applies its path-containment policy before the
+    fixed script can run.  Consequently its workspace root must be the
+    artifact workspace which owns the Feature-specific runtime copy, rather
+    than an unrelated session or business-repository directory.
+    """
+    root = artifact_workspace.expanduser().resolve()
+    script = Path(workflow_script).expanduser().resolve()
+    try:
+        relative_script = script.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"workflow_script_outside_artifact_workspace:{script}:{root}") from exc
+    return {
+        "workflowWorkspaceRoot": str(root),
+        "workflowScriptRelativePath": str(relative_script),
+    }
+
+
 def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     """Load and validate runtime configuration from .autobiz/runtime_config.json."""
     defaults: dict[str, Any] = {
@@ -540,6 +560,10 @@ def analyze_batches(
             str(artifact_workspace),
             feature,
         )
+        workflow_workspace = workflow_workspace_contract(
+            artifact_workspace,
+            runtime_script["workflowScript"],
+        )
         common_result = {
             "useWorkflow": True,
             "strategy": "fixed",
@@ -547,6 +571,7 @@ def analyze_batches(
             "batches": launch_batches,
             "artifactWorkspace": str(artifact_workspace),
             **runtime_script,
+            **workflow_workspace,
             "workflowScriptPath": runtime_script["workflowScript"],
             "codeWorkspaces": workspace_contract["codeWorkspaces"],
             "executionIsolation": workspace_contract["executionIsolation"],
