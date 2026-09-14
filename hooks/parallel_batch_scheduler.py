@@ -989,7 +989,7 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
                 raise ValueError(f"parallel_batch_worktree_branch_required:{batch_id}")
             if current_git_branch(Path(candidate)) != expected_branch:
                 raise ValueError(f"parallel_batch_worktree_branch_mismatch:{batch_id}")
-        for key in ("worktreePath", "branchName", "commitSha", "compileStatus", "mergeCommitSha", "error"):
+        for key in ("worktreePath", "branchName", "commitSha", "mergeCommitSha", "error"):
             if key in details:
                 batch[key] = details[key]
         if status == "retry_pending":
@@ -1466,7 +1466,6 @@ def main(argv: list[str] | None = None) -> int:
     mark.add_argument("--merge-commit-sha")
     mark.add_argument("--worktree-path")
     mark.add_argument("--branch-name")
-    mark.add_argument("--compile-status")
     mark.add_argument("--error")
     args = parser.parse_args(argv)
     try:
@@ -1509,13 +1508,12 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(True, **manual_resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "list":
             return _emit(True, runs=list_runs(workspace, feature))
-        details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "compile_status", "error"} and value is not None}
+        details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "error"} and value is not None}
         detail_names = {
             "commit_sha": "commitSha",
             "merge_commit_sha": "mergeCommitSha",
             "worktree_path": "worktreePath",
             "branch_name": "branchName",
-            "compile_status": "compileStatus",
             "error": "error",
         }
         details = {detail_names[key]: value for key, value in details.items()}

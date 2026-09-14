@@ -714,7 +714,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             bundle_root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             bundle_batch = json.loads((feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
             owners = bundle_root["parallelBatchPipeline"]["validationOwnership"]
-            self.assertEqual(owners["BATCH-B001-COMPILE"]["stage"], "review")
+            self.assertNotIn("BATCH-B001-COMPILE", owners)
             self.assertEqual(owners["VAL-T001-01"], {
                 "ownerBatchId": "B001", "stage": "test", "kind": "test_intent", "taskId": "T001", "sourceBatchId": "B001",
             })

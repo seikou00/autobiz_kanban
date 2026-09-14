@@ -105,7 +105,7 @@ def test_fixed_workflow_entrypoint():
         "Route resolver",
         "invalid_code_workspace_path",
         "不得创建任何 workflow",
-        "required: [\"batchId\", \"status\", \"compileStatus\", \"worktreePath\", \"branchName\", \"commitSha\"]",
+        "required: [\"batchId\", \"status\", \"worktreePath\", \"branchName\", \"commitSha\"]",
         "drainRunnableLifecycles",
         "takeNextRunnableLifecycle",
         "runLifecycleChain",
@@ -152,19 +152,13 @@ def test_fixed_workflow_entrypoint():
         "promoteReadyBatch",
         "--batch-worktree",
         "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
-        "修复、跳过编译记录并封存一次，然后直接进入 UTest，不会再次执行 Review",
+        "生产代码修复和封存",
         "failureContext",
         "本次打回的精确问题如下",
         "targetId、commandId、evidenceId、test-output.log 路径",
         "record-test-failure",
         'testStatus:\\"deferred\\"',
         "--purpose review",
-        "skipBatchCompileForDelivery",
-        "skip-batch-compile",
-        "workflow_batch_compile_disabled",
-        "compileSkipRecorded",
-        'batchResult.compileStatus !== "skipped"',
-        "临时停用所有 Batch compile",
         "parallel_git_index_lock_busy",
         "parallel_git_index_lock_recovery_failed",
         "SINGLE_REPAIRABLE_STAGES",
@@ -197,13 +191,10 @@ def test_fixed_workflow_entrypoint():
         print("✗ 固定 Workflow 存在绕过自治边界的直接子 Agent 调用")
         return False
     if "compileAlreadyPassed" in content:
-        print("✗ rework 仍将已记录的编译失败误判为未通过")
+        print("✗ rework 仍保留已废弃的批次编译状态")
         return False
-    delivery_start = content.find("async function skipBatchCompileForDelivery(")
-    delivery_end = content.find("async function runBatchUtestAndSeal(", delivery_start)
-    delivery_protocol = content[delivery_start:delivery_end]
-    if '"${taskRunnerPath}" batch-compile' in delivery_protocol or '"${taskRunnerPath}" revalidate-batch-compile' in content:
-        print("✗ 固定 Workflow 仍会执行 Batch compile")
+    if "batch-compile" in content or "skip-batch-compile" in content or "compileStatus" in content:
+        print("✗ 固定 Workflow 仍保留 Batch compile 路径或状态")
         return False
     rework_start = content.find("async function reworkDeliveryImplementation(")
     rework_end = content.find("async function recordSingleRepairResolution(", rework_start)
@@ -232,9 +223,9 @@ def test_fixed_workflow_entrypoint():
         print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
     review_prompt = content.find("对已草稿封存的 Batch")
-    compile_skip_prompt = content.find("已通过业务 Review。当前插件已临时停用所有 Batch compile")
-    if review_prompt < 0 or compile_skip_prompt < 0:
-        print("✗ Review 与编译跳过记录的固定顺序缺失")
+    utest_prompt = content.find("async function runBatchUtestAndSeal(")
+    if review_prompt < 0 or utest_prompt < 0:
+        print("✗ Review 到 UTest 的固定顺序缺失")
         return False
     candidate_start = content.find("构建 Batch ${batchId} 的独立 Merge Train 候选")
     candidate_end = content.find("let built = builtRaw;", candidate_start)

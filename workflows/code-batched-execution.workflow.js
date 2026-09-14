@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
     { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 集合" },
-    { title: "Batch 阶段", detail: "编码 → review → 编译/封存 → test；Review 可定向修复一次，UTest 失败记录后继续" },
+    { title: "Batch 阶段", detail: "编码 → review → UTest/封存；Review 可定向修复一次，UTest 失败记录后继续" },
     { title: "候选验证", detail: "Merge Train 合成并推广已完成 Review 与 UTest 记录的候选 SHA" },
     { title: "最终验证", detail: "合并后运行 B-E2E，最终只聚合既有证据、不重复执行命令" }
   ]
@@ -30,13 +30,12 @@ const BATCH_RESULT_SCHEMA = {
     status: { enum: ["success", "failed", "timeout"] },
     tasksCompleted: { type: "number" },
     tasksTotal: { type: "number" },
-    compileStatus: { enum: ["passed", "failed", "skipped"] },
     worktreePath: { type: "string" },
     branchName: { type: "string" },
     commitSha: { type: "string" },
     errorMessage: { type: "string" }
   },
-  required: ["batchId", "status", "compileStatus", "worktreePath", "branchName", "commitSha"],
+  required: ["batchId", "status", "worktreePath", "branchName", "commitSha"],
   additionalProperties: false
 };
 const MERGE_RESULT_SCHEMA = {
@@ -965,27 +964,6 @@ function withLatestBatchDelivery(batchResult, result) {
   };
 }
 
-async function skipBatchCompileForDelivery(batchResult) {
-  const batchId = batchResult.batchId;
-  const batchWorktree = batchResult.worktreePath;
-  const batchBranch = batchResult.branchName;
-  const batchWorkspace = batchWorkspaces[batchId] || {};
-  const batchWorkspaceRef = batchWorkspace.workspaceRef;
-  if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef)) {
-    throw new Error(`batch_compile_skip_context_missing:${batchId}`);
-  }
-  return requireSuccess(await workflowAgent(
-    `Batch ${batchId} 已通过业务 Review。当前插件已临时停用所有 Batch compile：不得执行 Maven、Gradle、npm build/typecheck、task_runner.py batch-compile 或 revalidate-batch-compile。` +
-    `只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作，不得修改业务代码。` +
-    `依次执行：1) python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --ttl-seconds ${timeoutPerBatch} --lease-guard，并保存真实 ownerToken；` +
-    `2) python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "${batchWorktree}" --branch-name "${batchBranch}"；` +
-    `3) python "${taskRunnerPath}" skip-batch-compile --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 ownerToken> --workspace-ref "${batchWorkspaceRef}"；该命令只写入 skipReason=workflow_batch_compile_disabled，不运行任何编译命令；` +
-    `4) 以 final-status sealed release 同一 lease。不得再次 seal：Review draft 已是本次生产代码封存版本，UTest 阶段会封存测试资产。` +
-    `返回 {batchId,status:"success",compileStatus:"skipped",worktreePath,branchName,commitSha:"${batchResult.commitSha}"}。`,
-    { label: `skip-batch-compile-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
-  ), `skip batch compile ${batchId}`);
-}
-
 async function runBatchUtestAndSeal(batchResult) {
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
@@ -1015,7 +993,6 @@ async function runBatchUtestAndSeal(batchResult) {
 async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const reviewResolvedByRepair = options.reviewResolvedByRepair === true;
   const testResolvedByRepair = options.testResolvedByRepair === true;
-  const compileSkipRecorded = options.compileSkipRecorded === true;
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -1075,12 +1052,6 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     }
     requireSuccess(review, `stage review ${batchId}`);
   }
-  if (compileSkipRecorded && batchResult.compileStatus !== "skipped") {
-    throw new Error(`compile_skip_missing_for_delivery:${batchId}`);
-  }
-  if (!compileSkipRecorded) {
-    batchResult = await skipBatchCompileForDelivery(batchResult);
-  }
   if (!testResolvedByRepair) {
     const test = requireSuccess(await runBatchUtestAndSeal(batchResult), `stage test ${batchId}`);
     const testedDelivery = withLatestBatchDelivery(batchResult, test);
@@ -1093,7 +1064,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   if (qualityGateRequired) {
     requireSuccess(await workflowAgent(
       `执行 Batch ${batchId} 的静态质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
-    `该命令只运行 Plan 明确归属本 Batch 的 qualityGateCommands（lint/static check）；Batch compile 已被临时停用，禁止执行任何编译、重复 TASK 测试、projectValidationCommands 或 E2E。` +
+    `该命令只运行 Plan 明确归属本 Batch 的 qualityGateCommands（lint/static check）；禁止自行补充批次编译、重复 TASK 测试、projectValidationCommands 或 E2E。` +
       `通过后执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
       `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
       { label: `stage-quality-gate-${batchId}`, phase: "Batch 阶段" }
@@ -1140,9 +1111,9 @@ async function reworkDeliveryImplementation(recovery) {
     `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。不得调用 request_user_input、要求用户确认或等待用户裁定；按既定契约自动完成最小兼容修复并继续。${repairBrief}` +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取真实 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行启动后台 heartbeat；随后 mark-batch 为 running；` +
     `2) 先清理陈旧 run，再开始任何修复：对 ${JSON.stringify(taskIds)} 中每个真实 TASK 依次执行 task_runner.py inspect（携带 workspace、feature、task-id、code-workspace）；只要发现 parallelRunId="${runId}" 且状态为 started、in_progress 或 implementation_recording 的旧 run，就先用其 inspect 返回的真实 runId 执行 task_runner.py abort --force-with-changes --abort-why "implementation_rework_stale_run"，并携带 --workspace-ref "${batchWorkspaceRef}"。abort 必须保留 Worktree 未提交改动；每次 abort 后再次 inspect 确认该 TASK 已无活动 run。必须先完成全部陈旧 run 清理，禁止一边清理一边 start 新 TASK；其他 parallelRunId 的活动 run、无法 inspect 的 run 或 abort 失败均不得猜测，立即以 final-status pending 释放 lease 并返回 failed。` +
-    `3) 严格按依赖拓扑逐个修复，绝不并行或预启动：每次只处理一个 TASK，先 inspect 当前状态并确认其所有 deps 已为 implemented/done；前置 TASK 尚未完成时必须继续完成前置 TASK，禁止尝试 start 当前 TASK。当前 TASK 为 implemented/done 时，读取其真实 latestImplementationEvidenceId，执行 task_runner.py start-task-repair --prior-evidence-id <真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"，记下真实 runId；当前 TASK 为 todo 时执行普通 task_runner.py start（同样携带 parallel-run-id、lease-token、code-workspace、workspace-ref），记下真实 runId。状态仍为 in_progress 时禁止再次 start；应回到步骤 2 处理其陈旧 run。其他状态不得臆造命令，返回 failed。完成当前 TASK 的生产修复后，必须立刻用该真实 runId 执行 finish-implementation：只有 start-task-repair 启动的任务携带 --repair-mode，普通 start 启动的任务禁止携带 --repair-mode。确认 finish 成功且 TASK 已为 implemented/done 后，才可处理其下一个依赖任务；必须完成 ${JSON.stringify(taskIds)} 的全部实际 TASK 后才能进入编译跳过记录。` +
-    `4) 当前插件已临时停用所有 Batch compile：不得执行 Maven、Gradle、npm build/typecheck、batch-compile 或 revalidate-batch-compile。改为执行 python "${taskRunnerPath}" skip-batch-compile（携带 workspace、feature、batch-id、code-workspace、parallel-run-id="${runId}"、lease-token 和 workspace-ref="${batchWorkspaceRef}"）；该命令只记录 skipReason=workflow_batch_compile_disabled。随后用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有跳过记录、lease 或 seal/release 失败才中断。` +
-    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",compileStatus:"skipped",worktreePath,branchName,commitSha}。`,
+    `3) 严格按依赖拓扑逐个修复，绝不并行或预启动：每次只处理一个 TASK，先 inspect 当前状态并确认其所有 deps 已为 implemented/done；前置 TASK 尚未完成时必须继续完成前置 TASK，禁止尝试 start 当前 TASK。当前 TASK 为 implemented/done 时，读取其真实 latestImplementationEvidenceId，执行 task_runner.py start-task-repair --prior-evidence-id <真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"，记下真实 runId；当前 TASK 为 todo 时执行普通 task_runner.py start（同样携带 parallel-run-id、lease-token、code-workspace、workspace-ref），记下真实 runId。状态仍为 in_progress 时禁止再次 start；应回到步骤 2 处理其陈旧 run。其他状态不得臆造命令，返回 failed。完成当前 TASK 的生产修复后，必须立刻用该真实 runId 执行 finish-implementation：只有 start-task-repair 启动的任务携带 --repair-mode，普通 start 启动的任务禁止携带 --repair-mode。确认 finish 成功且 TASK 已为 implemented/done 后，才可处理其下一个依赖任务。` +
+    `4) 用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有 lease 或 seal/release 失败才中断。` +
+    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",worktreePath,branchName,commitSha}。`,
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `implementation rework ${batchId}`);
 }
@@ -1161,7 +1132,7 @@ async function recordSingleRepairResolution(recovery, repaired) {
     repairDisposition: "single_repair_accepted",
   });
   return requireSuccess(await workflowAgent(
-    `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复、跳过编译记录和封存。` +
+    `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复和封存。` +
     `不得让模型串行拼接多个 stage start/complete，也不得根据原始文本判断是否收口。只执行 python "${stagePath}" record-single-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failedStage}" --metadata-json '${metadata}'。` +
     `该插件命令会以单个、幂等的受控入口写入 prepare/implement/review evidence，并验证最终 Review evidence 的 single_repair_accepted 标记。只原样返回 JSON。`,
     { label: `record-single-repair-${failedStage}-${batchId}`, phase: "Batch 阶段", schema: SINGLE_REPAIR_RESULT_SCHEMA }
@@ -1201,8 +1172,8 @@ async function runDeliveryWithImplementationRepair(batchResult) {
     delivery = repaired;
     await recordSingleRepairResolution(staged.recovery, repaired);
     options = staged.failedStage === "review"
-      ? { reviewResolvedByRepair: true, compileSkipRecorded: true }
-      : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileSkipRecorded: true };
+      ? { reviewResolvedByRepair: true }
+      : { reviewResolvedByRepair: true, testResolvedByRepair: true };
   }
 }
 
@@ -1214,8 +1185,8 @@ async function continueRecoveredDelivery(recovery) {
   await recordSingleRepairResolution(recovery, repaired);
   const failedStage = recovery.failureContext.failedStage;
   const options = failedStage === "review"
-    ? { reviewResolvedByRepair: true, compileSkipRecorded: true }
-    : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileSkipRecorded: true };
+    ? { reviewResolvedByRepair: true }
+    : { reviewResolvedByRepair: true, testResolvedByRepair: true };
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 
@@ -1390,9 +1361,9 @@ function implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batc
     `3. 将步骤 2 返回的非空 ownerToken 保存为变量，并在后续命令中展开为该真实字符串；命令行中不得出现空字符串、字面量 "LEASE_TOKEN" 或 "<lease-token>"。禁止自行运行 batch_lease_manager.py heartbeat、run_in_background、&、nohup、setsid 或 Start-Process。插件会在每个携带 token 的 task_runner/worktree_manager 命令开始时续租；独立 shell 子进程存活与否不再作为 Batch 失败条件。\n` +
     `4. 执行 python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "${batchWorktree}" --branch-name "${batchBranch}"。业务源码命令只在该 checkout 内执行。\n` +
     `5. Scheduler 已提供本 Batch 的唯一 TASK IDs：${JSON.stringify(taskIds)}。逐个以这些具体 ID 执行；禁止使用空值、"undefined" 或任何占位符。不要用 read_file 读取 artifact 目录；artifact workspace 不是代码目录。自动重试时，先对每个 TASK 执行 task_runner.py inspect；如发现同一 parallelRunId 的 started/in_progress run，使用其真实 runId 执行 task_runner.py abort --force-with-changes --abort-why "automatic_batch_retry" 并携带 --workspace-ref "${batchWorkspaceRef}"，保留 worktree 改动并将 TASK 恢复为 todo。已经 implemented/done 的 TASK 必须保留既有 implementation evidence，禁止再次 start；只继续未完成 TASK。对数组中的每个实际 ID，直接将该值传给 code_task_context.py 的 --task-id 参数。以 taskContract.uiRequired 为唯一条件：false 时跳过 Route resolver，不读取 HTML/Route SKILL；true 时必须在本 agent 内、写前端源码前执行 python "${routeResolverPath}" --workspace "${artifactWorkspace}" --feature "${feature}" --start-route-run --json，并按返回 route 读取对应 Route SKILL 到 EOF，标记 route-skill-read-complete、创建 route write_todos；仅当 Route SKILL 清单推进到转交 parser 后才读取对应 parser 并标记 parser-read，完成清单后标记 route-todos-completed，统一回检后写入 FRONTEND_ROUTE.json。route=spec-driven-ui 不读 parser 但仍须回检，route=none 禁止写前端源码。随后用 task_runner.py start、完成实现后用 finish-implementation；所有 task_runner 调用必须带 --workspace "${artifactWorkspace}"、--parallel-run-id "${runId}"、展开后的真实 lease token、--code-workspace "${batchWorktree}" 和 --workspace-ref "${batchWorkspaceRef}"。不得操作其他 Batch 或任何主业务 checkout。\n` +
-    `6. 全部 TASK 完成后执行 python "${leasePath}" check 并携带同一真实 --owner-token 和 --require-lease-guard；仅 valid=true 才可继续。当前插件已临时停用所有 Batch compile：此后也不得执行 batch-compile、revalidate-batch-compile、Maven、Gradle 或 npm build/typecheck。只调用 python "${worktreeManagerPath}" --json seal --purpose review，并携带 --artifact-workspace "${artifactWorkspace}"、--feature "${feature}"、--run-id "${runId}"、--batch-id "${batchId}"、--repo "${batchWorktree}" 和 --owner-token（同一真实 token）；该命令也会续租。从 JSON 保存供 Review 使用的草稿 commitSha。插件在此命令中提交；不要自行 git add、git commit 或把 Batch 标为可候选合并。\n` +
+    `6. 全部 TASK 完成后执行 python "${leasePath}" check 并携带同一真实 --owner-token 和 --require-lease-guard；仅 valid=true 才可继续。只调用 python "${worktreeManagerPath}" --json seal --purpose review，并携带 --artifact-workspace "${artifactWorkspace}"、--feature "${feature}"、--run-id "${runId}"、--batch-id "${batchId}"、--repo "${batchWorktree}" 和 --owner-token（同一真实 token）；该命令也会续租。从 JSON 保存供 Review 使用的草稿 commitSha。插件在此命令中提交；不要自行 git add、git commit 或把 Batch 标为可候选合并。\n` +
     `7. 草稿 seal 成功后执行 python "${leasePath}" release，并携带 --workspace "${artifactWorkspace}"、--feature "${feature}"、--run-id "${runId}"、--batch-id "${batchId}"、--owner-token（同一真实 token）和 --final-status sealed。若 seal 返回 parallel_git_index_lock_busy 或 parallel_git_index_lock_recovery_failed，说明等待与本 Batch index.lock 的受控清理后仍无法写入；只以 final-status pending 调用同一 release，随后返回 failed，由 Workflow 标记为 retry_pending 并在同一 run resume。其他首次命令失败也同样以 final-status pending 释放。禁止检查/修改插件源码、创建 Git wrapper、尝试替代命令或继续任何 TASK。\n` +
-    `返回 {batchId, status:"success", compileStatus:"skipped", worktreePath:batchWorktree, branchName:batchBranch, commitSha}。不得创建任何 workflow、手工创建分支、使用 undefined 路径或 feature、手工 git add/commit；不要 merge、rebase、解决冲突、删除 worktree。任何命令失败立即返回 failed，不得以部分结果继续。`;
+    `返回 {batchId, status:"success", worktreePath:batchWorktree, branchName:batchBranch, commitSha}。不得创建任何 workflow、手工创建分支、使用 undefined 路径或 feature、手工 git add/commit；不要 merge、rebase、解决冲突、删除 worktree。任何命令失败立即返回 failed，不得以部分结果继续。`;
 }
 
 async function runInitialBatchLifecycle(batchId) {
@@ -1420,7 +1391,7 @@ async function runInitialBatchLifecycle(batchId) {
       { label: `fixed-batch-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
     ));
     batchResults.push(implemented);
-    if (!implemented || implemented.status !== "success" || implemented.compileStatus !== "skipped") {
+    if (!implemented || implemented.status !== "success") {
       return safelyDeferBatchForRetry(
         batchId,
         batchWorktree,
@@ -2019,7 +1990,7 @@ let e2e;
 try {
   e2eStarted = requireSuccess(await workflowAgent(
     `所有 delivery Batch 已推广后，创建 B-E2E。执行 python "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch compile 或 UTest。只返回 JSON。`,
+    `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch UTest。只返回 JSON。`,
     { label: "begin-e2e-validation", phase: "最终验证" }
   ), "begin e2e");
   e2e = requireSuccess(await workflowAgent(

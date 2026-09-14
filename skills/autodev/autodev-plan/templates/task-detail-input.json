@@ -1,16 +1,15 @@
 {
-  "goal": "[observable outcome]",
-  "scope": {
+  "schemaVersion": "autodev.plan-detail.v1",
+  "context": {
     "modules": ["[module]"],
     "entrypoints": [],
-    "dataObjects": [],
-    "paths": []
+    "dataObjects": []
   },
-  "implementationPoints": [
+  "implementation": [
     "[implement the behavior]",
     "[cover its public boundary]"
   ],
-  "acceptanceCriteria": [
+  "acceptance": [
     {
       "text": "[observable acceptance result]",
       "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
@@ -19,17 +18,17 @@
   "nonGoals": [
     "[explicit adjacent behavior or scope that this task will not change]"
   ],
-  "designRefs": [],
-  "dataIds": [],
-  "decisionIds": [],
-  "validationCommands": [
+  "refs": {
+    "design": [],
+    "data": [],
+    "decisions": []
+  },
+  "checks": [
     {
       "argv": ["[executable]", "[task test arguments]"],
       "kind": "behavior_test",
       "required": true,
       "covers": [1]
     }
-  ],
-  "expectedFiles": [],
-  "blockers": []
+  ]
 }

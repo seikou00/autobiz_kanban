@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: 基于已确认技术设计生成可执行任务计划、批次计划和 PLAN.md。
-version: v2.3.0908
+version: v2.4.0911
 ---
 
 # /autodev-plan - Executable Task Plan
@@ -29,6 +29,14 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 `plan_writer.py` 是候选分组、Draft、工程命令、正式 Bundle 和 `PLAN.md` 的唯一写入入口。不得直接编辑根 / Batch JSON、维护平行 `plan_v*.json`，或根据 validator 失败反推 schema。`PLAN.md` 必须从 `plan.json` 投影，不能独自维护机器事实。
 
+模型只生成紧凑输入合同，不能生成或回传完整 `plan.json`、Batch JSON、Draft JSON 或 `PLAN.md`：
+
+- 候选分组使用 `autodev.plan-core.v1`（模板中的 `tasks[]`）：`outcome` 合并标题、`dependsOn` 合并依赖、`writeSet` 是唯一候选写集、`refs` 合并需求/场景/API 引用，`validation.seam` 取代独立验证边界字段。writer 自动投影成运行时兼容的 group contract。
+- 单 Task 详情使用 `autodev.plan-detail.v1`：`context`、`implementation`、`acceptance`、`checks`、`refs`。`outcome` 默认复用 Plan Core，避免重复生成；只有需覆盖时才显式传入。验收 ID、命令 ID、命令 cwd、workspace roots、lane、Batch 和 `PLAN.md` 均由 writer 派生。
+- 需要上下文时只运行 `show-draft-task-work --task-id T001`，它只返回该 Task 的 compact core、当前 detail、Draft revision 和 writer-owned 字段；不得读取全量 Draft 后再输出全量替换。
+
+兼容运行时字段只在 writer 投影和审阅中出现：候选表仍可显示“完整 specRefs 清单”和“可合并(附 splitRationale)”/“splitRationale 草稿”，但模型必须写成 `refs` / `validation.mergeJustification`；非 UI Core task 不写 `ui`，writer 投影为 `uiRequired:false`。最终的 `validationCommands[].cwd` 保持 Git 根相对路径，由 writer 按 `scope.workspaceRoots` 派生或校验。
+
 开始候选分组前，必须完整读取：
 
 - `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json`
@@ -45,7 +53,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 
 - 从 `proposal.md` 的影响模块、`scope.md`、`UI_CONTEXT.json` 和实际代码仓库确认所有相关 Git 根（含前端）；缺少某个实际 Git 根时先向用户确认，不得按 backend-only 猜测。
 - 建立 `workspaceRef -> 实际 Git 根 -> workspaceRoot -> 路径写法` 映射。具名仓库的 `scope.paths` 使用 `repoId:relative/path`，默认根不带前缀；不得写绝对路径或重复 workspace root。
-- 建立写入归属表，逐项检查 `touches`、`scope.paths`、`expectedFiles` 和 `implementationPoints`。跨 Batch 的共享 Controller、SQL、路由、协议或全局配置只保留一个前置 owner，消费者移除该路径并通过 `deps` 消费其结果。
+- 建立写入归属表，逐项检查 `touches`、`scope.paths`、`expectedFiles` 和 `implementationPoints`。跨 Batch 的共享 Controller/Service 默认只保留一个前置 owner；若确为互不重叠的稳定方法，Core 的同一 `writeSet.path` 可分别声明 `symbols: ["Class#method"]`，每个 symbol 只能有一个 owner。SQL、路由、协议或全局配置仍必须单 owner；消费者移除该路径并通过 `deps` 消费其结果。
 - 先为每个候选任务判定 `executionMode`。`verified_existing` 仅表示本任务不做业务代码改动：通常保持 `touches: []`，用真实的 `validationBoundary`、`validationCommands`、`implementationPoints` 和 `specRefs` 声明验证表面；不要把仅供验证阅读的现有文件伪装成写入归属。
 
 不要用覆盖不完整的“2-task mini group”作为真实 Feature 的 `preflight-task-groups` 冒烟样本：该预检还会校验完整场景覆盖。路径和字段形状以本节模板、`add-task-contract` 和完整候选分组的预检为准。
@@ -78,39 +86,58 @@ python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail \
   --feature "${feature}" --task-id T001 --body-stdin
 ```
 
-详情不得改写 group-owned 字段、`scope.pages` 或 `scope.workspaceRoots`；这些由 writer 投影。先选择路径格式或验证边界最复杂的一个任务执行一次 `set-draft-task-detail`，并用 `show-task-draft` 核对投影；成功后再批量补齐其余详情。该命令对单个详情原子校验，失败不落盘。所有 task ready 前，`preflight-task-draft` 出现 `draft_task_not_ready` 属于预期，不能把它当作详情格式失败；不读取或手改 Draft JSON。
+详情不得改写 group-owned 字段、`scope.pages` 或 `scope.workspaceRoots`；这些由 writer 投影。先选择路径格式或验证边界最复杂的一个任务执行一次 `set-draft-task-detail`，并用 `show-draft-task-work --task-id <id>` 核对该任务投影；成功后再批量补齐其余详情。该命令对单个详情原子校验，失败不落盘。所有 task ready 前，`preflight-task-draft` 出现 `draft_task_not_ready` 属于预期，不能把它当作详情格式失败；不读取或手改 Draft JSON。
 
-### 2. 配置工程命令、预检与发布
+### 2. 配置质量门、预检与发布
 
-为每个实际存在 `executionMode=code` 任务的 lane 配置一条 required 编译命令；`verified_existing` 和 `external_dependency` 不需要编译命令。质量门和项目级 E2E 是按需补充；多仓库时每条命令都显式指定正确的 `--repo <workspaceRef>`。
+批次编译不属于 Plan 合同。质量门和项目级 E2E 是按需补充；多仓库时每条命令都显式指定正确的 `--repo <workspaceRef>`。
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>"
-python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane frontend --command "<FRONTEND_COMPILE_OR_BUILD>"
 python "${pluginPath}/hooks/plan_writer.py" add-quality-gate-command --feature "${feature}" --lane backend --command "<BACKEND_LINT_OR_STATIC_CHECK>"
 python "${pluginPath}/hooks/plan_writer.py" add-project-validation-command --feature "${feature}" --command "<FINAL_E2E_COMMAND>" --cwd "<GIT_ROOT_RELATIVE_CWD>" --kind e2e_test --repo "<workspaceRef>"
 python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${feature}"
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-finalize 会通过事务一次性写入根 `plan.json`、所有 Batch 计划与 `PLAN.md`。根计划不含 `tasks`；每个 Batch 由 `compileProfiles` 投影出唯一 `compileCommand`，并按需带 `qualityGateCommands`。Draft 未完整通过时，不写任何正式产物。
+finalize 会通过事务一次性写入根 `plan.json`、所有 Batch 计划与 `PLAN.md`。根计划不含 `tasks`；每个 Batch 只按需带 `qualityGateCommands`。Draft 未完整通过时，不写任何正式产物。
 
 ## 修复与变更
 
 `preflight-task-groups` / `preflight-task-draft` 使用 Design 锁和当前 Draft 校验引用、DAG、Batch、workspace、场景覆盖和验证命令。读取返回的 `validation.issues`、`validation.invalidTaskIds` 和每项 `repairSuggestion`：
 
 - `repairTarget=design_revision`：停止 Plan，回 `/autodev-design` 修订并重锁。
-- `repairTarget=task_group`：只修分组；分组 digest 变动后用 `rebuild-task-draft`，不要把修改同步进旧 Draft。读取返回的 `preservedTaskIds` 和 `resetTaskIds` 后，只重填 reset 的详情；不得假定 rebuild 会重置全部或保留全部任务。
-- `repairTarget=task_detail`：只修对应详情，使用 `repair-draft-task` / `repair-draft-tasks` 后重跑预检。
+- `repairTarget=task_group`：只修分组，**保留现有 `task-groups.json`**。如果 Draft 尚未创建，使用 `create-repair-work --group-file <file>`；如果 Draft 已创建，将同一命令的输出交给 `apply-draft-patch`。工单只会开放 `/groups/<task>/writeSet`、`/groups/<task>/dependsOn` 或 `/groups/<task>/validation.mergeJustification` 等必要路径，并要求 `baseGroupingDigest`（预 Draft）或 `baseRevision`（Draft）。不要删除文件、不要提交完整 Core、不要用全量生成替代修复。若错误不能由这些受限字段安全表达，回覆盖矩阵定位遗漏并重新分组；Draft 重投影后读取 `preservedTaskIds` 和 `resetTaskIds`，只重填 reset 的详情；不得假定 rebuild 会重置全部或保留全部任务。
+- `repairTarget=task_detail`：先生成受限修订工单，再只提交该工单允许的增量 patch。将 validator 输出或评审输出传给：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" create-repair-work \
+  --feature "${feature}" --feedback-file "<VALIDATION_OR_REVIEW_JSON>"
+```
+
+返回的 `issues[]` 是模型唯一允许读取的失败上下文：包含 `reasonCode`、失败原因、Task、字段、当前值哈希、`allowedOps` 与成功条件。模型必须返回 `autodev.plan-repair-patch.v1`，带 `workId`、`baseRevision`、`resolves` 和每条 `replace` 的 `expectedHash`，再执行：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" apply-draft-patch \
+  --feature "${feature}" --patch-file "<PATCH_JSON>"
+```
+
+预 Draft 的分组错误改为传入现有 Core 文件：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" create-repair-work \
+  --feature "${feature}" --group-file "<TASK_GROUPS_JSON>"
+```
+
+它返回 `source.groupingDigest`；patch 使用 `baseGroupingDigest`，其 `ops` 仍只能是 `allowedOps` 中的 `replace`。patch 不能修改未列出的路径、其他 Task、Batch 或 `PLAN.md`。revision、grouping digest 或字段哈希不匹配时，重新生成 repair work，绝不能复用旧 patch、删除 `task-groups.json` 或退化为全量重写。旧的 `repair-draft-task` / `repair-draft-tasks` 仅用于兼容，不应用于新的模型修订流程。
 - `repairTarget=draft_integrity`：按错误恢复；不得为了规避错误删除 `.tmp/plan_writer`、删除 Draft 或全量重填 task。
 
-Draft 已创建后，`specRefs`、`touches`、`deps`、`workspaceRef`、`splitRationale`、`validationBoundary` 等均为 group-owned 字段。只有返回 `repairTarget=task_group` 时才编辑候选分组并 rebuild；`scope.paths`、implementationPoints、acceptanceCriteria、task validationCommands 等 `task_detail` 问题不得改动候选分组。rebuild 的返回值是唯一的重填清单：**只**重填 `resetTaskIds`，不得重填 `preservedTaskIds`。若发现 specs 或 design 本身需要改动，停止 Plan，回到对应上游阶段；不得在 Plan/Draft 阶段直接修改它们。
+Draft 已创建后，`specRefs`、`touches`、`deps`、`workspaceRef`、`splitRationale`、`validationBoundary` 等均为 group-owned 字段。只有返回 `repairTarget=task_group` 时才编辑候选分组并 rebuild；新流程优先使用受限 patch，writer 自动重投影而不是要求模型重建 Draft。`scope.paths`、implementationPoints、acceptanceCriteria、task validationCommands 等 `task_detail` 问题不得改动候选分组。重投影的返回值是唯一的重填清单：**只**重填 `resetTaskIds`，不得重填 `preservedTaskIds`。若发现 specs 或 design 本身需要改动，停止 Plan，回到对应上游阶段；不得在 Plan/Draft 阶段直接修改它们。
 
 已 finalized 且尚未执行的计划，先运行 `diagnose-plan-repair`；仅在允许修复时使用 `reopen-finalized-draft --reason <reason>`，局部修复后 `finalize-task-draft --force`。返回 `plan_revision_required` 时转入计划修订；只有 `full_rebuild_required` 才能全量重建。
 
 ## 阶段门与完成
 
-finalize 后先运行机器阶段门，再按渲染出的协议进行回检；回检改动产物后重跑阶段门。
+finalize 后先运行机器阶段门，再按渲染出的协议进行回检，并完整遵循其输出；不得凭记忆执行本节。回检改动产物后重跑阶段门。
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"

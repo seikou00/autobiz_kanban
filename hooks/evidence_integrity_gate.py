@@ -290,7 +290,7 @@ def _check_batch_completion(
     *,
     feature_dir: Path | None = None,
 ) -> list[str]:
-    """Validate the batch compile closure used by Code done gate."""
+    """Validate the delivery closure used by the Code done gate."""
     errors: list[str] = []
     if not defer_to_test_stages_enabled(plan):
         return ["taskValidationPolicy_not_supported"]
@@ -300,6 +300,11 @@ def _check_batch_completion(
 
     for batch_id, batch in batch_plans.items():
         if not isinstance(batch, dict):
+            continue
+        # Current Plans have no batch compilation surface.  Preserve the
+        # stricter checks only for finalized legacy artifacts that still carry
+        # the old command/state pair while they complete migration.
+        if "compileCommand" not in batch and "batchCompile" not in batch:
             continue
         compile_result = batch.get("batchCompile")
         if not isinstance(compile_result, dict):
@@ -342,10 +347,10 @@ def _check_batch_completion(
             errors.append(f"{batch_id}.batch_compile_implementation_revision_mismatch")
 
     # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
-    # A compile result is insufficient here: only the merger records the
-    # delivery and transitions the task from implemented to done.  Requiring a
-    # succeeded runtime manifest prevents a manually edited plan from bypassing
-    # the merge and final verification barriers.
+    # Only the merger records the delivery and transitions the task from
+    # implemented to done. Requiring a succeeded runtime manifest prevents a
+    # manually edited plan from bypassing the merge and final verification
+    # barriers.
     if len(batch_plans) > 1:
         run_ids: set[str] = set()
         for batch_id, batch in batch_plans.items():

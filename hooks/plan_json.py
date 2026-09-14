@@ -913,13 +913,9 @@ def validate_plan_data(
         and entry.get("workspaceRef")
     }
     _validate_code_workspace_bindings(errors, data, batch_workspace_refs)
-    _validate_compile_profiles(
-        errors,
-        data,
-        require_initial_status=require_initial_status,
-        require_backend_compile=(require_backend_compile or require_all_done),
-        used_lanes=used_lanes,
-    )
+    # Batch compilation is retired from the Plan contract.  Older Plans may
+    # still contain ``compileProfiles`` while they are being migrated, but the
+    # field no longer contributes a required validation surface.
     _validate_quality_gate_profiles(errors, data)
 
     known_batches = set(batch_ids)
@@ -987,13 +983,6 @@ def validate_batch_plan_data(
         str(batch_id),
         require_backend_compile=require_backend_compile,
     )
-    _validate_batch_compile(
-        errors,
-        data,
-        str(batch_id),
-        enabled=defer_to_test_stages,
-        require_all_done=require_all_done,
-    )
     if "taskValidation" in data:
         errors.append(f"{batch_id}.taskValidation_forbidden")
     delivery_kind = data.get("deliveryKind")
@@ -1037,13 +1026,6 @@ def validate_batch_plan_data(
     }
     if len(frontend_routes) > 1:
         errors.append(f"{batch_id}.mixed_task_frontend_routes")
-    compile_command = data.get("compileCommand")
-    _validate_command_workspace_root(
-        errors,
-        compile_command,
-        context=f"{batch_id}.compileCommand",
-        workspace_roots=workspace_roots,
-    )
     quality_commands = data.get("qualityGateCommands")
     for index, command in enumerate(quality_commands if isinstance(quality_commands, list) else []):
         _validate_command_workspace_root(
@@ -1463,24 +1445,9 @@ def _validate_batch_execution_commands(
     *,
     require_backend_compile: bool,
 ) -> None:
-    compile_command = data.get("compileCommand")
-    compile_required = require_backend_compile and data.get("executionLane") == "backend"
-    if compile_command is None:
-        if compile_required:
-            errors.append(f"batch_compile_contract_requires_rebuild:{batch_id}.compileCommand")
-    else:
-        _validate_compile_command(
-            errors,
-            compile_command,
-            context=f"{batch_id}.compileCommand",
-            command_id_required=True,
-        )
-    if compile_required and not (
-        isinstance(compile_command, dict)
-        and compile_command.get("required") is True
-        and compile_command.get("kind") == "compile"
-    ):
-        errors.append(f"{batch_id}.compileCommand.required_compile_missing")
+    # Kept as an argument for old callers.  Compilation is no longer a Batch
+    # command and is intentionally absent from the generated Plan.
+    del require_backend_compile
     quality_commands = data.get("qualityGateCommands")
     if not isinstance(quality_commands, list):
         errors.append(f"quality_gate_contract_requires_rebuild:{batch_id}.qualityGateCommands")
@@ -1654,8 +1621,10 @@ def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) ->
 
     if policy.get("orchestration") != "inline":
         errors.append("taskValidationPolicy.orchestration_must_be_inline")
-    if policy.get("codeGate") != "batch_compile_only":
-        errors.append("taskValidationPolicy.codeGate_must_be_batch_compile_only")
+    # Accept the retired value only to read historical artifacts.  New Plans
+    # use ``review_only`` and do not expose a batch compile gate.
+    if policy.get("codeGate") not in {"review_only", "batch_compile_only"}:
+        errors.append("taskValidationPolicy.codeGate_must_be_review_only")
     if policy.get("maxTestStageRepairAttempts") != BATCH_COMPILE_MAX_REPAIR_ATTEMPTS:
         errors.append(
             f"taskValidationPolicy.maxTestStageRepairAttempts_must_be:{BATCH_COMPILE_MAX_REPAIR_ATTEMPTS}"
@@ -2083,15 +2052,6 @@ def _validate_batch_execution_command_projection(
             if isinstance(command, dict)
             and _profile_command_matches_batch_workspace(command, workspace_ref)
         ] if isinstance(commands, list) else []
-
-    compile_matches = matching_commands("compileProfiles")
-    expected_compile = (
-        {**compile_matches[0], "id": f"BATCH-{batch_id}-COMPILE"}
-        if len(compile_matches) == 1
-        else None
-    )
-    if batch.get("compileCommand") != expected_compile:
-        errors.append(f"{batch_id}.compileCommand_profile_projection_mismatch")
 
     expected_quality = [
         {**command, "id": f"BATCH-{batch_id}-QUALITY-{index:03d}"}

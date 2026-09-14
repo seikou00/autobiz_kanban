@@ -689,18 +689,6 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(draft_task["validationCommands"][0]["covers"], ["AC-T001-01"])
             self.assertEqual(draft_task["validationCommands"][0]["cwd"], ".")
 
-            missing_engineering_commands = _run(
-                "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
-                "--feature", "alpha",
-            )
-            self.assertNotEqual(missing_engineering_commands.returncode, 0)
-            self.assertIn("missing_backend_compile_command", missing_engineering_commands.stdout)
-            compile_added = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('compile')\"",
-            )
-            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
             project_added = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
@@ -759,12 +747,6 @@ class JsonWriterTests(unittest.TestCase):
                 "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
             )
             self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
-            compile_added = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('compile')\"",
-            )
-            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
             project_added = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
@@ -976,25 +958,9 @@ class JsonWriterTests(unittest.TestCase):
                 )
                 self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
 
-            # Add compile commands before finalize (new requirement)
-            # First test that missing --repo is rejected when multiple repos exist
-            missing_repo = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend", "--command", "mvn compile -q",
-                "--code-workspace", str(backend_a),
-            )
-            self.assertNotEqual(missing_repo.returncode, 0)
-            self.assertIn("compile_command_repository_required", missing_repo.stdout)
-
-            # Then add compile commands for both repositories
+            # Project validation still requires an explicit repository binding
+            # when a delivery spans multiple repositories.
             for repository, code_workspace in (("backend-a", backend_a), ("backend-b", backend_b)):
-                added = _run(
-                    "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                    "--feature", "alpha", "--lane", "backend", "--repo", repository,
-                    "--command", "mvn compile -q",
-                    "--code-workspace", str(code_workspace),
-                )
-                self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
                 project_added = _run(
                     "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                     "--feature", "alpha", "--repo", repository,
@@ -1008,16 +974,6 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
 
-            # Verify that compile commands cannot be added after finalize
-            post_finalize_add = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend", "--repo", "backend-a",
-                "--command", "mvn test",
-                "--code-workspace", str(backend_a),
-            )
-            self.assertNotEqual(post_finalize_add.returncode, 0)
-            self.assertIn("task_draft_finalized", post_finalize_add.stdout)
-
             initial = _run(
                 "plan_writer.py", "validate", "--workspace", str(workspace),
                 "--feature", "alpha", "--initial",
@@ -1030,14 +986,8 @@ class JsonWriterTests(unittest.TestCase):
             second_batch = json.loads(
                 (feature_dir / "plans" / "B002" / "plan.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(
-                first_batch["compileCommand"].get("repo"),
-                "backend-a",
-            )
-            self.assertEqual(
-                second_batch["compileCommand"].get("repo"),
-                "backend-b",
-            )
+            self.assertNotIn("compileCommand", first_batch)
+            self.assertNotIn("compileCommand", second_batch)
 
     def test_plan_writer_draft_rejects_group_owned_detail_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1612,11 +1562,6 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
 
-            compile_added = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend", "--command", "mvn.cmd compile -q",
-            )
-            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
             project_added = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", "mvn.cmd test -q",
@@ -1628,10 +1573,7 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
             root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                root_plan["compileProfiles"]["backend"]["commands"][0]["cwd"],
-                "backend/service",
-            )
+            self.assertNotIn("compileProfiles", root_plan)
 
     def test_plan_writer_rejects_project_selector_from_leaf_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1989,7 +1931,7 @@ class JsonWriterTests(unittest.TestCase):
             {
                 "mode": "defer_to_test_stages",
                 "orchestration": "inline",
-                "codeGate": "batch_compile_only",
+                "codeGate": "review_only",
                 "maxTestStageRepairAttempts": 3,
                 "taskCommandTiming": "test_stages_only",
                 "codeCommandTiming": "after_all_batch_tasks_implemented",
@@ -2003,22 +1945,24 @@ class JsonWriterTests(unittest.TestCase):
             contract["taskDetailTemplate"],
             "skills/autodev/autodev-plan/templates/task-detail-input.json",
         )
-        self.assertNotIn("workspaceRoots", contract["taskDetailInputExample"]["scope"])
+        self.assertEqual(contract["taskDetailInputExample"]["schemaVersion"], "autodev.plan-detail.v1")
+        self.assertNotIn("workspaceRoots", contract["taskDetailInputExample"]["context"])
         self.assertTrue(contract["taskDetailInputExample"]["nonGoals"])
-        self.assertNotIn("id", contract["taskDetailInputExample"]["acceptanceCriteria"][0])
-        self.assertNotIn("id", contract["taskDetailInputExample"]["validationCommands"][0])
+        self.assertNotIn("id", contract["taskDetailInputExample"]["acceptance"][0])
+        self.assertNotIn("id", contract["taskDetailInputExample"]["checks"][0])
         self.assertIn("task-directory", contract["deprecatedInputModes"])
         self.assertIn("import-task-directory", contract["legacyTaskDirectoryMigration"])
         self.assertEqual(
             contract["taskGroupTemplate"],
             "skills/autodev/autodev-plan/templates/task-groups.json",
         )
-        self.assertIn("groups", contract["taskGroupInputExample"])
+        self.assertEqual(contract["taskGroupInputExample"]["schemaVersion"], "autodev.plan-core.v1")
+        self.assertIn("tasks", contract["taskGroupInputExample"])
         group_ui_example = contract["taskGroupUiRequiredExample"]
-        self.assertTrue(group_ui_example["uiRequired"])
+        self.assertIn("ui", group_ui_example)
         self.assertEqual(
-            list(group_ui_example["uiRefs"]),
-            ["pageRefs", "interactionRefs", "visualSourceRefs", "frontendRoute"],
+            list(group_ui_example["ui"]),
+            ["pages", "interactions", "visualSources", "route"],
         )
         self.assertEqual(
             contract["exampleOnlyTaskGroupFields"],
@@ -2029,12 +1973,11 @@ class JsonWriterTests(unittest.TestCase):
             ],
         )
         external_example = contract["taskGroupExternalDependencyExample"]
-        self.assertEqual(external_example["executionMode"], "external_dependency")
-        self.assertTrue(external_example["externalDependency"]["trackingRefs"])
+        self.assertEqual(external_example["mode"], "external_dependency")
+        self.assertTrue(external_example["external"]["trackingRefs"])
         group_exception = contract["taskGroupMatrixExceptionExample"]
-        self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
-        self.assertIn("splitRationale", group_exception)
-        self.assertIn("validationBoundary", group_exception)
+        self.assertIn("mergeJustification", group_exception["validation"])
+        self.assertEqual(len(group_exception["refs"]["scenarios"]), 6)
         self.assertEqual(contract["validationKinds"], sorted(TASK_VALIDATION_KINDS))
         self.assertEqual(
             contract["validationKindsByLane"],
@@ -2043,14 +1986,7 @@ class JsonWriterTests(unittest.TestCase):
                 "frontend": sorted(TASK_VALIDATION_KINDS),
             },
         )
-        self.assertEqual(
-            contract["validationCoverage"]["compileMayCoverAcceptanceCriteriaByLane"],
-            {"backend": False, "frontend": True},
-        )
-        self.assertEqual(
-            contract["validationCoverage"]["frontendCompileKinds"],
-            ["build", "compile", "typecheck"],
-        )
+        self.assertEqual(contract["validationCoverage"], {"rule": "required_commands_cover_all_acceptance_criteria"})
         self.assertEqual(contract["validationCommandPolicy"]["inlineShell"], "forbidden")
         self.assertTrue(contract["validationCommandPolicy"]["packageScriptMustExist"])
         self.assertTrue(contract["validationCommandPolicy"]["mavenTargetMustBeConcreteClass"])
@@ -2066,7 +2002,7 @@ class JsonWriterTests(unittest.TestCase):
             contract["validationTestPlanPolicy"]["createInCodeAllowed"],
             False,
         )
-        self.assertEqual(contract["compileCommandKinds"], ["compile"])
+        self.assertNotIn("compileCommandKinds", contract)
         self.assertEqual(contract["qualityGateCommandKinds"], ["static_check"])
         self.assertEqual(
             contract["projectValidationCommand"]["allowedKinds"],
@@ -2084,19 +2020,7 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertEqual(contract["projectValidationCommand"]["executionTarget"], "merged_main_e2e")
         self.assertTrue(contract["projectValidationCommand"]["repoRequiredWhenMultipleWorkspaces"])
-        self.assertEqual(
-            contract["compileCommand"],
-            {
-                "command": (
-                    "add-compile-command --lane <backend|frontend> "
-                    "[--repo <workspaceRef>] --command <command>"
-                ),
-                "requiredFields": ["argv", "cwd", "kind", "required"],
-                "requiredPerUsedWorkspaceInLane": "exactly_one",
-                "repoRequiredWhenLaneUsesMultipleWorkspaces": True,
-                "defaultCwd": "declared_workspace_root",
-            },
-        )
+        self.assertNotIn("compileCommand", contract)
         self.assertEqual(
             contract["qualityGateCommand"]["executionStage"],
             "quality_gate_only_when_commands_present",
@@ -2116,9 +2040,9 @@ class JsonWriterTests(unittest.TestCase):
             contract["validationEnvironmentPolicy"],
             {
                 "preflightBeforeRun": True,
-                "missingExecutableResult": "block_batch_compile",
-                "runtimeEnvironmentResult": "block_batch_compile",
-                "requiredActions": ["fix_compile_environment_and_retry_batch_compile"],
+                "missingExecutableResult": "record_stage_environment_failure",
+                "runtimeEnvironmentResult": "record_stage_environment_failure",
+                "requiredActions": ["repair_stage_environment_and_retry"],
                 "planOrDigestRebuildRequired": False,
             },
         )
@@ -2161,11 +2085,23 @@ class JsonWriterTests(unittest.TestCase):
                 "preflightCommand": "preflight-task-draft",
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
-                "requiredBefore": ["add-compile-command"],
+                "requiredBefore": [],
             },
         )
         self.assertTrue(contract["collectingRepairs"]["atomic"])
         self.assertTrue(contract["collectingRepairs"]["preserveUnchangedTaskDetails"])
+        self.assertEqual(
+            contract["modelFacingContracts"]["planCore"]["schemaVersion"],
+            "autodev.plan-core.v1",
+        )
+        self.assertEqual(
+            contract["modelFacingContracts"]["taskDetail"]["schemaVersion"],
+            "autodev.plan-detail.v1",
+        )
+        self.assertEqual(
+            contract["modelFacingContracts"]["repair"]["patchSchemaVersion"],
+            "autodev.plan-repair-patch.v1",
+        )
         self.assertFalse(contract["draftWorkflow"]["standaloneTaskFiles"])
         self.assertEqual(contract["draftWorkflow"]["groupLock"], "groupingDigest")
         self.assertEqual(contract["draftWorkflow"]["persistentDesignLock"], ".design-contract.lock.json")
@@ -3302,6 +3238,370 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("missing_unit_target_trace_args", unit.stdout)
             self.assertNotEqual(e2e.returncode, 0)
             self.assertIn("required", e2e.stderr)
+
+    def test_compact_plan_core_detail_and_restricted_repair_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            core = {
+                "schemaVersion": "autodev.plan-core.v1",
+                "featureId": "alpha",
+                "tasks": [{
+                    "id": "T001",
+                    "outcome": "deliver observable behavior",
+                    "dependsOn": [],
+                    "workspace": "default",
+                    "writeSet": [{"path": "src/cap.py"}],
+                    "refs": {
+                        "requirements": ["specs/cap/spec.md#REQ-001"],
+                        "scenarios": ["specs/cap/spec.md#SCN-001"],
+                        "api": ["API-001"],
+                    },
+                    "validation": {"seam": "public behavior seam validated by the task command"},
+                }],
+            }
+            core_path = root / "plan-core.json"
+            core_path.write_text(json.dumps(core), encoding="utf-8")
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(core_path),
+                "--code-workspace", str(module),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            self.assertEqual(json.loads(prepared.stdout)["draft"]["revision"], 1)
+
+            compact_detail = {
+                "schemaVersion": "autodev.plan-detail.v1",
+                "context": {"modules": ["src"], "entrypoints": [], "dataObjects": []},
+                "implementation": ["update behavior", "cover public boundary"],
+                "acceptance": [{
+                    "text": "behavior is observable",
+                    "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                }],
+                "nonGoals": ["do not change unrelated behavior"],
+                "refs": {
+                    "design": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                    "data": ["DATA-001"],
+                    "decisions": ["D-001"],
+                },
+                "checks": [{
+                    "argv": [sys.executable, "-c", "print('task validation')"],
+                    "kind": "behavior_test",
+                    "required": True,
+                    "covers": [1],
+                }],
+            }
+            detail_path = root / "detail.json"
+            detail_path.write_text(json.dumps(compact_detail), encoding="utf-8")
+            detailed = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+            self.assertEqual(json.loads(detailed.stdout)["draft"]["revision"], 2)
+
+            task_work = _run(
+                "plan_writer.py", "show-draft-task-work", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001",
+            )
+            self.assertEqual(task_work.returncode, 0, task_work.stdout + task_work.stderr)
+            task_work_payload = json.loads(task_work.stdout)["taskWork"]
+            self.assertEqual(task_work_payload["baseRevision"], 2)
+            self.assertEqual(task_work_payload["core"]["outcome"], "deliver observable behavior")
+            self.assertEqual(task_work_payload["currentDetail"]["schemaVersion"], "autodev.plan-detail.v1")
+
+            feedback_path = root / "feedback.json"
+            feedback_path.write_text(json.dumps({"issues": [{
+                "issueId": "REV-001",
+                "taskId": "T001",
+                "field": "implementation",
+                "reason": "implementation_too_vague",
+                "detail": "implementation points need a concrete entrypoint",
+                "repairTarget": "task_detail",
+            }]}), encoding="utf-8")
+            repair_work = _run(
+                "plan_writer.py", "create-repair-work", "--workspace", str(workspace),
+                "--feature", "alpha", "--feedback-file", str(feedback_path),
+            )
+            self.assertEqual(repair_work.returncode, 0, repair_work.stdout + repair_work.stderr)
+            work = json.loads(repair_work.stdout)["repairWork"]
+            issue = work["issues"][0]
+            self.assertEqual(issue["reasonCode"], "implementation_too_vague")
+            self.assertEqual(issue["allowedOps"][0]["path"], "/tasks/T001/implementationPoints")
+            self.assertIn("currentHash", issue["allowedOps"][0])
+
+            rejected_patch_path = root / "rejected.patch.json"
+            rejected_patch_path.write_text(json.dumps({
+                "schemaVersion": "autodev.plan-repair-patch.v1",
+                "workId": work["workId"],
+                "baseRevision": work["baseRevision"],
+                "resolves": ["REV-001"],
+                "ops": [{
+                    "op": "replace",
+                    "path": "/tasks/T001/nonGoals",
+                    "expectedHash": "sha256:untrusted",
+                    "value": ["unauthorized"],
+                }],
+            }), encoding="utf-8")
+            rejected = _run(
+                "plan_writer.py", "apply-draft-patch", "--workspace", str(workspace),
+                "--feature", "alpha", "--patch-file", str(rejected_patch_path),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("draft_patch_path_not_allowed", rejected.stdout)
+
+            patch_path = root / "repair.patch.json"
+            patch_path.write_text(json.dumps({
+                "schemaVersion": "autodev.plan-repair-patch.v1",
+                "workId": work["workId"],
+                "baseRevision": work["baseRevision"],
+                "resolves": ["REV-001"],
+                "reason": "point to the concrete service entrypoint",
+                "ops": [{
+                    "op": "replace",
+                    "path": issue["allowedOps"][0]["path"],
+                    "expectedHash": issue["allowedOps"][0]["currentHash"],
+                    "value": ["CapService#apply performs the behavior", "cover the public boundary"],
+                }],
+            }), encoding="utf-8")
+            applied = _run(
+                "plan_writer.py", "apply-draft-patch", "--workspace", str(workspace),
+                "--feature", "alpha", "--patch-file", str(patch_path),
+            )
+            self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+            applied_payload = json.loads(applied.stdout)
+            self.assertEqual(applied_payload["draft"]["revision"], 3)
+            self.assertEqual(applied_payload["incrementalChange"]["revalidatedTaskIds"], ["T001"])
+            task = json.loads(
+                (
+                    feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+                ).read_text(encoding="utf-8")
+            )["tasks"][0]
+            self.assertEqual(task["implementationPoints"][0], "CapService#apply performs the behavior")
+
+            repeated = _run(
+                "plan_writer.py", "apply-draft-patch", "--workspace", str(workspace),
+                "--feature", "alpha", "--patch-file", str(patch_path),
+            )
+            self.assertNotEqual(repeated.returncode, 0)
+            self.assertIn("draft_patch_repair_work_not_open", repeated.stdout)
+
+    def test_restricted_group_patch_preserves_unaffected_draft_details(self) -> None:
+        """Shared-write repairs change only Core owners, never rebuild the Draft."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            core = {
+                "schemaVersion": "autodev.plan-core.v1",
+                "featureId": "alpha",
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "outcome": "own the activity write boundary",
+                        "dependsOn": [],
+                        "workspace": "default",
+                        "writeSet": [{"path": "src/activity.py"}],
+                        "refs": {
+                            "requirements": ["specs/cap/spec.md#REQ-001"],
+                            "scenarios": ["specs/cap/spec.md#SCN-001"],
+                            "api": ["API-001"],
+                        },
+                        "validation": {"seam": "public activity behavior has one executable validation seam"},
+                    },
+                    {
+                        "id": "T002",
+                        "outcome": "consume the activity write boundary",
+                        "dependsOn": [],
+                        "workspace": "default",
+                        "writeSet": [{"path": "src/coupon.py"}],
+                        "refs": {
+                            "requirements": ["specs/cap/spec.md#REQ-001"],
+                            "scenarios": ["specs/cap/spec.md#SCN-001"],
+                            "api": ["API-001"],
+                        },
+                        "validation": {"seam": "public coupon behavior has one executable validation seam"},
+                    },
+                ],
+            }
+            core_path = root / "task-groups.json"
+            core_path.write_text(json.dumps(core), encoding="utf-8")
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(core_path),
+                "--code-workspace", str(module),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            detail_path = root / "detail.json"
+            detail_path.write_text(json.dumps({
+                "schemaVersion": "autodev.plan-detail.v1",
+                "context": {"modules": ["src"], "entrypoints": [], "dataObjects": []},
+                "implementation": ["update the owned behavior", "cover its public boundary"],
+                "acceptance": [{
+                    "text": "behavior is observable",
+                    "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                }],
+                "nonGoals": ["do not modify unrelated behavior"],
+                "refs": {
+                    "design": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                    "data": ["DATA-001"],
+                    "decisions": ["D-001"],
+                },
+                "checks": [{
+                    "argv": [sys.executable, "-c", "print('task validation')"],
+                    "kind": "behavior_test",
+                    "required": True,
+                    "covers": [1],
+                }],
+            }), encoding="utf-8")
+            for task_id in ("T001", "T002"):
+                detailed = _run(
+                    "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                    "--feature", "alpha", "--task-id", task_id, "--body-file", str(detail_path),
+                )
+                self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+
+            feedback_path = root / "shared-write-feedback.json"
+            feedback_path.write_text(json.dumps({"issues": [{
+                "issueId": "OWN-001",
+                "reason": "shared_write_path_requires_single_owner",
+                "detail": "workspace=default;path=src/activity.py;taskIds=T001,T002",
+                "taskIds": ["T001", "T002"],
+                "field": "touches",
+                "repairTarget": "task_group",
+            }]}), encoding="utf-8")
+            repair_work = _run(
+                "plan_writer.py", "create-repair-work", "--workspace", str(workspace),
+                "--feature", "alpha", "--feedback-file", str(feedback_path),
+            )
+            self.assertEqual(repair_work.returncode, 0, repair_work.stdout + repair_work.stderr)
+            work = json.loads(repair_work.stdout)["repairWork"]
+            issue = work["issues"][0]
+            allowed = {item["path"]: item for item in issue["allowedOps"]}
+            self.assertEqual(
+                set(allowed),
+                {
+                    "/groups/T001/writeSet",
+                    "/groups/T001/dependsOn",
+                    "/groups/T002/writeSet",
+                    "/groups/T002/dependsOn",
+                },
+            )
+            self.assertIn("不要删除", issue["recommendedAction"])
+
+            patch_path = root / "group-repair.patch.json"
+            patch_path.write_text(json.dumps({
+                "schemaVersion": "autodev.plan-repair-patch.v1",
+                "workId": work["workId"],
+                "baseRevision": work["baseRevision"],
+                "resolves": ["OWN-001"],
+                "reason": "T001 owns the producer; T002 consumes it after the dependency boundary",
+                "ops": [
+                    {
+                        "op": "replace",
+                        "path": "/groups/T002/writeSet",
+                        "expectedHash": allowed["/groups/T002/writeSet"]["currentHash"],
+                        "value": [{"path": "src/coupon.py"}],
+                    },
+                    {
+                        "op": "replace",
+                        "path": "/groups/T002/dependsOn",
+                        "expectedHash": allowed["/groups/T002/dependsOn"]["currentHash"],
+                        "value": ["T001"],
+                    },
+                ],
+            }), encoding="utf-8")
+            applied = _run(
+                "plan_writer.py", "apply-draft-patch", "--workspace", str(workspace),
+                "--feature", "alpha", "--patch-file", str(patch_path),
+            )
+            self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+            payload = json.loads(applied.stdout)
+            self.assertEqual(payload["preservedTaskIds"], ["T001"])
+            self.assertEqual(payload["resetTaskIds"], ["T002"])
+            self.assertEqual(payload["incrementalChange"]["revalidatedTaskIds"], ["T002"])
+            self.assertEqual(payload["draft"]["pendingTaskIds"], ["T002"])
+            updated_core = json.loads(core_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated_core["tasks"][1]["dependsOn"], ["T001"])
+            self.assertEqual(updated_core["tasks"][0]["writeSet"], [{"path": "src/activity.py"}])
+
+    def test_pre_draft_api_soft_limit_is_repaired_without_regenerating_plan_core(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            design_path = feature_dir / "design.md"
+            design_path.write_text(
+                design_path.read_text(encoding="utf-8").replace(
+                    "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                    "\n".join([
+                        "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                        "| API-002 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                        "| API-003 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                    ]),
+                ),
+                encoding="utf-8",
+            )
+            refreshed = sync_design_contract_lock(feature_dir.parents[2], feature_dir.name)
+            self.assertTrue(refreshed.ok, refreshed.errors)
+            core = {
+                "schemaVersion": "autodev.plan-core.v1",
+                "featureId": "alpha",
+                "tasks": [{
+                    "id": "T001",
+                    "outcome": "deliver the three coupled activity endpoints",
+                    "dependsOn": [],
+                    "workspace": "default",
+                    "writeSet": [{"path": "src/activity.py"}],
+                    "refs": {
+                        "requirements": ["specs/cap/spec.md#REQ-001"],
+                        "scenarios": ["specs/cap/spec.md#SCN-001"],
+                        "api": ["API-001", "API-002", "API-003"],
+                    },
+                    "validation": {"seam": "one public activity command exposes the endpoint behavior"},
+                }],
+            }
+            core_path = root / "task-groups.json"
+            core_path.write_text(json.dumps(core), encoding="utf-8")
+            repair_work = _run(
+                "plan_writer.py", "create-repair-work", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(core_path),
+            )
+            self.assertEqual(repair_work.returncode, 0, repair_work.stdout + repair_work.stderr)
+            work = json.loads(repair_work.stdout)["repairWork"]
+            self.assertEqual(work["source"]["kind"], "plan_core")
+            issue = next(item for item in work["issues"] if item["reasonCode"] == "missing_plan_task_split_rationale")
+            allowed = issue["allowedOps"]
+            self.assertEqual(allowed[0]["path"], "/groups/T001/validation.mergeJustification")
+
+            patch_path = root / "api-soft-limit.patch.json"
+            patch_path.write_text(json.dumps({
+                "schemaVersion": "autodev.plan-repair-patch.v1",
+                "workId": work["workId"],
+                "baseGroupingDigest": work["source"]["groupingDigest"],
+                "resolves": [issue["issueId"]],
+                "reason": "The three endpoints share one state transition and response assertion.",
+                "ops": [{
+                    "op": "replace",
+                    "path": allowed[0]["path"],
+                    "expectedHash": allowed[0]["currentHash"],
+                    "value": "API-001、API-002、API-003 共享同一次提交动作、同一个响应断言和同一验证闭环，不能独立验证。",
+                }],
+            }), encoding="utf-8")
+            applied = _run(
+                "plan_writer.py", "apply-draft-patch", "--workspace", str(workspace),
+                "--feature", "alpha", "--patch-file", str(patch_path),
+            )
+            self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+            payload = json.loads(applied.stdout)
+            self.assertEqual(payload["incrementalChange"]["kind"], "restricted_plan_core_patch")
+            self.assertFalse((feature_dir / ".tmp" / "plan_writer" / "draft").exists())
+            updated = json.loads(core_path.read_text(encoding="utf-8"))
+            self.assertIn("mergeJustification", updated["tasks"][0]["validation"])
 
 if __name__ == "__main__":
     unittest.main()

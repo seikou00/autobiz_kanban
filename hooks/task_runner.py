@@ -804,19 +804,17 @@ def _start_task_unlocked(
 
     if defer_to_test_stages_enabled(plan.root):
         batch = plan.batches.get(batch_id)
+        legacy_compile = isinstance(batch, dict) and isinstance(batch.get("compileCommand"), dict)
         batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
         compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
-        is_compile_repair = (
-            isinstance(repair_context, dict)
-            and repair_context.get("batchCompileRepair") is True
-        )
-        if compile_status == "failed" and not is_compile_repair:
+        is_compile_repair = isinstance(repair_context, dict) and repair_context.get("batchCompileRepair") is True
+        if legacy_compile and compile_status == "failed" and not is_compile_repair:
             raise TaskRunnerError(
                 f"batch_compile_repair_requires_explicit_start:{task_id}",
                 requiredAction="start_batch_compile_repair",
                 repairOwnerTaskIds=batch_compile.get("repairOwnerTaskIds", []),
             )
-        if compile_status == "repairing" and not is_compile_repair:
+        if legacy_compile and compile_status == "repairing" and not is_compile_repair:
             raise TaskRunnerError(
                 f"batch_compile_repair_already_running:{batch_id}",
                 requiredAction="continue_batch_compile_repair",
@@ -825,7 +823,7 @@ def _start_task_unlocked(
         if normalize_status(task.get("status")) == "implemented" and not is_compile_repair and not is_task_repair:
             raise TaskRunnerError(
                 f"task_implementation_already_ready:{task_id}",
-                requiredAction="await_review" if parallel_run_id is not None else "run_batch_compile",
+                requiredAction=("await_review" if parallel_run_id is not None else "run_batch_compile") if legacy_compile else "await_review",
             )
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
@@ -1732,7 +1730,7 @@ def _implementation_record(
         "action": "implementation",
         "runId": run_id,
         "completionMode": completion_mode,
-        "summary": f"{task.get('id')} implementation ready for batch compile",
+        "summary": f"{task.get('id')} implementation ready for review",
         "implementation": {
             "noCodeChange": no_code_change,
             "whatChanged": [] if no_code_change else changed_files,
@@ -2064,10 +2062,8 @@ def _finish_implementation_unlocked(
         "evidenceIds": [evidence_id],
         "implementationEvidenceId": evidence_id,
     })
-    if isinstance(result.data, dict):
-        for field in ("batchContinuation", "batchCompile"):
-            if isinstance(result.data.get(field), dict):
-                state[field] = result.data[field]
+    if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
+        state["batchContinuation"] = result.data["batchContinuation"]
     _save_run(path, state)
     return True, state
 

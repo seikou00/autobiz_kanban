@@ -1,110 +1,31 @@
 {
+  "schemaVersion": "autodev.plan-core.v1",
   "featureId": "[feature]",
-  "writeOwnershipRule": "同一 workspaceRef 下每个 touches 路径只能由一个自动 Batch 拥有；共享 SQL、路由或全局配置由前置 owner group 一次性修改，消费者只用 deps 依赖它。",
-  "atomicGroupRule": "默认一任务一 Batch。只有任一任务单独实现、验收或合并会破坏闭环时，才在每个成员上使用相同 atomicGroup（2-3 个任务、同 workspaceRef/lane/stage）；依赖或文件重叠不会自动成组。",
-  "groups": [
+  "tasks": [
     {
       "id": "T001",
-      "title": "[single observable behavior]",
-      "executionMode": "code",
-      "executionStage": "parallel",
-      "touches": ["[backend-repository-id]:src/path/to/owned-file"],
-      "deps": [],
-      "uiRequired": false,
-      "workspaceRef": "[backend-repository-id]",
-      "specRefs": [
-        "specs/[capability]/spec.md#REQ-001",
-        "specs/[capability]/spec.md#SCN-001"
+      "outcome": "[single observable behavior]",
+      "dependsOn": [],
+      "mode": "code",
+      "stage": "parallel",
+      "workspace": "[backend-repository-id]",
+      "writeSet": [
+        {"path": "[backend-repository-id]:src/path/to/owned-file"}
       ],
-      "mergedScenarioRefs": [],
-      "apiIds": [],
-      "validationBoundary": "[public seam plus one executable validation command or assertion]"
+      "refs": {
+        "requirements": ["specs/[capability]/spec.md#REQ-001"],
+        "scenarios": ["specs/[capability]/spec.md#SCN-001"],
+        "api": []
+      },
+      "validation": {
+        "seam": "[public seam plus one executable validation command or assertion]"
+      }
     }
   ],
-  "uiRequiredExample": {
-    "when": "the group implements a UI_CONTEXT page or interaction; copy real IDs and route from UI_CONTEXT.json",
-    "id": "T001",
-    "title": "[single observable UI behavior]",
-    "executionMode": "code",
-    "executionStage": "parallel",
-    "touches": ["[frontend-repository-id]:src/path/to/owned-file"],
-    "deps": [],
-    "uiRequired": true,
-    "workspaceRef": "[frontend-repository-id]",
-    "specRefs": [
-      "specs/[ui-capability]/spec.md#REQ-001",
-      "specs/[ui-capability]/spec.md#SCN-001"
-    ],
-    "mergedScenarioRefs": [],
-    "apiIds": [],
-    "uiRefs": {
-      "pageRefs": [
-        "PAGE-001"
-      ],
-      "interactionRefs": [
-        "UIX-001"
-      ],
-      "visualSourceRefs": [
-        "VIS-001"
-      ],
-      "frontendRoute": "absolute-html"
-    },
-    "validationBoundary": "one executable UI test validates the referenced page behavior against its required visual source"
-  },
-  "matrixExceptionExample": {
-    "when": "one group covers 6-12 scenarios that share one request/response or state-matrix validation loop",
-    "id": "T001",
-    "title": "[shared observable matrix behavior]",
-    "executionMode": "code",
-    "executionStage": "parallel",
-    "touches": ["[backend-repository-id]:src/path/to/owned-file"],
-    "deps": [],
-    "uiRequired": false,
-    "workspaceRef": "[backend-repository-id]",
-    "specRefs": [
-      "specs/[capability]/spec.md#REQ-001",
-      "specs/[capability]/spec.md#SCN-001",
-      "specs/[capability]/spec.md#SCN-002",
-      "specs/[capability]/spec.md#SCN-003",
-      "specs/[capability]/spec.md#SCN-004",
-      "specs/[capability]/spec.md#SCN-005",
-      "specs/[capability]/spec.md#SCN-006"
-    ],
-    "mergedScenarioRefs": [
-      "specs/[capability]/spec.md#SCN-001",
-      "specs/[capability]/spec.md#SCN-002",
-      "specs/[capability]/spec.md#SCN-003",
-      "specs/[capability]/spec.md#SCN-004",
-      "specs/[capability]/spec.md#SCN-005",
-      "specs/[capability]/spec.md#SCN-006"
-    ],
-    "apiIds": [],
-    "validationBoundary": "one request returns the complete matrix and one executable assertion validates it",
-    "splitRationale": "specs/[capability]/spec.md#SCN-001, specs/[capability]/spec.md#SCN-003, specs/[capability]/spec.md#SCN-006 共享同一请求、同一个响应断言和同一验证闭环，不能独立验证。"
-  },
-  "externalDependencyExample": {
-    "when": "the observable outcome is owned and executable only in a repository or system outside this Feature",
-    "id": "T001",
-    "title": "[record externally owned outcome]",
-    "executionMode": "external_dependency",
-    "executionStage": "parallel",
-    "touches": [],
-    "externalDependency": {
-      "system": "[external-system-or-repository]",
-      "owner": "[owning-team-or-person]",
-      "trackingRefs": [
-        "[ticket-or-design-reference]"
-      ]
-    },
-    "deps": [],
-    "uiRequired": false,
-    "workspaceRef": "[local-repository-id-used-for-supporting-evidence]",
-    "specRefs": [
-      "specs/[capability]/spec.md#REQ-001",
-      "specs/[capability]/spec.md#SCN-001"
-    ],
-    "mergedScenarioRefs": [],
-    "apiIds": [],
-    "validationBoundary": "record the external owner and tracking reference without creating local implementation or tests"
+  "notes": {
+    "writeSet": "默认同一 workspace 下每个路径只能有一个 owner；消费者通过 dependsOn 使用其产出，不重复声明文件。仅 Controller/Service 等可稳定按方法切分的文件可由多 Task 声明相同 path，但每项都必须提供互不重叠的 symbols（如 ActivityController#approve）；未声明 symbols 仍是整文件 owner。共享写入预检失败时保留本文件，使用 create-repair-work --group-file 与 apply-draft-patch 做定点修复。",
+    "merge": "超过普通粒度软上限时，在 validation.mergeJustification 写明共享验证闭环；API=3 虽未超过硬上限 3，仍因软上限 2 必须填写。脚本会从 refs.scenarios 派生 mergedScenarioRefs。",
+    "ui": "UI task 添加 ui: {pages, interactions, visualSources, route}；是否前端由 ui 是否存在派生。",
+    "atomic": "默认一 Task 一 Batch。仅不可独立交付时使用 atomic: {id, rationale}，每个成员必须相同。"
   }
 }

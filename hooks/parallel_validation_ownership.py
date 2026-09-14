@@ -62,7 +62,6 @@ def _pipeline_revision(root: dict[str, Any], batches: dict[str, dict[str, Any]])
                     if isinstance(task, dict)
                     for path in (task.get("scope", {}).get("paths", []) if isinstance(task.get("scope"), dict) else [])
                 ],
-                "compileCommand": batches.get(str(entry.get("id")), {}).get("compileCommand"),
                 "qualityGateCommands": batches.get(str(entry.get("id")), {}).get("qualityGateCommands", []),
                 "taskValidation": [
                     {
@@ -95,17 +94,6 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
             "stage": "review",
             "kind": "review",
         }
-        compile_command = batch.get("compileCommand") if isinstance(batch, dict) else None
-        compile_id = compile_command.get("id") if isinstance(compile_command, dict) else None
-        if isinstance(compile_id, str) and compile_id:
-            ownership[compile_id] = {
-                "ownerBatchId": batch_id,
-                # The implementation is draft-sealed first.  Its required
-                # production compile happens only after the read-only Review
-                # has passed (or its single repair was accepted).
-                "stage": "review",
-                "kind": "command",
-            }
         quality_commands = batch.get("qualityGateCommands") if isinstance(batch, dict) else []
         for command in quality_commands if isinstance(quality_commands, list) else []:
             command_id = command.get("id") if isinstance(command, dict) else None
@@ -205,9 +193,6 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
             continue
         batch_id = entry["id"]
         batch = batches.get(batch_id, {})
-        compile_command = batch.get("compileCommand") if isinstance(batch, dict) else None
-        if isinstance(compile_command, dict) and isinstance(compile_command.get("id"), str):
-            source_ids.append(compile_command["id"])
         quality_commands = batch.get("qualityGateCommands") if isinstance(batch, dict) else []
         for command in quality_commands if isinstance(quality_commands, list) else []:
             if isinstance(command, dict) and isinstance(command.get("id"), str):

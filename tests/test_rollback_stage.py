@@ -519,14 +519,16 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue((history / "state-after.json").is_file())
 
         root = json.loads((self.feature_dir / "plan.json").read_text(encoding="utf-8"))
-        batch = json.loads(
-            (self.feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8")
-        )
+        batches = [
+            json.loads((self.feature_dir / entry["path"]).read_text(encoding="utf-8"))
+            for entry in root["batches"]
+        ]
         self.assertEqual(root["status"], "todo")
         self.assertEqual(root["projectCheckEvidenceIds"], [])
-        self.assertNotIn("batchCompile", batch)
-        self.assertEqual([item["status"] for item in batch["tasks"]], ["todo", "todo"])
-        self.assertTrue(all(item["evidenceIds"] == [] for item in batch["tasks"]))
+        self.assertTrue(all("batchCompile" not in batch for batch in batches))
+        reset_tasks = [item for batch in batches for item in batch["tasks"]]
+        self.assertEqual([item["status"] for item in reset_tasks], ["todo", "todo"])
+        self.assertTrue(all(item["evidenceIds"] == [] for item in reset_tasks))
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
 

@@ -126,6 +126,11 @@ DRAFT_RELATIVE_DIR = ".tmp/plan_writer/draft"
 DRAFT_LOCK_FILE = "lock.json"
 DRAFT_PLAN_FILE = "plan.json"
 DRAFT_TRANSACTION_FILE = ".draft-write-transaction.json"
+DRAFT_REPAIR_WORK_RELATIVE_DIR = ".tmp/plan_writer/repair-work"
+PLAN_CORE_SCHEMA = "autodev.plan-core.v1"
+PLAN_DETAIL_SCHEMA = "autodev.plan-detail.v1"
+PLAN_REPAIR_WORK_SCHEMA = "autodev.plan-repair-work.v1"
+PLAN_REPAIR_PATCH_SCHEMA = "autodev.plan-repair-patch.v1"
 DRAFT_GROUP_OWNED_FIELDS = {
     "id",
     "title",
@@ -143,6 +148,7 @@ DRAFT_GROUP_OWNED_FIELDS = {
     "executionStage",
     "atomicGroup",
     "touches",
+    "writeTargets",
 }
 DRAFT_DETAIL_FIELDS = {
     "goal",
@@ -176,7 +182,17 @@ TASK_IDS_IN_DETAIL_RE = re.compile(r"(?:^|;)taskIds=([^;]+)(?:;|$)")
 TASK_CONTEXT_IN_DETAIL_RE = re.compile(
     r"(?:^|;)context=(T\d{3})\.([A-Za-z][A-Za-z0-9]*(?:\[[0-9]+\])?)(?:;|$)"
 )
-TASK_DETAIL_PATCH_FIELDS = {"goal", "implementationPoints", "acceptanceCriteria", "nonGoals", "blockers"}
+TASK_DETAIL_PATCH_FIELDS = set(DRAFT_DETAIL_FIELDS)
+REPAIR_PATCH_PATH_RE = re.compile(r"^/tasks/(T\d{3})/([A-Za-z][A-Za-z0-9]*)$")
+REPAIR_GROUP_PATCH_PATH_RE = re.compile(
+    r"^/groups/(T\d{3})/(dependsOn|writeSet|validation\.mergeJustification)$"
+)
+REPAIR_WORK_ID_RE = re.compile(r"^RW-\d+-[0-9a-f]{8}$")
+GROUP_REPAIR_FIELD_TO_RUNTIME_FIELD = {
+    "dependsOn": "deps",
+    "writeSet": "touches",
+    "validation.mergeJustification": "splitRationale",
+}
 TASK_DETAIL_FORBIDDEN_FIELDS = {
     "id",
     "status",
@@ -222,7 +238,7 @@ PLANNING_MUTATION_COMMANDS = {
 DEFAULT_TASK_VALIDATION_POLICY = {
     "mode": "defer_to_test_stages",
     "orchestration": "inline",
-    "codeGate": "batch_compile_only",
+    "codeGate": "review_only",
     "maxTestStageRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
 }
 DRAFT_BUNDLE_COMMANDS = {
@@ -233,11 +249,13 @@ DRAFT_BUNDLE_COMMANDS = {
     "repair-draft-tasks",
     "preflight-task-draft",
     "show-task-draft",
+    "show-draft-task-work",
+    "create-repair-work",
+    "apply-draft-patch",
     "rebuild-task-draft",
     "reopen-finalized-draft",
     "diagnose-plan-repair",
     "finalize-task-draft",
-    "add-compile-command",
     "add-quality-gate-command",
     "add-project-validation-command",
 }
@@ -245,6 +263,8 @@ DRAFT_RUNTIME_GUARDED_COMMANDS = DRAFT_BUNDLE_COMMANDS - {
     "diagnose-plan-repair",
     "reopen-finalized-draft",
     "show-task-draft",
+    "show-draft-task-work",
+    "create-repair-work",
 }
 PLAN_REOPEN_ALLOWED_CHECKPOINTS = {
     "specs_done",
@@ -292,6 +312,17 @@ def _draft_batch_plan_path(workspace: Path, feature: str, batch_id: str) -> Path
 
 def _draft_transaction_path(workspace: Path, feature: str) -> Path:
     return _draft_dir(workspace, feature) / DRAFT_TRANSACTION_FILE
+
+
+def _draft_repair_work_dir(workspace: Path, feature: str) -> Path:
+    return artifact_path(workspace, feature, DRAFT_REPAIR_WORK_RELATIVE_DIR)
+
+
+def _json_digest(value: Any) -> str:
+    """Return a stable digest suitable for optimistic-concurrency checks."""
+
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _utc_now() -> str:
@@ -374,24 +405,47 @@ def _task_detail_input_example() -> dict[str, Any]:
 
 
 def _task_group_matrix_exception_example() -> dict[str, Any]:
-    value = _task_group_example().get("matrixExceptionExample")
-    if not isinstance(value, dict):
-        raise RuntimeError("task_group_matrix_exception_example_must_be_object")
-    return value
+    scenario_refs = [f"specs/[capability]/spec.md#SCN-{index:03d}" for index in range(1, 7)]
+    return {
+        "id": "T001",
+        "outcome": "[shared observable matrix behavior]",
+        "refs": {
+            "requirements": ["specs/[capability]/spec.md#REQ-001"],
+            "scenarios": scenario_refs,
+            "api": [],
+        },
+        "validation": {
+            "seam": "one request returns the complete matrix and one executable assertion validates it",
+            "mergeJustification": "SCN-001, SCN-003, and SCN-006 share one request/response and one validation loop and cannot be validated independently.",
+        },
+    }
 
 
 def _task_group_ui_required_example() -> dict[str, Any]:
-    value = _task_group_example().get("uiRequiredExample")
-    if not isinstance(value, dict):
-        raise RuntimeError("task_group_ui_required_example_must_be_object")
-    return value
+    return {
+        "id": "T001",
+        "outcome": "[single observable UI behavior]",
+        "ui": {
+            "pages": ["PAGE-001"],
+            "interactions": ["UIX-001"],
+            "visualSources": ["VIS-001"],
+            "route": "absolute-html",
+        },
+    }
 
 
 def _task_group_external_dependency_example() -> dict[str, Any]:
-    value = _task_group_example().get("externalDependencyExample")
-    if not isinstance(value, dict):
-        raise RuntimeError("task_group_external_dependency_example_must_be_object")
-    return value
+    return {
+        "id": "T001",
+        "outcome": "[record externally owned outcome]",
+        "mode": "external_dependency",
+        "writeSet": [],
+        "external": {
+            "system": "[external-system-or-repository]",
+            "owner": "[owning-team-or-person]",
+            "trackingRefs": ["[ticket-or-design-reference]"],
+        },
+    }
 
 
 def _matrix_exception_example() -> dict[str, Any]:
@@ -433,7 +487,6 @@ def _initial(feature: str) -> dict[str, Any]:
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
         "taskValidationPolicy": copy.deepcopy(DEFAULT_TASK_VALIDATION_POLICY),
         "batches": [],
-        "compileProfiles": {},
         "qualityGateProfiles": {},
         "projectValidationCommands": [],
         "projectCheckEvidenceIds": [],
@@ -462,8 +515,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     if isinstance(policy, dict) and policy.get("strategy") != BATCH_STRATEGY:
         raise PlanWriterInputError("batch_policy_requires_rebuild", str(policy.get("strategy")))
     finalized = root.get("taskSetStatus") == "finalized"
-    if finalized and "compileProfiles" not in root:
-        raise PlanWriterInputError("batch_compile_contract_requires_rebuild", "compileProfiles")
     if finalized and "qualityGateProfiles" not in root:
         raise PlanWriterInputError("quality_gate_contract_requires_rebuild", "qualityGateProfiles")
     data = dict(root)
@@ -473,7 +524,13 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("nextBatchId", None)
     data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
     data.setdefault("batches", [])
-    data.setdefault("compileProfiles", {})
+    # ``compileProfiles`` belonged to the retired batch-compile contract.
+    # Keep it only as an internal compatibility value while an already
+    # finalized legacy Plan is still running. New Drafts never receive this
+    # field and therefore can never project batch compilation back out.
+    legacy_compile_profiles = data.pop("compileProfiles", None)
+    if isinstance(legacy_compile_profiles, dict):
+        data["_legacyCompileProfiles"] = legacy_compile_profiles
     data.setdefault("qualityGateProfiles", {})
     data.setdefault("projectValidationCommands", [])
     data.setdefault("projectCheckEvidenceIds", [])
@@ -492,11 +549,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
         plan = load_json(batch_plan_path(feature_dir, batch_id))
         if not isinstance(plan, dict):
             raise PlanWriterInputError("missing_batch_plan", batch_id)
-        if finalized and "compileCommand" not in plan:
-            raise PlanWriterInputError(
-                "batch_compile_contract_requires_rebuild",
-                f"{batch_id}.compileCommand",
-            )
         if finalized and "qualityGateCommands" not in plan:
             raise PlanWriterInputError(
                 "quality_gate_contract_requires_rebuild",
@@ -671,6 +723,177 @@ def _task_groups(data: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in groups if isinstance(item, dict)]
 
 
+def _compact_string_list(value: Any, *, task_id: str, field: str) -> list[str]:
+    """Read a compact-contract string list without silently inventing data."""
+
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise PlanWriterInputError("compact_plan_core_string_array_required", f"task={task_id};field={field}")
+    return [item.strip() for item in value]
+
+
+def _compact_write_set(value: Any, *, task_id: str) -> list[str]:
+    """Accept terse paths or ``{path, intent}`` entries and project ``touches``."""
+
+    if not isinstance(value, list):
+        raise PlanWriterInputError("compact_plan_core_write_set_required", f"task={task_id}")
+    paths: list[str] = []
+    for index, entry in enumerate(value, start=1):
+        raw_path = entry if isinstance(entry, str) else entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise PlanWriterInputError(
+                "compact_plan_core_write_set_path_invalid",
+                f"task={task_id};index={index}",
+            )
+        paths.append(raw_path.strip())
+    return paths
+
+
+def _compact_write_targets(value: Any, *, task_id: str) -> list[dict[str, Any]]:
+    """Preserve optional method/member anchors alongside physical write paths."""
+
+    paths = _compact_write_set(value, task_id=task_id)
+    targets: list[dict[str, Any]] = []
+    for index, (entry, path) in enumerate(zip(value, paths), start=1):
+        symbols = entry.get("symbols") if isinstance(entry, dict) else None
+        if symbols is not None and (
+            not isinstance(symbols, list)
+            or not symbols
+            or any(not isinstance(symbol, str) or not symbol.strip() for symbol in symbols)
+        ):
+            raise PlanWriterInputError(
+                "compact_plan_core_write_set_symbols_invalid",
+                f"task={task_id};index={index}",
+            )
+        target: dict[str, Any] = {"path": path}
+        if symbols is not None:
+            target["symbols"] = list(dict.fromkeys(symbol.strip() for symbol in symbols))
+        targets.append(target)
+    return targets
+
+
+def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
+    """Project the model-facing compact Plan Core to the legacy group contract.
+
+    Runtime Plan artifacts intentionally retain their established schema.  This
+    adapter means that planner models only need to emit one reference map and
+    one write set, while the writer remains backward compatible with existing
+    ``task-groups.json`` files and all downstream schedulers.
+    """
+
+    if data.get("schemaVersion") != PLAN_CORE_SCHEMA:
+        return data
+    feature_id = data.get("featureId")
+    raw_tasks = data.get("tasks")
+    if not isinstance(feature_id, str) or not feature_id.strip():
+        raise PlanWriterInputError("compact_plan_core_feature_id_missing")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise PlanWriterInputError("compact_plan_core_tasks_missing")
+
+    groups: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_tasks, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("compact_plan_core_task_must_be_object", f"index={index}")
+        task_id = raw.get("id")
+        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
+            raise PlanWriterInputError("compact_plan_core_task_id_invalid", f"index={index};task={task_id}")
+        outcome = raw.get("outcome")
+        if not isinstance(outcome, str) or not outcome.strip():
+            raise PlanWriterInputError("compact_plan_core_outcome_missing", f"task={task_id}")
+        refs = raw.get("refs")
+        if not isinstance(refs, dict):
+            raise PlanWriterInputError("compact_plan_core_refs_missing", f"task={task_id}")
+        requirements = _compact_string_list(refs.get("requirements"), task_id=task_id, field="refs.requirements")
+        scenarios = _compact_string_list(refs.get("scenarios"), task_id=task_id, field="refs.scenarios")
+        api_ids = _compact_string_list(refs.get("api", []), task_id=task_id, field="refs.api")
+        validation = raw.get("validation")
+        if not isinstance(validation, dict):
+            raise PlanWriterInputError("compact_plan_core_validation_missing", f"task={task_id}")
+        seam = validation.get("seam")
+        if not isinstance(seam, str) or not seam.strip():
+            raise PlanWriterInputError("compact_plan_core_validation_seam_missing", f"task={task_id}")
+
+        write_targets = _compact_write_targets(raw.get("writeSet", []), task_id=task_id)
+        group: dict[str, Any] = {
+            "id": task_id,
+            "title": outcome.strip(),
+            "executionMode": raw.get("mode", "code"),
+            "executionStage": raw.get("stage", "parallel"),
+            "touches": [target["path"] for target in write_targets],
+            "writeTargets": write_targets,
+            "deps": _compact_string_list(raw.get("dependsOn", []), task_id=task_id, field="dependsOn"),
+            "workspaceRef": raw.get("workspace", "default"),
+            "specRefs": [*requirements, *scenarios],
+            "mergedScenarioRefs": [],
+            "apiIds": api_ids,
+            "validationBoundary": seam.strip(),
+        }
+        merge_justification = validation.get("mergeJustification")
+        if merge_justification is not None:
+            if not isinstance(merge_justification, str) or not merge_justification.strip():
+                raise PlanWriterInputError("compact_plan_core_merge_justification_invalid", f"task={task_id}")
+            group["mergedScenarioRefs"] = scenarios
+            group["splitRationale"] = merge_justification.strip()
+
+        ui = raw.get("ui")
+        group["uiRequired"] = ui is not None
+        if ui is not None:
+            if not isinstance(ui, dict):
+                raise PlanWriterInputError("compact_plan_core_ui_must_be_object", f"task={task_id}")
+            group["uiRefs"] = {
+                "pageRefs": _compact_string_list(ui.get("pages"), task_id=task_id, field="ui.pages"),
+                "interactionRefs": _compact_string_list(ui.get("interactions", []), task_id=task_id, field="ui.interactions"),
+                "visualSourceRefs": _compact_string_list(ui.get("visualSources", []), task_id=task_id, field="ui.visualSources"),
+                "frontendRoute": ui.get("route"),
+            }
+        external = raw.get("external")
+        if external is not None:
+            group["externalDependency"] = copy.deepcopy(external)
+        atomic = raw.get("atomic")
+        if atomic is not None:
+            group["atomicGroup"] = copy.deepcopy(atomic)
+        groups.append(group)
+    return {"featureId": feature_id, "groups": groups}
+
+
+def _compact_detail_to_legacy(detail: dict[str, Any]) -> dict[str, Any]:
+    """Accept the terse Detail contract while preserving legacy command input."""
+
+    if detail.get("schemaVersion") != PLAN_DETAIL_SCHEMA:
+        return detail
+    unknown = sorted(set(detail) - {
+        "schemaVersion", "outcome", "context", "implementation", "acceptance",
+        "checks", "nonGoals", "refs", "expectedFiles", "blockers",
+    })
+    if unknown:
+        raise PlanWriterInputError("compact_plan_detail_field_unknown", f"fields={','.join(unknown)}")
+    refs = detail.get("refs")
+    if not isinstance(refs, dict):
+        raise PlanWriterInputError("compact_plan_detail_refs_missing")
+    context = detail.get("context")
+    if not isinstance(context, dict):
+        raise PlanWriterInputError("compact_plan_detail_context_missing")
+    return {
+        # A Detail normally reuses the Plan Core outcome.  Keeping this marker
+        # internal avoids asking the model to repeat goal/title for every task.
+        "goal": detail.get("outcome"),
+        "__compactGoalFromCore": "outcome" not in detail,
+        "scope": {
+            "modules": copy.deepcopy(context.get("modules", [])),
+            "entrypoints": copy.deepcopy(context.get("entrypoints", [])),
+            "dataObjects": copy.deepcopy(context.get("dataObjects", [])),
+        },
+        "implementationPoints": copy.deepcopy(detail.get("implementation")),
+        "acceptanceCriteria": copy.deepcopy(detail.get("acceptance")),
+        "nonGoals": copy.deepcopy(detail.get("nonGoals")),
+        "designRefs": copy.deepcopy(refs.get("design", [])),
+        "dataIds": copy.deepcopy(refs.get("data", [])),
+        "decisionIds": copy.deepcopy(refs.get("decisions", [])),
+        "validationCommands": copy.deepcopy(detail.get("checks")),
+        "expectedFiles": copy.deepcopy(detail.get("expectedFiles", [])),
+        "blockers": copy.deepcopy(detail.get("blockers", [])),
+    }
+
+
 def _group_string_list(
     errors: list[dict[str, str]],
     group: dict[str, Any],
@@ -740,6 +963,25 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
                     errors.append({"reason": f"{task_id}.atomicGroup.rationale_missing_or_too_short"})
         if "touches" in raw_group:
             _group_string_list(errors, raw_group, task_id, "touches", required=False)
+        write_targets = raw_group.get("writeTargets")
+        if write_targets is not None:
+            if not isinstance(write_targets, list):
+                errors.append({"reason": f"{task_id}.writeTargets_must_be_array"})
+            else:
+                for target_index, target in enumerate(write_targets, start=1):
+                    if not isinstance(target, dict):
+                        errors.append({"reason": f"{task_id}.writeTargets[{target_index}].must_be_object"})
+                        continue
+                    target_path = target.get("path")
+                    symbols = target.get("symbols")
+                    if not isinstance(target_path, str) or not target_path.strip():
+                        errors.append({"reason": f"{task_id}.writeTargets[{target_index}].path_missing"})
+                    if symbols is not None and (
+                        not isinstance(symbols, list)
+                        or not symbols
+                        or any(not isinstance(symbol, str) or not symbol.strip() for symbol in symbols)
+                    ):
+                        errors.append({"reason": f"{task_id}.writeTargets[{target_index}].symbols_invalid"})
         execution_mode = task_execution_mode(raw_group)
         external_dependency = raw_group.get("externalDependency")
         if execution_mode == "external_dependency":
@@ -879,6 +1121,7 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
             "executionStage": group.get("executionStage", "parallel"),
             "workspaceRef": group.get("workspaceRef"),
             "scope": {"paths": group.get("touches", [])},
+            "writeTargets": copy.deepcopy(group.get("writeTargets", [])),
             "expectedFiles": [],
         }
         for group in _task_groups(data)
@@ -942,6 +1185,20 @@ def _task_group_digest(data: dict[str, Any]) -> str:
                     if (path := normalize_owned_path(value, workspace_ref)) is not None
                 ]
                 group["touches"] = sorted(set(normalized))
+            write_targets = group.get("writeTargets")
+            if isinstance(write_targets, list):
+                workspace_ref = group.get("workspaceRef")
+                normalized_targets: list[dict[str, Any]] = []
+                for target in write_targets:
+                    if not isinstance(target, dict):
+                        normalized_targets.append(target)
+                        continue
+                    path = normalize_owned_path(target.get("path"), workspace_ref)
+                    normalized_target = copy.deepcopy(target)
+                    if path is not None:
+                        normalized_target["path"] = path
+                    normalized_targets.append(normalized_target)
+                group["writeTargets"] = normalized_targets
             groups.append(group)
     payload = {
         "featureId": data.get("featureId"),
@@ -994,6 +1251,8 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
             for path in raw
             if (normalized := normalize_owned_path(path, item.get("workspaceRef"))) is not None
         })
+    if isinstance(item.get("writeTargets"), list):
+        result["writeTargets"] = copy.deepcopy(item["writeTargets"])
     return result
 
 
@@ -1070,8 +1329,8 @@ def _batch_status(
     if any(status == "failed" for status in statuses):
         return "failed"
     if statuses and all(status == "done" for status in statuses):
-        compile_recorded = isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed", "skipped"}
-        return "done" if compile_recorded else "in_progress"
+        legacy_recorded = isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed", "skipped"}
+        return "done" if legacy_recorded else "in_progress"
     if any(status in {"in_progress", "implemented", "validating", "done"} for status in statuses):
         return "in_progress"
     return "todo"
@@ -1173,7 +1432,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     root = {
         key: value
         for key, value in data.items()
-        if key not in {"tasks", "_batchAssignments", "_batchPlans", "parallelPolicy"}
+        if key not in {"tasks", "_batchAssignments", "_batchPlans", "_legacyCompileProfiles", "parallelPolicy"}
     }
     root["batchPolicy"] = {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY}
     root_entries: list[dict[str, Any]] = []
@@ -1196,15 +1455,22 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         spec_root = spec_roots[batch_id]
         execution_lane = execution_lanes[batch_id]
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
-        compile_profiles = root.get("compileProfiles")
-        compile_profile = (
-            compile_profiles.get(execution_lane) if isinstance(compile_profiles, dict) else None
+        legacy_compile_profiles = data.get("_legacyCompileProfiles")
+        legacy_compile_profile = (
+            legacy_compile_profiles.get(execution_lane)
+            if isinstance(legacy_compile_profiles, dict)
+            else None
         )
-        compile_profile_commands = (
-            compile_profile.get("commands") if isinstance(compile_profile, dict) else []
+        legacy_compile_commands = (
+            legacy_compile_profile.get("commands")
+            if isinstance(legacy_compile_profile, dict)
+            else []
         )
-        if not isinstance(compile_profile_commands, list):
-            compile_profile_commands = []
+        if not isinstance(legacy_compile_commands, list):
+            legacy_compile_commands = []
+        legacy_compile = isinstance(previous.get("compileCommand"), dict)
+        if legacy_compile:
+            root["compileProfiles"] = copy.deepcopy(legacy_compile_profiles)
         quality_profiles = root.get("qualityGateProfiles")
         quality_profile = (
             quality_profiles.get(execution_lane) if isinstance(quality_profiles, dict) else None
@@ -1217,13 +1483,13 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         workspace_contract = workspace_contracts[batch_id]
         compile_matches = [
             command
-            for command in compile_profile_commands
+            for command in legacy_compile_commands
             if isinstance(command, dict)
             and _batch_profile_command_matches_workspace(command, workspace_contract)
         ]
         compile_command = (
             {**compile_matches[0], "id": f"BATCH-{batch_id}-COMPILE"}
-            if len(compile_matches) == 1
+            if legacy_compile and len(compile_matches) == 1
             else None
         )
         quality_matches = [
@@ -1236,7 +1502,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             {**command, "id": f"BATCH-{batch_id}-QUALITY-{command_index:03d}"}
             for command_index, command in enumerate(quality_matches, start=1)
         ]
-        batch_compile = previous.get("batchCompile") if isinstance(previous.get("batchCompile"), dict) else None
+        batch_compile = previous.get("batchCompile") if legacy_compile and isinstance(previous.get("batchCompile"), dict) else None
         status = _batch_status(batch_tasks, batch_compile)
         execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
@@ -1258,9 +1524,9 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             "taskIds": task_ids_list,
             "deliveryKind": delivery_kind,
             **({"atomicGroupId": atomic_group_id, "batchRationale": batch_rationale} if is_atomic_group else {}),
-            "compileCommand": compile_command,
+            **({"compileCommand": compile_command} if legacy_compile else {}),
             "qualityGateCommands": quality_commands,
-            **({"batchCompile": previous.get("batchCompile")} if "batchCompile" in previous else {}),
+            **({"batchCompile": batch_compile} if batch_compile is not None else {}),
             **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
             **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
             **({"mergedAt": previous.get("mergedAt")} if "mergedAt" in previous else {}),
@@ -1450,7 +1716,20 @@ def _write_draft_bundle(
     root, batch_plans = _project_batches(data)
     root["taskSetStatus"] = "collecting"
     root["taskSetDigest"] = task_set_digest(root, batch_plans)
-    lock = {**lock, "updatedAt": _utc_now()}
+    previous_revision = 0
+    lock_path = _draft_lock_path(workspace, feature)
+    if lock_path.is_file():
+        previous = load_json(lock_path)
+        if isinstance(previous, dict) and isinstance(previous.get("revision"), int):
+            previous_revision = previous["revision"]
+    requested_revision = lock.get("revision")
+    if not isinstance(requested_revision, int) or isinstance(requested_revision, bool):
+        requested_revision = 0
+    lock["revision"] = max(previous_revision, requested_revision) + 1
+    last_change = lock.get("lastChange")
+    if isinstance(last_change, dict):
+        last_change["revision"] = lock["revision"]
+    lock["updatedAt"] = _utc_now()
     atomic_write_json(
         _draft_transaction_path(workspace, feature),
         {
@@ -1621,6 +1900,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
             "workspaceRoots": copy.deepcopy(workspace_roots),
             "paths": touches,
         },
+        "writeTargets": copy.deepcopy(group.get("writeTargets", [])),
         "implementationPoints": [],
         "acceptanceCriteria": [],
         "validationBoundary": group.get("validationBoundary"),
@@ -1678,14 +1958,14 @@ def _plan_writer_stdin_body() -> dict[str, Any]:
 
 def _draft_detail_body(args: argparse.Namespace) -> dict[str, Any]:
     if args.body_file:
-        return read_object_file(args.body_file)
+        return _compact_detail_to_legacy(read_object_file(args.body_file))
     if args.body_stdin:
-        return _plan_writer_stdin_body()
+        return _compact_detail_to_legacy(_plan_writer_stdin_body())
     if args.body_json:
         value = parse_json_value(args.body_json)
         if not isinstance(value, dict):
             raise PlanWriterInputError("draft_task_detail_must_be_object")
-        return value
+        return _compact_detail_to_legacy(value)
     raise PlanWriterInputError("draft_task_detail_input_missing")
 
 
@@ -1776,6 +2056,8 @@ def _draft_default_command_cwd(scope: dict[str, Any], command: dict[str, Any]) -
 
 def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
     task_id = str(task.get("id"))
+    detail = copy.deepcopy(detail)
+    compact_goal_from_core = detail.pop("__compactGoalFromCore", False) is True
     group_owned = sorted(set(detail) & DRAFT_GROUP_OWNED_FIELDS)
     if group_owned:
         raise PlanWriterInputError(
@@ -1907,7 +2189,10 @@ def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -
         "expectedFiles",
         "blockers",
     ):
-        candidate[field] = copy.deepcopy(detail.get(field, [] if field != "goal" else ""))
+        if field == "goal" and compact_goal_from_core:
+            candidate[field] = copy.deepcopy(task.get("title", ""))
+        else:
+            candidate[field] = copy.deepcopy(detail.get(field, [] if field != "goal" else ""))
     candidate["status"] = "todo"
     candidate["evidenceIds"] = []
     candidate["implementationEvidenceIds"] = []
@@ -2454,7 +2739,7 @@ def _load_task_directory(task_dir: Path, feature: str) -> dict[str, Any]:
 
 
 def _load_task_group_file(group_file: Path, feature: str) -> dict[str, Any]:
-    data = read_object_file(group_file)
+    data = _compact_plan_core_to_groups(read_object_file(group_file))
     manifest_feature = data.get("featureId")
     if manifest_feature != feature:
         raise PlanWriterInputError(
@@ -2738,7 +3023,12 @@ def _structured_draft_issues(errors: list[dict[str, Any]]) -> list[dict[str, Any
         task_ids = _issue_task_ids(issue)
         field = _issue_field(issue)
         repair_target = _issue_repair_target(issue, task_ids, field)
-        issue["issueId"] = f"ISSUE-{index:03d}"
+        existing_issue_id = issue.get("issueId")
+        issue["issueId"] = (
+            existing_issue_id
+            if isinstance(existing_issue_id, str) and existing_issue_id.strip()
+            else f"ISSUE-{index:03d}"
+        )
         issue["scope"] = "cross_task" if len(task_ids) > 1 else "task" if task_ids else "draft"
         issue["taskIds"] = task_ids
         if field is not None:
@@ -2878,12 +3168,28 @@ def _draft_summary(lock: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]
         item for item in lock.get("readyTaskIds", []) if isinstance(item, str)
     }
     summary = _task_set_summary(data)
+    task_contract_hashes = {
+        str(task.get("id")): _json_digest({
+            field: value
+            for field, value in task.items()
+            if field not in {
+                "status", "evidenceIds", "implementationEvidenceIds",
+                "latestImplementationEvidenceId", "validationEvidenceIds",
+                "implementationRevision", "completionEvidenceIds", "latestPassEvidenceId",
+            }
+        })
+        for task in _tasks(data)
+        if isinstance(task.get("id"), str)
+    }
     return {
         "status": lock.get("status"),
+        "revision": lock.get("revision", 0),
         "groupingDigest": lock.get("groupingDigest"),
         "taskCount": len(task_ids),
         "readyTaskIds": [task_id for task_id in task_ids if task_id in ready],
         "pendingTaskIds": [task_id for task_id in task_ids if task_id not in ready],
+        "taskContractHashes": task_contract_hashes,
+        "lastChange": copy.deepcopy(lock.get("lastChange")) if isinstance(lock.get("lastChange"), dict) else None,
         "batches": summary["batches"],
     }
 
@@ -2911,11 +3217,11 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
     data = _initial(feature)
     implementation_scope, scope_errors = load_scope(_path(workspace, feature).parent)
     if scope_errors:
-        return render_result(WriterResult(
+        return WriterResult(
             ok=False,
             path=_draft_plan_path(workspace, feature),
             errors=[{"reason": error} for error in scope_errors],
-        ))
+        )
     data["implementationScope"] = implementation_scope
     data["codeWorkspaces"] = _code_workspace_bindings(
         workspace_contexts,
@@ -3123,6 +3429,8 @@ def _apply_draft_task_repairs(
     workspace: Path,
     feature: str,
     repairs: list[tuple[str, dict[str, Any]]],
+    *,
+    change_summary: dict[str, Any] | None = None,
 ) -> WriterResult:
     lock, data = _load_draft_bundle(workspace, feature)
     if lock.get("status") == "finalized":
@@ -3197,6 +3505,8 @@ def _apply_draft_task_repairs(
     ready.update(repaired_task_ids)
     lock["readyTaskIds"] = [task_id for task_id in ordered_ids if task_id in ready]
     lock["status"] = "ready" if len(ready) == len(ordered_ids) else "collecting"
+    if change_summary is not None:
+        lock["lastChange"] = copy.deepcopy(change_summary)
     write_result = _write_draft_bundle(workspace, feature, data, lock)
     remaining_errors: list[dict[str, Any]] = []
     if len(ready) == len(ordered_ids):
@@ -3234,94 +3544,13 @@ def _cmd_repair_draft_tasks(args: argparse.Namespace) -> int:
 
 
 def _validate_draft_engineering_commands(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """校验 Draft 的工程命令是否完整
+    """Batch compilation is no longer a Draft completion prerequisite.
 
-    按 lane + workspaceRef 校验：
-    - 每个 lane 的每个 workspace 需要恰好一条编译命令
-    - 项目级 E2E 命令是可选补充；Batch UTest 意图已提供逐 Batch 测试入口
-
-    Returns:
-        错误列表，空列表表示通过
+    Task tests and optional static quality gates retain their own contracts;
+    no lane is required to declare a cross-task compile command.
     """
-    errors = []
-
-    # 收集各 lane 的 code 模式任务及其 workspace
-    backend_workspaces: set[str] = set()
-    frontend_workspaces: set[str] = set()
-
-    def workspace_ref_for_task(task: dict[str, Any]) -> str:
-        """Normalize omitted Draft workspace bindings to the default repository.
-
-        Task-group validation later requires a concrete ``workspaceRef``, but
-        Draft command validation must still correctly match the default compile
-        profile while a caller supplies ``None`` or blank input.
-        """
-        value = task.get("workspaceRef")
-        if value is None:
-            return "default"
-        if isinstance(value, str):
-            normalized = value.strip()
-            return normalized or "default"
-        return str(value)
-
-    for task in _tasks(data):
-        if task_execution_mode(task) != "code":
-            continue
-        workspace_ref = workspace_ref_for_task(task)
-        lane = task_execution_lane(task)
-        if lane == "backend":
-            backend_workspaces.add(workspace_ref)
-        elif lane == "frontend":
-            frontend_workspaces.add(workspace_ref)
-
-    # 检查编译命令：每个 lane 的每个 workspace 需要一条
-    compile_profiles = data.get("compileProfiles", {})
-
-    for workspace_ref in sorted(backend_workspaces):
-        backend_commands = compile_profiles.get("backend", {}).get("commands", []) if isinstance(compile_profiles, dict) else []
-        matching = [
-            cmd for cmd in backend_commands
-            if isinstance(cmd, dict) and cmd.get("repo") == (None if workspace_ref == "default" else workspace_ref)
-        ]
-        if len(matching) == 0:
-            errors.append({
-                "reason": "missing_backend_compile_command",
-                "detail": f"backend workspace '{workspace_ref}' 缺少编译命令",
-                "repairSuggestion": (
-                    f"运行 add-compile-command --feature <feature> --lane backend "
-                    f"--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
-                    + (f" --repo '{workspace_ref}'" if workspace_ref != "default" else "")
-                ),
-            })
-        elif len(matching) > 1:
-            errors.append({
-                "reason": "duplicate_backend_compile_command",
-                "detail": f"backend workspace '{workspace_ref}' 有 {len(matching)} 条编译命令，应该恰好一条",
-            })
-
-    for workspace_ref in sorted(frontend_workspaces):
-        frontend_commands = compile_profiles.get("frontend", {}).get("commands", []) if isinstance(compile_profiles, dict) else []
-        matching = [
-            cmd for cmd in frontend_commands
-            if isinstance(cmd, dict) and cmd.get("repo") == (None if workspace_ref == "default" else workspace_ref)
-        ]
-        if len(matching) == 0:
-            errors.append({
-                "reason": "missing_frontend_compile_command",
-                "detail": f"frontend workspace '{workspace_ref}' 缺少编译命令",
-                "repairSuggestion": (
-                    f"运行 add-compile-command --feature <feature> --lane frontend "
-                    f"--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
-                    + (f" --repo '{workspace_ref}'" if workspace_ref != "default" else "")
-                ),
-            })
-        elif len(matching) > 1:
-            errors.append({
-                "reason": "duplicate_frontend_compile_command",
-                "detail": f"frontend workspace '{workspace_ref}' 有 {len(matching)} 条编译命令，应该恰好一条",
-            })
-
-    return errors
+    del data
+    return []
 
 
 def _draft_preflight(
@@ -3377,6 +3606,710 @@ def _cmd_show_task_draft(args: argparse.Namespace) -> int:
         path=_draft_plan_path(workspace, feature),
         data={"draft": _draft_summary(lock, data)},
     ))
+
+
+def _compact_group_projection(group: dict[str, Any]) -> dict[str, Any]:
+    """Render only stable, task-local planner context for a model call."""
+
+    spec_refs = [item for item in group.get("specRefs", []) if isinstance(item, str)]
+    refs = {
+        "requirements": [item for item in spec_refs if TASK_GROUP_REQUIREMENT_ID_RE.search(item)],
+        "scenarios": [item for item in spec_refs if SCENARIO_ID_RE.search(item)],
+        "api": copy.deepcopy(group.get("apiIds", [])),
+    }
+    write_targets = group.get("writeTargets")
+    compact_write_set = (
+        copy.deepcopy(write_targets)
+        if isinstance(write_targets, list)
+        else [{"path": path} for path in group.get("touches", []) if isinstance(path, str)]
+    )
+    projected: dict[str, Any] = {
+        "id": group.get("id"),
+        "outcome": group.get("title"),
+        "dependsOn": copy.deepcopy(group.get("deps", [])),
+        "mode": group.get("executionMode", "code"),
+        "stage": group.get("executionStage", "parallel"),
+        "workspace": group.get("workspaceRef"),
+        "writeSet": compact_write_set,
+        "refs": refs,
+        "validation": {"seam": group.get("validationBoundary")},
+    }
+    if isinstance(group.get("splitRationale"), str):
+        projected["validation"]["mergeJustification"] = group["splitRationale"]
+    ui_refs = group.get("uiRefs")
+    if isinstance(ui_refs, dict):
+        projected["ui"] = {
+            "pages": copy.deepcopy(ui_refs.get("pageRefs", [])),
+            "interactions": copy.deepcopy(ui_refs.get("interactionRefs", [])),
+            "visualSources": copy.deepcopy(ui_refs.get("visualSourceRefs", [])),
+            "route": ui_refs.get("frontendRoute"),
+        }
+    if isinstance(group.get("externalDependency"), dict):
+        projected["external"] = copy.deepcopy(group["externalDependency"])
+    if isinstance(group.get("atomicGroup"), dict):
+        projected["atomic"] = copy.deepcopy(group["atomicGroup"])
+    return projected
+
+
+def _compact_detail_projection(task: dict[str, Any]) -> dict[str, Any]:
+    detail = _draft_task_detail_projection(task)
+    scope = detail.get("scope") if isinstance(detail.get("scope"), dict) else {}
+    return {
+        "schemaVersion": PLAN_DETAIL_SCHEMA,
+        "outcome": detail.get("goal"),
+        "context": {
+            "modules": copy.deepcopy(scope.get("modules", [])),
+            "entrypoints": copy.deepcopy(scope.get("entrypoints", [])),
+            "dataObjects": copy.deepcopy(scope.get("dataObjects", [])),
+        },
+        "implementation": copy.deepcopy(detail.get("implementationPoints", [])),
+        "acceptance": copy.deepcopy(detail.get("acceptanceCriteria", [])),
+        "checks": copy.deepcopy(detail.get("validationCommands", [])),
+        "nonGoals": copy.deepcopy(detail.get("nonGoals", [])),
+        "refs": {
+            "design": copy.deepcopy(detail.get("designRefs", [])),
+            "data": copy.deepcopy(detail.get("dataIds", [])),
+            "decisions": copy.deepcopy(detail.get("decisionIds", [])),
+        },
+        "expectedFiles": copy.deepcopy(detail.get("expectedFiles", [])),
+        "blockers": copy.deepcopy(detail.get("blockers", [])),
+    }
+
+
+def _cmd_show_draft_task_work(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    lock, data = _load_draft_bundle(workspace, feature)
+    group_data = _draft_group_data(lock, feature, _tasks(data))
+    task = _find_task(data, args.task_id)
+    group = next((item for item in _task_groups(group_data) if item.get("id") == args.task_id), None)
+    if group is None:
+        return render_result(fail("task_group_not_found", args.task_id, path=_draft_plan_path(workspace, feature)))
+    return render_result(WriterResult(
+        ok=True,
+        path=_draft_plan_path(workspace, feature),
+        data={
+            "taskWork": {
+                "schemaVersion": "autodev.plan-task-work.v1",
+                "baseRevision": lock.get("revision", 0),
+                "taskId": args.task_id,
+                "core": _compact_group_projection(group),
+                "currentDetail": _compact_detail_projection(task),
+                "requiredOutput": PLAN_DETAIL_SCHEMA,
+                "writerOwned": ["acceptance.id", "checks.id", "checks.cwd", "scope.paths"],
+                "note": "仅返回 schemaVersion=autodev.plan-detail.v1 的单个任务详情；不要返回 PLAN.md、Batch 或其他 Task。",
+            },
+        },
+    ))
+
+
+def _repair_issue_field(issue: dict[str, Any]) -> str | None:
+    field = issue.get("field")
+    if not isinstance(field, str) or not field.strip():
+        return None
+    compact_aliases = {
+        "outcome": "goal",
+        "context": "scope",
+        "implementation": "implementationPoints",
+        "acceptance": "acceptanceCriteria",
+        "checks": "validationCommands",
+    }
+    if field.startswith("/tasks/"):
+        match = REPAIR_PATCH_PATH_RE.fullmatch(field)
+        return match.group(2) if match else None
+    top = re.split(r"[.\[]", field.strip(), maxsplit=1)[0]
+    return compact_aliases.get(top, top)
+
+
+def _group_patch_current_value(group: dict[str, Any], field: str) -> Any:
+    """Return the compact Core value used for a guarded group patch."""
+
+    runtime_field = GROUP_REPAIR_FIELD_TO_RUNTIME_FIELD[field]
+    value = group.get(runtime_field)
+    if field == "writeSet":
+        targets = group.get("writeTargets")
+        if isinstance(targets, list):
+            return copy.deepcopy(targets)
+        return [{"path": path} for path in value if isinstance(value, list) and isinstance(path, str)]
+    return copy.deepcopy(value)
+
+
+def _repair_group_compact_fields(issue: dict[str, Any]) -> list[str]:
+    """Map a group-level failure to its smallest editable Core fields."""
+
+    reason = str(issue.get("reason", ""))
+    field = _repair_issue_field(issue)
+    if reason == "shared_write_path_requires_single_owner" or field in {
+        "touches", "writeTargets", "writeSet", "scope.paths", "expectedFiles",
+    }:
+        # The owner choice needs one removal/addition in writeSet and, when a
+        # consumer needs the produced contract, an explicit dependency.
+        return ["writeSet", "dependsOn"]
+    if field in {"deps", "dependsOn"}:
+        return ["dependsOn"]
+    if field in {"splitRationale", "validation.mergeJustification"}:
+        return ["validation.mergeJustification"]
+    return []
+
+
+def _repair_issue_allowed_ops(
+    issue: dict[str, Any],
+    data: dict[str, Any],
+    group_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if issue.get("repairTarget") == "task_group":
+        fields = _repair_group_compact_fields(issue)
+        if not fields:
+            return []
+        groups_by_id = {
+            str(group.get("id")): group
+            for group in _task_groups(group_data)
+            if isinstance(group.get("id"), str)
+        }
+        allowed: list[dict[str, Any]] = []
+        for task_id in issue.get("taskIds", []):
+            group = groups_by_id.get(task_id) if isinstance(task_id, str) else None
+            if group is None:
+                continue
+            for editable_field in fields:
+                current = _group_patch_current_value(group, editable_field)
+                allowed.append({
+                    "op": "replace",
+                    "path": f"/groups/{task_id}/{editable_field}",
+                    "currentHash": _json_digest(current),
+                    "currentValue": current,
+                })
+        return allowed
+    if issue.get("repairTarget") != "task_detail":
+        return []
+    field = _repair_issue_field(issue)
+    fields = [field] if field in TASK_DETAIL_PATCH_FIELDS else []
+    if not fields:
+        return []
+    allowed: list[dict[str, Any]] = []
+    for task_id in issue.get("taskIds", []):
+        if not isinstance(task_id, str):
+            continue
+        try:
+            task = _find_task(data, task_id)
+        except PlanWriterInputError:
+            continue
+        for editable_field in fields:
+            current = copy.deepcopy(task.get(editable_field))
+            allowed.append({
+                "op": "replace",
+                "path": f"/tasks/{task_id}/{editable_field}",
+                "currentHash": _json_digest(current),
+                "currentValue": current,
+            })
+    return allowed
+
+
+def _repair_work_issues(
+    raw: list[dict[str, Any]],
+    data: dict[str, Any],
+    group_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    structured = _structured_draft_issues(raw)
+    work_issues: list[dict[str, Any]] = []
+    for issue in structured:
+        allowed_ops = _repair_issue_allowed_ops(issue, data, group_data)
+        issue["reasonCode"] = issue.get("reason")
+        issue["reason"] = issue.get("repairSuggestion") or issue.get("detail") or issue.get("reason")
+        issue["allowedOps"] = allowed_ops
+        if issue.get("repairTarget") == "task_group" and allowed_ops:
+            issue["recommendedAction"] = (
+                "仅使用 allowedOps 中的 Core replace 操作；不要删除或重建 task-groups.json。"
+                "脚本会校验整个候选分组，并只重置 Core 投影发生变化的 resetTaskIds。"
+            )
+        elif issue.get("repairTarget") == "task_group":
+            issue["recommendedAction"] = "该分组错误没有可安全自动修改的字段；保留现有 task-groups.json，先回到覆盖矩阵或设计决策定位原因。"
+        elif issue.get("repairTarget") == "design_revision":
+            issue["recommendedAction"] = "回到 Design 修订并重新锁定；Plan Draft 不允许绕过设计锁。"
+        elif not allowed_ops:
+            issue["recommendedAction"] = "该错误没有可安全自动修改的单字段 patch；先补充 field 和 taskId，或按 repairTarget 处理。"
+        else:
+            issue["recommendedAction"] = "仅使用 allowedOps 中的 replace 操作；提交后脚本会原子校验并仅重校验受影响任务。"
+        issue["successCondition"] = f"重新预检后不再出现 {issue.get('reason')}。"
+        work_issues.append(issue)
+    return work_issues
+
+
+def _repair_feedback_issues(
+    args: argparse.Namespace,
+    workspace: Path,
+    feature: str,
+    data: dict[str, Any],
+    group_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if args.feedback_file:
+        feedback = read_object_file(args.feedback_file)
+        validation = feedback.get("validation")
+        raw = validation.get("issues") if isinstance(validation, dict) else feedback.get("issues")
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            raise PlanWriterInputError("repair_feedback_issues_missing")
+        return [copy.deepcopy(item) for item in raw]
+    errors = _task_set_preflight_errors(
+        _path(workspace, feature).parent,
+        data,
+        group_data,
+        [item for item in data.get("codeWorkspaces", []) if isinstance(item, str)],
+    )
+    return errors
+
+
+def _cmd_create_repair_work(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    group_file_arg = getattr(args, "group_file", None)
+    if group_file_arg:
+        group_file = Path(group_file_arg).expanduser().resolve()
+        if not group_file.is_file():
+            return render_result(fail(
+                "task_group_source_missing_incremental_repair_forbidden",
+                "保留原 task-groups.json；不能删除后全量重新生成",
+                path=group_file,
+            ))
+        group_data = _load_task_group_file(group_file, feature)
+        data = {"featureId": feature, "tasks": []}
+        if args.feedback_file:
+            raw_issues = _repair_feedback_issues(args, workspace, feature, data, group_data)
+        else:
+            raw_issues = _task_group_preflight_errors(
+                _path(workspace, feature).parent,
+                group_data,
+            )
+        revision = None
+        work_source = {
+            "kind": "plan_core",
+            "groupFile": str(group_file),
+            "groupingDigest": _task_group_digest(group_data),
+        }
+    else:
+        lock, data = _load_draft_bundle(workspace, feature)
+        group_data = _draft_group_data(lock, feature, _tasks(data))
+        raw_issues = _repair_feedback_issues(args, workspace, feature, data, group_data)
+        revision = lock.get("revision", 0)
+        work_source = {"kind": "draft", "groupingDigest": _task_group_digest(group_data)}
+    issues = _repair_work_issues(raw_issues, data, group_data)
+    work_id = f"RW-{int(revision) if isinstance(revision, int) else 0:04d}-{_json_digest({'issues': issues, 'source': work_source})[7:15]}"
+    work = {
+        "schemaVersion": PLAN_REPAIR_WORK_SCHEMA,
+        "workId": work_id,
+        "featureId": feature,
+        "createdAt": _utc_now(),
+        "status": "open",
+        "source": work_source,
+        "issues": issues,
+    }
+    if revision is not None:
+        work["baseRevision"] = revision
+    path = _draft_repair_work_dir(workspace, feature) / f"{work_id}.json"
+    changed = atomic_write_json(path, work)
+    return render_result(WriterResult(
+        ok=True,
+        path=path,
+        changed=changed,
+        data={"repairWork": work},
+    ))
+
+
+def _patch_body(args: argparse.Namespace) -> dict[str, Any]:
+    if args.patch_file:
+        return read_object_file(args.patch_file)
+    if args.patch_stdin:
+        return _plan_writer_stdin_body()
+    raise PlanWriterInputError("draft_patch_input_missing")
+
+
+def _normalize_group_patch_value(field: str, value: Any, *, task_id: str) -> Any:
+    """Validate a group patch in compact Core spelling before persistence."""
+
+    if field == "dependsOn":
+        return _compact_string_list(value, task_id=task_id, field="dependsOn")
+    if field == "writeSet":
+        return _compact_write_targets(value, task_id=task_id)
+    if field == "validation.mergeJustification":
+        if not isinstance(value, str) or not value.strip():
+            raise PlanWriterInputError("compact_plan_core_merge_justification_invalid", f"task={task_id}")
+        return value.strip()
+    raise PlanWriterInputError("draft_patch_group_field_invalid", f"task={task_id};field={field}")
+
+
+def _patch_group_source(
+    source: dict[str, Any],
+    task_id: str,
+    field: str,
+    value: Any,
+) -> dict[str, Any]:
+    """Patch exactly one model-facing Core field without changing source shape."""
+
+    candidate = copy.deepcopy(source)
+    compact_source = candidate.get("schemaVersion") == PLAN_CORE_SCHEMA
+    collection_name = "tasks" if compact_source else "groups"
+    entries = candidate.get(collection_name)
+    if not isinstance(entries, list):
+        raise PlanWriterInputError("task_group_source_invalid", f"collection={collection_name}")
+    entry = next(
+        (item for item in entries if isinstance(item, dict) and item.get("id") == task_id),
+        None,
+    )
+    if entry is None:
+        raise PlanWriterInputError("task_group_not_found", task_id)
+    if compact_source:
+        if field == "validation.mergeJustification":
+            validation = entry.get("validation")
+            if not isinstance(validation, dict):
+                raise PlanWriterInputError("compact_plan_core_validation_missing", f"task={task_id}")
+            validation["mergeJustification"] = value
+        else:
+            entry[field] = value
+        return candidate
+
+    runtime_field = GROUP_REPAIR_FIELD_TO_RUNTIME_FIELD[field]
+    if field == "writeSet":
+        entry[runtime_field] = [item["path"] for item in value]
+        entry["writeTargets"] = copy.deepcopy(value)
+    else:
+        entry[runtime_field] = value
+    return candidate
+
+
+def _group_patch_candidate(
+    group_file: Path,
+    feature_dir: Path,
+    expected_grouping_digest: str,
+    group_repairs: list[tuple[str, str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | WriterResult:
+    """Build and validate a minimal Core source replacement without writing it."""
+
+    if not group_file.is_file():
+        return fail(
+            "task_group_source_missing_incremental_repair_forbidden",
+            "保留原 task-groups.json；不能删除后用全量生成替代定点修复",
+            path=group_file,
+        )
+    source = read_object_file(group_file)
+    try:
+        current_group_data = _compact_plan_core_to_groups(source)
+    except PlanWriterInputError as exc:
+        return fail(exc.reason, exc.detail, path=group_file)
+    if _task_group_digest(current_group_data) != expected_grouping_digest:
+        return fail(
+            "draft_patch_group_source_conflict",
+            "task-groups.json 在 repair work 创建后发生变化；请重新生成 repair work",
+            path=group_file,
+        )
+    candidate_source = source
+    try:
+        for task_id, field, raw_value in group_repairs:
+            value = _normalize_group_patch_value(field, raw_value, task_id=task_id)
+            candidate_source = _patch_group_source(candidate_source, task_id, field, value)
+        candidate_group_data = _compact_plan_core_to_groups(candidate_source)
+    except PlanWriterInputError as exc:
+        return fail(exc.reason, exc.detail, path=group_file)
+    errors = _task_group_preflight_errors(feature_dir, candidate_group_data)
+    if errors:
+        return WriterResult(ok=False, path=group_file, errors=errors)
+    return source, candidate_source, candidate_group_data
+
+
+def _apply_draft_group_patch(
+    workspace: Path,
+    feature: str,
+    *,
+    work_id: str,
+    resolves: list[str],
+    group_repairs: list[tuple[str, str, Any]],
+    changed_fields_by_task: dict[str, list[str]],
+    reason: str | None,
+) -> WriterResult:
+    """Apply a locked Plan Core patch and reproject only affected Draft tasks."""
+
+    if _path(workspace, feature).is_file():
+        return fail("formal_plan_already_exists", path=_path(workspace, feature))
+    lock, data = _load_draft_bundle(workspace, feature)
+    if lock.get("status") == "finalized":
+        return fail("task_draft_finalized", path=_draft_plan_path(workspace, feature))
+    group_data = _draft_group_data(lock, feature, _tasks(data))
+    design_lock_errors = _draft_design_contract_errors(_path(workspace, feature).parent, lock)
+    if design_lock_errors:
+        return WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_lock_errors,
+        )
+    group_file_value = lock.get("groupFile")
+    group_file = Path(group_file_value).expanduser().resolve() if isinstance(group_file_value, str) else None
+    if group_file is None:
+        return fail("task_draft_group_file_missing", path=_draft_plan_path(workspace, feature))
+    candidate = _group_patch_candidate(
+        group_file,
+        _path(workspace, feature).parent,
+        _task_group_digest(group_data),
+        group_repairs,
+    )
+    if isinstance(candidate, WriterResult):
+        return candidate
+    _, candidate_source, candidate_group_data = candidate
+
+    code_workspaces = [
+        item for item in lock.get("codeWorkspaces", []) if isinstance(item, str) and item
+    ]
+    change_summary = {
+        "kind": "restricted_group_patch",
+        "repairWorkId": work_id,
+        "issueIds": list(resolves),
+        "changedFieldsByTask": copy.deepcopy(changed_fields_by_task),
+        "reason": reason,
+        "sourceFile": str(group_file),
+    }
+    # Validate all group invariants before touching the source.  The source is
+    # then atomically replaced and the Draft is reprojected from that exact
+    # candidate; no temporary deletion or regenerated task-group file exists.
+    source_changed = atomic_write_json(group_file, candidate_source)
+    result = _rebuild_task_draft_from_group_data(
+        workspace,
+        feature,
+        lock,
+        data,
+        group_file,
+        candidate_group_data,
+        code_workspaces,
+        last_change=change_summary,
+    )
+    if not result.ok:
+        return result
+    result_data = dict(result.data or {})
+    if result_data:
+        reset = result_data.get("resetTaskIds", [])
+        preserved = result_data.get("preservedTaskIds", [])
+        change_summary["resetTaskIds"] = copy.deepcopy(reset)
+        change_summary["preservedTaskIds"] = copy.deepcopy(preserved)
+        change_summary["revalidatedTaskIds"] = sorted(changed_fields_by_task)
+        change_summary["reusedTaskIds"] = copy.deepcopy(preserved)
+        result_data["incrementalChange"] = change_summary
+    return WriterResult(
+        ok=True,
+        path=result.path,
+        changed=result.changed or source_changed,
+        errors=result.errors,
+        data=result_data,
+    )
+
+
+def _apply_plan_core_patch(
+    workspace: Path,
+    feature: str,
+    *,
+    group_file: Path,
+    base_grouping_digest: str,
+    work_id: str,
+    resolves: list[str],
+    group_repairs: list[tuple[str, str, Any]],
+    changed_fields_by_task: dict[str, list[str]],
+    reason: str | None,
+) -> WriterResult:
+    """Repair a pre-Draft Plan Core in place, without fabricating a new file."""
+
+    candidate = _group_patch_candidate(
+        group_file,
+        _path(workspace, feature).parent,
+        base_grouping_digest,
+        group_repairs,
+    )
+    if isinstance(candidate, WriterResult):
+        return candidate
+    _, candidate_source, candidate_group_data = candidate
+    changed = atomic_write_json(group_file, candidate_source)
+    incremental_change = {
+        "kind": "restricted_plan_core_patch",
+        "repairWorkId": work_id,
+        "issueIds": list(resolves),
+        "changedFieldsByTask": copy.deepcopy(changed_fields_by_task),
+        "revalidatedTaskIds": sorted(changed_fields_by_task),
+        "reason": reason,
+        "sourceFile": str(group_file),
+        "groupingDigest": _task_group_digest(candidate_group_data),
+        "draftReprojection": "not_required_before_prepare_task_draft",
+    }
+    return WriterResult(
+        ok=True,
+        path=group_file,
+        changed=changed,
+        data={"incrementalChange": incremental_change},
+    )
+
+
+def _cmd_apply_draft_patch(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    patch = _patch_body(args)
+    if patch.get("schemaVersion") != PLAN_REPAIR_PATCH_SCHEMA:
+        return render_result(fail("draft_patch_schema_invalid"))
+    work_id = patch.get("workId")
+    if not isinstance(work_id, str) or not REPAIR_WORK_ID_RE.fullmatch(work_id):
+        return render_result(fail("draft_patch_work_id_missing"))
+    work_path = _draft_repair_work_dir(workspace, feature) / f"{work_id}.json"
+    work = read_object_file(work_path)
+    if work.get("schemaVersion") != PLAN_REPAIR_WORK_SCHEMA or work.get("featureId") != feature:
+        return render_result(fail("draft_patch_repair_work_invalid", path=work_path))
+    if work.get("status") != "open":
+        return render_result(fail("draft_patch_repair_work_not_open", path=work_path))
+    source = work.get("source") if isinstance(work.get("source"), dict) else {}
+    is_plan_core_work = source.get("kind") == "plan_core"
+    if is_plan_core_work:
+        group_file_value = source.get("groupFile")
+        base_grouping_digest = source.get("groupingDigest")
+        if not isinstance(group_file_value, str) or not isinstance(base_grouping_digest, str):
+            return render_result(fail("draft_patch_repair_work_invalid", path=work_path))
+        group_file = Path(group_file_value).expanduser().resolve()
+        if patch.get("baseGroupingDigest") != base_grouping_digest:
+            return render_result(fail(
+                "plan_core_patch_revision_conflict",
+                f"expected={base_grouping_digest};patch={patch.get('baseGroupingDigest')}",
+                path=group_file,
+            ))
+        group_data = _load_task_group_file(group_file, feature)
+        if _task_group_digest(group_data) != base_grouping_digest:
+            return render_result(fail(
+                "plan_core_patch_revision_conflict",
+                "task-groups.json 已变化；请重新生成 repair work",
+                path=group_file,
+            ))
+        data = {"featureId": feature, "tasks": []}
+    else:
+        lock, data = _load_draft_bundle(workspace, feature)
+        revision = lock.get("revision", 0)
+        if patch.get("baseRevision") != revision or work.get("baseRevision") != revision:
+            return render_result(fail(
+                "draft_patch_revision_conflict",
+                f"expected={revision};patch={patch.get('baseRevision')};work={work.get('baseRevision')}",
+                path=_draft_plan_path(workspace, feature),
+            ))
+        group_data = _draft_group_data(lock, feature, _tasks(data))
+    resolves = patch.get("resolves")
+    operations = patch.get("ops")
+    if not isinstance(resolves, list) or not resolves or any(not isinstance(item, str) for item in resolves):
+        return render_result(fail("draft_patch_resolves_invalid", path=work_path))
+    if not isinstance(operations, list) or not operations or any(not isinstance(item, dict) for item in operations):
+        return render_result(fail("draft_patch_ops_invalid", path=work_path))
+    issue_by_id = {
+        item.get("issueId"): item
+        for item in work.get("issues", [])
+        if isinstance(item, dict) and isinstance(item.get("issueId"), str)
+    }
+    if any(issue_id not in issue_by_id for issue_id in resolves):
+        return render_result(fail("draft_patch_issue_not_in_work", path=work_path))
+    allowed = {
+        (issue_id, item.get("path")): item
+        for issue_id in resolves
+        for item in issue_by_id[issue_id].get("allowedOps", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    repairs_by_task: dict[str, dict[str, Any]] = {}
+    group_repairs: list[tuple[str, str, Any]] = []
+    changed_fields_by_task: dict[str, list[str]] = {}
+    groups_by_id = {
+        str(group.get("id")): group
+        for group in _task_groups(group_data)
+        if isinstance(group.get("id"), str)
+    }
+    seen_paths: set[str] = set()
+    for operation in operations:
+        path = operation.get("path")
+        task_match = REPAIR_PATCH_PATH_RE.fullmatch(path) if isinstance(path, str) else None
+        group_match = REPAIR_GROUP_PATCH_PATH_RE.fullmatch(path) if isinstance(path, str) else None
+        if operation.get("op") != "replace" or (task_match is None and group_match is None):
+            return render_result(fail("draft_patch_operation_invalid", str(path), path=work_path))
+        if path in seen_paths or not any((issue_id, path) in allowed for issue_id in resolves):
+            return render_result(fail("draft_patch_path_not_allowed", str(path), path=work_path))
+        expected_hash = operation.get("expectedHash")
+        allowed_entry = next(item for issue_id in resolves if (item := allowed.get((issue_id, path))) is not None)
+        if expected_hash != allowed_entry.get("currentHash"):
+            return render_result(fail("draft_patch_precondition_invalid", str(path), path=work_path))
+        if task_match is not None:
+            task_id, field = task_match.groups()
+            task = _find_task(data, task_id)
+            if _json_digest(task.get(field)) != expected_hash:
+                return render_result(fail("draft_patch_precondition_conflict", str(path), path=_draft_plan_path(workspace, feature)))
+            repairs_by_task.setdefault(task_id, {})[field] = copy.deepcopy(operation.get("value"))
+        else:
+            assert group_match is not None
+            task_id, field = group_match.groups()
+            group = groups_by_id.get(task_id)
+            if group is None or _json_digest(_group_patch_current_value(group, field)) != expected_hash:
+                return render_result(fail("draft_patch_precondition_conflict", str(path), path=_draft_plan_path(workspace, feature)))
+            group_repairs.append((task_id, field, copy.deepcopy(operation.get("value"))))
+        changed_fields_by_task.setdefault(task_id, []).append(field)
+        seen_paths.add(path)
+    if repairs_by_task and group_repairs:
+        return render_result(fail(
+            "draft_patch_mixed_targets_not_allowed",
+            "先应用 task_group patch 并只重填 resetTaskIds，再为 task_detail 创建新的 repair work",
+            path=work_path,
+        ))
+    if group_repairs:
+        if is_plan_core_work:
+            result = _apply_plan_core_patch(
+                workspace,
+                feature,
+                group_file=group_file,
+                base_grouping_digest=base_grouping_digest,
+                work_id=work_id,
+                resolves=list(resolves),
+                group_repairs=group_repairs,
+                changed_fields_by_task=changed_fields_by_task,
+                reason=patch.get("reason") if isinstance(patch.get("reason"), str) else None,
+            )
+        else:
+            result = _apply_draft_group_patch(
+                workspace,
+                feature,
+                work_id=work_id,
+                resolves=list(resolves),
+                group_repairs=group_repairs,
+                changed_fields_by_task=changed_fields_by_task,
+                reason=patch.get("reason") if isinstance(patch.get("reason"), str) else None,
+            )
+        if result.ok:
+            work["status"] = "applied"
+            work["appliedAt"] = _utc_now()
+            work["appliedRevision"] = result.data.get("draft", {}).get("revision") if isinstance(result.data, dict) else None
+            work["appliedPatch"] = {
+                "issueIds": list(resolves),
+                "paths": sorted(seen_paths),
+            }
+            atomic_write_json(work_path, work)
+        return render_result(result)
+    changed_task_ids = sorted(repairs_by_task)
+    change_summary = {
+        "kind": "restricted_patch",
+        "repairWorkId": work_id,
+        "issueIds": list(resolves),
+        "changedFieldsByTask": changed_fields_by_task,
+        "revalidatedTaskIds": changed_task_ids,
+        "reusedTaskIds": [
+            str(task.get("id")) for task in _tasks(data)
+            if isinstance(task.get("id"), str) and str(task.get("id")) not in changed_task_ids
+        ],
+        "reason": patch.get("reason") if isinstance(patch.get("reason"), str) else None,
+    }
+    result = _apply_draft_task_repairs(
+        workspace,
+        feature,
+        [(task_id, repair) for task_id, repair in repairs_by_task.items()],
+        change_summary=change_summary,
+    )
+    if result.ok:
+        work["status"] = "applied"
+        work["appliedAt"] = _utc_now()
+        work["appliedRevision"] = result.data.get("draft", {}).get("revision") if isinstance(result.data, dict) else None
+        work["appliedPatch"] = {
+            "issueIds": list(resolves),
+            "paths": sorted(seen_paths),
+        }
+        atomic_write_json(work_path, work)
+        if isinstance(result.data, dict):
+            result.data["incrementalChange"] = change_summary
+    return render_result(result)
 
 
 def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
@@ -3570,34 +4503,29 @@ def _cmd_reopen_finalized_draft(args: argparse.Namespace) -> int:
     ))
 
 
-def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
-    workspace, feature = _resolve(args)
-    if _path(workspace, feature).is_file():
-        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
-    old_lock, old_data = _load_draft_bundle(workspace, feature)
-    design_lock_errors = _draft_design_contract_errors(_path(workspace, feature).parent, old_lock)
-    if design_lock_errors:
-        return render_result(WriterResult(
-            ok=False,
-            path=_draft_plan_path(workspace, feature),
-            errors=design_lock_errors,
-        ))
-    group_file = Path(args.group_file).expanduser().resolve()
-    group_data = _load_task_group_file(group_file, feature)
-    errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
-    if errors:
-        return render_result(WriterResult(ok=False, path=group_file, errors=errors))
-    code_workspaces = (
-        [str(Path(value).expanduser().resolve()) for value in args.code_workspace]
-        if args.code_workspace
-        else [item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str)]
-    )
+def _rebuild_task_draft_from_group_data(
+    workspace: Path,
+    feature: str,
+    old_lock: dict[str, Any],
+    old_data: dict[str, Any],
+    group_file: Path,
+    group_data: dict[str, Any],
+    code_workspaces: list[str],
+    *,
+    last_change: dict[str, Any] | None = None,
+) -> WriterResult:
+    """Reproject a Draft after a validated, existing group source changed.
+
+    The caller owns source-file validation and persistence.  Keeping this
+    projection separate is what lets a repair patch preserve every task whose
+    Core projection and workspace binding are unchanged.
+    """
     if not code_workspaces:
-        return render_result(fail(
+        return fail(
             "code_workspace_required_for_rebuild",
             "pass --code-workspace to repair this draft",
             path=_draft_plan_path(workspace, feature),
-        ))
+        )
     old_code_workspaces = [
         item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str) and item
     ]
@@ -3669,8 +4597,10 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
         "createdAt": old_lock.get("createdAt") or _utc_now(),
         "rebuiltAt": _utc_now(),
     }
+    if last_change is not None:
+        lock["lastChange"] = copy.deepcopy(last_change)
     result = _write_draft_bundle(workspace, feature, data, lock)
-    return render_result(with_result_data(
+    return with_result_data(
         result,
         preservedTaskIds=preserved,
         resetTaskIds=reset,
@@ -3684,6 +4614,46 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
             ),
         },
         draft=_draft_summary(lock, data),
+    )
+
+
+def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    old_lock, old_data = _load_draft_bundle(workspace, feature)
+    design_lock_errors = _draft_design_contract_errors(_path(workspace, feature).parent, old_lock)
+    if design_lock_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_lock_errors,
+        ))
+    group_file = Path(args.group_file).expanduser().resolve()
+    if not group_file.is_file():
+        return render_result(fail(
+            "task_group_source_missing_incremental_repair_forbidden",
+            "保留原 task-groups.json；用 create-repair-work 和 apply-draft-patch 提交定点分组修复，"
+            "不得删除后全量重新生成",
+            path=group_file,
+        ))
+    group_data = _load_task_group_file(group_file, feature)
+    errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
+    if errors:
+        return render_result(WriterResult(ok=False, path=group_file, errors=errors))
+    code_workspaces = (
+        [str(Path(value).expanduser().resolve()) for value in args.code_workspace]
+        if args.code_workspace
+        else [item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str)]
+    )
+    return render_result(_rebuild_task_draft_from_group_data(
+        workspace,
+        feature,
+        old_lock,
+        old_data,
+        group_file,
+        group_data,
+        code_workspaces,
     ))
 
 
@@ -3918,7 +4888,36 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                                 {"taskId": "T001", "patch": {"designRefs": ["design.md#D-001"]}},
                             ],
                         },
-                        "groupOwnedFieldsRequire": "edit task-groups.json then rebuild-task-draft",
+                        "groupOwnedFieldsRequire": "create-repair-work --group-file <file> then apply-draft-patch; never delete/recreate task-groups.json",
+                    },
+                    "modelFacingContracts": {
+                        "planCore": {
+                            "schemaVersion": PLAN_CORE_SCHEMA,
+                            "input": "task-groups.json may use compact tasks[]; writer projects the runtime group contract",
+                            "mergedFields": {
+                                "outcome": ["title"],
+                                "dependsOn": ["deps"],
+                                "writeSet": ["touches", "scope.paths", "expectedFiles", "writeTargets.symbols"],
+                                "refs": ["specRefs", "apiIds"],
+                                "validation.seam": ["validationBoundary"],
+                            },
+                        },
+                        "taskDetail": {
+                            "schemaVersion": PLAN_DETAIL_SCHEMA,
+                            "workCommand": "show-draft-task-work --task-id <id>",
+                            "input": "set-draft-task-detail --task-id <id> --body-stdin",
+                            "outputIsSingleTaskOnly": True,
+                        },
+                        "repair": {
+                            "workCommand": "create-repair-work [--feedback-file <json>]",
+                            "planCoreWorkCommand": "create-repair-work --group-file <task-groups.json>",
+                            "patchSchemaVersion": PLAN_REPAIR_PATCH_SCHEMA,
+                            "applyCommand": "apply-draft-patch --patch-file <json>",
+                            "draftRequires": ["workId", "baseRevision", "resolves", "ops[].expectedHash"],
+                            "planCoreRequires": ["workId", "baseGroupingDigest", "resolves", "ops[].expectedHash"],
+                            "groupPatchPaths": ["writeSet", "dependsOn", "validation.mergeJustification"],
+                            "forbidden": ["full_plan_replacement", "PLAN.md_patch", "batch_patch", "unlisted_path_patch", "delete_task_groups_source"],
+                        },
                     },
                     "finalizedRepair": {
                         "diagnose": "diagnose-plan-repair",
@@ -4024,15 +5023,9 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "backend": sorted(BEHAVIOR_TASK_VALIDATION_KINDS),
                         "frontend": sorted(TASK_VALIDATION_KINDS),
                     },
-                    "compileCommandKinds": ["compile"],
                     "qualityGateCommandKinds": ["static_check"],
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
-                        "compileMayCoverAcceptanceCriteriaByLane": {
-                            "backend": False,
-                            "frontend": True,
-                        },
-                        "frontendCompileKinds": sorted(FRONTEND_COMPILE_VALIDATION_KINDS),
                     },
                     "validationCommandPolicy": {
                         "forbiddenExecutables": ["echo", "false", "printf", "true"],
@@ -4067,11 +5060,9 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     },
                     "validationEnvironmentPolicy": {
                         "preflightBeforeRun": True,
-                        "missingExecutableResult": "block_batch_compile",
-                        "runtimeEnvironmentResult": "block_batch_compile",
-                        "requiredActions": [
-                            "fix_compile_environment_and_retry_batch_compile"
-                        ],
+                        "missingExecutableResult": "record_stage_environment_failure",
+                        "runtimeEnvironmentResult": "record_stage_environment_failure",
+                        "requiredActions": ["repair_stage_environment_and_retry"],
                         "planOrDigestRebuildRequired": False,
                     },
                     "workspaceContract": {
@@ -4116,7 +5107,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "preflightCommand": "preflight-task-draft",
                         "command": "finalize-task-draft",
                         "coverage": "all_path_qualified_spec_scenarios",
-                        "requiredBefore": ["add-compile-command"],
+                        "requiredBefore": [],
                     },
                     "collectingRepairs": {
                         "replace": "set-draft-task-detail --task-id <id> --body-stdin",
@@ -4191,16 +5182,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "requiredPerWorkspaceRef": "optional_final_e2e_command",
                         "executionTarget": "merged_main_e2e",
                         "repoRequiredWhenMultipleWorkspaces": True,
-                    },
-                    "compileCommand": {
-                        "command": (
-                            "add-compile-command --lane <backend|frontend> "
-                            "[--repo <workspaceRef>] --command <command>"
-                        ),
-                        "requiredFields": ["argv", "cwd", "kind", "required"],
-                        "requiredPerUsedWorkspaceInLane": "exactly_one",
-                        "repoRequiredWhenLaneUsesMultipleWorkspaces": True,
-                        "defaultCwd": "declared_workspace_root",
                     },
                     "qualityGateCommand": {
                         "command": (
@@ -4842,64 +5823,32 @@ def record_task_implementation(
             for item in batch_tasks
         )
 
+        # Compatibility only: an already-finalized historical Plan that still
+        # has a compile command may finish its old state machine. New Plans
+        # never contain ``compileCommand`` and take the Review path below.
+        legacy_compile = isinstance(batch_plan.get("compileCommand"), dict)
         batch_compile = batch_plan.get("batchCompile")
-        batch_compile = batch_compile if isinstance(batch_compile, dict) else None
+        batch_compile = batch_compile if legacy_compile and isinstance(batch_compile, dict) else None
         if batch_compile is not None and batch_compile.get("status") == "repairing":
             if batch_compile.get("repairTaskId") != task_id:
-                return fail(
-                    "batch_compile_repair_task_mismatch",
-                    task_id,
-                    path=_path(workspace, feature),
-                )
-            last_failure = {
-                field: copy.deepcopy(batch_compile.get(field))
-                for field in (
-                    "commandId",
-                    "output",
-                    "failureCategory",
-                    "diagnosticPaths",
-                    "repairOwnerTaskIds",
-                    "requestedCodeWorkspaces",
-                    "workspaceSnapshotSha256",
-                    "implementationEvidenceByTask",
-                    "implementationRevisionByTask",
-                )
-            }
+                return fail("batch_compile_repair_task_mismatch", task_id, path=_path(workspace, feature))
             batch_plan["batchCompile"] = {
-                "status": "pending",
-                "commandId": None,
-                "output": None,
-                "failureCategory": None,
-                "diagnosticPaths": [],
-                "repairOwnerTaskIds": [],
-                "repairTaskId": None,
+                "status": "pending", "commandId": None, "output": None,
+                "failureCategory": None, "diagnosticPaths": [],
+                "repairOwnerTaskIds": [], "repairTaskId": None,
                 "repairAttempts": int(batch_compile.get("repairAttempts", 0)),
                 "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-                "requestedCodeWorkspaces": [],
-                "workspaceSnapshotSha256": None,
-                "implementationEvidenceByTask": {},
-                "implementationRevisionByTask": {},
-                "lastFailure": last_failure,
+                "requestedCodeWorkspaces": [], "workspaceSnapshotSha256": None,
+                "implementationEvidenceByTask": {}, "implementationRevisionByTask": {},
             }
-        elif all_implemented and batch_compile is None:
+        elif all_implemented and legacy_compile and batch_compile is None:
             batch_plan["batchCompile"] = {
-                "status": (
-                    "skipped"
-                    if batch_compile_is_not_configured_for_frontend(batch_plan)
-                    else "pending"
-                ),
-                "commandId": None,
-                "output": None,
-                "failureCategory": None,
-                "diagnosticPaths": [],
-                "repairOwnerTaskIds": [],
-                "repairTaskId": None,
-                "repairAttempts": 0,
-                "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-                "requestedCodeWorkspaces": [],
-                "workspaceSnapshotSha256": None,
-                "implementationEvidenceByTask": {},
-                "implementationRevisionByTask": {},
+                "status": "skipped" if batch_compile_is_not_configured_for_frontend(batch_plan) else "pending",
+                "commandId": None, "output": None, "failureCategory": None,
+                "diagnosticPaths": [], "repairOwnerTaskIds": [], "repairTaskId": None,
+                "repairAttempts": 0, "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+                "requestedCodeWorkspaces": [], "workspaceSnapshotSha256": None,
+                "implementationEvidenceByTask": {}, "implementationRevisionByTask": {},
             }
 
         data["status"] = "in_progress"
@@ -4910,15 +5859,20 @@ def record_task_implementation(
         if not result.ok:
             return result
         if all_implemented:
-            # In a fixed parallel Workflow, implementation produces an
-            # uncompiled Review draft.  Only the Workflow may advance that
-            # delivery to compilation after the read-only Review has passed.
-            required_action = "await_review" if parallel else "run_batch_compile"
-            return with_result_data(result, batchCompile={
-                "requiredAction": required_action,
+            if legacy_compile:
+                return with_result_data(result, batchCompile={
+                    "requiredAction": "await_review" if parallel else "run_batch_compile",
+                    "activeBatchId": batch_id,
+                    "taskIds": [str(item.get("id")) for item in batch_tasks],
+                    "status": "awaiting_review" if parallel else "ready",
+                })
+            # Implementation hands the sealed worktree to Review.  Batch
+            # compilation is deliberately not a Plan or Workflow transition.
+            return with_result_data(result, batchContinuation={
+                "requiredAction": "await_review",
                 "activeBatchId": batch_id,
                 "taskIds": [str(item.get("id")) for item in batch_tasks],
-                "status": "awaiting_review" if parallel else "ready",
+                "status": "awaiting_review",
             })
 
         return result
@@ -5647,6 +6601,29 @@ def main(argv: list[str] | None = None) -> int:
     _common(show_task_draft)
     show_task_draft.set_defaults(func=_cmd_show_task_draft)
 
+    show_draft_task_work = sub.add_parser("show-draft-task-work")
+    _task_selector(show_draft_task_work)
+    show_draft_task_work.set_defaults(func=_cmd_show_draft_task_work)
+
+    create_repair_work = sub.add_parser("create-repair-work")
+    _common(create_repair_work)
+    create_repair_work.add_argument(
+        "--feedback-file",
+        help="可选的评审/校验 JSON；支持 {issues:[...]} 或 {validation:{issues:[...]}}",
+    )
+    create_repair_work.add_argument(
+        "--group-file",
+        help="Core 预检尚未创建 Draft 时，绑定现有 task-groups.json 做定点分组修复",
+    )
+    create_repair_work.set_defaults(func=_cmd_create_repair_work)
+
+    apply_draft_patch = sub.add_parser("apply-draft-patch")
+    _common(apply_draft_patch)
+    patch_input = apply_draft_patch.add_mutually_exclusive_group(required=True)
+    patch_input.add_argument("--patch-file")
+    patch_input.add_argument("--patch-stdin", action="store_true")
+    apply_draft_patch.set_defaults(func=_cmd_apply_draft_patch)
+
     diagnose_plan_repair = sub.add_parser("diagnose-plan-repair")
     _common(diagnose_plan_repair)
     diagnose_plan_repair.set_defaults(func=_cmd_diagnose_plan_repair)
@@ -5775,15 +6752,6 @@ def main(argv: list[str] | None = None) -> int:
     validation_command.add_argument("--optional", action="store_true")
     validation_command.add_argument("--covers", action="append")
     validation_command.set_defaults(func=_cmd_add_validation_command)
-
-    compile_command = sub.add_parser("add-compile-command")
-    _common(compile_command)
-    compile_command.add_argument("--lane", choices=sorted(EXECUTION_LANES), required=True)
-    compile_command.add_argument("--command", required=True)
-    compile_command.add_argument("--cwd")
-    compile_command.add_argument("--repo")
-    compile_command.add_argument("--code-workspace", action="append")
-    compile_command.set_defaults(func=_cmd_add_compile_command)
 
     quality_gate = sub.add_parser("add-quality-gate-command")
     _common(quality_gate)

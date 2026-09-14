@@ -285,13 +285,13 @@ class BatchedPlanContractTest(unittest.TestCase):
 
         errors = validate_plan_data(root, require_backend_compile=True)
 
-        self.assertIn(
+        self.assertNotIn(
             "compileProfiles.backend.commands[0].validation_command_noop",
             errors,
         )
         self.assertIn("projectValidationCommands[0].validation_command_noop", errors)
 
-    def test_backend_batch_requires_compile_or_build_beyond_lint(self) -> None:
+    def test_backend_batch_does_not_require_a_compile_profile(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
         root["compileProfiles"]["backend"]["commands"] = [
             {
@@ -304,7 +304,7 @@ class BatchedPlanContractTest(unittest.TestCase):
 
         errors = validate_plan_data(root, require_backend_compile=True)
 
-        self.assertIn("compileProfiles.backend.compile_command_missing", errors)
+        self.assertEqual(errors, [])
 
     def test_compile_and_quality_commands_are_bound_to_task_set_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
@@ -322,7 +322,7 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertNotEqual(task_set_digest(root, {"B001": batch}), policy_digest)
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
-    def test_finalized_plan_requires_compile_and_quality_contracts(self) -> None:
+    def test_finalized_plan_allows_legacy_compile_fields_to_be_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -333,8 +333,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             root.pop("compileProfiles")
             write_plan_json(root_path, root)
 
-            with self.assertRaisesRegex(PlanJsonError, "batch_compile_contract_requires_rebuild"):
-                load_plan_bundle(feature_dir)
+            load_plan_bundle(feature_dir)
 
             root["compileProfiles"] = root_plan(batches=[])["compileProfiles"]
             write_plan_json(root_path, root)
@@ -343,8 +342,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             batch.pop("compileCommand")
             write_plan_json(batch_path, batch)
 
-            with self.assertRaisesRegex(PlanJsonError, "batch_compile_contract_requires_rebuild"):
-                load_plan_bundle(feature_dir)
+            load_plan_bundle(feature_dir)
 
     def test_project_validation_rejects_batch_kinds_and_profile_duplicates(self) -> None:
         base = root_plan(batches=[batch_entry("B001", ["T001"])])
@@ -387,7 +385,7 @@ class BatchedPlanContractTest(unittest.TestCase):
                     validate_plan_data(equivalent),
                 )
 
-    def test_bundle_rejects_generated_command_projection_drift(self) -> None:
+    def test_bundle_ignores_legacy_compile_projection_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -397,9 +395,8 @@ class BatchedPlanContractTest(unittest.TestCase):
             batch["compileCommand"]["argv"] = [sys.executable, "-c", "print('manual drift')"]
             write_plan_json(batch_path, batch)
 
-            with self.assertRaisesRegex(PlanJsonError, "B001.compileCommand_profile_projection_mismatch"):
-                load_plan_bundle(feature_dir)
-    def test_plan_writer_projects_lane_compile_commands(self) -> None:
+            load_plan_bundle(feature_dir)
+    def test_plan_writer_omits_lane_compile_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -503,15 +500,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             detailed = writer("set-draft-task-detail", "--task-id", "T001", "--body-file", str(body))
             self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
 
-            added = writer(
-                "add-compile-command",
-                "--lane",
-                "backend",
-                "--command",
-                f"{sys.executable} -c \"print('backend compile')\"",
-            )
-
-            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
             quality_added = writer(
                 "add-quality-gate-command",
                 "--lane",
@@ -531,8 +519,8 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(root["compileProfiles"]["backend"]["commands"][0]["kind"], "compile")
-            self.assertEqual(batch["compileCommand"]["id"], "BATCH-B001-COMPILE")
+            self.assertNotIn("compileProfiles", root)
+            self.assertNotIn("compileCommand", batch)
             self.assertEqual(root["qualityGateProfiles"]["backend"]["commands"][0]["kind"], "static_check")
             self.assertEqual(batch["qualityGateCommands"][0]["id"], "BATCH-B001-QUALITY-001")
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
@@ -584,7 +572,7 @@ class BatchedPlanContractTest(unittest.TestCase):
                 bypass_errors,
             )
 
-    def test_bundle_rejects_compile_command_cwd_outside_task_workspace(self) -> None:
+    def test_bundle_does_not_require_compile_command_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -598,12 +586,12 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
-            self.assertIn(
+            self.assertNotIn(
                 "B001.compileCommand.cwd_outside_workspace_root:backend/service",
                 errors,
             )
 
-    def test_initial_bundle_requires_profile_for_every_used_lane(self) -> None:
+    def test_initial_bundle_allows_missing_compile_profile_for_used_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -613,8 +601,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             del root["compileProfiles"]["backend"]
             write_plan_json(root_path, root)
 
-            with self.assertRaisesRegex(PlanJsonError, "compileProfiles_missing_lane:backend"):
-                load_plan_bundle(feature_dir, require_initial_status=True)
+            load_plan_bundle(feature_dir, require_initial_status=True)
 
     def test_root_plan_requires_task_set_status(self) -> None:
         plan = root_plan(batches=[batch_entry("B001", ["T001"])])
