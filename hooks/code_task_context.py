@@ -311,9 +311,8 @@ def build_context(
         expected_feature_id=feature,
         expected_batch_id=active_batch_id,
         known_task_ids=known_task_ids,
-        # batch-compile is execution state written by the Code runner.  It is
-        # valid only for the root Plan's deferred-validation policy, which is
-        # also the policy that allows task repair after a sealed Batch.
+        # Deferred validation permits task repair after a sealed Batch. Batch
+        # compilation is no longer part of that execution contract.
         defer_to_test_stages=defer_to_test_stages_enabled(data),
     )
     if batch_errors:
@@ -342,6 +341,9 @@ def build_context(
             "title": active_plan.get("title"),
             "status": active_plan.get("status"),
             "taskIds": active_entry.get("taskIds", []),
+            "deliveryKind": active_entry.get("deliveryKind"),
+            "atomicGroupId": active_entry.get("atomicGroupId"),
+            "batchRationale": active_entry.get("batchRationale"),
             "completedTaskCount": active_plan.get("completedTaskCount"),
             "taskCount": active_plan.get("taskCount"),
         },
@@ -363,6 +365,7 @@ def build_context(
             "uiRequired": task.get("uiRequired") is True,
             "uiRefs": task.get("uiRefs") if isinstance(task.get("uiRefs"), dict) else {},
             "workspaceRef": task.get("workspaceRef"),
+            "writeTargets": task.get("writeTargets") if isinstance(task.get("writeTargets"), list) else [],
             "implementationPoints": task.get("implementationPoints"),
             "acceptanceCriteria": task.get("acceptanceCriteria"),
             "validationBoundary": task.get("validationBoundary"),

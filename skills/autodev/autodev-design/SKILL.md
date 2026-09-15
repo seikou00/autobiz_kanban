@@ -89,7 +89,7 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.design
 ```
 
-回检导致设计变化时，重新完成受影响的未决项裁定、重新锁定设计契约并重跑产物契约预检（机器校验）。完成后立即调用统一 checkpoint 更新脚本推进 `design_done`；不得再向用户发起面向下游阶段的确认或等待：
+回检导致设计变化时，重新完成受影响的未决项裁定、重新锁定设计契约并重跑产物契约预检（机器校验）。完成后立即调用统一 checkpoint 更新脚本推进 `design_done`；不得自行增加文本确认或绕过该命令。项目会话会在这条命令执行前由平台触发 Human Gate，Auto 托管会话须等用户在该门禁中批准后再进入下游阶段：
 
 ```bash
 python "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"

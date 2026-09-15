@@ -118,6 +118,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
     all_done = bool(task_items) and all(item.get("status") == "done" for item in task_items)
     batch_status = "done" if all_done else "todo"
     root_status = "done" if all_done else "todo"
+    atomic = len(task_items) > 1
     write_plan_json(
         feature_dir / "plan.json",
         {
@@ -129,22 +130,10 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             "taskValidationPolicy": {
                 "mode": "defer_to_test_stages",
                 "orchestration": "inline",
-                "codeGate": "batch_compile_only",
+                "codeGate": "review_only",
                 "maxTestStageRepairAttempts": 3,
             },
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-            "compileProfiles": {
-                execution_lane: {
-                    "commands": [
-                        {
-                            "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
-                            "cwd": ".",
-                            "kind": "compile",
-                            "required": True,
-                        }
-                    ]
-                }
-            },
+            "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
             "qualityGateProfiles": {},
             "batches": [
                 {
@@ -155,6 +144,8 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                     "executionLane": execution_lane,
                     "deps": [],
                     "taskIds": [item["id"] for item in task_items],
+                    "deliveryKind": "atomic_group" if atomic else "single_task",
+                    **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
                     "status": batch_status,
                 }
             ],
@@ -178,13 +169,8 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 for item in task_items
                 for evidence_id in item.get("completionEvidenceIds", [])
             ],
-            "compileCommand": {
-                "id": "BATCH-B001-COMPILE",
-                "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
-                "cwd": ".",
-                "kind": "compile",
-                "required": True,
-            },
+            "deliveryKind": "atomic_group" if atomic else "single_task",
+            **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
             "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
@@ -591,7 +577,7 @@ class PlanJsonTest(unittest.TestCase):
             "taskSetStatus": "finalized",
             "activeBatchId": None,
             "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
             "batches": [{
                 "id": "B001", "path": "plans/B001/plan.json", "title": "capability",
                 "specRoots": ["specs/capability/spec.md"], "executionLane": "backend",
@@ -1430,9 +1416,12 @@ class EvidenceGateTest(unittest.TestCase):
                 "taskValidationPolicy": {
                     "mode": "defer_to_test_stages",
                     "orchestration": "inline",
-                    "codeGate": "batch_compile_only",
+                    "codeGate": "review_only",
                 },
-                "_bundleBatches": {"B001": dict(batch), "B002": dict(batch)},
+                "_bundleBatches": {
+                    "B001": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
+                    "B002": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
+                },
             }
 
             errors = _check_batch_completion(plan, {}, feature_dir=feature_dir)

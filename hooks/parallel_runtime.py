@@ -51,7 +51,7 @@ _PLAN_MUTABLE_KEYS = {
     "updatedAt", "createdAt", "evidenceIds", "completionEvidenceIds",
     "implementationEvidenceIds", "validationEvidenceIds", "latestImplementationEvidenceId",
     "latestPassEvidenceId", "latestPassEvidenceIds", "implementationRevision",
-    "taskSetDigest", "completedTaskCount", "batchCompile", "mergeCommitSha",
+    "taskSetDigest", "completedTaskCount", "mergeCommitSha",
     "deliveryRunId", "mergedAt",
     "projectCheckEvidenceIds", "latestProjectCheckEvidenceId",
     "projectValidationDisposition", "projectValidationFailedRunIds",
@@ -152,6 +152,9 @@ def plan_contract_snapshot(bundle: PlanBundle) -> dict[str, Any]:
                 for task in batch.get("tasks", [])
                 if isinstance(task, dict) and task.get("id")
             ),
+            "deliveryKind": entry.get("deliveryKind"),
+            "atomicGroupId": entry.get("atomicGroupId"),
+            "batchRationale": entry.get("batchRationale"),
             "contractHash": contract_hash,
         }
     return {"schemaVersion": 1, "batchIds": sorted(batches), "batches": batches}
@@ -370,6 +373,9 @@ def create_manifest(
             # workflow must consume these IDs from the scheduler response; it
             # must not rediscover or invent them from the artifact workspace.
             "taskIds": task_ids,
+            "deliveryKind": entry.get("deliveryKind"),
+            "atomicGroupId": entry.get("atomicGroupId"),
+            "batchRationale": entry.get("batchRationale"),
             "executionLane": entry.get("executionLane"),
             "workspaceRef": batch_workspace_ref(batch),
             "componentRoots": list(batch_component_roots(batch)),
@@ -384,7 +390,6 @@ def create_manifest(
             "worktreePath": None,
             "branchName": None,
             "commitSha": None,
-            "compileStatus": (batch.get("batchCompile") or {}).get("status", "pending"),
             "mergeCommitSha": merged_commit_sha if batch_status == "done" else None,
             "startedAt": None,
             "completedAt": None,
@@ -536,22 +541,16 @@ def acquire_lease(
         review_stage = (states.get("review") or {}).get("status")
         test_stage = (states.get("test") or {}).get("status")
         repair_pending = rework_stage == "pending"
-        compile_after_review_pending = (
-            review_stage == "passed"
-            and rework_stage == "passed"
-            and batch.get("compileStatus") == "pending"
-        )
         utest_pending = (
             review_stage == "passed"
             and test_stage in {"pending", "running", "failed"}
         )
         status = batch.get("status")
-        # A sealed delivery normally has no mutable lease. The two controlled
-        # exceptions are post-Review compile, production repair after a
-        # review/UTest source finding, and UTest work in the same native
+        # A sealed delivery normally has no mutable lease. The controlled
+        # exceptions are production repair and UTest work in the same native
         # Worktree after code review passes.
         if status not in {"pending", "leased"} and not (
-            status in {"sealed", "running"} and (compile_after_review_pending or repair_pending or utest_pending)
+            status in {"sealed", "running"} and (repair_pending or utest_pending)
         ):
             raise ValueError(f"parallel_batch_not_leaseable:{batch_id}:{batch.get('status')}")
         dependencies = batch.get("dependencies", [])
@@ -681,12 +680,11 @@ def renew_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
 
 
 def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner_token: str, *, final_status: str = "pending") -> None:
-    if final_status not in {"pending", "failed", "compile_failed", "blocked", "sealed"}:
+    if final_status not in {"pending", "failed", "blocked", "sealed"}:
         raise ValueError(f"parallel_batch_release_status_invalid:{final_status}")
 
     # A worker may only release a delivery after ``seal`` has persisted its
-    # immutable commit.  The initial Review draft is intentionally uncompiled;
-    # a failed post-Review compile is recorded but is temporarily non-blocking.
+    # immutable commit.
     path = lease_path(workspace, feature, run_id, batch_id)
     with run_lock(workspace, feature, run_id):
         with FileLock(path.with_suffix(".lock")):
@@ -697,14 +695,7 @@ def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, own
             if not isinstance(batch, dict):
                 raise ValueError(f"parallel_batch_not_found:{batch_id}")
             if final_status == "sealed":
-                states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
-                review_draft = (
-                    batch.get("status") == "sealed"
-                    and batch.get("compileStatus") == "pending"
-                    and isinstance(states.get("review"), dict)
-                    and states["review"].get("status") == "pending"
-                )
-                if batch.get("status") != "sealed" or (batch.get("compileStatus") not in {"passed", "failed", "skipped"} and not review_draft):
+                if batch.get("status") != "sealed":
                     raise ValueError(f"parallel_batch_not_ready_to_release:{batch_id}")
                 commit_sha = batch.get("commitSha")
                 if not isinstance(commit_sha, str) or not commit_sha.strip():

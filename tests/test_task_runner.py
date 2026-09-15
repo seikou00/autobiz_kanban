@@ -172,6 +172,11 @@ def _workspace(
     }
     tasks = [task]
     if deps:
+        atomic = {
+            "id": "AG001",
+            "rationale": "Test fixture keeps the dependency pair in one inseparable delivery loop.",
+        }
+        task["atomicGroup"] = atomic
         tasks.insert(
             0,
             {
@@ -195,6 +200,7 @@ def _workspace(
                 ],
             },
         )
+    is_atomic = len(tasks) > 1
     root_plan = {
         "featureId": "alpha",
         "status": "todo",
@@ -204,22 +210,10 @@ def _workspace(
         "taskValidationPolicy": {
             "mode": "defer_to_test_stages",
             "orchestration": "inline",
-            "codeGate": "batch_compile_only",
+            "codeGate": "review_only",
             "maxTestStageRepairAttempts": 3,
         },
-        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-        "compileProfiles": {
-            "backend": {
-                "commands": [
-                    {
-                        "argv": [sys.executable, "-c", "print('batch compile')"],
-                        "cwd": ".",
-                        "kind": "compile",
-                        "required": True,
-                    }
-                ]
-            }
-        },
+        "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
         "qualityGateProfiles": {},
         "batches": [
             {
@@ -230,6 +224,8 @@ def _workspace(
                 "executionLane": "backend",
                 "deps": [],
                 "taskIds": [item["id"] for item in tasks],
+                "deliveryKind": "atomic_group" if is_atomic else "single_task",
+                **({"atomicGroupId": "AG001", "batchRationale": "Test fixture keeps the dependency pair in one inseparable delivery loop."} if is_atomic else {}),
                 "status": "todo",
             }
         ],
@@ -261,13 +257,8 @@ def _workspace(
             "taskCount": len(tasks),
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
-            "compileCommand": {
-                "id": "BATCH-B001-COMPILE",
-                "argv": [sys.executable, "-c", "print('batch compile')"],
-                "cwd": ".",
-                "kind": "compile",
-                "required": True,
-            },
+            "deliveryKind": "atomic_group" if is_atomic else "single_task",
+            **({"atomicGroupId": "AG001", "batchRationale": "Test fixture keeps the dependency pair in one inseparable delivery loop."} if is_atomic else {}),
             "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": None,
@@ -308,6 +299,15 @@ def _start(workspace: Path, code: Path) -> dict:
         raise AssertionError(result.stdout + result.stderr)
     return json.loads(result.stdout)
 def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = False) -> None:
+    """Configure the only supported deferred-validation Plan contract.
+
+    The name is retained solely as a shared test-fixture API.  Batch compile
+    commands and the former ``batch_compile_only`` code gate are retired, so
+    test callers now exercise the review-owned validation flow regardless of
+    their former compiler-repair setup.
+    """
+
+    del always_fail
     batch = _read_batch(feature_dir)
     for task in batch["tasks"]:
         task.update({
@@ -316,11 +316,8 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
             "validationEvidenceIds": [],
             "implementationRevision": 0,
         })
-    compile_script = (
-        "import sys; print('repair.txt:1: cannot find symbol', file=sys.stderr); "
-        + ("raise SystemExit(1)" if always_fail else "raise SystemExit(0 if __import__('pathlib').Path('compile-fixed.txt').exists() else 1)")
-    )
-    batch["compileCommand"]["argv"] = [sys.executable, "-c", compile_script]
+    batch.pop("compileCommand", None)
+    batch.pop("batchCompile", None)
     _write_batch(feature_dir, batch)
 
     root_path = feature_dir / "plan.json"
@@ -328,14 +325,35 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
     root["taskValidationPolicy"] = {
         "mode": "defer_to_test_stages",
         "orchestration": "inline",
-        "codeGate": "batch_compile_only",
+        "codeGate": "review_only",
         "maxTestStageRepairAttempts": 3,
     }
-    root["compileProfiles"]["backend"]["commands"][0]["argv"] = [
-        sys.executable,
-        "-c",
-        compile_script,
-    ]
+    root.pop("compileProfiles", None)
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _refresh_parallel_pipeline(feature_dir)
+
+
+def _configure_review_only(feature_dir: Path) -> None:
+    """Configure the current Plan contract: Review/UTest owns validation."""
+
+    batch = _read_batch(feature_dir)
+    for task in batch["tasks"]:
+        task.update({
+            "implementationEvidenceIds": [],
+            "latestImplementationEvidenceId": None,
+            "validationEvidenceIds": [],
+            "implementationRevision": 0,
+        })
+    _write_batch(feature_dir, batch)
+
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["taskValidationPolicy"] = {
+        "mode": "defer_to_test_stages",
+        "orchestration": "inline",
+        "codeGate": "review_only",
+        "maxTestStageRepairAttempts": 3,
+    }
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _refresh_parallel_pipeline(feature_dir)
 
@@ -345,7 +363,7 @@ def _configure_frontend_without_batch_compile(feature_dir: Path) -> None:
 
     batch = _read_batch(feature_dir)
     batch["executionLane"] = "frontend"
-    batch["compileCommand"] = None
+    batch.pop("compileCommand", None)
     for task in batch["tasks"]:
         task["uiRequired"] = True
         task["scope"]["pages"] = ["PAGE-001"]
@@ -366,7 +384,7 @@ def _configure_frontend_without_batch_compile(feature_dir: Path) -> None:
     root_path = feature_dir / "plan.json"
     root = json.loads(root_path.read_text(encoding="utf-8"))
     root["batches"][0]["executionLane"] = "frontend"
-    root["compileProfiles"] = {"frontend": {"commands": []}}
+    root.pop("compileProfiles", None)
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _refresh_parallel_pipeline(feature_dir)
 
@@ -413,13 +431,14 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
             "taskIds": ["T002"],
+            "deliveryKind": "single_task",
             "startedAt": None,
             "completedAt": None,
             "tasks": [second_task],
         }
     )
     second.pop("batchCompile", None)
-    second["compileCommand"]["id"] = "BATCH-B002-COMPILE"
+    second.pop("compileCommand", None)
     second_path = feature_dir / "plans" / "B002" / "plan.json"
     second_path.parent.mkdir(parents=True)
     second_path.write_text(
@@ -440,6 +459,7 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "executionLane": "backend",
             "deps": ["B001"],
             "taskIds": ["T002"],
+            "deliveryKind": "single_task",
             "status": "todo",
         }
     )
@@ -452,10 +472,100 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_review_only_plan_finishes_implementation_and_merges_without_batch_compile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_review_only(feature_dir)
+
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("review-only implementation\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            result = json.loads(finished.stdout)
+            self.assertEqual(result["batchContinuation"]["requiredAction"], "await_review")
+            self.assertNotIn("batchCompile", _read_batch(feature_dir))
+
+            merged = plan_writer_module.mark_parallel_batch_tasks_merged(
+                workspace,
+                "alpha",
+                "B001",
+                merge_commit_sha="a" * 40,
+                delivery_run_id="cw-review-only-001",
+            )
+            self.assertTrue(merged.ok, merged.errors)
+            completed = _read_batch(feature_dir)
+            self.assertEqual(completed["tasks"][0]["status"], "done")
+            self.assertEqual(completed["mergeCommitSha"], "a" * 40)
+
+    def test_start_rejects_unattributed_changes_before_creating_a_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            leaked = code / "src" / "T001" / "prewritten.py"
+            leaked.parent.mkdir(parents=True)
+            leaked.write_text("value = 'written before start'\n", encoding="utf-8")
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            payload = json.loads(started.stdout)
+            self.assertEqual(
+                payload["error"],
+                "prestart_unattributed_changes_detected:src/T001/prewritten.py",
+            )
+            self.assertEqual(
+                payload["requiredAction"],
+                "recover_prestart_changes_in_clean_worktree",
+            )
+            self.assertFalse((feature_dir / ".task-runs" / "T001").exists())
+            self.assertEqual(_read_batch(feature_dir)["tasks"][0]["status"], "todo")
+
+    def test_start_allows_changes_claimed_by_a_completed_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp), deps=["T000"])
+            batch = _read_batch(feature_dir)
+            for task in batch["tasks"]:
+                task_id = str(task["id"])
+                task["scope"]["paths"] = [f"src/{task_id}"]
+                task["scope"]["workspaceRoots"] = {"default": "."}
+            _write_batch(feature_dir, batch)
+            _refresh_parallel_pipeline(feature_dir)
+
+            predecessor = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T000", "--code-workspace", str(code),
+            )
+            self.assertEqual(predecessor.returncode, 0, predecessor.stdout + predecessor.stderr)
+            predecessor_payload = json.loads(predecessor.stdout)
+            delivered = code / "src" / "T000" / "delivered.py"
+            delivered.parent.mkdir(parents=True)
+            delivered.write_text("delivered = True\n", encoding="utf-8")
+            predecessor_finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T000", "--code-workspace", str(code),
+                "--run-id", predecessor_payload["runId"],
+            )
+            self.assertEqual(
+                predecessor_finished.returncode,
+                0,
+                predecessor_finished.stdout + predecessor_finished.stderr,
+            )
+
+            successor = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+            self.assertEqual(successor.returncode, 0, successor.stdout + successor.stderr)
+
     def test_parallel_implementation_waits_for_review_before_compile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, _code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
             started = plan_writer_module.set_task_execution_status(
                 workspace, "alpha", "T001", "in_progress", parallel=True
             )
@@ -473,7 +583,7 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertTrue(recorded.ok, recorded.errors)
             self.assertEqual(
-                recorded.data["batchCompile"],
+                recorded.data["batchContinuation"],
                 {
                     "requiredAction": "await_review",
                     "activeBatchId": "B001",
@@ -517,6 +627,7 @@ class TaskRunnerTest(unittest.TestCase):
                 [],
             )
 
+    @unittest.skip("batch compile is retired")
     def test_revalidate_batch_compile_reruns_a_passed_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -577,7 +688,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(revalidated_batch["batchCompile"]["status"], "passed")
             self.assertEqual(revalidated_batch["batchCompile"]["repairAttempts"], 0)
 
-    def test_frontend_batch_without_compile_command_records_skipped_and_continues(self) -> None:
+    def test_frontend_batch_without_compile_command_hands_off_to_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             _configure_frontend_without_batch_compile(feature_dir)
@@ -590,38 +701,13 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", started["runId"],
             )
             self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            self.assertEqual(_read_batch(feature_dir)["batchCompile"]["status"], "skipped")
-
-            compiled = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
-            compile_payload = json.loads(compiled.stdout)
-            self.assertEqual(compile_payload["compileStatus"], "skipped")
-            self.assertEqual(compile_payload["requiredAction"], "code_done_ready")
-            self.assertEqual(
-                compile_payload["skipReason"],
-                "batch_compile_not_configured_for_frontend",
-            )
-            completed_batch = _read_batch(feature_dir)
-            self.assertEqual(completed_batch["batchCompile"]["commandId"], None)
-            self.assertEqual(completed_batch["batchCompile"]["requestedCodeWorkspaces"], [])
-            self.assertEqual(completed_batch["tasks"][0]["status"], "done")
-
-            revalidated = _run(
-                "revalidate-batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(revalidated.returncode, 0, revalidated.stdout + revalidated.stderr)
-            revalidated_payload = json.loads(revalidated.stdout)
-            self.assertEqual(revalidated_payload["compileStatus"], "skipped")
-            self.assertTrue(revalidated_payload["wasRevalidation"])
+            payload = json.loads(finished.stdout)
+            self.assertEqual(payload["batchContinuation"]["requiredAction"], "await_review")
+            self.assertNotIn("batchCompile", _read_batch(feature_dir))
 
     def test_multiple_batches_reject_direct_task_start_without_parallel_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
             _add_second_compile_only_batch(feature_dir)
             removed_session = _run(
                 "code-session", "--workspace", str(workspace), "--feature", "alpha",
@@ -642,6 +728,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIsNone(root["activeBatchId"])
             self.assertIsNone(root["nextBatchId"])
 
+    @unittest.skip("batch compile is retired")
     def test_batch_compile_failure_requires_model_repair_and_new_implementation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -742,6 +829,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertIn("plan_json:plan_json_status_not_done", check_code_done(feature_dir))
 
+    @unittest.skip("batch compile is retired")
     def test_parallel_compile_pass_waits_for_merge_before_marking_task_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -778,7 +866,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
             self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
 
-    def test_parallel_frontend_compile_skip_continues_to_utest(self) -> None:
+    def test_parallel_frontend_without_compile_hands_off_to_utest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             _configure_frontend_without_batch_compile(feature_dir)
@@ -791,32 +879,11 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
 
-            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
-                result = task_runner_module._integrate_batch_compile_result(
-                    workspace,
-                    "alpha",
-                    "B001",
-                    {
-                        "compileStatus": "skipped",
-                        "skipReason": "batch_compile_not_configured_for_frontend",
-                    },
-                    parallel_run_id="cw-test-001",
-                )
+            payload = json.loads(finished.stdout)
+            self.assertEqual(payload["batchContinuation"]["requiredAction"], "await_review")
+            self.assertNotIn("batchCompile", _read_batch(feature_dir))
 
-            self.assertEqual(result["compileStatus"], "skipped")
-            self.assertEqual(result["requiredAction"], "run_utest")
-            mark_parallel.assert_called_once_with(
-                workspace,
-                "alpha",
-                "cw-test-001",
-                "B001",
-                "sealed",
-                compileStatus="skipped",
-            )
-            compiled_batch = _read_batch(feature_dir)
-            self.assertEqual(compiled_batch["batchCompile"]["status"], "skipped")
-            self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
-
+    @unittest.skip("batch compile is retired")
     def test_parallel_workflow_compile_opt_out_is_recorded_as_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, _code = _workspace(Path(tmp))
@@ -866,6 +933,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
             load_plan_bundle(feature_dir)
 
+    @unittest.skip("batch compile is retired")
     def test_parallel_compile_failure_is_recorded_without_blocking_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -919,6 +987,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(completed_batch["tasks"][0]["status"], "done")
             self.assertEqual(completed_batch["mergeCommitSha"], "a" * 40)
 
+    @unittest.skip("batch compile is retired")
     def test_parallel_compile_environment_timeout_is_recorded_without_blocking_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -1023,6 +1092,7 @@ class TaskRunnerTest(unittest.TestCase):
         )
         emit.assert_called_once_with(True, **recorded)
 
+    @unittest.skip("batch compile is retired")
     def test_interrupted_compile_reuses_a_result_written_before_host_timeout(self) -> None:
         bundle = SimpleNamespace(batches={
             "B001": {
@@ -1098,6 +1168,7 @@ class TaskRunnerTest(unittest.TestCase):
                 Path("/workspace"), "alpha", "run-001", "B001"
             )
 
+    @unittest.skip("batch compile is retired")
     def test_batch_compile_repair_does_not_adopt_test_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -1131,6 +1202,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(payload["testFiles"], ["tests/generated_test.py"])
             self.assertEqual(_read_batch(feature_dir)["batchCompile"]["repairAttempts"], 0)
 
+    @unittest.skip("batch compile is retired")
     def test_batch_compile_repair_adopts_changes_from_legacy_failed_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -1168,6 +1240,7 @@ class TaskRunnerTest(unittest.TestCase):
                 ["compile-fixed.txt"],
             )
 
+    @unittest.skip("batch compile is retired")
     def test_batch_compile_model_repair_is_blocked_after_three_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -1266,6 +1339,31 @@ class TaskRunnerTest(unittest.TestCase):
                 "restore_test_changes_and_continue_production_implementation",
             )
             self.assertEqual(payload["testFiles"], ["src/test/GeneratedTest.java"])
+
+    def test_code_stage_rejects_test_fixture_mock_and_config_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            (code / "fixtures").mkdir()
+            (code / "fixtures" / "response.json").write_text("{}\n", encoding="utf-8")
+            (code / "__mocks__").mkdir()
+            (code / "__mocks__" / "client.js").write_text("module.exports = {};\n", encoding="utf-8")
+            (code / "vitest.config.ts").write_text("export default {};\n", encoding="utf-8")
+
+            result = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error"], "code_stage_test_changes_forbidden")
+            self.assertEqual(
+                payload["testFiles"],
+                ["__mocks__/client.js", "fixtures/response.json", "vitest.config.ts"],
+            )
+
     def test_maven_runner_rejects_project_selector_from_leaf_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = (Path(tmp) / "repo").resolve()
@@ -1749,15 +1847,15 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIn("code_workspace_contract_mismatch", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
-    def test_start_requires_backend_compile_or_build_batch_closure(self) -> None:
+    def test_start_rejects_retired_compile_plan_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             batch = _read_batch(feature_dir)
-            batch.pop("compileCommand")
+            batch["compileCommand"] = {"id": "BATCH-B001-COMPILE", "kind": "compile", "required": True}
             _write_batch(feature_dir, batch)
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
-            root["compileProfiles"]["backend"] = {"commands": []}
+            root["compileProfiles"] = {"backend": {"commands": []}}
             root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
             started = _run(
@@ -1766,10 +1864,9 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(started.returncode, 0)
-            self.assertIn("compileProfiles.backend.compile_command_missing", started.stdout)
-            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+            self.assertIn("compileProfiles_retired", started.stdout)
 
-    def test_backend_batch_cannot_bypass_compile_with_skipped_status(self) -> None:
+    def test_retired_batch_compile_state_requires_plan_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, feature_dir, _ = _workspace(Path(tmp))
             batch = _read_batch(feature_dir)
@@ -1790,8 +1887,9 @@ class TaskRunnerTest(unittest.TestCase):
             }
             _write_batch(feature_dir, batch)
 
-            with self.assertRaisesRegex(PlanJsonError, "B001.batchCompile.skipped_not_allowed"):
+            with self.assertRaises(PlanJsonError) as caught:
                 load_plan_bundle(feature_dir)
+            self.assertIn("B001.batchCompile_retired", str(caught.exception))
 
     def test_start_ignores_task_test_manifest_in_compile_only_code_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2159,7 +2257,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(run["changedFilesAtAbort"], ["implemented.txt"])
             self.assertEqual(run["fileChangesAtAbort"][0]["operation"], "created")
 
-    def test_abort_allows_restart_after_source_drift_without_cache_refresh(self) -> None:
+    def test_abort_does_not_adopt_source_drift_added_after_the_abort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             started = _start(workspace, code)
@@ -2176,9 +2274,30 @@ class TaskRunnerTest(unittest.TestCase):
                 "--task-id", "T001", "--code-workspace", str(code),
             )
 
-            self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+            self.assertNotEqual(restarted.returncode, 0)
+            self.assertIn("prestart_unattributed_changes_detected:pom.xml", restarted.stdout)
             run_paths = list((feature_dir / ".task-runs" / "T001").glob("*.json"))
-            self.assertEqual(len(run_paths), 2)
+            self.assertEqual(len(run_paths), 1)
+
+    def test_abort_allows_restart_with_its_own_preserved_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("preserved task change\n", encoding="utf-8")
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", started["runId"],
+                "--code-workspace", str(code), "--force-with-changes",
+                "--abort-why", "continue the same task",
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+
+            restarted = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+            self.assertEqual(len(list((feature_dir / ".task-runs" / "T001").glob("*.json"))), 2)
 
     def test_abort_preserves_logical_workspace_ref_for_native_worktree(self) -> None:
         """A Batch-named worktree must not lose its logical repository key on abort."""
@@ -2252,6 +2371,13 @@ class TaskRunnerTest(unittest.TestCase):
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             plan["batches"][0]["taskIds"].append("T002")
+            atomic = {"id": "AG001", "rationale": "Test fixture keeps both active-run checks in one delivery loop."}
+            for item in batch["tasks"]:
+                item["atomicGroup"] = atomic
+            for item in (batch, plan["batches"][0]):
+                item["deliveryKind"] = "atomic_group"
+                item["atomicGroupId"] = "AG001"
+                item["batchRationale"] = atomic["rationale"]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
             _refresh_parallel_pipeline(feature_dir)
@@ -2284,6 +2410,13 @@ class TaskRunnerTest(unittest.TestCase):
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             plan["batches"][0]["taskIds"].append("T002")
+            atomic = {"id": "AG001", "rationale": "Test fixture keeps both active-run checks in one delivery loop."}
+            for item in batch["tasks"]:
+                item["atomicGroup"] = atomic
+            for item in (batch, plan["batches"][0]):
+                item["deliveryKind"] = "atomic_group"
+                item["atomicGroupId"] = "AG001"
+                item["batchRationale"] = atomic["rationale"]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
             _refresh_parallel_pipeline(feature_dir)
@@ -2330,7 +2463,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(resumed.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", resumed.stdout)
+            self.assertIn("task_contract_changed_after_start:T001", resumed.stdout)
 
     def test_resume_rejects_repository_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2378,15 +2511,14 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
-            self.assertFalse(json.loads(aborted.stdout)["planStatusReset"])
+            self.assertTrue(json.loads(aborted.stdout)["planStatusReset"])
             updated = _read_batch(feature_dir)
-            self.assertEqual(updated["tasks"][0]["status"], "in_progress")
+            self.assertEqual(updated["tasks"][0]["status"], "todo")
             restarted = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
             )
-            self.assertNotEqual(restarted.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", restarted.stdout + restarted.stderr)
+            self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
     def test_start_rejects_unfinished_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _, code = _workspace(Path(tmp), deps=["T000"])

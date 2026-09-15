@@ -241,6 +241,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                     "conflictResolution": {"maxAttempts": 3, "enableAutoResolve": True},
                 },
             )
+            self.assertEqual(manifest["batches"]["B001"]["deliveryKind"], "single_task")
+            self.assertIsNone(manifest["batches"]["B001"]["atomicGroupId"])
 
     def test_resume_reports_unresolved_merge_train_without_global_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1292,13 +1294,12 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
     def test_plan_digest_ignores_execution_updates_but_detects_contract_drift(self) -> None:
         root = {"status": "todo", "taskSetDigest": "before", "batches": [{"id": "B001", "status": "todo", "completedTaskCount": 0}]}
-        batches = {"B001": {"batchCompile": {"status": "pending"}, "tasks": [{"id": "T001", "status": "todo", "goal": "original"}]}}
+        batches = {"B001": {"tasks": [{"id": "T001", "status": "todo", "goal": "original"}]}}
         bundle = PlanBundle(root=root, batches=batches, tasks=batches["B001"]["tasks"], task_batches={"T001": "B001"})
         digest = plan_digest(bundle)
         updated = copy.deepcopy(bundle)
         updated.root.update({"status": "in_progress", "taskSetDigest": "after"})
         updated.root["batches"][0].update({"status": "done", "completedTaskCount": 1})
-        updated.batches["B001"]["batchCompile"]["status"] = "passed"
         updated.batches["B001"]["tasks"][0]["status"] = "done"
         self.assertEqual(digest, plan_digest(updated))
         updated.batches["B001"]["tasks"][0]["goal"] = "changed"
@@ -1422,14 +1423,10 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "."}
             for command in b2["tasks"][0]["validationCommands"]:
                 command["repo"] = "web"
-            b2["compileCommand"]["repo"] = "web"
             b2_path.write_text(json.dumps(b2), encoding="utf-8")
             root_path = feature_dir / "plan.json"
             plan = json.loads(root_path.read_text(encoding="utf-8"))
             plan["batches"][1].update({"workspaceRef": "web", "deps": []})
-            plan["compileProfiles"]["backend"]["commands"].append({
-                key: value for key, value in b2["compileCommand"].items() if key != "id"
-            })
             plan["projectValidationCommands"][0]["repo"] = "default"
             plan["projectValidationCommands"].append({
                 "id": "PROJECT-VAL-002",
@@ -2101,7 +2098,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             third["batchId"] = "B003"
             third["title"] = "independent peer"
             third["taskIds"] = ["T003"]
-            third["compileCommand"]["id"] = "BATCH-B003-COMPILE"
             third_task = third["tasks"][0]
             third_task.update(
                 {
@@ -2135,6 +2131,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                     "executionLane": "backend",
                     "deps": [],
                     "taskIds": ["T003"],
+                    "deliveryKind": "single_task",
                     "status": "todo",
                 }
             )

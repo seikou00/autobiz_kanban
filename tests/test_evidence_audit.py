@@ -84,22 +84,10 @@ class EvidenceAuditTest(unittest.TestCase):
                         "taskValidationPolicy": {
                             "mode": "defer_to_test_stages",
                             "orchestration": "inline",
-                            "codeGate": "batch_compile_only",
+                            "codeGate": "review_only",
                             "maxTestStageRepairAttempts": 3,
                         },
-                        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-                        "compileProfiles": {
-                            "backend": {
-                                "commands": [
-                                    {
-                                        "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
-                                        "cwd": ".",
-                                        "kind": "compile",
-                                        "required": True,
-                                    }
-                                ]
-                            }
-                        },
+                        "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
                         "qualityGateProfiles": {},
                         "batches": [
                             {
@@ -110,6 +98,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 "executionLane": "backend",
                                 "deps": [],
                                 "taskIds": ["T001"],
+                                "deliveryKind": "single_task",
                                 "status": "done",
                             },
                             {
@@ -120,6 +109,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 "executionLane": "backend",
                                 "deps": ["B001"],
                                 "taskIds": ["T002"],
+                                "deliveryKind": "single_task",
                                 "status": "todo",
                             },
                         ],
@@ -150,13 +140,7 @@ class EvidenceAuditTest(unittest.TestCase):
                             "taskCount": 1,
                             "completedTaskCount": completed_count,
                             "completionEvidenceIds": [],
-                            "compileCommand": {
-                                "id": f"BATCH-{batch_id}-COMPILE",
-                                "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
-                                "cwd": ".",
-                                "kind": "compile",
-                                "required": True,
-                            },
+                            "deliveryKind": "single_task",
                             "qualityGateCommands": [],
                             "startedAt": None,
                             "completedAt": completed_at,

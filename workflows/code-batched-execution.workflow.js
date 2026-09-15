@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
     { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 集合" },
-    { title: "Batch 阶段", detail: "编码 → review → 编译/封存 → test；Review 可定向修复一次，UTest 失败记录后继续" },
+    { title: "Batch 阶段", detail: "编码 → review → UTest/封存；Review 可定向修复一次，UTest 失败记录后继续" },
     { title: "候选验证", detail: "Merge Train 合成并推广已完成 Review 与 UTest 记录的候选 SHA" },
     { title: "最终验证", detail: "合并后运行 B-E2E，最终只聚合既有证据、不重复执行命令" }
   ]
@@ -12,6 +12,12 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 4;
 const MAX_SCHEDULER_CYCLES = 100;
+// A transport-level empty model response happens before the child can return
+// its command result.  It is neither a Batch verdict nor evidence that the
+// command failed, so give that same child a small, bounded retry budget.
+// Retrying other errors would be unsafe because they may describe a genuine
+// command failure after a state-changing operation.
+const MAX_EMPTY_AGENT_RESPONSE_RETRIES = 2;
 // The scheduler is the authority for the per-Batch retry budget (currently
 // two failure admissions).  Keep one extra pass to let the scheduler turn a
 // legacy retry marker with a zero counter into its explicit exhausted state.
@@ -30,13 +36,12 @@ const BATCH_RESULT_SCHEMA = {
     status: { enum: ["success", "failed", "timeout"] },
     tasksCompleted: { type: "number" },
     tasksTotal: { type: "number" },
-    compileStatus: { enum: ["passed", "failed", "skipped"] },
     worktreePath: { type: "string" },
     branchName: { type: "string" },
     commitSha: { type: "string" },
     errorMessage: { type: "string" }
   },
-  required: ["batchId", "status", "compileStatus", "worktreePath", "branchName", "commitSha"],
+  required: ["batchId", "status", "worktreePath", "branchName", "commitSha"],
   additionalProperties: false
 };
 const MERGE_RESULT_SCHEMA = {
@@ -433,13 +438,76 @@ const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 // boundary so adding a later phase cannot accidentally reintroduce a user
 // confirmation prompt.
 const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。\n";
-function workflowAgent(instruction, options) {
-  return agent(WORKFLOW_AUTONOMY_PREFIX + instruction, options);
+function emptyAgentResponse(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim().length === 0;
+  return Boolean(
+    value
+    && typeof value === "object"
+    && typeof value.value === "string"
+    && value.value.trim().length === 0
+  );
+}
+
+function emptyAgentResponseFailure(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /(?:received\s+)?empty\s+response\s+from\s+(?:chat\s+)?model(?:\s+call)?|workflow_agent_empty_response/i.test(message);
+}
+
+async function workflowAgent(instruction, options = {}) {
+  const label = usableString(options.label) ? options.label : "workflow-agent";
+  let lastEmptyResponse;
+  for (let attempt = 0; attempt <= MAX_EMPTY_AGENT_RESPONSE_RETRIES; attempt += 1) {
+    const retryOptions = attempt === 0
+      ? options
+      : { ...options, label: `${label}-empty-retry-${attempt}` };
+    try {
+      const response = await agent(WORKFLOW_AUTONOMY_PREFIX + instruction, retryOptions);
+      if (!emptyAgentResponse(response)) return response;
+      lastEmptyResponse = new Error(`workflow_agent_empty_response:${label}:attempt=${attempt + 1}`);
+    } catch (error) {
+      if (!emptyAgentResponseFailure(error)) throw error;
+      lastEmptyResponse = error;
+    }
+  }
+  throw new Error(
+    `workflow_agent_empty_response_exhausted:${label}:${errorText(lastEmptyResponse)}`
+  );
 }
 const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py");
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
   .join(" ");
+// Tests are intentionally owned by the later UTest stage.  This boundary is
+// injected into both initial implementation and implementation rework prompts;
+// task_runner.py independently rejects violating file changes at completion.
+const CODE_STAGE_TEST_BOUNDARY = "Code 阶段和修复阶段只允许生产源码、生产配置、迁移和公开接口的最小实现。可以只读既有测试理解契约，但在 task_runner.py finish-implementation 成功前，禁止创建、修改或删除测试源码（包括 src/test、test、tests、__tests__）、fixture/mock、测试环境或测试配置；禁止执行任何测试命令（包括 mvn test、Gradle test、npm test、pnpm test、yarn test、jest、vitest、pytest）及 TASK validation commands。所有测试资产和测试命令仅可在 Review 通过后的 UTest 阶段执行。\n";
+
+function taskWorkspacePath(batchId, batchWorktree, componentRoots) {
+  if (!usableString(batchWorktree)) {
+    throw new Error(`batch_worktree_missing:${batchId}`);
+  }
+  const roots = Array.isArray(componentRoots)
+    ? [...new Set(componentRoots.filter(usableString).map(root => root.trim()))]
+    : [];
+  if (roots.length !== 1) {
+    throw new Error(`batch_component_root_invalid:${batchId}:${JSON.stringify(componentRoots)}`);
+  }
+  const root = roots[0].replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "") || ".";
+  if (root === ".") return batchWorktree;
+  if (
+    absolutePath(root)
+    || root.split("/").some(part => !part || part === "." || part === "..")
+  ) {
+    throw new Error(`batch_component_root_invalid:${batchId}:${roots[0]}`);
+  }
+  return joinPath(batchWorktree, root);
+}
+
+function batchTaskWorkspace(batchId, batchWorktree) {
+  const batchWorkspace = batchWorkspaces[batchId] || {};
+  return taskWorkspacePath(batchId, batchWorktree, batchWorkspace.componentRoots);
+}
 
 function normalizeScheduledGroups(groups) {
   return (Array.isArray(groups) ? groups : [])
@@ -539,6 +607,13 @@ let schedulerCycles = 0;
 let mergeSequence = 0;
 let blockedBatches = (prepared.blockedBatches || []).filter(usableString);
 let lastScheduler = prepared;
+// Keep only the scheduler's last proven-safe pending waves.  This is used
+// solely when a later *read-only* scheduler child exhausts empty-response
+// retries.  It lets unrelated work continue without inventing a new DAG or
+// bypassing the scheduler's conservative write-set grouping.
+let schedulerSnapshotDegraded = false;
+let schedulerFallbackGroups = [];
+const schedulerFallbackConsumed = new Set();
 
 function errorText(value) {
   if (value instanceof Error) return value.message || String(value);
@@ -659,6 +734,8 @@ if (initialRetryRecoveryFailure) {
 }
 
 function markSchedulerRecovered() {
+  schedulerSnapshotDegraded = false;
+  schedulerFallbackConsumed.clear();
   for (const record of unresolvedRecords) {
     if (record && record.kind === "scheduler" && record.resolved !== true) {
       record.resolved = true;
@@ -667,9 +744,71 @@ function markSchedulerRecovered() {
   }
 }
 
+function nextSchedulerFallbackWave(groups, consumed, quarantined) {
+  for (const group of normalizeScheduledGroups(groups)) {
+    const remaining = group.filter(batchId => (
+      isValidBatchId(batchId)
+      && !consumed.has(batchId)
+      && !quarantined.has(batchId)
+    ));
+    if (remaining.length) return remaining;
+  }
+  return [];
+}
+
+function boundedSchedulerFallbackGroups(groups, capacity) {
+  const width = Number.isInteger(capacity) && capacity > 0 ? capacity : 1;
+  return normalizeScheduledGroups(groups).flatMap(group => {
+    const waves = [];
+    for (let index = 0; index < group.length; index += width) {
+      waves.push(group.slice(index, index + width));
+    }
+    return waves;
+  });
+}
+
+function cacheSchedulerFallbackGroups(scheduler) {
+  const ready = new Set([
+    ...(Array.isArray(scheduler && scheduler.readyBatches) ? scheduler.readyBatches : []),
+    ...(Array.isArray(scheduler && scheduler.allReadyBatches) ? scheduler.allReadyBatches : []),
+  ].filter(isValidBatchId));
+  const rawGroups = Array.isArray(scheduler && scheduler.parallelGroups)
+    ? scheduler.parallelGroups
+    : scheduler && scheduler.allParallelGroups;
+  const groups = normalizeScheduledGroups(rawGroups)
+    .map(group => group.filter(batchId => ready.has(batchId)))
+    .filter(group => group.length);
+  if (!groups.length) return;
+  // `parallelGroups` expresses conflict-safe compatibility, while the actual
+  // dispatch also observes maxParallel. Preserve both constraints before this
+  // snapshot can be used as a degraded-mode queue.
+  const capacity = Number.isInteger(scheduler && scheduler.maxParallel) && scheduler.maxParallel > 0
+    ? scheduler.maxParallel
+    : maxParallel;
+  schedulerFallbackGroups = boundedSchedulerFallbackGroups(groups, capacity);
+  schedulerFallbackConsumed.clear();
+}
+
+function schedulerSnapshotFallback(label, error) {
+  schedulerSnapshotDegraded = true;
+  return {
+    ...(lastScheduler && typeof lastScheduler === "object" ? lastScheduler : {}),
+    // `scheduledGroups` is a point-in-time dispatch grant. Replaying it after
+    // a read failure could re-run a just-finished Batch, so expose only the
+    // cached safe waves through `runnableSchedulerFallbackBatchIds` below.
+    scheduledGroups: [],
+    schedulerSnapshotFallback: true,
+    schedulerSnapshotFailure: {
+      label,
+      error: errorText(error),
+    },
+  };
+}
+
 function applySchedulerState(scheduler) {
   if (!scheduler || typeof scheduler !== "object") return;
   lastScheduler = scheduler;
+  cacheSchedulerFallbackGroups(scheduler);
   scheduledGroups = normalizeScheduledGroups(scheduler.scheduledGroups || []);
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
@@ -700,6 +839,11 @@ async function readSchedulerState(label, phaseName = "准备") {
     return state;
   } catch (error) {
     recordSchedulerFailure(label, error);
+    // A blank model completion did not produce a scheduler verdict.  Continue
+    // only from a previously returned scheduler grouping; malformed or real
+    // command failures remain a stop condition so the workflow cannot guess
+    // about leases, dependencies, or conflicts.
+    if (emptyAgentResponseFailure(error)) return schedulerSnapshotFallback(label, error);
     return null;
   }
 }
@@ -965,27 +1109,6 @@ function withLatestBatchDelivery(batchResult, result) {
   };
 }
 
-async function skipBatchCompileForDelivery(batchResult) {
-  const batchId = batchResult.batchId;
-  const batchWorktree = batchResult.worktreePath;
-  const batchBranch = batchResult.branchName;
-  const batchWorkspace = batchWorkspaces[batchId] || {};
-  const batchWorkspaceRef = batchWorkspace.workspaceRef;
-  if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef)) {
-    throw new Error(`batch_compile_skip_context_missing:${batchId}`);
-  }
-  return requireSuccess(await workflowAgent(
-    `Batch ${batchId} 已通过业务 Review。当前插件已临时停用所有 Batch compile：不得执行 Maven、Gradle、npm build/typecheck、task_runner.py batch-compile 或 revalidate-batch-compile。` +
-    `只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作，不得修改业务代码。` +
-    `依次执行：1) python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --ttl-seconds ${timeoutPerBatch} --lease-guard，并保存真实 ownerToken；` +
-    `2) python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "${batchWorktree}" --branch-name "${batchBranch}"；` +
-    `3) python "${taskRunnerPath}" skip-batch-compile --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 ownerToken> --workspace-ref "${batchWorkspaceRef}"；该命令只写入 skipReason=workflow_batch_compile_disabled，不运行任何编译命令；` +
-    `4) 以 final-status sealed release 同一 lease。不得再次 seal：Review draft 已是本次生产代码封存版本，UTest 阶段会封存测试资产。` +
-    `返回 {batchId,status:"success",compileStatus:"skipped",worktreePath,branchName,commitSha:"${batchResult.commitSha}"}。`,
-    { label: `skip-batch-compile-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
-  ), `skip batch compile ${batchId}`);
-}
-
 async function runBatchUtestAndSeal(batchResult) {
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
@@ -1015,7 +1138,6 @@ async function runBatchUtestAndSeal(batchResult) {
 async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const reviewResolvedByRepair = options.reviewResolvedByRepair === true;
   const testResolvedByRepair = options.testResolvedByRepair === true;
-  const compileSkipRecorded = options.compileSkipRecorded === true;
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -1075,12 +1197,6 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     }
     requireSuccess(review, `stage review ${batchId}`);
   }
-  if (compileSkipRecorded && batchResult.compileStatus !== "skipped") {
-    throw new Error(`compile_skip_missing_for_delivery:${batchId}`);
-  }
-  if (!compileSkipRecorded) {
-    batchResult = await skipBatchCompileForDelivery(batchResult);
-  }
   if (!testResolvedByRepair) {
     const test = requireSuccess(await runBatchUtestAndSeal(batchResult), `stage test ${batchId}`);
     const testedDelivery = withLatestBatchDelivery(batchResult, test);
@@ -1093,7 +1209,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   if (qualityGateRequired) {
     requireSuccess(await workflowAgent(
       `执行 Batch ${batchId} 的静态质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
-    `该命令只运行 Plan 明确归属本 Batch 的 qualityGateCommands（lint/static check）；Batch compile 已被临时停用，禁止执行任何编译、重复 TASK 测试、projectValidationCommands 或 E2E。` +
+    `该命令只运行 Plan 明确归属本 Batch 的 qualityGateCommands（lint/static check）；禁止自行补充批次编译、重复 TASK 测试、projectValidationCommands 或 E2E。` +
       `通过后执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
       `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
       { label: `stage-quality-gate-${batchId}`, phase: "Batch 阶段" }
@@ -1124,6 +1240,7 @@ async function reworkDeliveryImplementation(recovery) {
   if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef) || !taskIds.length) {
     throw new Error(`implementation_rework_context_missing:${batchId}`);
   }
+  const taskWorkspace = batchTaskWorkspace(batchId, batchWorktree);
   const failureContext = recovery && typeof recovery.failureContext === "object" && recovery.failureContext !== null
     ? recovery.failureContext
     : null;
@@ -1138,11 +1255,12 @@ async function reworkDeliveryImplementation(recovery) {
     : "这是未完成 implement 的中断恢复，没有 review/test 打回上下文；按原 TASK 恢复执行。";
   return requireSuccess(await workflowAgent(
     `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。不得调用 request_user_input、要求用户确认或等待用户裁定；按既定契约自动完成最小兼容修复并继续。${repairBrief}` +
+    CODE_STAGE_TEST_BOUNDARY +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取真实 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行启动后台 heartbeat；随后 mark-batch 为 running；` +
     `2) 先清理陈旧 run，再开始任何修复：对 ${JSON.stringify(taskIds)} 中每个真实 TASK 依次执行 task_runner.py inspect（携带 workspace、feature、task-id、code-workspace）；只要发现 parallelRunId="${runId}" 且状态为 started、in_progress 或 implementation_recording 的旧 run，就先用其 inspect 返回的真实 runId 执行 task_runner.py abort --force-with-changes --abort-why "implementation_rework_stale_run"，并携带 --workspace-ref "${batchWorkspaceRef}"。abort 必须保留 Worktree 未提交改动；每次 abort 后再次 inspect 确认该 TASK 已无活动 run。必须先完成全部陈旧 run 清理，禁止一边清理一边 start 新 TASK；其他 parallelRunId 的活动 run、无法 inspect 的 run 或 abort 失败均不得猜测，立即以 final-status pending 释放 lease 并返回 failed。` +
-    `3) 严格按依赖拓扑逐个修复，绝不并行或预启动：每次只处理一个 TASK，先 inspect 当前状态并确认其所有 deps 已为 implemented/done；前置 TASK 尚未完成时必须继续完成前置 TASK，禁止尝试 start 当前 TASK。当前 TASK 为 implemented/done 时，读取其真实 latestImplementationEvidenceId，执行 task_runner.py start-task-repair --prior-evidence-id <真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"，记下真实 runId；当前 TASK 为 todo 时执行普通 task_runner.py start（同样携带 parallel-run-id、lease-token、code-workspace、workspace-ref），记下真实 runId。状态仍为 in_progress 时禁止再次 start；应回到步骤 2 处理其陈旧 run。其他状态不得臆造命令，返回 failed。完成当前 TASK 的生产修复后，必须立刻用该真实 runId 执行 finish-implementation：只有 start-task-repair 启动的任务携带 --repair-mode，普通 start 启动的任务禁止携带 --repair-mode。确认 finish 成功且 TASK 已为 implemented/done 后，才可处理其下一个依赖任务；必须完成 ${JSON.stringify(taskIds)} 的全部实际 TASK 后才能进入编译跳过记录。` +
-    `4) 当前插件已临时停用所有 Batch compile：不得执行 Maven、Gradle、npm build/typecheck、batch-compile 或 revalidate-batch-compile。改为执行 python "${taskRunnerPath}" skip-batch-compile（携带 workspace、feature、batch-id、code-workspace、parallel-run-id="${runId}"、lease-token 和 workspace-ref="${batchWorkspaceRef}"）；该命令只记录 skipReason=workflow_batch_compile_disabled。随后用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有跳过记录、lease 或 seal/release 失败才中断。` +
-    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",compileStatus:"skipped",worktreePath,branchName,commitSha}。`,
+    `3) 严格按依赖拓扑逐个修复，绝不并行或预启动：每次只处理一个 TASK，先 inspect 当前状态并确认其所有 deps 已为 implemented/done；所有 task_runner.py 调用必须使用 --lease-token <真实 token>、--code-workspace "${taskWorkspace}" 和 --workspace-ref "${batchWorkspaceRef}"。前置 TASK 尚未完成时必须继续完成前置 TASK，禁止尝试 start 当前 TASK。当前 TASK 为 implemented/done 时，读取其真实 latestImplementationEvidenceId，执行 task_runner.py start-task-repair --prior-evidence-id <真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${taskWorkspace}" --workspace-ref "${batchWorkspaceRef}"，记下真实 runId；当前 TASK 为 todo 时执行普通 task_runner.py start（同样携带 parallel-run-id、lease-token、code-workspace、workspace-ref），记下真实 runId。状态仍为 in_progress 时禁止再次 start；应回到步骤 2 处理其陈旧 run。其他状态不得臆造命令，返回 failed。完成当前 TASK 的生产修复后，必须立刻用该真实 runId 执行 finish-implementation：只有 start-task-repair 启动的任务携带 --repair-mode，普通 start 启动的任务禁止携带 --repair-mode。确认 finish 成功且 TASK 已为 implemented/done 后，才可处理其下一个依赖任务。` +
+    `4) 用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有 lease 或 seal/release 失败才中断。` +
+    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",worktreePath,branchName,commitSha}。`,
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `implementation rework ${batchId}`);
 }
@@ -1161,7 +1279,7 @@ async function recordSingleRepairResolution(recovery, repaired) {
     repairDisposition: "single_repair_accepted",
   });
   return requireSuccess(await workflowAgent(
-    `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复、跳过编译记录和封存。` +
+    `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复和封存。` +
     `不得让模型串行拼接多个 stage start/complete，也不得根据原始文本判断是否收口。只执行 python "${stagePath}" record-single-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failedStage}" --metadata-json '${metadata}'。` +
     `该插件命令会以单个、幂等的受控入口写入 prepare/implement/review evidence，并验证最终 Review evidence 的 single_repair_accepted 标记。只原样返回 JSON。`,
     { label: `record-single-repair-${failedStage}-${batchId}`, phase: "Batch 阶段", schema: SINGLE_REPAIR_RESULT_SCHEMA }
@@ -1201,8 +1319,8 @@ async function runDeliveryWithImplementationRepair(batchResult) {
     delivery = repaired;
     await recordSingleRepairResolution(staged.recovery, repaired);
     options = staged.failedStage === "review"
-      ? { reviewResolvedByRepair: true, compileSkipRecorded: true }
-      : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileSkipRecorded: true };
+      ? { reviewResolvedByRepair: true }
+      : { reviewResolvedByRepair: true, testResolvedByRepair: true };
   }
 }
 
@@ -1214,8 +1332,8 @@ async function continueRecoveredDelivery(recovery) {
   await recordSingleRepairResolution(recovery, repaired);
   const failedStage = recovery.failureContext.failedStage;
   const options = failedStage === "review"
-    ? { reviewResolvedByRepair: true, compileSkipRecorded: true }
-    : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileSkipRecorded: true };
+    ? { reviewResolvedByRepair: true }
+    : { reviewResolvedByRepair: true, testResolvedByRepair: true };
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 
@@ -1382,17 +1500,18 @@ async function safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, rea
   }
 }
 
-function implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef) {
+function implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef, taskWorkspace) {
   return `在插件创建的原生 Git worktree "${batchWorktree}" 中执行 Batch ${batchId}。Feature=${feature}，runId=${runId}，artifact workspace=${artifactWorkspace}。严格按以下固定顺序执行：\n` +
     `Code Workflow 已获自主执行授权：不得调用 request_user_input、要求用户确认或等待用户裁定。差异按既定 TASK/规格和现有工程模式作最小兼容实现，并作为非阻断 Evidence 记录；流程必须继续。\n` +
+    CODE_STAGE_TEST_BOUNDARY +
     `1. 执行 cd "${batchWorktree}"（Windows 使用 Set-Location），确认 git rev-parse --show-toplevel 等于该路径、git symbolic-ref --quiet --short HEAD 等于 "${batchBranch}"。禁止 git worktree add/remove、git switch、merge、rebase 或操作其他 checkout。\n` +
     `2. 执行 python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --ttl-seconds ${timeoutPerBatch} --lease-guard；从 JSON 的 lease.ownerToken 保存本 Batch 的 lease token。\n` +
     `3. 将步骤 2 返回的非空 ownerToken 保存为变量，并在后续命令中展开为该真实字符串；命令行中不得出现空字符串、字面量 "LEASE_TOKEN" 或 "<lease-token>"。禁止自行运行 batch_lease_manager.py heartbeat、run_in_background、&、nohup、setsid 或 Start-Process。插件会在每个携带 token 的 task_runner/worktree_manager 命令开始时续租；独立 shell 子进程存活与否不再作为 Batch 失败条件。\n` +
     `4. 执行 python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "${batchWorktree}" --branch-name "${batchBranch}"。业务源码命令只在该 checkout 内执行。\n` +
-    `5. Scheduler 已提供本 Batch 的唯一 TASK IDs：${JSON.stringify(taskIds)}。逐个以这些具体 ID 执行；禁止使用空值、"undefined" 或任何占位符。不要用 read_file 读取 artifact 目录；artifact workspace 不是代码目录。自动重试时，先对每个 TASK 执行 task_runner.py inspect；如发现同一 parallelRunId 的 started/in_progress run，使用其真实 runId 执行 task_runner.py abort --force-with-changes --abort-why "automatic_batch_retry" 并携带 --workspace-ref "${batchWorkspaceRef}"，保留 worktree 改动并将 TASK 恢复为 todo。已经 implemented/done 的 TASK 必须保留既有 implementation evidence，禁止再次 start；只继续未完成 TASK。对数组中的每个实际 ID，直接将该值传给 code_task_context.py 的 --task-id 参数。以 taskContract.uiRequired 为唯一条件：false 时跳过 Route resolver，不读取 HTML/Route SKILL；true 时必须在本 agent 内、写前端源码前执行 python "${routeResolverPath}" --workspace "${artifactWorkspace}" --feature "${feature}" --start-route-run --json，并按返回 route 读取对应 Route SKILL 到 EOF，标记 route-skill-read-complete、创建 route write_todos；仅当 Route SKILL 清单推进到转交 parser 后才读取对应 parser 并标记 parser-read，完成清单后标记 route-todos-completed，统一回检后写入 FRONTEND_ROUTE.json。route=spec-driven-ui 不读 parser 但仍须回检，route=none 禁止写前端源码。随后用 task_runner.py start、完成实现后用 finish-implementation；所有 task_runner 调用必须带 --workspace "${artifactWorkspace}"、--parallel-run-id "${runId}"、展开后的真实 lease token、--code-workspace "${batchWorktree}" 和 --workspace-ref "${batchWorkspaceRef}"。不得操作其他 Batch 或任何主业务 checkout。\n` +
-    `6. 全部 TASK 完成后执行 python "${leasePath}" check 并携带同一真实 --owner-token 和 --require-lease-guard；仅 valid=true 才可继续。当前插件已临时停用所有 Batch compile：此后也不得执行 batch-compile、revalidate-batch-compile、Maven、Gradle 或 npm build/typecheck。只调用 python "${worktreeManagerPath}" --json seal --purpose review，并携带 --artifact-workspace "${artifactWorkspace}"、--feature "${feature}"、--run-id "${runId}"、--batch-id "${batchId}"、--repo "${batchWorktree}" 和 --owner-token（同一真实 token）；该命令也会续租。从 JSON 保存供 Review 使用的草稿 commitSha。插件在此命令中提交；不要自行 git add、git commit 或把 Batch 标为可候选合并。\n` +
+    `5. Scheduler 已提供本 Batch 的唯一 TASK IDs：${JSON.stringify(taskIds)}。逐个以这些具体 ID 执行；禁止使用空值、"undefined" 或任何占位符。不要用 read_file 读取 artifact 目录；artifact workspace 不是代码目录。自动重试时，先对每个 TASK 执行 task_runner.py inspect；如发现同一 parallelRunId 的 started/in_progress run，使用其真实 runId 执行 task_runner.py abort --force-with-changes --abort-why "automatic_batch_retry" 并携带 --workspace-ref "${batchWorkspaceRef}"，保留 worktree 改动并将 TASK 恢复为 todo。已经 implemented/done 的 TASK 必须保留既有 implementation evidence，禁止再次 start；只继续未完成 TASK。对数组中的每个实际 ID，直接将该值传给 code_task_context.py 的 --task-id 参数。以 taskContract.uiRequired 为唯一条件：false 时跳过 Route resolver，不读取 HTML/Route SKILL；true 时必须在本 agent 内、写前端源码前执行 python "${routeResolverPath}" --workspace "${artifactWorkspace}" --feature "${feature}" --start-route-run --json，并按返回 route 读取对应 Route SKILL 到 EOF，标记 route-skill-read-complete、创建 route write_todos；仅当 Route SKILL 清单推进到转交 parser 后才读取对应 parser 并标记 parser-read，完成清单后标记 route-todos-completed，统一回检后写入 FRONTEND_ROUTE.json。route=spec-driven-ui 不读 parser 但仍须回检，route=none 禁止写前端源码。每个 TASK 必须严格执行“start 成功后才可写业务源码；紧接着 finish-implementation 成功后才可开始下一个 TASK”。禁止预先编写后续 TASK 的任何业务文件。若 start 返回 prestart_unattributed_changes_detected：不得创建 supporting file、不得以 no-code-change 提交、不得继续后续 TASK；保留原始 JSON 并返回 failed，使 Workflow 将该 Batch 隔离为 retry_pending，其他独立 Batch 继续。单个 TASK 从 start 成功到 finish 成功期间产生的全部业务变更都归属该 TASK，runner 不按 Plan 的 scope.paths 拒绝实际实现文件。所有 task_runner 调用必须带 --workspace "${artifactWorkspace}"、--parallel-run-id "${runId}"、展开后的真实 --lease-token、--code-workspace "${taskWorkspace}" 和 --workspace-ref "${batchWorkspaceRef}"。不得操作其他 Batch 或任何主业务 checkout。\n` +
+    `6. 全部 TASK 完成后执行 python "${leasePath}" check 并携带同一真实 --owner-token 和 --require-lease-guard；仅 valid=true 才可继续。只调用 python "${worktreeManagerPath}" --json seal --purpose review，并携带 --artifact-workspace "${artifactWorkspace}"、--feature "${feature}"、--run-id "${runId}"、--batch-id "${batchId}"、--repo "${batchWorktree}" 和 --owner-token（同一真实 token）；该命令也会续租。从 JSON 保存供 Review 使用的草稿 commitSha。插件在此命令中提交；不要自行 git add、git commit 或把 Batch 标为可候选合并。\n` +
     `7. 草稿 seal 成功后执行 python "${leasePath}" release，并携带 --workspace "${artifactWorkspace}"、--feature "${feature}"、--run-id "${runId}"、--batch-id "${batchId}"、--owner-token（同一真实 token）和 --final-status sealed。若 seal 返回 parallel_git_index_lock_busy 或 parallel_git_index_lock_recovery_failed，说明等待与本 Batch index.lock 的受控清理后仍无法写入；只以 final-status pending 调用同一 release，随后返回 failed，由 Workflow 标记为 retry_pending 并在同一 run resume。其他首次命令失败也同样以 final-status pending 释放。禁止检查/修改插件源码、创建 Git wrapper、尝试替代命令或继续任何 TASK。\n` +
-    `返回 {batchId, status:"success", compileStatus:"skipped", worktreePath:batchWorktree, branchName:batchBranch, commitSha}。不得创建任何 workflow、手工创建分支、使用 undefined 路径或 feature、手工 git add/commit；不要 merge、rebase、解决冲突、删除 worktree。任何命令失败立即返回 failed，不得以部分结果继续。`;
+    `返回 {batchId, status:"success", worktreePath:batchWorktree, branchName:batchBranch, commitSha}。不得创建任何 workflow、手工创建分支、使用 undefined 路径或 feature、手工 git add/commit；不要 merge、rebase、解决冲突、删除 worktree。任何命令失败立即返回 failed，不得以部分结果继续。`;
 }
 
 async function runInitialBatchLifecycle(batchId) {
@@ -1415,12 +1534,13 @@ async function runInitialBatchLifecycle(batchId) {
     if (!usableString(batchWorktree) || !usableString(batchBranch)) {
       throw new Error(`plugin did not provide native worktree for ${batchId}`);
     }
+    const taskWorkspace = batchTaskWorkspace(batchId, batchWorktree);
     const implemented = unwrap(await workflowAgent(
-      implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef),
+      implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef, taskWorkspace),
       { label: `fixed-batch-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
     ));
     batchResults.push(implemented);
-    if (!implemented || implemented.status !== "success" || implemented.compileStatus !== "skipped") {
+    if (!implemented || implemented.status !== "success") {
       return safelyDeferBatchForRetry(
         batchId,
         batchWorktree,
@@ -1477,21 +1597,41 @@ async function runLifecycleSafely(batchId, source, execute, fallback = {}) {
 function runnableScheduledBatchIds() {
   return normalizeScheduledGroups(scheduledGroups)
     .flat()
-    .filter(batchId => !quarantinedBatchIds.has(batchId));
+    .filter(batchId => (
+      !quarantinedBatchIds.has(batchId)
+      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(batchId))
+    ));
+}
+
+function runnableSchedulerFallbackBatchIds() {
+  if (!schedulerSnapshotDegraded) return [];
+  return nextSchedulerFallbackWave(
+    schedulerFallbackGroups,
+    schedulerFallbackConsumed,
+    quarantinedBatchIds,
+  );
 }
 
 function runnableStageRecoveries() {
   return stageRecoveryBatches
-    .filter(recovery => recovery && !quarantinedBatchIds.has(recovery.batchId));
+    .filter(recovery => (
+      recovery
+      && !quarantinedBatchIds.has(recovery.batchId)
+      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(recovery.batchId))
+    ));
 }
 
 function runnableMergeableBatchIds() {
-  return mergeableBatches.filter(batchId => !quarantinedBatchIds.has(batchId));
+  return mergeableBatches.filter(batchId => (
+    !quarantinedBatchIds.has(batchId)
+    && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(batchId))
+  ));
 }
 
 function takeNextRunnableLifecycle(claimedBatchIds) {
   const claimed = claimedBatchIds || new Set();
   const scheduledBatchIds = runnableScheduledBatchIds();
+  const fallbackBatchIds = runnableSchedulerFallbackBatchIds();
   const recoveries = runnableStageRecoveries();
   const mergeable = runnableMergeableBatchIds();
   const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
@@ -1506,6 +1646,14 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
     const job = claim({
       batchId,
       source: "initial",
+      execute: () => runInitialBatchLifecycle(batchId),
+    });
+    if (job) return job;
+  }
+  for (const batchId of fallbackBatchIds) {
+    const job = claim({
+      batchId,
+      source: "scheduler_snapshot_fallback",
       execute: () => runInitialBatchLifecycle(batchId),
     });
     if (job) return job;
@@ -1560,6 +1708,11 @@ async function runLifecycleChain(initialJob, claimedBatchIds, drainLabel) {
       "Batch 阶段"
     );
     if (!state) return result;
+    if (state.schedulerSnapshotFallback === true) {
+      // This Batch has completed a lifecycle attempt. Do not replay it from a
+      // stale scheduler grant while walking the cached, conservative waves.
+      schedulerFallbackConsumed.add(job.batchId);
+    }
     job = takeNextRunnableLifecycle(claimedBatchIds);
   }
   return result;
@@ -2019,7 +2172,7 @@ let e2e;
 try {
   e2eStarted = requireSuccess(await workflowAgent(
     `所有 delivery Batch 已推广后，创建 B-E2E。执行 python "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch compile 或 UTest。只返回 JSON。`,
+    `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch UTest。只返回 JSON。`,
     { label: "begin-e2e-validation", phase: "最终验证" }
   ), "begin e2e");
   e2e = requireSuccess(await workflowAgent(

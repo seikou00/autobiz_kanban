@@ -186,6 +186,34 @@ def capture_untracked_files(repo: Path) -> list[str]:
     )
 
 
+def working_tree_changed_files(repo: Path) -> list[str]:
+    """Return every business path differing from ``HEAD`` in this checkout.
+
+    Task runs keep completed tasks' changes uncommitted until a Batch is
+    sealed. Use NUL-delimited Git output so CJK and Windows paths remain
+    lossless, and add untracked files explicitly.
+    """
+    completed = _run_text(
+        repo,
+        "diff",
+        "--name-only",
+        "-z",
+        "HEAD",
+        "--",
+        ".",
+        _PLATFORM_RUNTIME_EXCLUDE,
+    )
+    if completed.returncode != 0:
+        raise RepositorySnapshotError("git_worktree_status_failed")
+    changed = {
+        raw.decode("utf-8", errors="surrogateescape")
+        for raw in completed.stdout.encode("utf-8", errors="surrogateescape").split(b"\0")
+        if raw
+    }
+    changed.update(capture_untracked_files(repo))
+    return sorted(changed)
+
+
 def capture_repository_snapshot(repo: Path, *, include_files: bool = True) -> dict[str, Any]:
     """Capture repository identity and, unless disabled, visible file hashes.
 

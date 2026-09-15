@@ -247,10 +247,10 @@
         "skill": "autobiz-requirement-discuss",
         "order": 10,
         "runtimePolicy": {
-          "agentMode": "solo",
+          "agentMode": "multi",
           "toolCustomConfig": {
             "task": {
-              "enabled": false
+              "enabled": true
             }
           }
         },
@@ -694,7 +694,7 @@
         "skill": "autodev-code",
         "order": 60,
         "runtimePolicy": {
-          "agentMode": "multi",
+          "agentMode": "workflow",
           "toolCustomConfig": {
             "task": {
               "enabled": true

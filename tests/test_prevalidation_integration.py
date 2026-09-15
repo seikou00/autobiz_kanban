@@ -188,11 +188,41 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
     return path
 
 
-def _run(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+def _plan_core_body(tasks: list[dict]) -> dict:
+    """Render existing test fixtures into the model-facing Core contract."""
+
+    return {
+        "schemaVersion": "autodev.plan-core.v1",
+        "featureId": "alpha",
+        "tasks": [
+            {
+                "id": task["id"],
+                "outcome": task["title"],
+                "dependsOn": list(task.get("deps", [])),
+                "workspace": task.get("workspaceRef", "default"),
+                "writeSet": [],
+                "refs": {
+                    "requirements": [item for item in task["specRefs"] if "REQ-" in item],
+                    "scenarios": [item for item in task["specRefs"] if "SCN-" in item],
+                    "api": list(task.get("apiIds", [])),
+                },
+                "validation": {"seam": task["validationBoundary"]},
+            }
+            for task in tasks
+        ],
+    }
+
+
+def _run(
+    script: str,
+    *args: str,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ROOT / "hooks" / script), *args],
         cwd=ROOT,
         text=True,
+        input=input_text,
         capture_output=True,
         check=False,
     )
@@ -220,12 +250,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
         )
         self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
-        compile_added = _run(
-            "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-            "--feature", "alpha", "--lane", "backend",
-            "--command", f"{sys.executable} -c \"print('compile')\"",
-        )
-        self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
         project_added = _run(
             "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
             "--feature", "alpha", "--command", f"{sys.executable} -c \"print('integration')\"",
@@ -238,15 +262,15 @@ class PrevalidationIntegrationTests(unittest.TestCase):
         self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
         return workspace, feature_dir, task
 
-    def test_reopen_reconfigures_engineering_commands_and_rematerializes(self) -> None:
+    def test_reopen_reconfigures_review_owned_commands_and_rematerializes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, _ = self._finalize_single_task(root)
 
             locked = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "plan_writer.py", "add-quality-gate-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('replacement compile')\"",
+                "--command", f"{sys.executable} -c \"print('quality replacement')\"",
             )
             self.assertNotEqual(locked.returncode, 0)
             self.assertIn("task_draft_finalized", locked.stdout)
@@ -266,12 +290,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(reopened.returncode, 0, reopened.stdout + reopened.stderr)
 
-            compile_replaced = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('replacement compile')\"",
-            )
-            self.assertEqual(compile_replaced.returncode, 0, compile_replaced.stdout + compile_replaced.stderr)
             project_replaced = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", f"{sys.executable} -c \"print('replacement integration')\"",
@@ -302,11 +320,9 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertEqual(rematerialized.returncode, 0, rematerialized.stdout + rematerialized.stderr)
 
             root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            compile_commands = root_plan["compileProfiles"]["backend"]["commands"]
             project_commands = root_plan["projectValidationCommands"]
             quality_commands = root_plan["qualityGateProfiles"]["backend"]["commands"]
-            self.assertEqual(len(compile_commands), 1)
-            self.assertIn("replacement compile", compile_commands[0]["argv"][-1])
+            self.assertNotIn("compileProfiles", root_plan)
             self.assertEqual(len(project_commands), 1)
             self.assertIn("replacement integration", project_commands[0]["argv"][-1])
             self.assertEqual(len(quality_commands), 1)
@@ -702,12 +718,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                     "--feature", "alpha", "--task-id", task["id"], "--body-file", str(detail_path),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            compile_added = _run(
-                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--lane", "backend",
-                "--command", f"{sys.executable} -c \"print('compile')\"",
-            )
-            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
             project_added = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--command", f"{sys.executable} -c \"print('integration')\"",
@@ -791,7 +801,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertNotEqual(reopened.returncode, 0)
             self.assertIn("design_revision", reopened.stdout)
 
-    def test_corrupt_formal_bundle_does_not_block_draft_restore(self) -> None:
+    def test_direct_formal_edit_does_not_trigger_digest_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, task = self._finalize_single_task(root)
@@ -803,8 +813,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             strict_show = _run(
                 "plan_writer.py", "show", "--workspace", str(workspace), "--feature", "alpha",
             )
-            self.assertNotEqual(strict_show.returncode, 0)
-            self.assertIn("task_set_digest_mismatch", strict_show.stdout)
+            self.assertEqual(strict_show.returncode, 0, strict_show.stdout + strict_show.stderr)
             diagnosis = _run(
                 "plan_writer.py", "diagnose-plan-repair", "--workspace", str(workspace),
                 "--feature", "alpha",
@@ -812,7 +821,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertEqual(diagnosis.returncode, 0, diagnosis.stdout + diagnosis.stderr)
             self.assertEqual(
                 json.loads(diagnosis.stdout)["diagnosis"]["artifactState"],
-                "finalized_corrupt",
+                "finalized",
             )
             reopened = _run(
                 "plan_writer.py", "reopen-finalized-draft", "--workspace", str(workspace),
@@ -886,6 +895,214 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
             draft_task = json.loads(draft_batch_path.read_text(encoding="utf-8"))["tasks"][0]
             self.assertNotEqual(draft_task["goal"], "must not be persisted")
+
+    def test_dual_design_and_group_drift_requires_and_runs_full_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, _ = self._finalize_single_task(root)
+            draft_lock_path = feature_dir / ".tmp" / "plan_writer" / "draft" / "lock.json"
+            draft_lock = json.loads(draft_lock_path.read_text(encoding="utf-8"))
+            group_file = Path(draft_lock["groupFile"])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][0]["title"] = "replanned observable behavior"
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+
+            design_path = feature_dir / "design.md"
+            design_path.write_text(
+                design_path.read_text(encoding="utf-8").replace("D-001", "D-002"),
+                encoding="utf-8",
+            )
+            self.assertTrue(sync_design_contract_lock(workspace, "alpha").ok)
+
+            diagnosis = _run(
+                "plan_writer.py", "diagnose-plan-repair", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(diagnosis.returncode, 0, diagnosis.stdout + diagnosis.stderr)
+            payload = json.loads(diagnosis.stdout)["diagnosis"]
+            self.assertEqual(payload["recommendedCommand"], "full_rebuild_required")
+            self.assertTrue(payload["drift"]["designChanged"])
+            self.assertTrue(payload["drift"]["groupChanged"])
+
+            repair_work = _run(
+                "plan_writer.py", "create-repair-work", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+            self.assertNotEqual(repair_work.returncode, 0)
+            self.assertIn("full_rebuild_required", repair_work.stdout)
+
+            rebuilt = _run(
+                "plan_writer.py", "rebuild-finalized-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--design-revision-confirmed", "--reason", "refresh revised design and grouping",
+            )
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+            rebuilt_payload = json.loads(rebuilt.stdout)
+            self.assertEqual(rebuilt_payload["resetTaskIds"], ["T001"])
+            self.assertTrue(rebuilt_payload["formalPlanWasPresent"])
+            self.assertTrue(rebuilt_payload["draft"]["pendingTaskIds"])
+
+    def test_write_task_groups_uses_stdin_preflight_and_atomic_core_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            core = _plan_core_body([_plan_task_body()])
+
+            written = _run(
+                "plan_writer.py", "write-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--body-stdin",
+                input_text=json.dumps(core),
+            )
+            self.assertEqual(written.returncode, 0, written.stdout + written.stderr)
+            payload = json.loads(written.stdout)
+            source_path = feature_dir / ".tmp" / "plan_writer" / "task-groups.json"
+            self.assertEqual(payload["groupFile"], str(source_path.resolve()))
+            self.assertEqual(json.loads(source_path.read_text(encoding="utf-8")), core)
+            self.assertEqual(payload["grouping"]["detailObligations"], [])
+
+            invalid = json.loads(json.dumps(core))
+            invalid["tasks"][0]["refs"]["scenarios"] = ["specs/cap/spec.md#SCN-999"]
+            rejected = _run(
+                "plan_writer.py", "write-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--body-stdin",
+                input_text=json.dumps(invalid),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("unknown_plan_task_scenario_ref", rejected.stdout)
+            self.assertEqual(json.loads(source_path.read_text(encoding="utf-8")), core)
+
+    def test_core_preflight_emits_matrix_detail_obligation_before_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            spec_path = feature_dir / "specs" / "cap" / "spec.md"
+            spec_path.parent.mkdir(parents=True)
+            spec_path.write_text(
+                "\n".join([
+                    "## ADDED Requirements",
+                    "### Requirement [REQ-001]: capability",
+                    *[f"#### Scenario [SCN-{index:03d}]: path {index}" for index in range(1, 7)],
+                ]),
+                encoding="utf-8",
+            )
+            _write_design(feature_dir)
+            scenarios = [f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 7)]
+            core = {
+                "schemaVersion": "autodev.plan-core.v1",
+                "featureId": "alpha",
+                "tasks": [{
+                    "id": "T001",
+                    "outcome": "validate one shared response matrix",
+                    "dependsOn": [],
+                    "workspace": "default",
+                    "writeSet": [],
+                    "refs": {
+                        "requirements": ["specs/cap/spec.md#REQ-001"],
+                        "scenarios": scenarios,
+                        "api": [],
+                    },
+                    "validation": {
+                        "seam": "one request and one assertion validate the shared response matrix",
+                        "mergeJustification": (
+                            f"{scenarios[0]}, {scenarios[2]}, and {scenarios[5]} share one request, "
+                            "one response assertion, and one shared validation loop, so splitting them would copy it."
+                        ),
+                    },
+                }],
+            }
+            result = _run(
+                "plan_writer.py", "write-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--body-stdin", input_text=json.dumps(core),
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            obligation = json.loads(result.stdout)["grouping"]["detailObligations"]
+            self.assertEqual(obligation[0]["taskId"], "T001")
+            self.assertEqual(obligation[0]["required"]["commandCount"], 1)
+            self.assertIn("behavior_test", obligation[0]["required"]["allowedKinds"])
+            self.assertIn("omit covers", obligation[0]["required"]["covers"])
+
+    def test_detail_lint_batches_errors_and_batch_write_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
+            first = _plan_task_body("T001", scenario="SCN-001")
+            second = _plan_task_body("T002", scenario="SCN-002")
+            second["deps"] = ["T001"]
+            group_file = _write_task_groups(root / "task-groups.json", [first, second])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            init = _run(
+                "plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertNotEqual(init.returncode, 0)
+            self.assertIn("task_draft_already_exists", init.stdout)
+            self.assertFalse((feature_dir / "plan.json").exists())
+
+            invalid = _draft_detail_body(first)
+            invalid["implementationPoints"] = [f"point {index}" for index in range(7)]
+            invalid["decisionIds"] = ["D-999"]
+            lint = _run(
+                "plan_writer.py", "lint-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-json", json.dumps(invalid),
+            )
+            self.assertNotEqual(lint.returncode, 0)
+            lint_reasons = {item["reason"] for item in json.loads(lint.stdout)["errors"]}
+            self.assertIn("T001.implementation_points_exceeds_limit", lint_reasons)
+            self.assertIn("unknown_plan_json_decision_ref", lint_reasons)
+
+            invalid_second = _draft_detail_body(second)
+            invalid_second["implementationPoints"] = [f"point {index}" for index in range(7)]
+            batch = {
+                "details": [
+                    {"taskId": "T001", "body": _draft_detail_body(first)},
+                    {"taskId": "T002", "body": invalid_second},
+                ]
+            }
+            result = _run(
+                "plan_writer.py", "set-draft-task-details", "--workspace", str(workspace),
+                "--feature", "alpha", "--body-json", json.dumps(batch),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("T002.implementation_points_exceeds_limit", result.stdout)
+            draft = json.loads((
+                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            ).read_text(encoding="utf-8"))
+            self.assertEqual(draft["tasks"][0]["goal"], "")
+
+            batch["details"][1]["body"] = _draft_detail_body(second)
+            incomplete = {"details": [batch["details"][0]]}
+            incomplete_lint = _run(
+                "plan_writer.py", "lint-draft-task-details", "--workspace", str(workspace),
+                "--feature", "alpha", "--full", "--body-json", json.dumps(incomplete),
+            )
+            self.assertNotEqual(incomplete_lint.returncode, 0)
+            self.assertIn("draft_task_details_full_payload_incomplete", incomplete_lint.stdout)
+
+            lint_full = _run(
+                "plan_writer.py", "lint-draft-task-details", "--workspace", str(workspace),
+                "--feature", "alpha", "--full", "--body-json", json.dumps(batch),
+            )
+            self.assertEqual(lint_full.returncode, 0, lint_full.stdout + lint_full.stderr)
+            lint_payload = json.loads(lint_full.stdout)
+            self.assertTrue(lint_payload["fullValidation"])
+            self.assertEqual(lint_payload["candidateTaskIds"], ["T001", "T002"])
+
+            written = _run(
+                "plan_writer.py", "set-draft-task-details", "--workspace", str(workspace),
+                "--feature", "alpha", "--full", "--body-json", json.dumps(batch),
+            )
+            self.assertEqual(written.returncode, 0, written.stdout + written.stderr)
+            written_payload = json.loads(written.stdout)
+            self.assertTrue(written_payload["fullValidation"])
+            self.assertEqual(written_payload["writtenTaskIds"], ["T001", "T002"])
 
 
 if __name__ == "__main__":

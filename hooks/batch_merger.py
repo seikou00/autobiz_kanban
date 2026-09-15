@@ -256,14 +256,7 @@ def merge_run(
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
-        plan_path = workspace / ".autobizdevops" / "features" / feature
-        from hooks.plan_json import load_plan_bundle
-        from hooks.parallel_runtime import mergeable_batches, plan_digest, ready_batches
-        bundle = load_plan_bundle(plan_path)
-        if plan_digest(bundle) != manifest.get("planDigest"):
-            manifest["status"] = "blocked"
-            save_manifest(workspace, feature, run_id, manifest)
-            return {"success": False, "merged": [], "failed": [{"error": "parallel_plan_digest_changed"}], "totalConflicts": 0}
+        from hooks.parallel_runtime import mergeable_batches, ready_batches
         mergeable = set(mergeable_batches(manifest))
         if batch_ids:
             ids = list(batch_ids)
@@ -392,11 +385,6 @@ def merge_run(
                         "branchName": rebased.get("branch"),
                         "targetSha": record["headSha"],
                         "conflicts": rebased.get("conflicts", []),
-                        "compileCommand": (
-                            bundle.batches.get(batch_id, {}).get("compileCommand")
-                            if isinstance(bundle.batches.get(batch_id), dict)
-                            else None
-                        ),
                     }
                     batch["status"] = "needs_resolution"
                     batch["resolution"] = resolution
@@ -461,51 +449,45 @@ def merge_run(
                     "conflicts": result.get("conflicts", []),
                 })
                 break
-            plan_batch = bundle.batches.get(batch_id)
-            batch_compile = plan_batch.get("batchCompile") if isinstance(plan_batch, dict) else None
-            # Compile is recorded for delivery diagnostics but is temporarily
-            # non-blocking.  A missing/unfinished compile still cannot be
-            # merged; a recorded pass, failure, or frontend skip may proceed.
-            if isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed", "skipped"}:
-                plan_result = mark_parallel_batch_tasks_merged(
-                    workspace,
-                    feature,
-                    batch_id,
-                    merge_commit_sha=str(result.get("commitSha") or ""),
-                    delivery_run_id=run_id,
-                )
-                if not plan_result.ok:
-                    resolution = {
-                        "kind": "plan_state_update",
+            plan_result = mark_parallel_batch_tasks_merged(
+                workspace,
+                feature,
+                batch_id,
+                merge_commit_sha=str(result.get("commitSha") or ""),
+                delivery_run_id=run_id,
+            )
+            if not plan_result.ok:
+                resolution = {
+                    "kind": "plan_state_update",
+                    "mergeCommitSha": result.get("commitSha"),
+                    "deliveryRunId": run_id,
+                    "repositoryRef": ref,
+                    "repositoryHeadSha": result.get("commitSha"),
+                    "planWriterErrors": plan_result.errors or [],
+                }
+                record["headSha"] = result.get("commitSha")
+                for binding in manifest.get("repositories", {}).values():
+                    if isinstance(binding, dict) and isinstance(binding.get("gitRoot"), str) and str(Path(binding["gitRoot"]).resolve()) == root_key:
+                        binding["headSha"] = result.get("commitSha")
+                failed.append({
+                    "batchId": batch_id,
+                    "repositoryRef": ref,
+                    "worktree": batch.get("worktreePath"),
+                    "error": "parallel_merge_plan_state_update_failed",
+                    "planWriterErrors": plan_result.errors or [],
+                    "sourceMerged": True,
+                    "needsPlanRecovery": True,
+                    "resolution": resolution,
+                })
+                batch.update(
+                    {
+                        "status": "needs_resolution",
                         "mergeCommitSha": result.get("commitSha"),
-                        "deliveryRunId": run_id,
-                        "repositoryRef": ref,
-                        "repositoryHeadSha": result.get("commitSha"),
-                        "planWriterErrors": plan_result.errors or [],
-                    }
-                    record["headSha"] = result.get("commitSha")
-                    for binding in manifest.get("repositories", {}).values():
-                        if isinstance(binding, dict) and isinstance(binding.get("gitRoot"), str) and str(Path(binding["gitRoot"]).resolve()) == root_key:
-                            binding["headSha"] = result.get("commitSha")
-                    failed.append({
-                        "batchId": batch_id,
-                        "repositoryRef": ref,
-                        "worktree": batch.get("worktreePath"),
                         "error": "parallel_merge_plan_state_update_failed",
-                        "planWriterErrors": plan_result.errors or [],
-                        "sourceMerged": True,
-                        "needsPlanRecovery": True,
                         "resolution": resolution,
-                    })
-                    batch.update(
-                        {
-                            "status": "needs_resolution",
-                            "mergeCommitSha": result.get("commitSha"),
-                            "error": "parallel_merge_plan_state_update_failed",
-                            "resolution": resolution,
-                        }
-                    )
-                    break
+                    }
+                )
+                break
             record["headSha"] = result.get("commitSha")
             for binding in manifest.get("repositories", {}).values():
                 if isinstance(binding, dict) and isinstance(binding.get("gitRoot"), str) and str(Path(binding["gitRoot"]).resolve()) == root_key:

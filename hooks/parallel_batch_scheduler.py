@@ -32,7 +32,6 @@ from hooks.parallel_runtime import (
     list_runs,
     load_manifest,
     parallel_plan_errors,
-    plan_drift_details,
     plan_digest,
     mergeable_batches,
     stage_recovery_batches,
@@ -773,27 +772,6 @@ def schedule(
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         bundle = load_plan_bundle(feature_dir(workspace, feature))
-        current_digest = plan_digest(bundle)
-        if current_digest != manifest.get("planDigest"):
-            drift = plan_drift_details(manifest.get("planContract"), bundle)
-            manifest["status"] = "blocked"
-            manifest["planDrift"] = {
-                "reason": "parallel_plan_digest_changed",
-                "expectedDigest": manifest.get("planDigest"),
-                "currentDigest": current_digest,
-                **drift,
-            }
-            save_manifest(workspace, feature, run_id, manifest)
-            append_event(
-                workspace,
-                feature,
-                run_id,
-                "plan_changed",
-                expectedDigest=manifest.get("planDigest"),
-                currentDigest=current_digest,
-                drift=drift,
-            )
-            raise ValueError("parallel_plan_digest_changed:" + json.dumps(drift, ensure_ascii=False, sort_keys=True))
         # A retained per-Batch conflict (or one conflicted Merge Train) owns
         # only the deliveries recorded in that retained state.  Keep those
         # deliveries out of every runnable output so a resume cannot silently
@@ -937,6 +915,9 @@ def schedule(
                     "workspaceRef": item.get("workspaceRef"),
                     "componentRoots": item.get("componentRoots", []),
                     "executionStage": item.get("executionStage", "parallel"),
+                    "deliveryKind": item.get("deliveryKind"),
+                    "atomicGroupId": item.get("atomicGroupId"),
+                    "batchRationale": item.get("batchRationale"),
                     "qualityGateRequired": item.get("qualityGateRequired") is True,
                     "requestedPath": (manifest.get("repositories", {}).get(str(item.get("repositoryRef")), {}) or {}).get("requestedPath"),
                     "worktreePath": item.get("worktreePath"),
@@ -986,7 +967,7 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
                 raise ValueError(f"parallel_batch_worktree_branch_required:{batch_id}")
             if current_git_branch(Path(candidate)) != expected_branch:
                 raise ValueError(f"parallel_batch_worktree_branch_mismatch:{batch_id}")
-        for key in ("worktreePath", "branchName", "commitSha", "compileStatus", "mergeCommitSha", "error"):
+        for key in ("worktreePath", "branchName", "commitSha", "mergeCommitSha", "error"):
             if key in details:
                 batch[key] = details[key]
         if status == "retry_pending":
@@ -1463,7 +1444,6 @@ def main(argv: list[str] | None = None) -> int:
     mark.add_argument("--merge-commit-sha")
     mark.add_argument("--worktree-path")
     mark.add_argument("--branch-name")
-    mark.add_argument("--compile-status")
     mark.add_argument("--error")
     args = parser.parse_args(argv)
     try:
@@ -1506,13 +1486,12 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(True, **manual_resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "list":
             return _emit(True, runs=list_runs(workspace, feature))
-        details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "compile_status", "error"} and value is not None}
+        details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "error"} and value is not None}
         detail_names = {
             "commit_sha": "commitSha",
             "merge_commit_sha": "mergeCommitSha",
             "worktree_path": "worktreePath",
             "branch_name": "branchName",
-            "compile_status": "compileStatus",
             "error": "error",
         }
         details = {detail_names[key]: value for key, value in details.items()}

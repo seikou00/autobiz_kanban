@@ -486,7 +486,7 @@ def fail_stage(
             # that delivery releasable and recoverable rather than downgrading
             # it to ``running`` and then rejecting `release --final-status
             # sealed` for the same lease.
-            batch["status"] = "sealed" if batch.get("commitSha") and batch.get("compileStatus") in {"passed", "failed", "skipped"} else "running"
+            batch["status"] = "sealed" if batch.get("commitSha") else "running"
             next_name = stage
         elif next_name is not None:
             # A production repair changes the delivery commit.  All delivery
@@ -504,7 +504,7 @@ def fail_stage(
                 if reset:
                     states[name].update({"status": "pending", "latestEvidenceId": None, "completedAt": None})
             batch["activeStage"] = None
-            batch["status"] = "sealed" if batch.get("commitSha") and batch.get("compileStatus") in {"passed", "failed", "skipped"} else "running"
+            batch["status"] = "sealed" if batch.get("commitSha") else "running"
         else:
             batch["status"] = "blocked" if failure_type == "needs_triage" else "failed"
         save_manifest(workspace, feature, run_id, manifest)

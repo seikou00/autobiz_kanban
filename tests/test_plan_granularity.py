@@ -28,7 +28,8 @@ def _task_with_scenarios(count: int) -> dict:
             }
         ],
         "splitRationale": (
-            "SCN-001、SCN-004、SCN-007 由同一查询请求返回完整字段矩阵，"
+            "specs/capability/spec.md#SCN-001、specs/capability/spec.md#SCN-004、"
+            "specs/capability/spec.md#SCN-007 由同一查询请求返回完整字段矩阵，"
             "并由同一个响应断言验证，拆开会复制同一验证闭环。"
         ),
     }
@@ -220,6 +221,25 @@ class PlanGranularityTests(unittest.TestCase):
         task["splitRationale"] = "同一查询请求返回完整字段矩阵，并由同一个响应断言验证，拆开会复制同一验证闭环。"
 
         self.assertIn("invalid_plan_task_split_rationale", _reasons(task))
+
+    def test_matrix_exception_requires_path_qualified_scenario_refs_in_rationale(self) -> None:
+        task = _task_with_scenarios(9)
+        task["mergedScenarioRefs"] = task["specRefs"][1:]
+        task["splitRationale"] = (
+            "SCN-001、SCN-004、SCN-007 由同一查询请求返回完整字段矩阵，"
+            "并由同一个响应断言验证，拆开会复制同一验证闭环。"
+        )
+
+        errors = validate_plan_task_grouping_item(task, task_id="T001")
+        rationale_error = next(
+            item for item in errors if item["reason"] == "invalid_plan_task_split_rationale"
+        )
+        missing_ids = next(
+            item
+            for item in rationale_error["violations"]
+            if item["code"] == "split_rationale_missing_related_ids"
+        )
+        self.assertEqual(missing_ids["actualCount"], 0)
 
     def test_rejects_scenario_range_or_concatenation_shorthand(self) -> None:
         for anchor in ("SCN-001~SCN-009", "SCN-001, SCN-002", "SCN-001SCN-006", "SCN-001到SCN-009"):

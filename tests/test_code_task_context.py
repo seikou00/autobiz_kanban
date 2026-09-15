@@ -8,13 +8,13 @@ from unittest.mock import patch
 from hooks.code_task_context import build_context
 
 
-def test_deferred_validation_policy_allows_batch_compile_state(tmp_path: Path) -> None:
-    """A sealed Batch must remain repairable after batch-compile writes its state."""
+def test_deferred_validation_policy_uses_review_owned_state(tmp_path: Path) -> None:
+    """Code context accepts the current review-owned deferred-validation Plan."""
     root_plan = {
         "taskValidationPolicy": {
             "mode": "defer_to_test_stages",
             "orchestration": "inline",
-            "codeGate": "batch_compile_only",
+            "codeGate": "review_only",
         },
         "activeBatchId": "B001",
         "batches": [{"id": "B001", "status": "in_progress", "taskIds": ["T001"], "executionLane": "backend"}],
@@ -25,13 +25,12 @@ def test_deferred_validation_policy_allows_batch_compile_state(tmp_path: Path) -
         "status": "in_progress",
         "taskCount": 1,
         "completedTaskCount": 0,
-        "batchCompile": {"status": "passed"},
         "tasks": [{"id": "T001", "workspaceRef": "RouYi"}],
     }
 
     def validate_batch(data, **kwargs):
-        assert data["batchCompile"]["status"] == "passed"
-        return [] if kwargs["defer_to_test_stages"] is True else ["B001.batchCompile_unexpected"]
+        assert "batchCompile" not in data
+        return [] if kwargs["defer_to_test_stages"] is True else ["B001.deferred_validation_required"]
 
     with (
         patch("hooks.code_task_context.load_plan", side_effect=[root_plan, batch_plan]),

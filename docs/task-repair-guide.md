@@ -9,7 +9,7 @@
 - ✅ 任务状态为 `implemented` 或 `done`
 - ✅ 发现实现有 bug 或不符合预期
 - ✅ 需要保留修复历史的引用链
-- ✅ 需要重新验证批次编译
+- ✅ 需要由固定 Workflow 重新走 Review、UTest 与可选质量门
 
 ## 在 Claw 对话中触发修复
 
@@ -24,7 +24,7 @@ Claude 会自动：
 2. 启动任务修复流程
 3. 根据你的描述修改代码
 4. 完成修复并记录新的 evidence
-5. 如果需要，重新验证批次编译
+5. 由固定 Workflow 继续该 Batch 的 Review/UTest
 
 ### 方式二：明确请求修复流程
 
@@ -96,16 +96,9 @@ python hooks/task_runner.py finish-implementation \
 
 注意：如果原任务状态是 `done`，会自动恢复为 `done`（见下方"状态保持"特性）。
 
-### 步骤 5：（可选）重新验证批次编译
+### 步骤 5：继续固定 Workflow
 
-如果这个任务属于某个批次，需要重新验证：
-
-```bash
-python hooks/task_runner.py revalidate-batch-compile \
-  --feature <FEATURE> \
-  --batch-id B01 \
-  --code-workspace <BUSINESS_REPO>
-```
+修复完成后不要运行批次编译或跳过编译命令。固定 Workflow 会从该 Batch 的 Review 继续，并在同一 Worktree 执行 UTest 与可选质量门。
 
 ## 核心特性
 
@@ -126,9 +119,9 @@ ev-002 (第一次修复)
 ev-003 (第二次修复)
 ```
 
-### ✅ 批次重验
+### ✅ 固定交付续跑
 
-修复任务后，可以重新验证整个批次的编译状态，确保所有任务的最新实现都能通过编译。
+修复任务后，固定 Workflow 会针对新的 implementation evidence 重新完成 Review、UTest 与可选质量门。
 
 ## 错误处理
 
@@ -148,22 +141,11 @@ Error: prior_evidence_mismatch
 
 解决方案：检查提供的 `prior-evidence-id` 是否是该任务的最新 evidence ID。
 
-### 批次编译失败
-
-```json
-{
-  "compileStatus": "failed",
-  "errors": ["..."]
-}
-```
-
-解决方案：查看编译错误信息，继续修复相关任务。
-
 ## 最佳实践
 
 1. **修复前先检查**：确认任务的最新 evidence ID，避免基于旧版本修复
 2. **小步修复**：每次只修复一个明确的问题，而不是多个问题一起改
-3. **验证批次**：修复后及时验证批次编译，确保没有引入新问题
+3. **继续交付**：修复后让固定 Workflow 重新完成 Review 和 UTest
 4. **查看证据链**：通过 evidence 的 `priorEvidenceId` 可以追溯完整的修复历史
 
 ## 示例场景
@@ -191,19 +173,9 @@ python hooks/task_runner.py finish-implementation \
   --repair-mode
 ```
 
-### 场景 2：修复后重新验证批次
+### 场景 2：修复后继续 Batch 交付
 
-```bash
-# 1. 修复 T001（同上）
-
-# 2. 重新验证批次 B01
-python hooks/task_runner.py revalidate-batch-compile \
-  --feature login \
-  --batch-id B01 \
-  --code-workspace ./business-repo
-
-# 3. 如果还有失败，继续修复其他任务
-```
+完成修复后恢复同一固定 Workflow；它会重新完成 Review、UTest 与可选质量门。
 
 ### 场景 3：在 Claw 对话中快速修复
 
@@ -216,7 +188,7 @@ Claude:
 2. 启动任务修复（prior-evidence-id: ev-20240818-003）
 3. 将密码加密从 md5 改为 bcrypt...
 4. 完成修复，新的 evidence ID: ev-20240818-004
-5. 重新验证批次 B02... ✓ 编译通过
+5. 固定 Workflow 完成 Review 与 UTest
 
 修复完成！
 ```

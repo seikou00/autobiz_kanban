@@ -64,8 +64,6 @@ class RollbackStageTest(unittest.TestCase):
         batch["featureId"] = self.feature
         batch["status"] = "in_progress"
         batch["startedAt"] = "2026-08-18T10:00:00Z"
-        batch["batchCompile"] = {"status": "passed", "runId": "compile-1"}
-
         root = root_plan(batches=[batch_entry("B001", ["T001", "T002"])])
         root["featureId"] = self.feature
         root["status"] = "in_progress"
@@ -519,14 +517,16 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue((history / "state-after.json").is_file())
 
         root = json.loads((self.feature_dir / "plan.json").read_text(encoding="utf-8"))
-        batch = json.loads(
-            (self.feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8")
-        )
+        batches = [
+            json.loads((self.feature_dir / entry["path"]).read_text(encoding="utf-8"))
+            for entry in root["batches"]
+        ]
         self.assertEqual(root["status"], "todo")
         self.assertEqual(root["projectCheckEvidenceIds"], [])
-        self.assertNotIn("batchCompile", batch)
-        self.assertEqual([item["status"] for item in batch["tasks"]], ["todo", "todo"])
-        self.assertTrue(all(item["evidenceIds"] == [] for item in batch["tasks"]))
+        self.assertTrue(all("batchCompile" not in batch for batch in batches))
+        reset_tasks = [item for batch in batches for item in batch["tasks"]]
+        self.assertEqual([item["status"] for item in reset_tasks], ["todo", "todo"])
+        self.assertTrue(all(item["evidenceIds"] == [] for item in reset_tasks))
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
 
@@ -746,6 +746,41 @@ class RollbackStageTest(unittest.TestCase):
 
         self.assertTrue(result.ok, result.errors)
         self.assertEqual((repository / "app.txt").read_text(encoding="utf-8"), "user baseline change\n")
+
+    def test_code_source_restore_allows_stored_object_digest_drift(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        (repository / "app.txt").write_text("user baseline change\n", encoding="utf-8")
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+        entry = session["repositories"][repository.name]["files"]["app.txt"]
+        object_path = (
+            self.project
+            / ".autobizdevops"
+            / "rollback"
+            / "baselines"
+            / self.feature
+            / "objects"
+            / entry["objectSha256"]
+        )
+        object_path.write_text("modified baseline object\n", encoding="utf-8")
+        (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
+        self._write_task_run(repository)
+
+        result = execute_stage_rollback(
+            prepare_stage_rollback(
+                workspace=self.project,
+                feature=self.feature,
+                stage="dev.code",
+                code_source="restore",
+            )
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual((repository / "app.txt").read_text(encoding="utf-8"), "modified baseline object\n")
 
     def test_code_session_preserves_tracked_file_deleted_before_capture(self) -> None:
         self._set_checkpoint("code_done")

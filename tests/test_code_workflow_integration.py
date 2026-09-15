@@ -101,11 +101,15 @@ def test_fixed_workflow_entrypoint():
         "function normalizePath",
         "function samePath",
         "function joinPath",
+        "function taskWorkspacePath",
+        "function batchTaskWorkspace",
+        "batch_component_root_invalid",
+        '--code-workspace "${taskWorkspace}"',
         "taskContract.uiRequired",
         "Route resolver",
         "invalid_code_workspace_path",
         "不得创建任何 workflow",
-        "required: [\"batchId\", \"status\", \"compileStatus\", \"worktreePath\", \"branchName\", \"commitSha\"]",
+        "required: [\"batchId\", \"status\", \"worktreePath\", \"branchName\", \"commitSha\"]",
         "drainRunnableLifecycles",
         "takeNextRunnableLifecycle",
         "runLifecycleChain",
@@ -152,19 +156,13 @@ def test_fixed_workflow_entrypoint():
         "promoteReadyBatch",
         "--batch-worktree",
         "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
-        "修复、跳过编译记录并封存一次，然后直接进入 UTest，不会再次执行 Review",
+        "生产代码修复和封存",
         "failureContext",
         "本次打回的精确问题如下",
         "targetId、commandId、evidenceId、test-output.log 路径",
         "record-test-failure",
         'testStatus:\\"deferred\\"',
         "--purpose review",
-        "skipBatchCompileForDelivery",
-        "skip-batch-compile",
-        "workflow_batch_compile_disabled",
-        "compileSkipRecorded",
-        'batchResult.compileStatus !== "skipped"',
-        "临时停用所有 Batch compile",
         "parallel_git_index_lock_busy",
         "parallel_git_index_lock_recovery_failed",
         "SINGLE_REPAIRABLE_STAGES",
@@ -181,6 +179,9 @@ def test_fixed_workflow_entrypoint():
         "Review execution mode=fixed_code_workflow",
         "Code Workflow 已获自主执行授权",
         "const WORKFLOW_AUTONOMY_PREFIX",
+        "const CODE_STAGE_TEST_BOUNDARY",
+        "禁止创建、修改或删除测试源码",
+        "所有测试资产和测试命令仅可在 Review 通过后的 UTest 阶段执行",
         "function workflowAgent",
     ]
     missing = [check for check in checks if check not in content]
@@ -193,17 +194,23 @@ def test_fixed_workflow_entrypoint():
     if "--with-heartbeat" in content or "--require-heartbeat" in content:
         print("✗ 固定脚本仍依赖旧的后台 heartbeat 参数")
         return False
-    if "await agent(" in content:
+    wrapper_start = content.find("async function workflowAgent(")
+    wrapper_end = content.find("const aggregatePath", wrapper_start)
+    direct_agent_call = content.find("await agent(")
+    if (
+        direct_agent_call >= 0
+        and not (wrapper_start >= 0 and wrapper_end > wrapper_start and wrapper_start <= direct_agent_call < wrapper_end)
+    ):
         print("✗ 固定 Workflow 存在绕过自治边界的直接子 Agent 调用")
         return False
     if "compileAlreadyPassed" in content:
-        print("✗ rework 仍将已记录的编译失败误判为未通过")
+        print("✗ rework 仍保留已废弃的批次编译状态")
         return False
-    delivery_start = content.find("async function skipBatchCompileForDelivery(")
-    delivery_end = content.find("async function runBatchUtestAndSeal(", delivery_start)
-    delivery_protocol = content[delivery_start:delivery_end]
-    if '"${taskRunnerPath}" batch-compile' in delivery_protocol or '"${taskRunnerPath}" revalidate-batch-compile' in content:
-        print("✗ 固定 Workflow 仍会执行 Batch compile")
+    if content.count("CODE_STAGE_TEST_BOUNDARY") < 3:
+        print("✗ 初始实现和修复实现未同时注入 UTest 边界")
+        return False
+    if "batch-compile" in content or "skip-batch-compile" in content or "compileStatus" in content:
+        print("✗ 固定 Workflow 仍保留 Batch compile 路径或状态")
         return False
     rework_start = content.find("async function reworkDeliveryImplementation(")
     rework_end = content.find("async function recordSingleRepairResolution(", rework_start)
@@ -232,9 +239,9 @@ def test_fixed_workflow_entrypoint():
         print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
     review_prompt = content.find("对已草稿封存的 Batch")
-    compile_skip_prompt = content.find("已通过业务 Review。当前插件已临时停用所有 Batch compile")
-    if review_prompt < 0 or compile_skip_prompt < 0:
-        print("✗ Review 与编译跳过记录的固定顺序缺失")
+    utest_prompt = content.find("async function runBatchUtestAndSeal(")
+    if review_prompt < 0 or utest_prompt < 0:
+        print("✗ Review 到 UTest 的固定顺序缺失")
         return False
     candidate_start = content.find("构建 Batch ${batchId} 的独立 Merge Train 候选")
     candidate_end = content.find("let built = builtRaw;", candidate_start)
@@ -247,6 +254,47 @@ def test_fixed_workflow_entrypoint():
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
     print("✓ 每个 Batch 独立完成 review、UTest、合并并重新调度")
+    print()
+    return True
+
+
+def test_workflow_component_root_binding():
+    """Task Runner 必须使用 worktree 内的 Plan 模块根，而非 worktree 根。"""
+    print("测试 4.1: Task workspace 组件根绑定")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {};
+vm.createContext(context);
+const helperStart = source.indexOf("function usableString(");
+const inputStart = source.indexOf("const input = unwrap(args);");
+const componentStart = source.indexOf("function taskWorkspacePath(");
+const componentEnd = source.indexOf("function normalizeScheduledGroups(");
+if (helperStart < 0 || inputStart < 0 || componentStart < 0 || componentEnd < 0) process.exit(2);
+vm.runInContext(source.slice(helperStart, inputStart), context);
+vm.runInContext(source.slice(componentStart, componentEnd), context);
+const worktree = "D:\\autobiz\\worktrees\\B007";
+const component = context.taskWorkspacePath(
+  "B007", worktree, ["后台服务/企业经营/LF39.05_bcentpaireport"]
+);
+if (component !== "D:/autobiz/worktrees/B007/后台服务/企业经营/LF39.05_bcentpaireport") process.exit(3);
+if (context.taskWorkspacePath("B001", worktree, ["."]) !== worktree) process.exit(4);
+for (const roots of [["backend", "frontend"], ["../outside"]]) {
+  let rejected = false;
+  try { context.taskWorkspacePath("B001", worktree, roots); } catch (_) { rejected = true; }
+  if (!rejected) process.exit(5);
+}
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ Task workspace 组件根绑定错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ Task Runner 使用 worktree 内的 Plan 组件根")
+    print("✓ 组件根越界或一个 Batch 绑定多个根会被拒绝")
     print()
     return True
 
@@ -453,6 +501,7 @@ let scheduled = ["B001"];
 const executed = [];
 let refreshes = 0;
 context.runnableScheduledBatchIds = () => scheduled;
+context.runnableSchedulerFallbackBatchIds = () => [];
 context.runnableStageRecoveries = () => [];
 context.runnableMergeableBatchIds = () => [];
 context.runInitialBatchLifecycle = async batchId => ({
@@ -490,9 +539,72 @@ if (refreshes !== 2) process.exit(4);
     return True
 
 
+def test_workflow_empty_response_recovery():
+    """空模型响应应重试，并只用已验证波次降级继续。"""
+    print("测试 8: 空响应恢复")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {
+  MAX_EMPTY_AGENT_RESPONSE_RETRIES: 2,
+  usableString: value => typeof value === "string" && value.trim().length > 0,
+};
+let calls = 0;
+const labels = [];
+context.agent = async (_prompt, options) => {
+  calls += 1;
+  labels.push(options.label);
+  if (calls < 3) throw new Error("Received empty response from chat model call");
+  return '{"ok":true}';
+};
+vm.createContext(context);
+const agentStart = source.indexOf("const WORKFLOW_AUTONOMY_PREFIX");
+const agentEnd = source.indexOf("const aggregatePath", agentStart);
+const fallbackStart = source.indexOf("function nextSchedulerFallbackWave(");
+const fallbackEnd = source.indexOf("function cacheSchedulerFallbackGroups(", fallbackStart);
+if (agentStart < 0 || agentEnd < 0 || fallbackStart < 0 || fallbackEnd < 0) process.exit(2);
+vm.runInContext(source.slice(agentStart, agentEnd), context);
+context.normalizeScheduledGroups = groups => Array.isArray(groups)
+  ? groups.map(group => Array.isArray(group) ? group.filter(value => typeof value === "string" && value) : []).filter(group => group.length)
+  : [];
+context.isValidBatchId = value => typeof value === "string" && value.length > 0;
+vm.runInContext(source.slice(fallbackStart, fallbackEnd), context);
+(async () => {
+  const result = await context.workflowAgent("return json", { label: "empty-test" });
+  if (result !== '{"ok":true}') process.exit(3);
+  if (calls !== 3) process.exit(4);
+  if (labels.join(",") !== "empty-test,empty-test-empty-retry-1,empty-test-empty-retry-2") process.exit(5);
+  const consumed = new Set(["B001"]);
+  const quarantined = new Set();
+  const groups = [["B001"], ["B007"], ["B015"]];
+  const first = context.nextSchedulerFallbackWave(groups, consumed, quarantined);
+  if (first.join(",") !== "B007") process.exit(6);
+  consumed.add("B007");
+  const second = context.nextSchedulerFallbackWave(groups, consumed, quarantined);
+  if (second.join(",") !== "B015") process.exit(7);
+  const bounded = context.boundedSchedulerFallbackGroups([["B001", "B007", "B015"]], 1);
+  if (JSON.stringify(bounded) !== JSON.stringify([["B001"], ["B007"], ["B015"]])) process.exit(8);
+  const parallel = context.boundedSchedulerFallbackGroups([["B001", "B007", "B015"]], 2);
+  if (JSON.stringify(parallel) !== JSON.stringify([["B001", "B007"], ["B015"]])) process.exit(9);
+})().catch(() => process.exit(10));
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ 空响应恢复错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ 空模型响应会在同一子任务内受控重试")
+    print("✓ 调度快照空响应时只按上一个安全波次继续 B007/B015")
+    print()
+    return True
+
+
 def test_skill_integration():
     """测试技能集成。"""
-    print("测试 8: 技能集成")
+    print("测试 9: 技能集成")
     print("-" * 60)
 
     skill_file = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
@@ -561,9 +673,11 @@ def main():
     tests = [
         ("Workflow Launcher", test_workflow_launcher),
         ("Fixed Workflow Entrypoint", test_fixed_workflow_entrypoint),
+        ("Task Workspace Component Root", test_workflow_component_root_binding),
         ("Structured Output Normalization", test_workflow_structured_output_normalization),
         ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
+        ("Empty Response Recovery", test_workflow_empty_response_recovery),
         ("Skill Integration", test_skill_integration),
     ]
 

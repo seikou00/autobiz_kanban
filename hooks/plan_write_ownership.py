@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""File-level write ownership checks for generated Plans.
+"""Write ownership checks for generated Plans.
 
 ``scope.paths`` and ``expectedFiles`` are the physical write set consumed by
 the conservative Batch scheduler.  They must not make several *Batches* claim
@@ -8,6 +8,10 @@ the same file: that looks parallel in the Task DAG but is necessarily
 serialized at runtime.  A shared schema, route registry, or global
 configuration file is instead owned by one earlier Batch; its consumers
 depend on that Batch without also listing the file in their write sets.
+
+A Controller or service may opt into member ownership with stable
+``writeTargets: [{path, symbols}]`` anchors. Only disjoint anchors may be
+owned by different Batches; all legacy paths remain whole-file claims.
 """
 
 from __future__ import annotations
@@ -85,6 +89,43 @@ def task_write_paths(task: dict[str, Any]) -> set[str]:
     }
 
 
+def task_write_targets(task: dict[str, Any]) -> dict[str, set[str] | None]:
+    """Return physical paths and optional member anchors for one task.
+
+    ``None`` denotes a whole-file claim.  Empty or malformed target data never
+    weakens that conservative default, preserving legacy Plan behavior.
+    """
+
+    workspace_ref = task.get("workspaceRef")
+    declared: dict[str, set[str] | None] = {}
+    raw_targets = task.get("writeTargets")
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            path = normalize_owned_path(item.get("path"), workspace_ref)
+            if path is None or is_test_asset_path(path):
+                continue
+            raw_symbols = item.get("symbols")
+            if not isinstance(raw_symbols, list) or any(
+                not isinstance(symbol, str) or not symbol.strip() for symbol in raw_symbols
+            ):
+                declared[path] = None
+                continue
+            symbols = {symbol.strip() for symbol in raw_symbols}
+            if not symbols:
+                declared[path] = None
+                continue
+            prior = declared.get(path)
+            declared[path] = None if prior is None and path in declared else (prior or set()) | symbols
+
+    # scope.paths/expectedFiles remain physical source of truth. A target only
+    # refines a matching path; no declared anchor can hide another file write.
+    for path in task_write_paths(task):
+        declared.setdefault(path, None)
+    return declared
+
+
 def write_ownership_violations(
     tasks: Iterable[dict[str, Any]],
     *,
@@ -99,7 +140,9 @@ def write_ownership_violations(
     this is useful only for callers that do not have a Batch projection yet.
     """
 
-    owners: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    owners: dict[tuple[str, str], dict[str, dict[str, set[str] | None]]] = defaultdict(
+        lambda: defaultdict(dict)
+    )
     for task in tasks:
         if not isinstance(task, dict) or task.get("executionMode") == "external_dependency":
             continue
@@ -114,29 +157,63 @@ def write_ownership_violations(
             if ownership_scope_by_task is not None
             else task_id
         )
-        for path in task_write_paths(task):
-            owners[(workspace_ref.strip(), path)][scope].add(task_id)
+        for path, symbols in task_write_targets(task).items():
+            scoped = owners[(workspace_ref.strip(), path)][scope]
+            prior = scoped.get(task_id)
+            if prior is None and task_id in scoped:
+                continue
+            if symbols is None:
+                scoped[task_id] = None
+            else:
+                scoped[task_id] = (prior or set()) | symbols
 
     violations: list[dict[str, Any]] = []
-    for (workspace_ref, path), scoped_task_ids in sorted(owners.items()):
-        if len(scoped_task_ids) < 2:
+    for (workspace_ref, path), scoped_claims in sorted(owners.items()):
+        if len(scoped_claims) < 2:
             continue
-        ordered_task_ids = sorted({task_id for values in scoped_task_ids.values() for task_id in values})
+        whole_file_scopes = {
+            scope
+            for scope, claims in scoped_claims.items()
+            if any(symbols is None for symbols in claims.values())
+        }
+        symbol_scopes: dict[str, set[str]] = defaultdict(set)
+        for scope, claims in scoped_claims.items():
+            for symbols in claims.values():
+                if symbols is not None:
+                    for symbol in symbols:
+                        symbol_scopes[symbol].add(scope)
+        overlapping_symbols = sorted(
+            symbol for symbol, scopes in symbol_scopes.items() if len(scopes) > 1
+        )
+        if not whole_file_scopes and not overlapping_symbols:
+            continue
+        violating_scopes = set(whole_file_scopes)
+        if whole_file_scopes:
+            violating_scopes.update(scoped_claims)
+        for symbol in overlapping_symbols:
+            violating_scopes.update(symbol_scopes[symbol])
+        ordered_task_ids = sorted({
+            task_id
+            for scope, claims in scoped_claims.items()
+            if scope in violating_scopes
+            for task_id in claims
+        })
+        ownership_kind = "whole_file" if whole_file_scopes else "member_anchor"
         violations.append({
             "reason": "shared_write_path_requires_single_owner",
             "workspaceRef": workspace_ref,
             "path": path,
             "detail": (
                 f"workspace={workspace_ref};path={path};"
-                f"taskIds={','.join(ordered_task_ids)}"
+                f"taskIds={','.join(ordered_task_ids)};ownership={ownership_kind}"
             ),
             "taskIds": ordered_task_ids,
-            "field": "touches",
+            "field": "writeTargets" if ownership_kind == "member_anchor" else "touches",
             "repairTarget": "task_group",
             "repairSuggestion": (
-                f"{workspace_ref}:{path} 被多个 Task 同时声明为写入目标。请创建或保留一个"
-                "前置 owner Task（共享 SQL/路由/全局配置建议 executionStage=global），"
-                "把该文件的全部改动与验证收敛到 owner；其他 Task 通过 deps 消费其产出，"
+                f"{workspace_ref}:{path} 被多个 Task 以 {ownership_kind} 方式声明。"
+                "如确为同一 Controller/Service 的不同方法，可为每个 Task 在 writeTargets 中声明"
+                "互不重叠的稳定 symbols；否则保留一个前置 owner Task，消费者通过 deps 消费其产出，"
                 "并从 touches、scope.paths、expectedFiles 和 implementationPoints 中移除该文件。"
             ),
         })

@@ -29,7 +29,6 @@ from evidence_store import (  # noqa: E402
 )
 from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
-    batch_compile_is_not_configured_for_frontend,
     blocked_tasks,
     defer_to_test_stages_enabled,
     failed_tasks,
@@ -212,7 +211,7 @@ def _check_completion(
     *,
     feature_dir: Path | None = None,
 ) -> list[str]:
-    """Validate Code completion evidence for the compile-only policy."""
+    """Validate Code completion evidence for deferred validation."""
     errors: list[str] = []
     by_id = {
         str(record.get("evidenceId")): record
@@ -329,7 +328,7 @@ def _check_batch_completion(
     *,
     feature_dir: Path | None = None,
 ) -> list[str]:
-    """Validate the batch compile closure used by Code done gate."""
+    """Validate the delivery closure used by the Code done gate."""
     errors: list[str] = []
     if not defer_to_test_stages_enabled(plan):
         return ["taskValidationPolicy_not_supported"]
@@ -340,51 +339,14 @@ def _check_batch_completion(
     for batch_id, batch in batch_plans.items():
         if not isinstance(batch, dict):
             continue
-        compile_result = batch.get("batchCompile")
-        if not isinstance(compile_result, dict):
-            errors.append(f"{batch_id}.batch_compile_contract_missing")
-            continue
-        compile_status = compile_result.get("status")
-        if compile_status == "skipped":
-            if not batch_compile_is_not_configured_for_frontend(batch):
-                errors.append(f"{batch_id}.batch_compile_skip_not_allowed")
-            continue
-        if compile_status not in {"passed", "failed"}:
-            errors.append(f"{batch_id}.batch_compile_not_recorded:{compile_status}")
-            continue
-        command_id = compile_result.get("commandId")
-        if not isinstance(command_id, str) or not command_id.strip():
-            errors.append(f"{batch_id}.batch_compile_commandId_missing_or_empty")
-            continue
-        compile_command = batch.get("compileCommand")
-        if not (
-            isinstance(compile_command, dict)
-            and compile_command.get("kind") == "compile"
-            and compile_command.get("required") is True
-            and compile_command.get("id") == command_id
-        ):
-            errors.append(f"{batch_id}.batch_compile_commandId_not_found_in_plan:{command_id}")
-            continue
-        expected_evidence = {
-            str(task.get("id")): task.get("latestImplementationEvidenceId")
-            for task in batch.get("tasks", [])
-            if isinstance(task, dict) and isinstance(task.get("id"), str)
-        }
-        if compile_result.get("implementationEvidenceByTask") != expected_evidence:
-            errors.append(f"{batch_id}.batch_compile_implementation_evidence_mismatch")
-        expected_revisions = {
-            str(task.get("id")): task.get("implementationRevision")
-            for task in batch.get("tasks", [])
-            if isinstance(task, dict) and isinstance(task.get("id"), str)
-        }
-        if compile_result.get("implementationRevisionByTask") != expected_revisions:
-            errors.append(f"{batch_id}.batch_compile_implementation_revision_mismatch")
+        if "compileCommand" in batch or "batchCompile" in batch:
+            errors.append(f"{batch_id}.batch_compile_retired")
 
     # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
-    # A compile result is insufficient here: only the merger records the
-    # delivery and transitions the task from implemented to done.  Requiring a
-    # succeeded runtime manifest prevents a manually edited plan from bypassing
-    # the merge and final verification barriers.
+    # Only the merger records the delivery and transitions the task from
+    # implemented to done. Requiring a succeeded runtime manifest prevents a
+    # manually edited plan from bypassing the merge and final verification
+    # barriers.
     if len(batch_plans) > 1:
         run_ids: set[str] = set()
         for batch_id, batch in batch_plans.items():

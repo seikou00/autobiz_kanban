@@ -79,6 +79,16 @@ fresh platform Workflow with the same launcher `scriptPath` and `args` (no
 `resumeFromRunId`). `scheduler ensure` then reuses the durable scheduler run
 and reads its current state instead of replaying a completed platform journal.
 
+Before making this call, configure the platform Workflow tool's session
+workspace root to `launcher.workflowWorkspaceRoot`. This is the same absolute
+directory as `launcher.artifactWorkspace`; it is not a business code
+workspace. `launcher.workflowScriptRelativePath` is an audit value proving
+that the fixed script is contained below that root. If the platform mounts a
+different workspace root, stop with `workflow_workspace_root_mismatch` and
+repair the session configuration. Do not copy, move, or symlink the script
+into the mounted workspace: that creates a second runtime owner and breaks
+Feature-scoped rollback and journal ownership.
+
 The Workflow host workspace is not a Worktree source contract. The plugin
 resolves every repository from the complete `codeWorkspaces` mapping and
 provisions its own native Worktree for each Batch. The artifact workspace
@@ -128,8 +138,8 @@ provisioned.
    `maxParallel` slot is free. A completed Batch immediately triggers a fresh
    selection, so no unrelated Batch completion barrier exists.
 2. The selected tasks run concurrently with `parallel()` up to `maxParallel`.
-   Every Batch independently runs code → Review → compile/seal
-   → UTest → quality gate → Merge Train promotion. A fast Batch may therefore
+   Every Batch independently runs code → Review → UTest/seal
+   → quality gate → Merge Train promotion. A fast Batch may therefore
    review, test, and merge while another Batch in the same frontier is still
    coding. Every Batch records its actual Worktree path and branch in the
    scheduler manifest. In conservative mode, same-repository write-set overlap
@@ -137,20 +147,17 @@ provisioned.
    handling. Each Merge Train candidate contains exactly one `--batch-id`; its
    `--wave` value is only a unique candidate-record sequence.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
-   invokes `worktree_manager.py seal --purpose review` to create an uncompiled
-   Review draft. It must not run `batch-compile` at this point. The draft is
+   invokes `worktree_manager.py seal --purpose review` to create a
+   Review draft. The draft is
    released as `sealed` for the following read-only Review.
 4. `parallelBatchPipeline.validationOwnership` assigns every test intent to
    its delivery Batch except `e2e_test`, which belongs to final B-E2E.  Root
    project commands also belong to B-E2E.  The delivery UTest agent generates
    and runs its own tests in the native Worktree; `parallel_stage_validation.py`
    executes only declared command owners and records their evidence.
-5. Each Review draft first performs production-code-only `review`. Only a
-   passed Review may run the first `batch-compile` and formally seal that
-   delivery. A Review source bug returns to that Batch's implement repair,
-   followed by forced `revalidate-batch-compile` and a new seal; either
-   `passed` or `failed` compile status is recorded as diagnostic evidence and
-   does not block UTest. The Review is then recorded as resolved. The resulting
+5. Each Review draft first performs production-code-only `review`. A Review
+   source bug returns to that Batch's implement repair and a new seal. The
+   Review is then recorded as resolved. The resulting
    delivery performs UTest in the same Worktree and re-seals the test assets.
    Any final UTest failure is
    retained with its runner Evidence as a non-blocking issue and proceeds to
@@ -201,14 +208,13 @@ Within its plugin-provisioned native Git Worktree, a Batch agent must:
   `task_runner.py` and `worktree_manager.py` command boundary instead of
   requiring a background daemon. Agents must not start a heartbeat through
   shell backgrounding, `run_in_background`, `&`, `nohup`, or `Start-Process`.
-  Before compile and before seal, run
+  Before seal, run
   `check --owner-token <token> --require-lease-guard`;
 - pass the plugin-provisioned Worktree as `--code-workspace`;
 - complete all assigned TASKs, draft-seal with `--purpose review`, and wait for
   the Workflow's Review stage;
-- run `batch-compile` only after that Review passes, then invoke
-  `worktree_manager.py seal` to commit the compiled worktree and persist its
-  path, branch, and commit SHA before releasing as `sealed`.
+- after Review, let the fixed Workflow proceed directly to UTest; it creates
+  and seals test assets before the Batch becomes ready to merge.
 
 The Batch agent must not merge, rebase, resolve conflicts, delete Worktrees, or
 modify a shared main checkout. It receives no platform isolation option.

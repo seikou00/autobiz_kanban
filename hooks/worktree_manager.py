@@ -389,7 +389,7 @@ def seal_parallel_batch(
     *,
     purpose: str = "implementation",
 ) -> dict[str, Any]:
-    """Commit a Batch worktree for Review or after its required compile."""
+    """Commit a Batch worktree for Review or after UTest changes."""
     if purpose not in {"review", "implementation"}:
         return {"success": False, "error": f"parallel_batch_seal_purpose_invalid:{purpose}"}
     try:
@@ -407,14 +407,8 @@ def seal_parallel_batch(
         except CommitMessageError as exc:
             return {"success": False, "error": str(exc)}
         review_draft = purpose == "review"
-        ready_for_review = (
-            batch.get("status") in {"running", "leased", "sealed"}
-            and batch.get("compileStatus") == "pending"
-        )
-        ready_for_delivery = (
-            batch.get("status") in {"sealed", "leased"}
-            and batch.get("compileStatus") in {"passed", "failed", "skipped"}
-        )
+        ready_for_review = batch.get("status") in {"running", "leased", "sealed"}
+        ready_for_delivery = batch.get("status") in {"sealed", "leased"}
         if not (ready_for_review if review_draft else ready_for_delivery):
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}
         raw_worktree = batch.get("worktreePath")

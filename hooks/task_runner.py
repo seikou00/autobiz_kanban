@@ -42,9 +42,6 @@ from hooks.plan_json import (  # noqa: E402
     task_contract_sha256,
     task_execution_lane,
     task_execution_mode,
-    task_set_digest,
-    batch_plan_path,
-    plan_json_path,
     task_workspace_roots,
 )
 from hooks.plan_writer import (  # noqa: E402
@@ -70,6 +67,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     resolve_repositories,
     snapshot_changes,
     unignored_runtime_artifact_paths,
+    working_tree_changed_files,
 )
 from hooks.task_run_integrity import (  # noqa: E402
     strict_task_run_integrity_error,
@@ -681,6 +679,16 @@ def _repository_changes(
     return changes, final
 
 
+def _repository_worktree_changes(repositories: RepositoryMap) -> list[str]:
+    """List current dirty paths using the same repository identifiers as runs."""
+    multiple = len(repositories) > 1
+    changed: list[str] = []
+    for repository_id, repo in repositories.items():
+        for path in working_tree_changed_files(repo):
+            changed.append(f"{repository_id}:{path}" if multiple else path)
+    return sorted(set(changed))
+
+
 def _requested_workspace_relative_path(
     state: dict[str, Any],
     repository_id: str,
@@ -708,6 +716,61 @@ def _is_transient_validation_path(path: str) -> bool:
     if parts and parts[0] in {"test", "tests"}:
         return True
     return any(parts[index : index + 2] == ("src", "test") for index in range(len(parts) - 1))
+
+
+_CODE_STAGE_TEST_CONFIG_FILENAMES = frozenset({
+    "pytest.ini",
+    "tox.ini",
+    ".coveragerc",
+    "phpunit.xml",
+    "testng.xml",
+})
+_CODE_STAGE_TEST_CONFIG_PREFIXES = (
+    "jest.config.",
+    "vitest.config.",
+    "playwright.config.",
+    "cypress.config.",
+    "ava.config.",
+    "karma.conf.",
+    "codecept.conf.",
+    ".mocharc",
+)
+_CODE_STAGE_TEST_ASSET_DIRECTORIES = frozenset({
+    "__tests__",
+    "__mocks__",
+    "__fixtures__",
+    "test-fixtures",
+    "test-fixture",
+})
+
+
+def _is_code_stage_test_asset_path(path: str) -> bool:
+    """Return whether a changed path belongs exclusively to the UTest stage.
+
+    The Code and implementation-rework stages may read existing tests as a
+    contract, but they must not add or alter test sources, fixtures/mocks, or
+    test-runner configuration.  Keep this list deliberately path-based: it is
+    evaluated from Git changes at ``finish-implementation`` and therefore
+    cannot depend on a particular language or build tool being present.
+    """
+    normalized = path.replace("\\", "/").lstrip("./")
+    parts = PurePosixPath(normalized).parts
+    lowered_parts = tuple(part.casefold() for part in parts)
+    if _is_transient_validation_path("/".join(lowered_parts)):
+        return True
+    if any(part in _CODE_STAGE_TEST_ASSET_DIRECTORIES for part in lowered_parts):
+        return True
+    # Root-level fixture and mock trees conventionally exist solely to support
+    # tests.  Do not classify arbitrary production directories named "mock".
+    if lowered_parts and lowered_parts[0] in {"fixtures", "fixture", "mocks"}:
+        return True
+    if len(lowered_parts) != 1:
+        return False
+    filename = lowered_parts[0]
+    return (
+        filename in _CODE_STAGE_TEST_CONFIG_FILENAMES
+        or filename.startswith(_CODE_STAGE_TEST_CONFIG_PREFIXES)
+    )
 
 
 def _partition_transient_validation_changes(
@@ -801,31 +864,11 @@ def _start_task_unlocked(
         isinstance(repair_context, dict)
         and repair_context.get("taskRepair") is True
     )
-
     if defer_to_test_stages_enabled(plan.root):
-        batch = plan.batches.get(batch_id)
-        batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
-        compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
-        is_compile_repair = (
-            isinstance(repair_context, dict)
-            and repair_context.get("batchCompileRepair") is True
-        )
-        if compile_status == "failed" and not is_compile_repair:
-            raise TaskRunnerError(
-                f"batch_compile_repair_requires_explicit_start:{task_id}",
-                requiredAction="start_batch_compile_repair",
-                repairOwnerTaskIds=batch_compile.get("repairOwnerTaskIds", []),
-            )
-        if compile_status == "repairing" and not is_compile_repair:
-            raise TaskRunnerError(
-                f"batch_compile_repair_already_running:{batch_id}",
-                requiredAction="continue_batch_compile_repair",
-                repairTaskId=batch_compile.get("repairTaskId"),
-            )
-        if normalize_status(task.get("status")) == "implemented" and not is_compile_repair and not is_task_repair:
+        if normalize_status(task.get("status")) == "implemented" and not is_task_repair:
             raise TaskRunnerError(
                 f"task_implementation_already_ready:{task_id}",
-                requiredAction="await_review" if parallel_run_id is not None else "run_batch_compile",
+                requiredAction="await_review",
             )
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
@@ -872,6 +915,39 @@ def _start_task_unlocked(
         )
     execution_mode = task_execution_mode(task)
     declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
+    # A Batch worktree legitimately remains dirty after an earlier Task has
+    # finished: those files are already bound to that Task's evidence. Any
+    # other dirty business file predates this Task's start snapshot. Starting
+    # now would make the change invisible at finish time and can wrongly bind
+    # it to a sibling Task, so fail before writing a run or mutating the Plan.
+    # A forced abort may retain only the current Task's durable diff; it is
+    # never a blanket exemption for later unrelated edits.
+    dirty_paths = _repository_worktree_changes(repositories)
+    in_workspace_dirty_paths = [
+        path for path in dirty_paths
+        if _paths_within_workspace_contexts([path], scope_workspaces)
+    ]
+    claimed_paths = _claimed_batch_change_paths(
+        feature_dir,
+        plan,
+        batch_id,
+        excluding_task_id=task_id,
+    )
+    claimed_paths.update(_changed_files(_historical_task_file_changes(
+        feature_dir,
+        task_id,
+        "",
+    )))
+    unattributed_paths = sorted(set(in_workspace_dirty_paths) - claimed_paths)
+    if unattributed_paths:
+        raise TaskRunnerError(
+            "prestart_unattributed_changes_detected:" + ",".join(unattributed_paths),
+            requiredAction="recover_prestart_changes_in_clean_worktree",
+            taskId=task_id,
+            batchId=batch_id,
+            unattributedFiles=unattributed_paths,
+            claimedFiles=sorted(claimed_paths),
+        )
     repository_state = _repository_state(repositories)
 
     run_id = _new_run_id()
@@ -1732,7 +1808,7 @@ def _implementation_record(
         "action": "implementation",
         "runId": run_id,
         "completionMode": completion_mode,
-        "summary": f"{task.get('id')} implementation ready for batch compile",
+        "summary": f"{task.get('id')} implementation ready for review",
         "implementation": {
             "noCodeChange": no_code_change,
             "whatChanged": [] if no_code_change else changed_files,
@@ -1773,8 +1849,8 @@ def _finish_implementation_unlocked(
     execution_mode = task_execution_mode(task)
     if not defer_to_test_stages_enabled(plan.root):
         raise TaskRunnerError(
-            f"finish_implementation_requires_compile_only_plan:{task_id}",
-            requiredAction="rebuild_plan_with_defer_to_test_stages",
+            f"finish_implementation_requires_deferred_validation_plan:{task_id}",
+            requiredAction="rebuild_plan_with_deferred_validation",
         )
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("parallelRunId") != parallel_run_id:
@@ -1851,7 +1927,7 @@ def _finish_implementation_unlocked(
         for change in repair_file_changes
         for path in (change.get("path"), change.get("fromPath"))
         if isinstance(path, str)
-        and _is_transient_validation_path(path.split(":", 1)[-1])
+        and _is_code_stage_test_asset_path(path.split(":", 1)[-1])
     })
     if test_asset_changes:
         raise TaskRunnerError(
@@ -2064,10 +2140,8 @@ def _finish_implementation_unlocked(
         "evidenceIds": [evidence_id],
         "implementationEvidenceId": evidence_id,
     })
-    if isinstance(result.data, dict):
-        for field in ("batchContinuation", "batchCompile"):
-            if isinstance(result.data.get(field), dict):
-                state[field] = result.data[field]
+    if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
+        state["batchContinuation"] = result.data["batchContinuation"]
     _save_run(path, state)
     return True, state
 
@@ -2441,6 +2515,41 @@ def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) 
     return _paths_within_workspace_contexts(paths, state.get("scopeWorkspaces"))
 
 
+def _implemented_task_ids(plan: PlanBundle, batch_id: str) -> set[str]:
+    batch = plan.batches.get(batch_id)
+    tasks = batch.get("tasks") if isinstance(batch, dict) else []
+    return {
+        str(item.get("id"))
+        for item in tasks
+        if isinstance(item, dict)
+        and normalize_status(item.get("status")) in {"implemented", "done"}
+        and isinstance(item.get("id"), str)
+    }
+
+
+def _claimed_batch_change_paths(
+    feature_dir: Path,
+    plan: PlanBundle,
+    batch_id: str,
+    *,
+    excluding_task_id: str,
+) -> set[str]:
+    """Paths already bound to completed sibling-task implementation evidence."""
+    completed_task_ids = _implemented_task_ids(plan, batch_id) - {excluding_task_id}
+    claimed: set[str] = set()
+    for record in read_records(stream_path(feature_dir)):
+        if (
+            record.get("action") != "implementation"
+            or record.get("completionMode") != "implemented"
+            or record.get("taskId") not in completed_task_ids
+        ):
+            continue
+        changed = record.get("changedFiles")
+        if isinstance(changed, list):
+            claimed.update(item for item in changed if isinstance(item, str))
+    return claimed
+
+
 def _prior_aborted_run_conflict(
     feature_dir: Path,
     task: dict[str, Any],
@@ -2583,31 +2692,6 @@ def _resume_task_unlocked(
         raise TaskRunnerError(f"task_run_cannot_resume:{state.get('status')}")
     if state.get("evidenceIds"):
         raise TaskRunnerError("task_run_cannot_resume_with_evidence")
-    root_path = plan_json_path(feature_dir)
-    try:
-        root_data = json.loads(root_path.read_text(encoding="utf-8"))
-        batch_plans = {
-            str(entry["id"]): json.loads(batch_plan_path(feature_dir, str(entry["id"])).read_text(encoding="utf-8"))
-            for entry in root_data.get("batches", [])
-            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-        }
-        declared_digest = root_data.get("taskSetDigest")
-        current_digest = task_set_digest(root_data, batch_plans)
-        if isinstance(declared_digest, str) and declared_digest != current_digest:
-            legacy_root = json.loads(json.dumps(root_data))
-            entries = legacy_root.get("batches", [])
-            for index, entry in enumerate(entries):
-                if index > 0 and isinstance(entry, dict):
-                    deps = entry.get("deps") if isinstance(entry.get("deps"), list) else []
-                    previous = str(entries[index - 1].get("id"))
-                    if previous not in deps:
-                        entry["deps"] = sorted([*deps, previous])
-            if declared_digest != task_set_digest(legacy_root, batch_plans):
-                raise TaskRunnerError("task_set_digest_mismatch")
-    except TaskRunnerError:
-        raise
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise TaskRunnerError(f"task_set_digest_mismatch:{exc}") from exc
     if state.get("taskContractSha256") != task_contract_sha256(task):
         raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
     if state.get("batchId") is not None and state.get("batchId") != batch_id:
@@ -2826,8 +2910,7 @@ def start_batch_compile_repair(
                 expectedBatchId=batch_id,
                 actualBatchId=actual_batch_id,
             )
-        if not defer_to_test_stages_enabled(bundle.root):
-            raise TaskRunnerError(f"defer_to_test_stages_not_enabled:{batch_id}")
+        raise TaskRunnerError(f"batch_compile_retired:{batch_id}")
         batch = bundle.batches.get(batch_id)
         batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
         if not isinstance(batch_compile, dict) or batch_compile.get("status") != "failed":
@@ -2913,7 +2996,7 @@ def start_batch_compile_repair(
                 for change in adopted_file_changes
                 for path in (change.get("path"), change.get("fromPath"))
                 if isinstance(path, str)
-                and _is_transient_validation_path(path.split(":", 1)[-1])
+                and _is_code_stage_test_asset_path(path.split(":", 1)[-1])
             })
             if test_asset_changes:
                 raise TaskRunnerError(
@@ -3072,8 +3155,7 @@ def _run_batch_compile(
     """
     feature_dir = _feature_dir(workspace, feature)
     plan_bundle = load_plan_bundle(feature_dir)
-    if not defer_to_test_stages_enabled(plan_bundle.root):
-        raise TaskRunnerError(f"defer_to_test_stages_not_enabled:{batch_id}")
+    raise TaskRunnerError(f"batch_compile_retired:{batch_id}")
     batch = plan_bundle.batches.get(batch_id)
     if not isinstance(batch, dict):
         raise TaskRunnerError(f"batch_not_found:{batch_id}")
@@ -3347,6 +3429,7 @@ def run_batch_compile(
         bundle = load_plan_bundle(_feature_dir(workspace, feature))
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    raise TaskRunnerError(f"batch_compile_retired:{batch_id}")
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     _assert_parallel_compile_after_review(workspace, feature, parallel_run_id, batch_id)
@@ -3385,6 +3468,7 @@ def skip_batch_compile(
         bundle = load_plan_bundle(_feature_dir(workspace, feature))
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    raise TaskRunnerError(f"batch_compile_retired:{batch_id}")
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     batch = bundle.batches.get(batch_id)
@@ -3448,6 +3532,7 @@ def record_interrupted_batch_compile(
         bundle = load_plan_bundle(_feature_dir(workspace, feature))
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    raise TaskRunnerError(f"batch_compile_retired:{batch_id}")
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     _assert_parallel_compile_after_review(workspace, feature, parallel_run_id, batch_id)
@@ -3540,6 +3625,7 @@ def revalidate_batch_compile(
         bundle = load_plan_bundle(_feature_dir(workspace, feature))
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    raise TaskRunnerError(f"batch_compile_retired:{batch_id}")
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     # 强制重新运行编译，并通过 plan_writer 重置已通过的编译门禁。

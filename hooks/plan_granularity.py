@@ -208,24 +208,19 @@ def _task_ui_refs(task: dict[str, Any], field: str) -> list[str]:
 
 
 def _mentioned_related_scenario_refs(rationale: str, related_ids: set[str]) -> set[str]:
+    """Return only path-qualified scenario refs explicitly named in a rationale.
+
+    A bare ``SCN-001`` is ambiguous as soon as a Feature has more than one
+    spec file.  The Plan Core contract already requires the full spec path, so
+    do not silently accept the short form just because it happens to be unique
+    in a particular Feature today.
+    """
+
     mentioned: set[str] = set()
     normalized_rationale = rationale.replace("\\", "/")
-    by_scn_id: dict[str, set[str]] = {}
     for related_id in related_ids:
-        scenario_ids = SCN_ID.findall(related_id)
-        if not scenario_ids:
-            continue
-        by_scn_id.setdefault(scenario_ids[-1], set()).add(related_id)
         if "#" in related_id and related_id in normalized_rationale:
             mentioned.add(related_id)
-
-    mentioned_scn_ids = {match.group(0) for match in SCN_ID.finditer(rationale)}
-    for scn_id in mentioned_scn_ids:
-        candidates = by_scn_id.get(scn_id, set())
-        if len(candidates) == 1:
-            mentioned.update(candidates)
-        elif not candidates and scn_id in related_ids:
-            mentioned.add(scn_id)
     return mentioned
 
 

@@ -406,72 +406,40 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(missing, [], "Biz skill docs must show the unified biz_validate.py command path")
 
 
-    def test_plan_template_has_one_task_input_example(self) -> None:
+    def test_plan_templates_expose_only_current_model_inputs(self) -> None:
         template_dir = ROOT / "skills/autodev/autodev-plan/templates"
-        template = json.loads((template_dir / "task-input.json").read_text(encoding="utf-8"))
+        legacy = json.loads((template_dir / "task-input.json").read_text(encoding="utf-8"))
         self.assertFalse((template_dir / "plan.json").exists())
         self.assertFalse((template_dir / "batch-plan.json").exists())
-        for field in (
-            "id",
-            "title",
-            "goal",
-            "deps",
-            "uiRequired",
-            "workspaceRef",
-            "scope",
-            "implementationPoints",
-            "acceptanceCriteria",
-            "validationBoundary",
-            "nonGoals",
-            "specRefs",
-            "designRefs",
-            "apiIds",
-            "dataIds",
-            "decisionIds",
-            "validationCommands",
-            "expectedFiles",
-            "blockers",
-        ):
-            self.assertIn(field, template)
-        for writer_owned_field in (
-            "status",
-            "evidenceIds",
-            "completionEvidenceIds",
-            "latestPassEvidenceId",
-            "completionPolicy",
-        ):
-            self.assertNotIn(writer_owned_field, template)
-        self.assertFalse(template["uiRequired"])
-        self.assertNotIn("uiRefs", template)
-        self.assertTrue(template["nonGoals"])
-        self.assertIsInstance(template["validationBoundary"], str)
-        self.assertGreaterEqual(len(template["validationBoundary"].strip()), 10)
-        self.assertEqual(template["apiIds"], [])
-        self.assertEqual(template["dataIds"], [])
-        self.assertEqual(template["mergedScenarioRefs"], [])
+        self.assertEqual(legacy["deprecated"], True)
+        self.assertNotIn("mergedScenarioRefs", legacy)
+        self.assertNotIn("splitRationale", legacy)
         detail = json.loads((template_dir / "task-detail-input.json").read_text(encoding="utf-8"))
         self.assertNotIn("id", detail)
         self.assertNotIn("specRefs", detail)
-        self.assertNotIn("pages", detail["scope"])
-        self.assertNotIn("workspaceRoots", detail["scope"])
+        self.assertEqual(detail["schemaVersion"], "autodev.plan-detail.v1")
+        self.assertNotIn("pages", detail["context"])
+        self.assertNotIn("workspaceRoots", detail["context"])
         self.assertTrue(detail["nonGoals"])
-        self.assertNotIn("id", detail["acceptanceCriteria"][0])
-        self.assertNotIn("id", detail["validationCommands"][0])
+        self.assertNotIn("id", detail["acceptance"][0])
+        self.assertNotIn("id", detail["checks"][0])
+        self.assertNotIn("covers", detail["checks"][0])
         grouping = json.loads((template_dir / "task-groups.json").read_text(encoding="utf-8"))
         self.assertIn("featureId", grouping)
-        self.assertEqual(len(grouping["groups"]), 1)
-        self.assertIn("validationBoundary", grouping["groups"][0])
-        self.assertIn("workspaceRef", grouping["groups"][0])
-        group_ui_example = grouping["uiRequiredExample"]
-        self.assertTrue(group_ui_example["uiRequired"])
+        self.assertEqual(grouping["schemaVersion"], "autodev.plan-core.v1")
+        self.assertEqual(len(grouping["tasks"]), 1)
+        self.assertIn("validation", grouping["tasks"][0])
+        self.assertNotIn("mergeJustification", grouping["tasks"][0]["validation"])
+        self.assertIn("workspace", grouping["tasks"][0])
+        matrix_example = grouping["examples"]["matrixExceptionTask"]
+        self.assertIn("mergeJustification", matrix_example["validation"])
+        self.assertNotIn("mergedScenarioRefs", matrix_example)
+        self.assertNotIn("splitRationale", matrix_example)
+        group_ui_example = {"ui": {"pages": ["PAGE-001"], "interactions": [], "visualSources": [], "route": "absolute-html"}}
         self.assertEqual(
-            list(group_ui_example["uiRefs"]),
-            ["pageRefs", "interactionRefs", "visualSourceRefs", "frontendRoute"],
+            list(group_ui_example["ui"]),
+            ["pages", "interactions", "visualSources", "route"],
         )
-        group_exception = grouping["matrixExceptionExample"]
-        self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
-        self.assertIn("splitRationale", group_exception)
-        self.assertIn("validationBoundary", group_exception)
 
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = _plan_skill_docs()
@@ -482,9 +450,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "add-task-contract",
             ".tmp/plan_writer/draft/plan.json",
             ".tmp/plan_writer/task-groups.json",
+            "write-task-groups",
             "preflight-task-groups",
             "prepare-task-draft",
             "set-draft-task-detail",
+            "lint-draft-task-details --full",
+            "set-draft-task-details --full",
             "preflight-task-draft",
             "finalize-task-draft",
             "rebuild-task-draft",
@@ -583,12 +554,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "候选任务分组表",
             "不要一边补 task detail 一边重新拆分",
             "连续 `T001`、`T002`、`T003`",
-            "完整 specRefs 清单",
+            "refs.requirements",
             "不同 spec 文件里的同号 `SCN-001` 是不同场景",
             "拆分结论",
             "需拆分",
-            "可合并(附 splitRationale)",
-            "splitRationale 草稿",
+            "可合并（附 `validation.mergeJustification`）",
+            "mergeJustification 草稿",
             "SCN `<=5`",
             "SCN `12`",
             "mergedScenarioRefs",
@@ -619,9 +590,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "唯一的 Code 启动入口",
             "不得调用 `task_runner.py code-session`",
             "固定 Workflow",
-            "skip-batch-compile",
-            "workflow_batch_compile_disabled",
-            "绝不执行 Maven、Gradle、npm build/typecheck、`batch-compile` 或 `revalidate-batch-compile`",
+            "batch-compile",
             "原生 Git Worktree",
             "Task Run 的 Git 快照",
             "batchExecutionPlan",
@@ -690,8 +659,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         required = [
             "batchExecutionPlan",
             "逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集",
-            "按 `waves` 展示",
-            "实际后续 Wave 只会在上游合并成功后释放",
+            "`waves` 仅是 Plan 的兼容预览/审计分组",
+            "不是整波屏障",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
