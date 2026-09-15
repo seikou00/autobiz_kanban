@@ -194,7 +194,13 @@ def test_fixed_workflow_entrypoint():
     if "--with-heartbeat" in content or "--require-heartbeat" in content:
         print("✗ 固定脚本仍依赖旧的后台 heartbeat 参数")
         return False
-    if "await agent(" in content:
+    wrapper_start = content.find("async function workflowAgent(")
+    wrapper_end = content.find("const aggregatePath", wrapper_start)
+    direct_agent_call = content.find("await agent(")
+    if (
+        direct_agent_call >= 0
+        and not (wrapper_start >= 0 and wrapper_end > wrapper_start and wrapper_start <= direct_agent_call < wrapper_end)
+    ):
         print("✗ 固定 Workflow 存在绕过自治边界的直接子 Agent 调用")
         return False
     if "compileAlreadyPassed" in content:
@@ -495,6 +501,7 @@ let scheduled = ["B001"];
 const executed = [];
 let refreshes = 0;
 context.runnableScheduledBatchIds = () => scheduled;
+context.runnableSchedulerFallbackBatchIds = () => [];
 context.runnableStageRecoveries = () => [];
 context.runnableMergeableBatchIds = () => [];
 context.runInitialBatchLifecycle = async batchId => ({
@@ -532,9 +539,72 @@ if (refreshes !== 2) process.exit(4);
     return True
 
 
+def test_workflow_empty_response_recovery():
+    """空模型响应应重试，并只用已验证波次降级继续。"""
+    print("测试 8: 空响应恢复")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {
+  MAX_EMPTY_AGENT_RESPONSE_RETRIES: 2,
+  usableString: value => typeof value === "string" && value.trim().length > 0,
+};
+let calls = 0;
+const labels = [];
+context.agent = async (_prompt, options) => {
+  calls += 1;
+  labels.push(options.label);
+  if (calls < 3) throw new Error("Received empty response from chat model call");
+  return '{"ok":true}';
+};
+vm.createContext(context);
+const agentStart = source.indexOf("const WORKFLOW_AUTONOMY_PREFIX");
+const agentEnd = source.indexOf("const aggregatePath", agentStart);
+const fallbackStart = source.indexOf("function nextSchedulerFallbackWave(");
+const fallbackEnd = source.indexOf("function cacheSchedulerFallbackGroups(", fallbackStart);
+if (agentStart < 0 || agentEnd < 0 || fallbackStart < 0 || fallbackEnd < 0) process.exit(2);
+vm.runInContext(source.slice(agentStart, agentEnd), context);
+context.normalizeScheduledGroups = groups => Array.isArray(groups)
+  ? groups.map(group => Array.isArray(group) ? group.filter(value => typeof value === "string" && value) : []).filter(group => group.length)
+  : [];
+context.isValidBatchId = value => typeof value === "string" && value.length > 0;
+vm.runInContext(source.slice(fallbackStart, fallbackEnd), context);
+(async () => {
+  const result = await context.workflowAgent("return json", { label: "empty-test" });
+  if (result !== '{"ok":true}') process.exit(3);
+  if (calls !== 3) process.exit(4);
+  if (labels.join(",") !== "empty-test,empty-test-empty-retry-1,empty-test-empty-retry-2") process.exit(5);
+  const consumed = new Set(["B001"]);
+  const quarantined = new Set();
+  const groups = [["B001"], ["B007"], ["B015"]];
+  const first = context.nextSchedulerFallbackWave(groups, consumed, quarantined);
+  if (first.join(",") !== "B007") process.exit(6);
+  consumed.add("B007");
+  const second = context.nextSchedulerFallbackWave(groups, consumed, quarantined);
+  if (second.join(",") !== "B015") process.exit(7);
+  const bounded = context.boundedSchedulerFallbackGroups([["B001", "B007", "B015"]], 1);
+  if (JSON.stringify(bounded) !== JSON.stringify([["B001"], ["B007"], ["B015"]])) process.exit(8);
+  const parallel = context.boundedSchedulerFallbackGroups([["B001", "B007", "B015"]], 2);
+  if (JSON.stringify(parallel) !== JSON.stringify([["B001", "B007"], ["B015"]])) process.exit(9);
+})().catch(() => process.exit(10));
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ 空响应恢复错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ 空模型响应会在同一子任务内受控重试")
+    print("✓ 调度快照空响应时只按上一个安全波次继续 B007/B015")
+    print()
+    return True
+
+
 def test_skill_integration():
     """测试技能集成。"""
-    print("测试 8: 技能集成")
+    print("测试 9: 技能集成")
     print("-" * 60)
 
     skill_file = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
@@ -607,6 +677,7 @@ def main():
         ("Structured Output Normalization", test_workflow_structured_output_normalization),
         ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
+        ("Empty Response Recovery", test_workflow_empty_response_recovery),
         ("Skill Integration", test_skill_integration),
     ]
 

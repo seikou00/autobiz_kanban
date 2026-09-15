@@ -12,6 +12,12 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 4;
 const MAX_SCHEDULER_CYCLES = 100;
+// A transport-level empty model response happens before the child can return
+// its command result.  It is neither a Batch verdict nor evidence that the
+// command failed, so give that same child a small, bounded retry budget.
+// Retrying other errors would be unsafe because they may describe a genuine
+// command failure after a state-changing operation.
+const MAX_EMPTY_AGENT_RESPONSE_RETRIES = 2;
 // The scheduler is the authority for the per-Batch retry budget (currently
 // two failure admissions).  Keep one extra pass to let the scheduler turn a
 // legacy retry marker with a zero counter into its explicit exhausted state.
@@ -432,8 +438,41 @@ const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 // boundary so adding a later phase cannot accidentally reintroduce a user
 // confirmation prompt.
 const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。\n";
-function workflowAgent(instruction, options) {
-  return agent(WORKFLOW_AUTONOMY_PREFIX + instruction, options);
+function emptyAgentResponse(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim().length === 0;
+  return Boolean(
+    value
+    && typeof value === "object"
+    && typeof value.value === "string"
+    && value.value.trim().length === 0
+  );
+}
+
+function emptyAgentResponseFailure(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /(?:received\s+)?empty\s+response\s+from\s+(?:chat\s+)?model(?:\s+call)?|workflow_agent_empty_response/i.test(message);
+}
+
+async function workflowAgent(instruction, options = {}) {
+  const label = usableString(options.label) ? options.label : "workflow-agent";
+  let lastEmptyResponse;
+  for (let attempt = 0; attempt <= MAX_EMPTY_AGENT_RESPONSE_RETRIES; attempt += 1) {
+    const retryOptions = attempt === 0
+      ? options
+      : { ...options, label: `${label}-empty-retry-${attempt}` };
+    try {
+      const response = await agent(WORKFLOW_AUTONOMY_PREFIX + instruction, retryOptions);
+      if (!emptyAgentResponse(response)) return response;
+      lastEmptyResponse = new Error(`workflow_agent_empty_response:${label}:attempt=${attempt + 1}`);
+    } catch (error) {
+      if (!emptyAgentResponseFailure(error)) throw error;
+      lastEmptyResponse = error;
+    }
+  }
+  throw new Error(
+    `workflow_agent_empty_response_exhausted:${label}:${errorText(lastEmptyResponse)}`
+  );
 }
 const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py");
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
@@ -568,6 +607,13 @@ let schedulerCycles = 0;
 let mergeSequence = 0;
 let blockedBatches = (prepared.blockedBatches || []).filter(usableString);
 let lastScheduler = prepared;
+// Keep only the scheduler's last proven-safe pending waves.  This is used
+// solely when a later *read-only* scheduler child exhausts empty-response
+// retries.  It lets unrelated work continue without inventing a new DAG or
+// bypassing the scheduler's conservative write-set grouping.
+let schedulerSnapshotDegraded = false;
+let schedulerFallbackGroups = [];
+const schedulerFallbackConsumed = new Set();
 
 function errorText(value) {
   if (value instanceof Error) return value.message || String(value);
@@ -688,6 +734,8 @@ if (initialRetryRecoveryFailure) {
 }
 
 function markSchedulerRecovered() {
+  schedulerSnapshotDegraded = false;
+  schedulerFallbackConsumed.clear();
   for (const record of unresolvedRecords) {
     if (record && record.kind === "scheduler" && record.resolved !== true) {
       record.resolved = true;
@@ -696,9 +744,71 @@ function markSchedulerRecovered() {
   }
 }
 
+function nextSchedulerFallbackWave(groups, consumed, quarantined) {
+  for (const group of normalizeScheduledGroups(groups)) {
+    const remaining = group.filter(batchId => (
+      isValidBatchId(batchId)
+      && !consumed.has(batchId)
+      && !quarantined.has(batchId)
+    ));
+    if (remaining.length) return remaining;
+  }
+  return [];
+}
+
+function boundedSchedulerFallbackGroups(groups, capacity) {
+  const width = Number.isInteger(capacity) && capacity > 0 ? capacity : 1;
+  return normalizeScheduledGroups(groups).flatMap(group => {
+    const waves = [];
+    for (let index = 0; index < group.length; index += width) {
+      waves.push(group.slice(index, index + width));
+    }
+    return waves;
+  });
+}
+
+function cacheSchedulerFallbackGroups(scheduler) {
+  const ready = new Set([
+    ...(Array.isArray(scheduler && scheduler.readyBatches) ? scheduler.readyBatches : []),
+    ...(Array.isArray(scheduler && scheduler.allReadyBatches) ? scheduler.allReadyBatches : []),
+  ].filter(isValidBatchId));
+  const rawGroups = Array.isArray(scheduler && scheduler.parallelGroups)
+    ? scheduler.parallelGroups
+    : scheduler && scheduler.allParallelGroups;
+  const groups = normalizeScheduledGroups(rawGroups)
+    .map(group => group.filter(batchId => ready.has(batchId)))
+    .filter(group => group.length);
+  if (!groups.length) return;
+  // `parallelGroups` expresses conflict-safe compatibility, while the actual
+  // dispatch also observes maxParallel. Preserve both constraints before this
+  // snapshot can be used as a degraded-mode queue.
+  const capacity = Number.isInteger(scheduler && scheduler.maxParallel) && scheduler.maxParallel > 0
+    ? scheduler.maxParallel
+    : maxParallel;
+  schedulerFallbackGroups = boundedSchedulerFallbackGroups(groups, capacity);
+  schedulerFallbackConsumed.clear();
+}
+
+function schedulerSnapshotFallback(label, error) {
+  schedulerSnapshotDegraded = true;
+  return {
+    ...(lastScheduler && typeof lastScheduler === "object" ? lastScheduler : {}),
+    // `scheduledGroups` is a point-in-time dispatch grant. Replaying it after
+    // a read failure could re-run a just-finished Batch, so expose only the
+    // cached safe waves through `runnableSchedulerFallbackBatchIds` below.
+    scheduledGroups: [],
+    schedulerSnapshotFallback: true,
+    schedulerSnapshotFailure: {
+      label,
+      error: errorText(error),
+    },
+  };
+}
+
 function applySchedulerState(scheduler) {
   if (!scheduler || typeof scheduler !== "object") return;
   lastScheduler = scheduler;
+  cacheSchedulerFallbackGroups(scheduler);
   scheduledGroups = normalizeScheduledGroups(scheduler.scheduledGroups || []);
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
@@ -729,6 +839,11 @@ async function readSchedulerState(label, phaseName = "准备") {
     return state;
   } catch (error) {
     recordSchedulerFailure(label, error);
+    // A blank model completion did not produce a scheduler verdict.  Continue
+    // only from a previously returned scheduler grouping; malformed or real
+    // command failures remain a stop condition so the workflow cannot guess
+    // about leases, dependencies, or conflicts.
+    if (emptyAgentResponseFailure(error)) return schedulerSnapshotFallback(label, error);
     return null;
   }
 }
@@ -1482,21 +1597,41 @@ async function runLifecycleSafely(batchId, source, execute, fallback = {}) {
 function runnableScheduledBatchIds() {
   return normalizeScheduledGroups(scheduledGroups)
     .flat()
-    .filter(batchId => !quarantinedBatchIds.has(batchId));
+    .filter(batchId => (
+      !quarantinedBatchIds.has(batchId)
+      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(batchId))
+    ));
+}
+
+function runnableSchedulerFallbackBatchIds() {
+  if (!schedulerSnapshotDegraded) return [];
+  return nextSchedulerFallbackWave(
+    schedulerFallbackGroups,
+    schedulerFallbackConsumed,
+    quarantinedBatchIds,
+  );
 }
 
 function runnableStageRecoveries() {
   return stageRecoveryBatches
-    .filter(recovery => recovery && !quarantinedBatchIds.has(recovery.batchId));
+    .filter(recovery => (
+      recovery
+      && !quarantinedBatchIds.has(recovery.batchId)
+      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(recovery.batchId))
+    ));
 }
 
 function runnableMergeableBatchIds() {
-  return mergeableBatches.filter(batchId => !quarantinedBatchIds.has(batchId));
+  return mergeableBatches.filter(batchId => (
+    !quarantinedBatchIds.has(batchId)
+    && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(batchId))
+  ));
 }
 
 function takeNextRunnableLifecycle(claimedBatchIds) {
   const claimed = claimedBatchIds || new Set();
   const scheduledBatchIds = runnableScheduledBatchIds();
+  const fallbackBatchIds = runnableSchedulerFallbackBatchIds();
   const recoveries = runnableStageRecoveries();
   const mergeable = runnableMergeableBatchIds();
   const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
@@ -1511,6 +1646,14 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
     const job = claim({
       batchId,
       source: "initial",
+      execute: () => runInitialBatchLifecycle(batchId),
+    });
+    if (job) return job;
+  }
+  for (const batchId of fallbackBatchIds) {
+    const job = claim({
+      batchId,
+      source: "scheduler_snapshot_fallback",
       execute: () => runInitialBatchLifecycle(batchId),
     });
     if (job) return job;
@@ -1565,6 +1708,11 @@ async function runLifecycleChain(initialJob, claimedBatchIds, drainLabel) {
       "Batch 阶段"
     );
     if (!state) return result;
+    if (state.schedulerSnapshotFallback === true) {
+      // This Batch has completed a lifecycle attempt. Do not replay it from a
+      // stale scheduler grant while walking the cached, conservative waves.
+      schedulerFallbackConsumed.add(job.batchId);
+    }
     job = takeNextRunnableLifecycle(claimedBatchIds);
   }
   return result;

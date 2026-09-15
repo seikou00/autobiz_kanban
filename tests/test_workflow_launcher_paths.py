@@ -272,6 +272,61 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["workflowArgs"]["resumeRunId"], "cw-resume-001")
         self.assertEqual(result["batches"][0]["id"], "B001")
 
+    def test_launcher_keeps_every_manifest_retry_batch_in_manual_recovery(self) -> None:
+        """Manual recovery must not narrow B001/B007/B015 to its first dispatch slot."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_path = root / "plugin"
+            artifact_workspace = root / "artifacts"
+            code_workspace = root / "business-code"
+            feature_dir = artifact_workspace / ".autobizdevops" / "features" / "resume-all"
+            (plugin_path / "workflows").mkdir(parents=True)
+            (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text(
+                "export const meta = {};", encoding="utf-8"
+            )
+            code_workspace.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
+            feature_dir.mkdir(parents=True)
+            (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
+            (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
+            batch_ids = ["B001", "B007", "B015"]
+            bundle = PlanBundle(
+                root={
+                    "codeWorkspaces": {"api": str(code_workspace)},
+                    # The Plan may already project these deliveries as done or
+                    # failed. The manifest remains the recovery authority.
+                    "batches": [
+                        {"id": "B001", "status": "failed", "workspaceRef": "api", "deps": []},
+                        {"id": "B007", "status": "done", "workspaceRef": "api", "deps": []},
+                        {"id": "B015", "status": "failed", "workspaceRef": "api", "deps": []},
+                    ],
+                },
+                batches={batch_id: {"tasks": [{"workspaceRef": "api"}]} for batch_id in batch_ids},
+                tasks=[],
+                task_batches={},
+            )
+            with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), mock.patch(
+                "hooks.workflow_launcher.validate_plan_for_parallel",
+                return_value={"canParallel": False, "reason": "no_pending_batches", "errors": []},
+            ), mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-resume-all"), mock.patch(
+                "hooks.workflow_launcher.load_manifest",
+                return_value={
+                    "runId": "cw-resume-all",
+                    "batches": {batch_id: {"status": "retry_pending"} for batch_id in batch_ids},
+                },
+            ):
+                result = analyze_batches("resume-all", plugin_path, artifact_workspace, "Z990692-294")
+
+        self.assertTrue(result["useWorkflow"])
+        self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
+        self.assertEqual(result["workflowArgs"]["resumeRunId"], "cw-resume-all")
+        self.assertEqual([batch["id"] for batch in result["batches"]], batch_ids)
+        self.assertEqual(result["batchCount"], len(batch_ids))
+        self.assertEqual(
+            result["reason"],
+            "fixed_workflow_for_manual_recovery:cw-resume-all:B001,B007,B015",
+        )
+
     def test_launcher_blocks_when_static_workflow_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
