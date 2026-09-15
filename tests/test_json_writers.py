@@ -1733,8 +1733,10 @@ class JsonWriterTests(unittest.TestCase):
                 {
                     ("T001", "missing_plan_task_merged_scenario_refs"),
                     ("T001", "missing_plan_task_split_rationale"),
+                    ("T001", "unknown_plan_task_scenario_ref"),
                     ("T002", "missing_plan_task_merged_scenario_refs"),
                     ("T002", "missing_plan_task_split_rationale"),
+                    ("T002", "unknown_plan_task_scenario_ref"),
                 },
             )
             merged_issue = next(
@@ -1899,12 +1901,8 @@ class JsonWriterTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["ok"])
         contract = payload["contract"]
-        self.assertEqual(contract["taskTemplate"], "skills/autodev/autodev-plan/templates/task-input.json")
-        self.assertEqual(contract["taskTemplateStatus"], "deprecated_legacy_import_only")
-        self.assertEqual(contract["taskInputExample"]["id"], "T001")
-        self.assertIn("validationCommands", contract["taskInputExample"])
-        self.assertIn("matrixExceptionExample", contract["taskInputExample"])
-        self.assertEqual(contract["exampleOnlyTaskFields"], ["matrixExceptionExample"])
+        self.assertNotIn("taskTemplate", contract)
+        self.assertNotIn("taskInputExample", contract)
         self.assertEqual(
             contract["taskValidationPolicy"],
             {
@@ -1918,7 +1916,6 @@ class JsonWriterTests(unittest.TestCase):
                 "codeStageTestExecution": "forbidden",
             },
         )
-        self.assertNotIn("status", contract["taskInputExample"])
         self.assertEqual(contract["recommendedInputMode"], "draft-batch")
         self.assertEqual(
             contract["taskDetailTemplate"],
@@ -1944,11 +1941,11 @@ class JsonWriterTests(unittest.TestCase):
             ["pages", "interactions", "visualSources", "route"],
         )
         self.assertEqual(
-            contract["exampleOnlyTaskGroupFields"],
+            contract["planCoreExamples"],
             [
-                "externalDependencyExample",
-                "matrixExceptionExample",
-                "uiRequiredExample",
+                "externalDependencyTask",
+                "matrixExceptionTask",
+                "uiTask",
             ],
         )
         external_example = contract["taskGroupExternalDependencyExample"]
@@ -2058,9 +2055,14 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["taskSetFinalization"],
             {
+                "coreWriteCommand": "write-task-groups --body-stdin",
                 "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
                 "prepareCommand": "prepare-task-draft --group-file <file> --code-workspace <path>",
                 "detailCommand": "set-draft-task-detail --task-id <id> --body-stdin",
+                "detailLintCommand": "lint-draft-task-detail --task-id <id> --body-stdin",
+                "detailBatchCommand": "set-draft-task-details --body-stdin",
+                "fullDetailLintCommand": "lint-draft-task-details --full --body-stdin",
+                "fullDetailBatchCommand": "set-draft-task-details --full --body-stdin",
                 "preflightCommand": "preflight-task-draft",
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
@@ -2069,6 +2071,32 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertTrue(contract["collectingRepairs"]["atomic"])
         self.assertTrue(contract["collectingRepairs"]["preserveUnchangedTaskDetails"])
+        self.assertEqual(contract["collectingRepairs"]["batchReplace"], "set-draft-task-details --body-stdin")
+        self.assertEqual(contract["collectingRepairs"]["lint"], "lint-draft-task-detail --task-id <id> --body-stdin")
+        self.assertEqual(
+            contract["taskGranularity"]["softLimits"],
+            {"scenarios": 5, "apis": 2, "pages": 1, "interactions": 3},
+        )
+        self.assertEqual(
+            contract["taskGranularity"]["hardLimits"],
+            {"scenarios": 12, "apis": 3, "pages": 2, "interactions": 4},
+        )
+        self.assertEqual(contract["taskDetailConstraints"]["implementation"], {"minItems": 2, "maxItems": 6})
+        self.assertEqual(
+            contract["taskGranularity"]["matrixValidation"],
+            {
+                "when": "scenarios>5",
+                "requiredCommandCount": 1,
+                "backendAllowedKinds": ["behavior_test", "e2e_test", "integration_test"],
+                "frontendAllowedKinds": [
+                    "behavior_test", "build", "compile", "e2e_test", "integration_test", "typecheck",
+                ],
+                "covers": (
+                    "omit to auto-cover all generated acceptance criteria; "
+                    "when specified, it must equal all generated acceptance criteria"
+                ),
+            },
+        )
         self.assertEqual(
             contract["modelFacingContracts"]["planCore"]["schemaVersion"],
             "autodev.plan-core.v1",
@@ -2092,29 +2120,30 @@ class JsonWriterTests(unittest.TestCase):
             contract["writerOwnedDetailFields"]["scope"],
             ["pages", "workspaceRoots"],
         )
-        self.assertIn("specRefs", contract["groupOwnedTaskFields"])
-        self.assertIn("workspaceRef", contract["requiredTaskGroupFields"])
+        self.assertIn("specRefs", contract["runtimeGroupOwnedTaskFields"])
+        self.assertIn("workspaceRef", contract["runtimeProjectedTaskGroupFields"])
         self.assertIn("validationCommands", contract["requiredTaskDetailFields"])
         self.assertEqual(contract["formalArtifacts"]["integrityField"], "taskSetDigest")
         self.assertFalse(contract["formalArtifacts"]["directEditingSupported"])
         self.assertIn("--batch-id", contract["forbiddenArguments"])
-        self.assertIn("validationCommands", contract["requiredTaskFields"])
+        self.assertIn("validationCommands", contract["runtimeRequiredTaskFields"])
         self.assertEqual(contract["validationCoverage"]["rule"], "required_commands_cover_all_acceptance_criteria")
+        plan_core_contract = contract["modelFacingContracts"]["planCore"]
+        self.assertEqual(plan_core_contract["template"], contract["taskGroupTemplate"])
         self.assertEqual(
-            contract["conditionalFields"]["uiRefs"],
-            {
-                "when": "uiRequired_is_true",
-                "requiredFields": ["pageRefs", "interactionRefs", "visualSourceRefs", "frontendRoute"],
-            },
+            plan_core_contract["taskIdPolicy"],
+            {"format": "TNNN", "sequence": "ordered tasks start at T001 and increment by one without gaps"},
         )
         self.assertEqual(
-            contract["conditionalFields"]["mergedScenarioRefs"],
-            {
-                "when": "scenario_refs_count_is_6_to_12",
-                "requiredFields": [],
-                "mustEqual": "fully_qualified_scenario_refs_from_specRefs",
-            },
+            plan_core_contract["mergedFields"]["validation.mergeJustification"],
+            ["mergedScenarioRefs", "splitRationale"],
         )
+        self.assertEqual(
+            plan_core_contract["conditionalFields"]["validation.mergeJustification"]["writerDerives"],
+            ["mergedScenarioRefs", "splitRationale"],
+        )
+        self.assertIn("mergedScenarioRefs", plan_core_contract["forbiddenNonCoreFields"])
+        self.assertNotIn("conditionalFields", contract)
         self.assertEqual(
             contract["matrixException"],
             {
@@ -2126,14 +2155,14 @@ class JsonWriterTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(len(contract["matrixExceptionExample"]["mergedScenarioRefs"]), 6)
-        self.assertEqual(
-            contract["matrixExceptionExample"]["mergedScenarioRefs"],
-            contract["matrixExceptionExample"]["specRefs"][1:],
-        )
-        self.assertEqual(
-            contract["matrixExceptionExample"]["validationCommands"][0]["covers"],
-            ["AC-T001-01"],
+        matrix_example = contract["planCoreMatrixExceptionExample"]
+        self.assertEqual(len(matrix_example["refs"]["scenarios"]), 6)
+        self.assertIn("mergeJustification", matrix_example["validation"])
+        self.assertNotIn("mergedScenarioRefs", matrix_example)
+        self.assertNotIn("splitRationale", matrix_example)
+        self.assertIn(
+            "specs/[capability]/spec.md#SCN-001",
+            matrix_example["validation"]["mergeJustification"],
         )
         self.assertEqual(
             contract["projectValidationCommand"],
@@ -2176,56 +2205,50 @@ class JsonWriterTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            task = json.loads(
-                (ROOT / "skills/autodev/autodev-plan/templates/task-input.json").read_text(encoding="utf-8")
-            )
-            for writer_owned_field in (
-                "status",
-                "evidenceIds",
-                "completionEvidenceIds",
-                "latestPassEvidenceId",
-                "completionPolicy",
-            ):
-                self.assertNotIn(writer_owned_field, task)
-            task.update(
-                {
-                    "id": "T001",
-                    "title": "代发协议管控菜单与路由配置",
-                    "goal": "用户可以进入代发协议管控页面",
-                    "scope": {
-                        "modules": ["bcpccomplianceui"],
-                        "entrypoints": ["/protocol-control-apply-report"],
-                        "pages": [],
-                        "dataObjects": [],
-                        "paths": [],
-                    },
-                    "implementationPoints": ["注册页面路由", "验证菜单入口可达"],
-                    "acceptanceCriteria": [
-                        {
-                            "id": "AC-T001-01",
-                            "text": "目标用户可以进入代发协议管控页面",
-                            "scenarioRefs": ["specs/protocol-control-menu/spec.md#SCN-001"],
-                        }
-                    ],
-                    "nonGoals": ["不实现申请提交"],
-                    "specRefs": [
-                        "specs/protocol-control-menu/spec.md#REQ-001",
-                        "specs/protocol-control-menu/spec.md#SCN-001",
-                    ],
-                    "designRefs": ["design.md#D-001"],
-                    "decisionIds": ["D-001"],
-                    "validationCommands": [
-                        {
-                            "id": "VAL-T001-01",
-                            "argv": ["npm", "test", "--", "protocol-control"],
-                            "cwd": "bcpccomplianceui",
-                            "kind": "behavior_test",
-                            "required": True,
-                            "covers": ["AC-T001-01"],
-                        }
-                    ],
-                }
-            )
+            # Legacy runtime input remains supported by the CLI, but the
+            # plugin no longer exposes it as a model-facing template.
+            task = {
+                "id": "T001",
+                "title": "代发协议管控菜单与路由配置",
+                "goal": "用户可以进入代发协议管控页面",
+                "deps": [],
+                "uiRequired": False,
+                "workspaceRef": "default",
+                "scope": {
+                    "modules": ["bcpccomplianceui"],
+                    "entrypoints": ["/protocol-control-apply-report"],
+                    "pages": [],
+                    "dataObjects": [],
+                    "workspaceRoots": {"default": "."},
+                    "paths": [],
+                },
+                "implementationPoints": ["注册页面路由", "验证菜单入口可达"],
+                "acceptanceCriteria": [{
+                    "id": "AC-T001-01",
+                    "text": "目标用户可以进入代发协议管控页面",
+                    "scenarioRefs": ["specs/protocol-control-menu/spec.md#SCN-001"],
+                }],
+                "validationBoundary": "协议管控页面路由的公开可达 seam",
+                "nonGoals": ["不实现申请提交"],
+                "specRefs": [
+                    "specs/protocol-control-menu/spec.md#REQ-001",
+                    "specs/protocol-control-menu/spec.md#SCN-001",
+                ],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{
+                    "id": "VAL-T001-01",
+                    "argv": ["npm", "test", "--", "protocol-control"],
+                    "cwd": "bcpccomplianceui",
+                    "kind": "behavior_test",
+                    "required": True,
+                    "covers": ["AC-T001-01"],
+                }],
+                "expectedFiles": [],
+                "blockers": [],
+            }
             body_file = feature_dir / ".tmp" / "plan_writer" / "tasks" / "T001.json"
             body_file.parent.mkdir(parents=True)
             body_file.write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
@@ -2788,7 +2811,8 @@ class JsonWriterTests(unittest.TestCase):
                     }
                 ],
                 "splitRationale": (
-                    "SCN-001、SCN-004、SCN-009 由同一查询请求返回字段矩阵，"
+                    "specs/cap/spec.md#SCN-001、specs/cap/spec.md#SCN-004、"
+                    "specs/cap/spec.md#SCN-009 由同一查询请求返回字段矩阵，"
                     "并由同一个响应断言验证，拆开会复制同一验证闭环。"
                 ),
             }
@@ -3217,6 +3241,40 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("missing_unit_target_trace_args", unit.stdout)
             self.assertNotEqual(e2e.returncode, 0)
             self.assertIn("required", e2e.stderr)
+
+    def test_compact_plan_core_rejects_runtime_projection_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, _ = _workspace(root)
+            core_path = root / "invalid-plan-core.json"
+            core_path.write_text(json.dumps({
+                "schemaVersion": "autodev.plan-core.v1",
+                "featureId": "alpha",
+                "tasks": [{
+                    "id": "T001",
+                    "outcome": "deliver observable behavior",
+                    "dependsOn": [],
+                    "workspace": "default",
+                    "writeSet": [],
+                    "refs": {
+                        "requirements": ["specs/cap/spec.md#REQ-001"],
+                        "scenarios": ["specs/cap/spec.md#SCN-001"],
+                        "api": [],
+                    },
+                    "validation": {"seam": "public behavior seam is validated by one command"},
+                    "mergedScenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                    "splitRationale": "legacy field must not appear in compact Plan Core",
+                }],
+            }), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(core_path),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("compact_plan_core_non_core_field_forbidden", result.stdout)
+            self.assertIn("mergedScenarioRefs,splitRationale", result.stdout)
 
     def test_compact_plan_core_detail_and_restricted_repair_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

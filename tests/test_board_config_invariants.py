@@ -406,49 +406,14 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(missing, [], "Biz skill docs must show the unified biz_validate.py command path")
 
 
-    def test_plan_template_has_one_task_input_example(self) -> None:
+    def test_plan_templates_expose_only_current_model_inputs(self) -> None:
         template_dir = ROOT / "skills/autodev/autodev-plan/templates"
-        template = json.loads((template_dir / "task-input.json").read_text(encoding="utf-8"))
+        legacy = json.loads((template_dir / "task-input.json").read_text(encoding="utf-8"))
         self.assertFalse((template_dir / "plan.json").exists())
         self.assertFalse((template_dir / "batch-plan.json").exists())
-        for field in (
-            "id",
-            "title",
-            "goal",
-            "deps",
-            "uiRequired",
-            "workspaceRef",
-            "scope",
-            "implementationPoints",
-            "acceptanceCriteria",
-            "validationBoundary",
-            "nonGoals",
-            "specRefs",
-            "designRefs",
-            "apiIds",
-            "dataIds",
-            "decisionIds",
-            "validationCommands",
-            "expectedFiles",
-            "blockers",
-        ):
-            self.assertIn(field, template)
-        for writer_owned_field in (
-            "status",
-            "evidenceIds",
-            "completionEvidenceIds",
-            "latestPassEvidenceId",
-            "completionPolicy",
-        ):
-            self.assertNotIn(writer_owned_field, template)
-        self.assertFalse(template["uiRequired"])
-        self.assertNotIn("uiRefs", template)
-        self.assertTrue(template["nonGoals"])
-        self.assertIsInstance(template["validationBoundary"], str)
-        self.assertGreaterEqual(len(template["validationBoundary"].strip()), 10)
-        self.assertEqual(template["apiIds"], [])
-        self.assertEqual(template["dataIds"], [])
-        self.assertEqual(template["mergedScenarioRefs"], [])
+        self.assertEqual(legacy["deprecated"], True)
+        self.assertNotIn("mergedScenarioRefs", legacy)
+        self.assertNotIn("splitRationale", legacy)
         detail = json.loads((template_dir / "task-detail-input.json").read_text(encoding="utf-8"))
         self.assertNotIn("id", detail)
         self.assertNotIn("specRefs", detail)
@@ -458,12 +423,18 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertTrue(detail["nonGoals"])
         self.assertNotIn("id", detail["acceptance"][0])
         self.assertNotIn("id", detail["checks"][0])
+        self.assertNotIn("covers", detail["checks"][0])
         grouping = json.loads((template_dir / "task-groups.json").read_text(encoding="utf-8"))
         self.assertIn("featureId", grouping)
         self.assertEqual(grouping["schemaVersion"], "autodev.plan-core.v1")
         self.assertEqual(len(grouping["tasks"]), 1)
         self.assertIn("validation", grouping["tasks"][0])
+        self.assertNotIn("mergeJustification", grouping["tasks"][0]["validation"])
         self.assertIn("workspace", grouping["tasks"][0])
+        matrix_example = grouping["examples"]["matrixExceptionTask"]
+        self.assertIn("mergeJustification", matrix_example["validation"])
+        self.assertNotIn("mergedScenarioRefs", matrix_example)
+        self.assertNotIn("splitRationale", matrix_example)
         group_ui_example = {"ui": {"pages": ["PAGE-001"], "interactions": [], "visualSources": [], "route": "absolute-html"}}
         self.assertEqual(
             list(group_ui_example["ui"]),
@@ -479,9 +450,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "add-task-contract",
             ".tmp/plan_writer/draft/plan.json",
             ".tmp/plan_writer/task-groups.json",
+            "write-task-groups",
             "preflight-task-groups",
             "prepare-task-draft",
             "set-draft-task-detail",
+            "lint-draft-task-details --full",
+            "set-draft-task-details --full",
             "preflight-task-draft",
             "finalize-task-draft",
             "rebuild-task-draft",
@@ -580,12 +554,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "候选任务分组表",
             "不要一边补 task detail 一边重新拆分",
             "连续 `T001`、`T002`、`T003`",
-            "完整 specRefs 清单",
+            "refs.requirements",
             "不同 spec 文件里的同号 `SCN-001` 是不同场景",
             "拆分结论",
             "需拆分",
-            "可合并(附 splitRationale)",
-            "splitRationale 草稿",
+            "可合并（附 `validation.mergeJustification`）",
+            "mergeJustification 草稿",
             "SCN `<=5`",
             "SCN `12`",
             "mergedScenarioRefs",

@@ -181,12 +181,45 @@ def _unknown_design_id_issue(
     }
 
 
+def _reference_validation_contract(
+    contract: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return a contract that is safe for typed-reference validation.
+
+    Callers report an invalid or missing Design lock separately.  Reference
+    validation must nevertheless remain total: a partial lock used to raise a
+    KeyError and hid every actionable bad reference behind the first failure.
+    Treat an unusable snapshot as an empty, non-marker contract, so each
+    supplied typed ID is reported as unresolved while the lock diagnostic is
+    preserved by the caller.
+    """
+
+    if contract is None:
+        return None
+    ids = contract.get("ids") if isinstance(contract, dict) else None
+    if isinstance(ids, dict) and all(
+        isinstance(ids.get(kind), (set, list, tuple))
+        for kind in ("API", "DATA", "D")
+    ):
+        return contract
+    return {
+        "ids": {"API": set(), "DATA": set(), "D": set()},
+        "noHttpApi": False,
+        "noSql": False,
+    }
+
+
 def validate_task_group_design_contract(
     contract: dict[str, Any],
     groups: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Reject invented API IDs before a Draft can be prepared."""
 
+    contract = _reference_validation_contract(contract) or {
+        "ids": {"API": set(), "DATA": set(), "D": set()},
+        "noHttpApi": False,
+        "noSql": False,
+    }
     known = contract["ids"]["API"]
     errors: list[dict[str, Any]] = []
     for group in groups:
@@ -219,6 +252,11 @@ def validate_task_design_contract(
 ) -> list[dict[str, Any]]:
     """Validate task-owned typed references against the confirmed Design."""
 
+    contract = _reference_validation_contract(contract) or {
+        "ids": {"API": set(), "DATA": set(), "D": set()},
+        "noHttpApi": False,
+        "noSql": False,
+    }
     task_id = str(task.get("id", "task"))
     errors: list[dict[str, Any]] = []
     field_contracts = (
@@ -281,6 +319,11 @@ def validate_plan_design_coverage(
 ) -> list[dict[str, Any]]:
     """Require every confirmed Design ID to be covered without inventing new IDs."""
 
+    contract = _reference_validation_contract(contract) or {
+        "ids": {"API": set(), "DATA": set(), "D": set()},
+        "noHttpApi": False,
+        "noSql": False,
+    }
     covered = {"API": set(), "DATA": set(), "D": set()}
     for task in tasks:
         covered["API"].update(
@@ -533,7 +576,7 @@ def validate_task_artifact_refs(
     errors: list[dict[str, Any]] = []
     task_id = str(task.get("id", "task"))
 
-    contract = design_contract
+    contract = _reference_validation_contract(design_contract)
 
     # Validate designRefs.  Design owns validation of design.md itself.  Plan
     # consumes the locked contract snapshot and therefore can validate the

@@ -12,12 +12,12 @@
 
 | 输入 | Schema | 目的 |
 |---|---|---|
-| Plan Core | `autodev.plan-core.v1` | 候选 Task 的 outcome、dependsOn、writeSet、refs 与 validation.seam。`writeSet` 是唯一候选写入归属；默认按文件独占，也可用稳定 `symbols` 声明同一 Controller/Service 的互不重叠方法归属。 |
+| Plan Core | `autodev.plan-core.v1` | 候选 Task 的 outcome、dependsOn、writeSet、refs 与 validation.seam；仅超出粒度软上限时再写 validation.mergeJustification。`writeSet` 是唯一候选写入归属；默认按文件独占，也可用稳定 `symbols` 声明同一 Controller/Service 的互不重叠方法归属。 |
 | Task Detail | `autodev.plan-detail.v1` | 单一 Task 的 context、implementation、acceptance、checks、refs 和 nonGoals；默认复用 Core 的 outcome。 |
 | Repair Patch | `autodev.plan-repair-patch.v1` | 仅修订工单允许的字段；Draft 修订带 `workId`、`baseRevision`，预 Draft 的 Core 修订带 `workId`、`baseGroupingDigest`；两者每条操作都必须带 `expectedHash`。 |
 
-Core 中 `outcome`、`dependsOn`、`writeSet`、`refs`、`validation.seam` 分别投影到
-运行时的标题/默认 goal、依赖、写入提示/范围、规格/API 引用和验证边界。Detail 中的验收 ID、
+Core 中 `outcome`、`dependsOn`、`writeSet`、`refs`、`validation.seam`、`validation.mergeJustification` 分别投影到
+运行时的标题/默认 goal、依赖、写入提示/范围、规格/API 引用、验证边界和（仅例外任务的）`mergedScenarioRefs` / `splitRationale`。模型不得显式写后两项，且 merge 理由必须列出完整 `specs/<capability>/spec.md#SCN-NNN` 引用。Detail 中的验收 ID、
 命令 ID、命令 cwd、workspace roots、lane、Batch 与 `PLAN.md` 都由 writer 生成，不能
 由模型回写。
 
@@ -37,6 +37,19 @@ Core 预检尚未创建 Draft 时，传 `create-repair-work --group-file <task-g
 已存在时成功后仅重投影 patch 涉及的 Task，并记录 `preservedTaskIds` / `resetTaskIds`；共享
 写集、DAG 等跨 Task 不变量仍由脚本做全局校验。未提供 `symbols` 的共享路径仍按整文件
 冲突处理；提供 symbols 时，只有跨 Batch 重叠的同一 symbol 才冲突。
+
+Core 使用 `write-task-groups --body-stdin` 提交：它会先在内存中运行完整预检，只有通过后才原子
+写入 `.tmp/plan_writer/task-groups.json`，不需要可复用的临时 JSON 文件。返回的
+`grouping.detailObligations` 会提前声明 SCN matrix 的 Detail 命令要求。`preflight-task-groups`
+仍可对已存在的 Core 源做只读检查，并会在一次调用中返回可独立判断的结构、粒度、共享写集、Design API、
+SCN 实体与场景覆盖问题；每项带 `validationStage`。SCN 必须逐条写成
+`specs/<capability>/spec.md#SCN-NNN`，writer 会校验该 ID 真正定义在该文件中。首次完整 Detail
+提交使用 `lint-draft-task-details --full --body-stdin`，通过后将同一 `{taskId, body}` payload 交给
+`set-draft-task-details --full --body-stdin`；二者使用同一候选 Draft 和聚合预检，任一失败均不写入。
+已 finalized 且尚未执行时，
+若 Design snapshot 与 Core digest 同时漂移，`diagnose-plan-repair` 返回
+`full_rebuild_required`；使用 `rebuild-finalized-draft --group-file <file>
+--design-revision-confirmed --reason <reason>` 重投影，不能删除 Draft。
 
 ## 根计划
 

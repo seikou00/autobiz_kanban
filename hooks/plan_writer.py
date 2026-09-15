@@ -70,8 +70,16 @@ from hooks.plan_json import (  # noqa: E402
     validate_task_collection,
 )
 from hooks.plan_granularity import (  # noqa: E402
+    PLAN_TASK_HARD_MAX_APIS,
+    PLAN_TASK_HARD_MAX_UI_INTERACTIONS,
+    PLAN_TASK_HARD_MAX_UI_PAGES,
     PLAN_TASK_MATRIX_MAX_SCENARIOS,
+    PLAN_TASK_MAX_APIS,
     PLAN_TASK_MAX_SCENARIOS,
+    PLAN_TASK_MAX_UI_INTERACTIONS,
+    PLAN_TASK_MAX_UI_PAGES,
+    PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX,
+    PLAN_TASK_SPLIT_RATIONALE_MIN_LENGTH,
     scenario_refs_from_spec_refs,
     validate_plan_task_granularity_item,
     validate_plan_task_grouping_item,
@@ -114,12 +122,12 @@ TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 TASK_GROUP_API_ID_RE = re.compile(r"^API-\d{3}$")
 TASK_GROUP_PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 TASK_GROUP_INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
-TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-input.json"
-TASK_TEMPLATE_PATH = ROOT / TASK_TEMPLATE_RELATIVE_PATH
 TASK_GROUP_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-groups.json"
 TASK_GROUP_TEMPLATE_PATH = ROOT / TASK_GROUP_TEMPLATE_RELATIVE_PATH
 TASK_DETAIL_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-detail-input.json"
 TASK_DETAIL_TEMPLATE_PATH = ROOT / TASK_DETAIL_TEMPLATE_RELATIVE_PATH
+DRAFT_CORE_RELATIVE_DIR = ".tmp/plan_writer"
+DEFAULT_TASK_GROUPS_FILENAME = "task-groups.json"
 DRAFT_RELATIVE_DIR = ".tmp/plan_writer/draft"
 DRAFT_LOCK_FILE = "lock.json"
 DRAFT_PLAN_FILE = "plan.json"
@@ -172,6 +180,9 @@ DRAFT_REQUIRED_DETAIL_FIELDS = {
     "decisionIds",
     "validationCommands",
 }
+COMPACT_PLAN_CORE_FORBIDDEN_FIELDS = (
+    DRAFT_GROUP_OWNED_FIELDS - {"id"}
+) | DRAFT_DETAIL_FIELDS
 DRAFT_SCOPE_FIELDS = {"modules", "entrypoints", "dataObjects", "paths"}
 TASK_REPAIR_BODY_FIELDS = {"repairs"}
 TASK_ID_IN_REASON_RE = re.compile(r"^(T\d{3})\.([A-Za-z][A-Za-z0-9]*(?:\[[0-9]+\])?)")
@@ -243,6 +254,10 @@ DRAFT_BUNDLE_COMMANDS = {
     "prepare-task-draft",
     "import-task-directory",
     "set-draft-task-detail",
+    "set-draft-task-details",
+    "lint-draft-task-detail",
+    "lint-draft-task-details",
+    "write-task-groups",
     "repair-draft-task",
     "repair-draft-tasks",
     "preflight-task-draft",
@@ -251,6 +266,7 @@ DRAFT_BUNDLE_COMMANDS = {
     "create-repair-work",
     "apply-draft-patch",
     "rebuild-task-draft",
+    "rebuild-finalized-draft",
     "reopen-finalized-draft",
     "diagnose-plan-repair",
     "finalize-task-draft",
@@ -260,8 +276,11 @@ DRAFT_BUNDLE_COMMANDS = {
 DRAFT_RUNTIME_GUARDED_COMMANDS = DRAFT_BUNDLE_COMMANDS - {
     "diagnose-plan-repair",
     "reopen-finalized-draft",
+    "rebuild-finalized-draft",
     "show-task-draft",
     "show-draft-task-work",
+    "lint-draft-task-detail",
+    "lint-draft-task-details",
     "create-repair-work",
 }
 PLAN_REOPEN_ALLOWED_CHECKPOINTS = {
@@ -282,6 +301,16 @@ class PlanWriterInputError(ValueError):
 
 def _path(workspace: Path, feature: str) -> Path:
     return artifact_path(workspace, feature, PLAN_FILE)
+
+
+def _default_task_groups_path(workspace: Path, feature: str) -> Path:
+    """Return the single writer-owned Plan Core source location for a Feature."""
+
+    return artifact_path(
+        workspace,
+        feature,
+        f"{DRAFT_CORE_RELATIVE_DIR}/{DEFAULT_TASK_GROUPS_FILENAME}",
+    )
 
 
 def _md_path(workspace: Path, feature: str) -> Path:
@@ -372,16 +401,6 @@ def _plan_lock(workspace: Path, feature: str) -> FileLock:
 
 
 
-def _task_input_example() -> dict[str, Any]:
-    try:
-        value = json.loads(TASK_TEMPLATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"task_input_template_unavailable:{exc}") from exc
-    if not isinstance(value, dict):
-        raise RuntimeError("task_input_template_must_be_object")
-    return value
-
-
 def _task_group_example() -> dict[str, Any]:
     try:
         value = json.loads(TASK_GROUP_TEMPLATE_PATH.read_text(encoding="utf-8"))
@@ -404,6 +423,7 @@ def _task_detail_input_example() -> dict[str, Any]:
 
 def _task_group_matrix_exception_example() -> dict[str, Any]:
     scenario_refs = [f"specs/[capability]/spec.md#SCN-{index:03d}" for index in range(1, 7)]
+    cited_scenarios = ", ".join([scenario_refs[0], scenario_refs[2], scenario_refs[5]])
     return {
         "id": "T001",
         "outcome": "[shared observable matrix behavior]",
@@ -414,7 +434,10 @@ def _task_group_matrix_exception_example() -> dict[str, Any]:
         },
         "validation": {
             "seam": "one request returns the complete matrix and one executable assertion validates it",
-            "mergeJustification": "SCN-001, SCN-003, and SCN-006 share one request/response and one validation loop and cannot be validated independently.",
+            "mergeJustification": (
+                f"{cited_scenarios} share one request/response and one validation loop "
+                "and cannot be validated independently."
+            ),
         },
     }
 
@@ -443,35 +466,6 @@ def _task_group_external_dependency_example() -> dict[str, Any]:
             "owner": "[owning-team-or-person]",
             "trackingRefs": ["[ticket-or-design-reference]"],
         },
-    }
-
-
-def _matrix_exception_example() -> dict[str, Any]:
-    scenario_refs = [f"specs/[capability]/spec.md#SCN-{index:03d}" for index in range(1, 7)]
-    return {
-        "specRefs": ["specs/[capability]/spec.md#REQ-001", *scenario_refs],
-        "mergedScenarioRefs": scenario_refs,
-        "acceptanceCriteria": [
-            {
-                "id": "AC-T001-01",
-                "text": "[shared observable matrix result]",
-                "scenarioRefs": scenario_refs,
-            }
-        ],
-        "validationCommands": [
-            {
-                "id": "VAL-T001-01",
-                "argv": ["[executable]", "[matrix validation arguments]"],
-                "cwd": ".",
-                "kind": "integration_test",
-                "required": True,
-                "covers": ["AC-T001-01"],
-            }
-        ],
-        "splitRationale": (
-            "SCN-001, SCN-003, and SCN-006 share one request/response or state matrix "
-            "validation loop and cannot be validated independently."
-        ),
     }
 
 
@@ -782,6 +776,13 @@ def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         task_id = raw.get("id")
         if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
             raise PlanWriterInputError("compact_plan_core_task_id_invalid", f"index={index};task={task_id}")
+        forbidden_fields = sorted(set(raw) & COMPACT_PLAN_CORE_FORBIDDEN_FIELDS)
+        if forbidden_fields:
+            raise PlanWriterInputError(
+                "compact_plan_core_non_core_field_forbidden",
+                f"task={task_id};fields={','.join(forbidden_fields)};"
+                "use=outcome,dependsOn,writeSet,refs,validation",
+            )
         outcome = raw.get("outcome")
         if not isinstance(outcome, str) or not outcome.strip():
             raise PlanWriterInputError("compact_plan_core_outcome_missing", f"task={task_id}")
@@ -809,7 +810,6 @@ def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
             "deps": _compact_string_list(raw.get("dependsOn", []), task_id=task_id, field="dependsOn"),
             "workspaceRef": raw.get("workspace", "default"),
             "specRefs": [*requirements, *scenarios],
-            "mergedScenarioRefs": [],
             "apiIds": api_ids,
             "validationBoundary": seam.strip(),
         }
@@ -1077,26 +1077,121 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
     return errors
 
 
+def _with_validation_stage(
+    stage: str,
+    errors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Annotate independently-computed preflight failures with their stage."""
+
+    annotated: list[dict[str, Any]] = []
+    for error in errors:
+        item = copy.deepcopy(error)
+        item.setdefault("validationStage", stage)
+        annotated.append(item)
+    return annotated
+
+
+def _task_group_spec_ref_errors(
+    feature_dir: Path,
+    groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Verify that every path-qualified Core scenario reference exists.
+
+    Coverage alone catches a missing expected scenario, but it used to leave a
+    misplaced ``SCN-110`` looking like an unrelated coverage gap.  This check
+    reports the owning task, input field, and exact missing path first.
+    """
+
+    defined: dict[str, set[str]] = {}
+    for spec_path in sorted((feature_dir / "specs").glob("**/*.md")):
+        relative = spec_path.relative_to(feature_dir).as_posix()
+        defined[relative] = set(SPEC_SCENARIO_DEF_RE.findall(
+            spec_path.read_text(encoding="utf-8")
+        ))
+
+    errors: list[dict[str, Any]] = []
+    for group in groups:
+        task_id = str(group.get("id", "task"))
+        refs = group.get("specRefs") if isinstance(group.get("specRefs"), list) else []
+        for index, raw_ref in enumerate(refs):
+            if not isinstance(raw_ref, str):
+                continue
+            path_part, separator, anchor = raw_ref.partition("#")
+            scenario_ids = SCENARIO_ID_RE.findall(anchor) if separator else []
+            if not scenario_ids:
+                continue
+            normalized_path = path_part.strip().replace("\\", "/")
+            field = f"specRefs[{index}]"
+            if not normalized_path:
+                errors.append({
+                    "reason": "plan_task_scenario_ref_not_path_qualified",
+                    "detail": f"task={task_id};ref={raw_ref}",
+                    "taskIds": [task_id],
+                    "field": field,
+                    "repairTarget": "task_group",
+                    "repairSuggestion": "每个 SCN 必须写成 specs/<capability>/spec.md#SCN-NNN，不能只写 SCN ID。",
+                })
+                continue
+            known_scenarios = defined.get(normalized_path)
+            if known_scenarios is None:
+                errors.append({
+                    "reason": "plan_task_spec_file_unknown",
+                    "detail": f"task={task_id};path={normalized_path}",
+                    "taskIds": [task_id],
+                    "field": field,
+                    "repairTarget": "task_group",
+                    "repairSuggestion": "将 specRefs 指向 Feature specs/ 下实际存在的 spec 文件。",
+                })
+                continue
+            for scenario_id in scenario_ids:
+                if scenario_id not in known_scenarios:
+                    errors.append({
+                        "reason": "unknown_plan_task_scenario_ref",
+                        "detail": f"task={task_id};path={normalized_path};scenario={scenario_id}",
+                        "taskIds": [task_id],
+                        "field": field,
+                        "repairTarget": "task_group",
+                        "repairSuggestion": (
+                            f"{normalized_path} 未定义 {scenario_id}；请改用该文件中真实的 SCN，"
+                            "或将引用移到实际定义该 SCN 的 spec 文件。"
+                        ),
+                    })
+    return errors
+
+
 def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> list[dict[str, Any]]:
-    errors = _task_group_structure_errors(data)
+    """Return all independent Core failures in one pass.
+
+    Later stages deliberately continue after structural, granularity, or
+    ownership failures whenever their input is still readable.  A missing
+    design lock is the only dependency that suppresses Design-ID validation;
+    it does not suppress spec-reference validation or scenario coverage.
+    """
+
+    errors = _with_validation_stage("structure", _task_group_structure_errors(data))
     implementation_scope, scope_errors = load_scope(feature_dir)
-    errors.extend({"reason": error} for error in scope_errors)
-    for group in _task_groups(data):
+    errors.extend(_with_validation_stage(
+        "scope", [{"reason": error} for error in scope_errors],
+    ))
+    groups = _task_groups(data)
+    grouping_errors: list[dict[str, Any]] = []
+    for group in groups:
         task_id = str(group.get("id", "task"))
         ui_required = group.get("uiRequired") is True
         if implementation_scope == "backend_only" and ui_required:
-            errors.append({
+            grouping_errors.append({
                 "reason": "implementation_scope_frontend_task_forbidden",
                 "detail": f"scope=backend_only;task={task_id}",
                 "repairSuggestion": f"当前实现范围为 backend_only，但任务 {task_id} 标记为需要前端（uiRequired=true）。请将该任务的 uiRequired 改为 false，或修改 scope.md 中的实现范围"
             })
         elif implementation_scope == "frontend_only" and not ui_required:
-            errors.append({
+            grouping_errors.append({
                 "reason": "implementation_scope_backend_task_forbidden",
                 "detail": f"scope=frontend_only;task={task_id}",
                 "repairSuggestion": f"当前实现范围为 frontend_only，但任务 {task_id} 标记为后端任务（uiRequired=false）。请将该任务的 uiRequired 改为 true，或修改 scope.md 中的实现范围"
             })
-        errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
+        grouping_errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
+    errors.extend(_with_validation_stage("granularity", grouping_errors))
     # ``touches`` is the candidate group's ownership declaration.  Validate it
     # before a Draft exists, otherwise a common SQL/config file only surfaces
     # later as a surprising sequence of single-Batch waves.
@@ -1110,45 +1205,58 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
             "writeTargets": copy.deepcopy(group.get("writeTargets", [])),
             "expectedFiles": [],
         }
-        for group in _task_groups(data)
+        for group in groups
     ]
     group_scope_data = {
         "featureId": data.get("featureId"),
         "tasks": copy.deepcopy(group_tasks),
     }
-    _, projected_group_batches = _project_batches(group_scope_data)
-    group_scopes = {
-        str(task.get("id")): batch_id
-        for batch_id, batch in projected_group_batches.items()
-        for task in batch.get("tasks", [])
-        if isinstance(task, dict) and isinstance(task.get("id"), str)
-    }
-    errors.extend(write_ownership_violations(
-        group_tasks,
-        ownership_scope_by_task=group_scopes,
-    ))
-    if errors:
-        return errors
+    try:
+        _, projected_group_batches = _project_batches(group_scope_data)
+        group_scopes = {
+            str(task.get("id")): batch_id
+            for batch_id, batch in projected_group_batches.items()
+            for task in batch.get("tasks", [])
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        ownership_errors = write_ownership_violations(
+            group_tasks,
+            ownership_scope_by_task=group_scopes,
+        )
+    except (TypeError, ValueError) as exc:
+        ownership_errors = [{
+            "reason": "task_group_ownership_projection_invalid",
+            "detail": str(exc),
+            "repairTarget": "task_group",
+        }]
+    errors.extend(_with_validation_stage("write_ownership", ownership_errors))
+
     design_contract, design_errors = _current_design_contract(feature_dir)
-    errors.extend(design_errors)
-    if design_errors:
-        return errors
-    errors.extend(validate_task_group_design_contract(design_contract, _task_groups(data)))
-    if errors:
-        return errors
-    expected, covered = _scenario_coverage(feature_dir, _task_groups(data))
+    errors.extend(_with_validation_stage("design_lock", design_errors))
+    if not design_errors:
+        errors.extend(_with_validation_stage(
+            "design_refs", validate_task_group_design_contract(design_contract, groups),
+        ))
+
+    errors.extend(_with_validation_stage(
+        "spec_refs", _task_group_spec_ref_errors(feature_dir, groups),
+    ))
+    expected, covered = _scenario_coverage(feature_dir, groups)
     missing = sorted(expected - covered)
     if missing:
         missing_count = len(missing)
         missing_preview = ', '.join(missing[:10])
         if missing_count > 10:
             missing_preview += f" ...还有 {missing_count - 10} 个"
-        return [{
+        errors.extend(_with_validation_stage("scenario_coverage", [{
             "reason": "missing_plan_scenario_coverage",
             "detail": f"return_to_scenario_matrix;ids={','.join(missing)}",
-            "repairSuggestion": f"有 {missing_count} 个场景未被任务覆盖：{missing_preview}。请在 task-groups.json 中添加或调整任务的 mergedScenarioRefs，确保所有场景都被覆盖"
-        }]
-    return []
+            "repairSuggestion": (
+                f"有 {missing_count} 个场景未被任务覆盖：{missing_preview}。"
+                "请在 Plan Core 的 refs.scenarios 中添加或调整任务引用，确保所有场景都被覆盖。"
+            ),
+        }]))
+    return errors
 
 
 def _task_group_digest(data: dict[str, Any]) -> str:
@@ -1759,28 +1867,74 @@ def _draft_group_change_summary(
     return ",".join(changes) if changes else "unknown_group_change"
 
 
+def _draft_group_drift(
+    lock: dict[str, Any],
+    feature: str,
+    task_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Inspect a Draft's Core source without forcing callers into an exception.
+
+    Finalized-plan recovery needs to reason about design and Core drift at the
+    same time.  The former implementation could only learn about group drift
+    by throwing before the Design check, which made the two recovery commands
+    mutually blocking.
+    """
+
+    group_file = lock.get("groupFile")
+    if not isinstance(group_file, str) or not group_file:
+        return {
+            "changed": True,
+            "reason": "task_draft_group_file_missing",
+            "detail": "",
+            "groupFile": None,
+        }
+    try:
+        data = _load_task_group_file(Path(group_file), feature)
+    except (PlanWriterInputError, OSError, ValueError) as exc:
+        reason = exc.reason if isinstance(exc, PlanWriterInputError) else "task_draft_group_source_invalid"
+        detail = exc.detail if isinstance(exc, PlanWriterInputError) else str(exc)
+        return {
+            "changed": True,
+            "reason": reason,
+            "detail": detail or "",
+            "groupFile": group_file,
+        }
+    actual = _task_group_digest(data)
+    expected = lock.get("groupingDigest")
+    changed = actual != expected
+    return {
+        "changed": changed,
+        "reason": "task_group_changed_after_draft_created" if changed else None,
+        "detail": (
+            f"expected={expected};actual={actual};affectedGroupFields="
+            f"{_draft_group_change_summary(data, task_items) if changed and task_items is not None else 'unknown_group_change'}"
+        ) if changed else "",
+        "groupFile": group_file,
+        "expectedDigest": expected,
+        "actualDigest": actual,
+        "data": data,
+    }
+
+
 def _draft_group_data(
     lock: dict[str, Any],
     feature: str,
     task_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    group_file = lock.get("groupFile")
-    if not isinstance(group_file, str) or not group_file:
+    drift = _draft_group_drift(lock, feature, task_items)
+    if drift.get("reason") == "task_draft_group_file_missing":
         raise PlanWriterInputError("task_draft_group_file_missing")
-    data = _load_task_group_file(Path(group_file), feature)
-    actual = _task_group_digest(data)
-    expected = lock.get("groupingDigest")
-    if actual != expected:
-        changed = (
-            _draft_group_change_summary(data, task_items)
-            if task_items is not None
-            else "unknown_group_change"
-        )
+    if drift.get("reason") not in {None, "task_group_changed_after_draft_created"}:
+        raise PlanWriterInputError(str(drift["reason"]), str(drift.get("detail") or ""))
+    if drift.get("changed") is True:
         raise PlanWriterInputError(
             "task_group_changed_after_draft_created",
-            f"expected={expected};actual={actual};affectedGroupFields={changed};"
+            f"{drift.get('detail')};"
             "run=rebuild-task-draft;then_refill_resetTaskIds_only",
         )
+    data = drift.get("data")
+    if not isinstance(data, dict):
+        raise PlanWriterInputError("task_draft_group_source_invalid")
     return data
 
 
@@ -2123,6 +2277,11 @@ def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -
                         "draft_validation_cover_invalid",
                         f"task={task_id};command={index};cover={value}",
                     )
+            if len(set(covers)) != len(covers):
+                raise PlanWriterInputError(
+                    "draft_validation_cover_duplicate",
+                    f"task={task_id};command={index}",
+                )
             command["covers"] = covers
         else:
             raise PlanWriterInputError("draft_validation_covers_must_be_array", f"task={task_id};index={index}")
@@ -2493,6 +2652,12 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    if _draft_lock_path(workspace, feature).is_file():
+        return render_result(fail(
+            "task_draft_already_exists",
+            "Draft 已存在；请继续、预检或重建 Draft，init 不会创建新的根 plan.json 占位。",
+            path=_draft_plan_path(workspace, feature),
+        ))
     existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
     if existing:
         return render_result(existing)
@@ -2700,6 +2865,87 @@ def _load_task_group_file(group_file: Path, feature: str) -> dict[str, Any]:
     return data
 
 
+def _task_groups_body(args: argparse.Namespace) -> dict[str, Any]:
+    """Read one Plan Core payload without relying on a reusable temp file."""
+
+    if args.body_file:
+        body = read_object_file(Path(args.body_file))
+    elif args.body_stdin:
+        body = _plan_writer_stdin_body()
+    elif args.body_json:
+        body = parse_json_value(args.body_json)
+        if not isinstance(body, dict):
+            raise PlanWriterInputError("task_groups_body_must_be_object")
+    else:
+        raise PlanWriterInputError("task_groups_input_missing")
+    if not isinstance(body, dict):
+        raise PlanWriterInputError("task_groups_body_must_be_object")
+    unknown = sorted(set(body) - {"schemaVersion", "featureId", "tasks"})
+    if unknown:
+        raise PlanWriterInputError("compact_plan_core_field_unknown", f"fields={','.join(unknown)}")
+    if body.get("schemaVersion") != PLAN_CORE_SCHEMA:
+        raise PlanWriterInputError(
+            "compact_plan_core_schema_required",
+            f"expected={PLAN_CORE_SCHEMA};actual={body.get('schemaVersion')}",
+        )
+    return body
+
+
+def _cmd_write_task_groups(args: argparse.Namespace) -> int:
+    """Preflight a compact Core and atomically persist it as the Draft source."""
+
+    workspace, feature = _resolve(args)
+    path = (
+        Path(args.group_file).expanduser().resolve()
+        if args.group_file
+        else _default_task_groups_path(workspace, feature)
+    )
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    if _draft_lock_path(workspace, feature).is_file():
+        return render_result(fail(
+            "task_draft_already_exists",
+            "use create-repair-work/apply-draft-patch or rebuild-task-draft; Core source is locked after Draft creation",
+            path=_draft_plan_path(workspace, feature),
+        ))
+
+    core = _task_groups_body(args)
+    group_data = _compact_plan_core_to_groups(core)
+    manifest_feature = group_data.get("featureId")
+    if manifest_feature != feature:
+        return render_result(fail(
+            "task_groups_feature_mismatch",
+            f"expected={feature};actual={manifest_feature}",
+            path=path,
+        ))
+    errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
+    report = _task_group_validation_report(group_data, errors)
+    if errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=path,
+            errors=errors,
+            data={"grouping": _task_group_summary(group_data), "validation": report},
+        ))
+
+    canonical_core = {
+        "schemaVersion": PLAN_CORE_SCHEMA,
+        "featureId": feature,
+        "tasks": copy.deepcopy(core["tasks"]),
+    }
+    changed = atomic_write_json(path, canonical_core)
+    return render_result(WriterResult(
+        ok=True,
+        path=path,
+        changed=changed,
+        data={
+            "groupFile": str(path),
+            "grouping": _task_group_summary(group_data),
+            "validation": report,
+        },
+    ))
+
+
 def _task_group_summary(data: dict[str, Any]) -> dict[str, Any]:
     groups = _task_groups(data)
     return {
@@ -2718,7 +2964,43 @@ def _task_group_summary(data: dict[str, Any]) -> dict[str, Any]:
             }
             for group in groups
         ],
+        "detailObligations": _matrix_detail_obligations(groups),
     }
+
+
+def _matrix_detail_obligations(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expose Detail requirements implied by an SCN matrix before Detail exists.
+
+    The full Plan validator can only check a matrix command after acceptance
+    criteria and checks have been supplied.  This projection makes the same
+    rule visible immediately after Core preflight, where it can still affect
+    task splitting rather than trigger an avoidable Detail rewrite.
+    """
+
+    obligations: list[dict[str, Any]] = []
+    for group in groups:
+        scenario_count = len(scenario_refs_from_spec_refs([
+            item for item in group.get("specRefs", []) if isinstance(item, str)
+        ]))
+        if scenario_count <= PLAN_TASK_MAX_SCENARIOS:
+            continue
+        allowed_kinds = set(BEHAVIOR_TASK_VALIDATION_KINDS) - {"static_check"}
+        if group.get("uiRequired") is True:
+            allowed_kinds.update(FRONTEND_COMPILE_VALIDATION_KINDS)
+        obligations.append({
+            "taskId": group.get("id"),
+            "trigger": f"scenarios={scenario_count}>{PLAN_TASK_MAX_SCENARIOS}",
+            "required": {
+                "commandCount": 1,
+                "required": True,
+                "allowedKinds": sorted(allowed_kinds),
+                "covers": (
+                    "omit covers to have the writer cover every generated acceptance criterion; "
+                    "if supplied, it must list every generated acceptance criterion exactly once"
+                ),
+            },
+        })
+    return obligations
 
 
 def _code_workspace_contexts(values: list[str] | None) -> list[dict[str, Any]]:
@@ -3342,6 +3624,344 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
     ))
 
 
+def _draft_detail_lint_errors(
+    feature: str,
+    feature_dir: Path,
+    candidate: dict[str, Any],
+    code_workspaces: list[str],
+    design_contract: dict[str, Any],
+    *,
+    defer_to_test_stages: bool,
+) -> list[dict[str, Any]]:
+    """Collect structural and artifact-reference errors without writing a Draft."""
+
+    errors = _draft_task_validation_errors(
+        feature,
+        candidate,
+        code_workspaces,
+        defer_to_test_stages=defer_to_test_stages,
+    )
+    errors.extend(validate_task_artifact_refs(
+        feature_dir,
+        candidate,
+        cache=None,
+        design_contract=design_contract,
+        check_design_artifact=False,
+    ))
+    return errors
+
+
+def _cmd_lint_draft_task_detail(args: argparse.Namespace) -> int:
+    """Validate one proposed Detail fully, without mutating Draft state."""
+
+    workspace, feature = _resolve(args)
+    lock, data = _load_draft_bundle(workspace, feature)
+    if lock.get("status") == "finalized":
+        return render_result(fail("task_draft_finalized", path=_draft_plan_path(workspace, feature)))
+    _draft_group_data(lock, feature, _tasks(data))
+    feature_dir = _path(workspace, feature).parent
+    design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
+    if design_lock_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_lock_errors,
+        ))
+    design_contract, design_errors = _current_design_contract(feature_dir)
+    if design_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_errors,
+        ))
+    task = _find_task(data, args.task_id)
+    candidate = _normalize_draft_task_detail(task, _draft_detail_body(args))
+    code_workspaces = [
+        item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
+    ]
+    candidate = _annotate_validation_test_plan(candidate, code_workspaces, data)
+    errors = _draft_detail_lint_errors(
+        feature,
+        feature_dir,
+        candidate,
+        code_workspaces,
+        design_contract,
+        defer_to_test_stages=defer_to_test_stages_enabled(data),
+    )
+    report = _validation_report([candidate], errors)
+    return render_result(WriterResult(
+        ok=not errors,
+        path=_draft_plan_path(workspace, feature),
+        errors=errors,
+        data={
+            "taskId": args.task_id,
+            "validation": report,
+            "draft": _draft_summary(lock, data),
+        },
+    ))
+
+
+def _draft_detail_batch_entries(args: argparse.Namespace) -> list[tuple[str, dict[str, Any]]]:
+    """Read the atomic multi-detail body accepted by set-draft-task-details."""
+
+    if args.body_file:
+        body = read_object_file(args.body_file)
+    elif args.body_stdin:
+        body = _plan_writer_stdin_body()
+    elif args.body_json:
+        body = parse_json_value(args.body_json)
+        if not isinstance(body, dict):
+            raise PlanWriterInputError("draft_task_details_must_be_object")
+    else:
+        raise PlanWriterInputError("draft_task_details_input_missing")
+    unknown = sorted(set(body) - {"details"})
+    if unknown:
+        raise PlanWriterInputError("draft_task_details_field_unknown", f"fields={','.join(unknown)}")
+    raw_details = body.get("details")
+    if not isinstance(raw_details, list) or not raw_details:
+        raise PlanWriterInputError("draft_task_details_missing")
+    entries: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_details, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("draft_task_details_entry_must_be_object", f"index={index}")
+        unknown_entry = sorted(set(raw) - {"taskId", "body"})
+        if unknown_entry:
+            raise PlanWriterInputError(
+                "draft_task_details_entry_field_unknown",
+                f"index={index};fields={','.join(unknown_entry)}",
+            )
+        task_id = raw.get("taskId")
+        body_value = raw.get("body")
+        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
+            raise PlanWriterInputError("draft_task_details_task_id_invalid", f"index={index};task={task_id}")
+        if task_id in seen:
+            raise PlanWriterInputError("draft_task_details_task_id_duplicate", f"task={task_id}")
+        if not isinstance(body_value, dict):
+            raise PlanWriterInputError("draft_task_details_body_must_be_object", f"task={task_id}")
+        seen.add(task_id)
+        entries.append((task_id, _compact_detail_to_legacy(body_value)))
+    return entries
+
+
+def _draft_detail_batch_candidate(
+    feature: str,
+    feature_dir: Path,
+    data: dict[str, Any],
+    group_data: dict[str, Any],
+    entries: list[tuple[str, dict[str, Any]]],
+    code_workspaces: list[str],
+    design_contract: dict[str, Any],
+    *,
+    full: bool,
+) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+    """Apply Details to an in-memory Draft and validate the resulting state.
+
+    ``lint-draft-task-details --full`` and ``set-draft-task-details --full``
+    intentionally share this routine.  A successful full lint therefore uses
+    the exact candidate Draft and the same aggregate preflight as the write;
+    only the final atomic bundle write differs.
+    """
+
+    candidate_data = copy.deepcopy(data)
+    errors: list[dict[str, Any]] = []
+    written_task_ids: list[str] = []
+    ordered_ids = [str(item.get("id")) for item in _tasks(candidate_data)]
+    submitted_ids = {task_id for task_id, _ in entries}
+    if full:
+        missing = [task_id for task_id in ordered_ids if task_id not in submitted_ids]
+        if missing:
+            errors.append({
+                "reason": "draft_task_details_full_payload_incomplete",
+                "detail": f"missingTaskIds={','.join(missing)}",
+                "taskIds": missing,
+                "repairTarget": "task_detail",
+            })
+
+    for task_id, detail in entries:
+        try:
+            task = _find_task(candidate_data, task_id)
+            candidate = _normalize_draft_task_detail(task, detail)
+            candidate = _annotate_validation_test_plan(candidate, code_workspaces, candidate_data)
+            task_errors = _draft_detail_lint_errors(
+                feature,
+                feature_dir,
+                candidate,
+                code_workspaces,
+                design_contract,
+                defer_to_test_stages=defer_to_test_stages_enabled(candidate_data),
+            )
+            if task_errors:
+                errors.extend(task_errors)
+                continue
+            task_items = _tasks(candidate_data)
+            task_items[task_items.index(task)] = candidate
+            written_task_ids.append(task_id)
+        except (PlanWriterInputError, ValueError) as exc:
+            reason = exc.reason if isinstance(exc, PlanWriterInputError) else "draft_task_detail_invalid"
+            detail_text = exc.detail if isinstance(exc, PlanWriterInputError) else str(exc)
+            errors.append({"reason": reason, "detail": f"task={task_id};{detail_text}"})
+
+    if full and not errors:
+        errors.extend(_task_set_preflight_errors(
+            feature_dir,
+            candidate_data,
+            group_data,
+            code_workspaces,
+            require_engineering_commands=True,
+        ))
+    return candidate_data, written_task_ids, errors
+
+
+def _draft_detail_batch_context(
+    args: argparse.Namespace,
+) -> tuple[
+    Path,
+    str,
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    Path,
+    list[str],
+]:
+    """Load the immutable Draft inputs shared by batch Detail operations."""
+
+    workspace, feature = _resolve(args)
+    lock, data = _load_draft_bundle(workspace, feature)
+    group_data = _draft_group_data(lock, feature, _tasks(data))
+    feature_dir = _path(workspace, feature).parent
+    code_workspaces = [
+        item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
+    ]
+    return (
+        workspace,
+        feature,
+        lock,
+        data,
+        group_data,
+        feature_dir,
+        code_workspaces,
+    )
+
+
+def _cmd_lint_draft_task_details(args: argparse.Namespace) -> int:
+    """Validate multiple Detail candidates, optionally as one complete Draft."""
+
+    (
+        workspace,
+        feature,
+        lock,
+        data,
+        group_data,
+        feature_dir,
+        code_workspaces,
+    ) = _draft_detail_batch_context(args)
+    if lock.get("status") == "finalized":
+        return render_result(fail("task_draft_finalized", path=_draft_plan_path(workspace, feature)))
+    design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
+    if design_lock_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_lock_errors,
+        ))
+    design_contract, design_errors = _current_design_contract(feature_dir)
+    if design_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_errors,
+        ))
+    entries = _draft_detail_batch_entries(args)
+    candidate_data, candidate_task_ids, errors = _draft_detail_batch_candidate(
+        feature,
+        feature_dir,
+        data,
+        group_data,
+        entries,
+        code_workspaces,
+        design_contract,
+        full=args.full,
+    )
+    report = _draft_validation_report(candidate_data, errors)
+    return render_result(WriterResult(
+        ok=not errors,
+        path=_draft_plan_path(workspace, feature),
+        errors=report["issues"],
+        data={
+            "candidateTaskIds": candidate_task_ids,
+            "fullValidation": args.full,
+            "validation": report,
+            "draft": _draft_summary(lock, data),
+        },
+    ))
+
+
+def _cmd_set_draft_task_details(args: argparse.Namespace) -> int:
+    """Atomically validate and write multiple independent task details."""
+
+    (
+        workspace,
+        feature,
+        lock,
+        data,
+        group_data,
+        feature_dir,
+        code_workspaces,
+    ) = _draft_detail_batch_context(args)
+    if lock.get("status") == "finalized":
+        return render_result(fail("task_draft_finalized", path=_draft_plan_path(workspace, feature)))
+    design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
+    if design_lock_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_lock_errors,
+        ))
+    design_contract, design_errors = _current_design_contract(feature_dir)
+    if design_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_errors,
+        ))
+    entries = _draft_detail_batch_entries(args)
+    candidate_data, written_task_ids, errors = _draft_detail_batch_candidate(
+        feature,
+        feature_dir,
+        data,
+        group_data,
+        entries,
+        code_workspaces,
+        design_contract,
+        full=args.full,
+    )
+    if errors:
+        report = _draft_validation_report(candidate_data, errors)
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=errors,
+            data={"validation": report, "draft": _draft_summary(lock, data)},
+        ))
+
+    data = candidate_data
+    ordered_ids = [str(item.get("id")) for item in _tasks(data)]
+    ready = {
+        item for item in lock.get("readyTaskIds", []) if isinstance(item, str)
+    }
+    ready.update(written_task_ids)
+    lock["readyTaskIds"] = [task_id for task_id in ordered_ids if task_id in ready]
+    lock["status"] = "ready" if len(ready) == len(ordered_ids) else "collecting"
+    result = _write_draft_bundle(workspace, feature, data, lock)
+    return render_result(with_result_data(
+        result,
+        writtenTaskIds=written_task_ids,
+        fullValidation=args.full,
+        draft=_draft_summary(lock, data),
+    ))
+
+
 def _draft_repair_entries(args: argparse.Namespace, *, single_task: bool) -> list[tuple[str, dict[str, Any]]]:
     body = _draft_detail_body(args)
     if single_task:
@@ -3635,6 +4255,11 @@ def _cmd_show_draft_task_work(args: argparse.Namespace) -> int:
     group = next((item for item in _task_groups(group_data) if item.get("id") == args.task_id), None)
     if group is None:
         return render_result(fail("task_group_not_found", args.task_id, path=_draft_plan_path(workspace, feature)))
+    matrix_obligation = next(
+        (item for item in _matrix_detail_obligations(_task_groups(group_data))
+         if item.get("taskId") == args.task_id),
+        None,
+    )
     return render_result(WriterResult(
         ok=True,
         path=_draft_plan_path(workspace, feature),
@@ -3645,6 +4270,7 @@ def _cmd_show_draft_task_work(args: argparse.Namespace) -> int:
                 "taskId": args.task_id,
                 "core": _compact_group_projection(group),
                 "currentDetail": _compact_detail_projection(task),
+                "detailObligation": matrix_obligation,
                 "requiredOutput": PLAN_DETAIL_SCHEMA,
                 "writerOwned": ["acceptance.id", "checks.id", "checks.cwd", "scope.paths"],
                 "note": "仅返回 schemaVersion=autodev.plan-detail.v1 的单个任务详情；不要返回 PLAN.md、Batch 或其他 Task。",
@@ -3820,6 +4446,38 @@ def _cmd_create_repair_work(args: argparse.Namespace) -> int:
                 path=group_file,
             ))
         group_data = _load_task_group_file(group_file, feature)
+        # A finalized Draft can be stale for both its Design snapshot and its
+        # Core digest.  A restricted patch cannot safely repair that state, so
+        # return the same explicit recovery disposition as diagnose instead of
+        # emitting an empty repair-work item and sending callers in circles.
+        if _draft_lock_path(workspace, feature).is_file():
+            try:
+                draft_lock, draft_data = _load_draft_bundle(workspace, feature)
+                design_drift = _draft_design_contract_errors(
+                    _path(workspace, feature).parent,
+                    draft_lock,
+                )
+                core_drift = _draft_group_drift(draft_lock, feature, _tasks(draft_data))
+                if design_drift and core_drift.get("changed") is True:
+                    return render_result(WriterResult(
+                        ok=False,
+                        path=group_file,
+                        errors=[{
+                            "reason": "full_rebuild_required",
+                            "detail": "design_and_group_changed_after_draft_created;"
+                            f"{core_drift.get('detail')}",
+                            "repairTarget": "full_rebuild",
+                            "repairable": False,
+                            "nextCommand": (
+                                "rebuild-finalized-draft --group-file <file> "
+                                "--design-revision-confirmed --reason <reason>"
+                            ),
+                        }],
+                    ))
+            except PlanWriterInputError:
+                # Pre-Draft repair work remains available when an interrupted
+                # Draft cannot be loaded; diagnose owns its recovery path.
+                pass
         data = {"featureId": feature, "tasks": []}
         if args.feedback_file:
             raw_issues = _repair_feedback_issues(args, workspace, feature, data, group_data)
@@ -4282,6 +4940,9 @@ def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
     draft_status: str | None = None
     draft_error: str | None = None
     draft_summary: dict[str, Any] | None = None
+    design_changed = False
+    group_changed = False
+    group_drift: dict[str, Any] | None = None
     try:
         draft_lock, draft_data = _load_draft_bundle(workspace, feature)
         draft_available = True
@@ -4291,12 +4952,23 @@ def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
             _path(workspace, feature).parent,
             draft_lock,
         )
-        draft_valid = not design_lock_errors
+        group_drift = _draft_group_drift(draft_lock, feature, _tasks(draft_data))
+        design_changed = any(
+            error.get("reason") == "confirmed_design_changed_after_draft_created"
+            for error in design_lock_errors
+        )
+        group_changed = group_drift.get("changed") is True
+        draft_valid = not design_lock_errors and not group_changed
         if design_lock_errors:
             first = design_lock_errors[0]
             draft_error = str(first.get("reason"))
             if first.get("detail"):
                 draft_error += f":{first['detail']}"
+        elif group_changed:
+            draft_error = str(group_drift.get("reason"))
+            detail = group_drift.get("detail")
+            if detail:
+                draft_error += f":{detail}"
     except PlanWriterInputError as exc:
         draft_available = _draft_lock_path(workspace, feature).is_file()
         draft_error = f"{exc.reason}:{exc.detail}" if exc.detail else exc.reason
@@ -4310,17 +4982,18 @@ def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
     else:
         artifact_state = "finalized_corrupt"
 
-    if draft_error == "confirmed_design_changed_after_draft_created" or (
-        isinstance(draft_error, str)
-        and draft_error.startswith("confirmed_design_changed_after_draft_created:")
-    ):
+    if execution_blockers:
+        recommended = "plan_revision_required"
+    elif design_changed and group_changed:
+        recommended = "full_rebuild_required"
+    elif design_changed:
         recommended = "design_revision_required"
+    elif group_changed:
+        recommended = "task_group_rebuild_required"
     elif not draft_available or not draft_valid:
         recommended = "full_rebuild_required"
     elif draft_status != "finalized":
         recommended = "continue_draft_repair"
-    elif execution_blockers:
-        recommended = "plan_revision_required"
     else:
         recommended = "reopen-finalized-draft"
 
@@ -4338,9 +5011,24 @@ def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
                 "draftValid": draft_valid,
                 "draftStatus": draft_status,
                 "draftError": draft_error,
+                "drift": {
+                    "designChanged": design_changed,
+                    "groupChanged": group_changed,
+                    "groupFile": group_drift.get("groupFile") if group_drift else None,
+                    "grouping": {
+                        key: group_drift.get(key)
+                        for key in ("expectedDigest", "actualDigest", "reason", "detail")
+                    } if group_drift else None,
+                },
                 "executionStarted": bool(execution_blockers),
                 "executionBlockers": execution_blockers,
                 "recommendedCommand": recommended,
+                "nextCommand": (
+                    "rebuild-finalized-draft --group-file <file> "
+                    "--design-revision-confirmed --reason <reason>"
+                    if recommended == "full_rebuild_required" and design_changed and group_changed
+                    else None
+                ),
                 "draft": draft_summary,
             },
         },
@@ -4356,7 +5044,6 @@ def _cmd_reopen_finalized_draft(args: argparse.Namespace) -> int:
             f"status={lock.get('status')}",
             path=_draft_plan_path(workspace, feature),
         ))
-    _draft_group_data(lock, feature, _tasks(data))
     feature_dir = _path(workspace, feature).parent
     design_contract, design_errors = _current_design_contract(feature_dir)
     if design_errors:
@@ -4371,6 +5058,25 @@ def _cmd_reopen_finalized_draft(args: argparse.Namespace) -> int:
         and isinstance(design_snapshot.get("sha256"), str)
         and design_snapshot.get("sha256") != design_contract.get("sha256")
     )
+    group_drift = _draft_group_drift(lock, feature, _tasks(data))
+    group_changed = group_drift.get("changed") is True
+    if design_changed and group_changed:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{
+                "reason": "full_rebuild_required",
+                "detail": "design_and_group_changed_after_draft_created;"
+                f"{group_drift.get('detail')}",
+                "repairTarget": "full_rebuild",
+                "repairable": False,
+                "designRevisionConfirmed": args.design_revision_confirmed is True,
+                "nextCommand": (
+                    "rebuild-finalized-draft --group-file <file> "
+                    "--design-revision-confirmed --reason <reason>"
+                ),
+            }],
+        ))
     if design_changed and args.design_revision_confirmed is not True:
         return render_result(WriterResult(
             ok=False,
@@ -4381,6 +5087,18 @@ def _cmd_reopen_finalized_draft(args: argparse.Namespace) -> int:
                 "repairTarget": "design_revision",
                 "repairable": False,
                 "designMutationAllowed": False,
+            }],
+        ))
+    if group_changed:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{
+                "reason": "task_group_changed_after_draft_created",
+                "detail": str(group_drift.get("detail") or ""),
+                "repairTarget": "task_group",
+                "repairable": False,
+                "nextCommand": "rebuild-finalized-draft --group-file <file> --reason <reason>",
             }],
         ))
     task_ids = [str(task.get("id")) for task in _tasks(data)]
@@ -4572,11 +5290,27 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
     old_lock, old_data = _load_draft_bundle(workspace, feature)
     design_lock_errors = _draft_design_contract_errors(_path(workspace, feature).parent, old_lock)
     if design_lock_errors:
-        return render_result(WriterResult(
-            ok=False,
-            path=_draft_plan_path(workspace, feature),
-            errors=design_lock_errors,
-        ))
+        confirmed_only = all(
+            error.get("reason") == "confirmed_design_changed_after_draft_created"
+            for error in design_lock_errors
+        )
+        if getattr(args, "design_revision_confirmed", False) and confirmed_only:
+            design_contract, design_errors = _current_design_contract(_path(workspace, feature).parent)
+            if design_errors:
+                return render_result(WriterResult(
+                    ok=False,
+                    path=_draft_plan_path(workspace, feature),
+                    errors=design_errors,
+                ))
+            old_lock = copy.deepcopy(old_lock)
+            old_lock["designContract"] = design_contract_snapshot(design_contract)
+            old_lock["designRevisionConfirmedAt"] = _utc_now()
+        else:
+            return render_result(WriterResult(
+                ok=False,
+                path=_draft_plan_path(workspace, feature),
+                errors=design_lock_errors,
+            ))
     group_file = Path(args.group_file).expanduser().resolve()
     if not group_file.is_file():
         return render_result(fail(
@@ -4602,6 +5336,141 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
         group_file,
         group_data,
         code_workspaces,
+    ))
+
+
+def _cmd_rebuild_finalized_draft(args: argparse.Namespace) -> int:
+    """Safely reproject an unexecuted finalized Draft after Core/Design drift.
+
+    This is intentionally separate from ``rebuild-task-draft``: a finalized
+    plan still has formal artifacts, and only this command verifies that none
+    of them has begun execution before permitting a replacement Draft.
+    """
+
+    workspace, feature = _resolve(args)
+    old_lock, old_data = _load_draft_bundle(workspace, feature)
+    if old_lock.get("status") != "finalized":
+        return render_result(fail(
+            "task_draft_not_finalized",
+            f"status={old_lock.get('status')}",
+            path=_draft_plan_path(workspace, feature),
+        ))
+    reason = str(args.reason).strip()
+    if not reason:
+        return render_result(fail("finalized_plan_reopen_reason_required"))
+
+    feature_dir = _path(workspace, feature).parent
+    design_contract, design_errors = _current_design_contract(feature_dir)
+    if design_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=design_errors,
+        ))
+    design_snapshot = old_lock.get("designContract")
+    design_changed = (
+        isinstance(design_snapshot, dict)
+        and isinstance(design_snapshot.get("sha256"), str)
+        and design_snapshot.get("sha256") != design_contract.get("sha256")
+    )
+    if design_changed and args.design_revision_confirmed is not True:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{
+                "reason": "confirmed_design_changed_after_draft_created",
+                "detail": "pass --design-revision-confirmed only after the Design revision was separately confirmed",
+                "repairTarget": "design_revision",
+                "repairable": False,
+                "designMutationAllowed": False,
+            }],
+        ))
+
+    group_file = Path(args.group_file).expanduser().resolve()
+    if not group_file.is_file():
+        return render_result(fail(
+            "task_group_source_missing_incremental_repair_forbidden",
+            "必须保留现有 task-groups.json，不能删除后再全量生成。",
+            path=group_file,
+        ))
+    group_data = _load_task_group_file(group_file, feature)
+    errors = _task_group_preflight_errors(feature_dir, group_data)
+    if errors:
+        return render_result(WriterResult(ok=False, path=group_file, errors=errors))
+
+    formal_root, formal_batches, formal_load_errors = _load_raw_formal_bundle(workspace, feature)
+    checkpoint, blockers = _formal_execution_blockers(
+        workspace,
+        feature,
+        formal_root,
+        formal_batches,
+        formal_load_errors,
+    )
+    if blockers:
+        return render_result(WriterResult(
+            ok=False,
+            path=_path(workspace, feature),
+            errors=[{
+                "reason": "finalized_plan_rebuild_forbidden",
+                "detail": ";".join(blockers),
+                "repairTarget": "plan_revision",
+            }],
+            data={"checkpoint": checkpoint, "executionBlockers": blockers},
+        ))
+
+    code_workspaces = (
+        [str(Path(value).expanduser().resolve()) for value in args.code_workspace]
+        if args.code_workspace
+        else [item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str)]
+    )
+    rebuild_lock = copy.deepcopy(old_lock)
+    rebuild_lock["designContract"] = design_contract_snapshot(design_contract)
+    result = _rebuild_task_draft_from_group_data(
+        workspace,
+        feature,
+        rebuild_lock,
+        old_data,
+        group_file,
+        group_data,
+        code_workspaces,
+        last_change={
+            "kind": "full_rebuild",
+            "reason": reason,
+            "designChanged": design_changed,
+            "groupChanged": _task_group_digest(group_data) != old_lock.get("groupingDigest"),
+            "sourceFile": str(group_file),
+        },
+    )
+    if not result.ok:
+        return render_result(result)
+
+    new_lock, new_data = _load_draft_bundle(workspace, feature)
+    new_lock.update({
+        "reopenedForRepair": True,
+        "reopenedAt": _utc_now(),
+        "reopenedReason": reason,
+        "reopenedFromFormalDigest": formal_root.get("taskSetDigest")
+        if isinstance(formal_root, dict)
+        else None,
+        "previousFinalizedAt": old_lock.get("finalizedAt"),
+        "fullRebuiltAt": _utc_now(),
+        "designContract": design_contract_snapshot(design_contract),
+    })
+    if design_changed:
+        new_lock["designRevisionConfirmedAt"] = _utc_now()
+        new_lock["designRevisionConfirmationReason"] = reason
+    lock_changed = atomic_write_json(_draft_lock_path(workspace, feature), new_lock)
+    return render_result(with_result_data(
+        result,
+        changed=result.changed or lock_changed,
+        checkpoint=checkpoint,
+        formalPlanWasPresent=formal_root is not None,
+        draft=_draft_summary(new_lock, new_data),
+        nextCommands=[
+            "set-draft-task-details --body-stdin (only resetTaskIds)",
+            "preflight-task-draft",
+            "finalize-task-draft --force",
+        ],
     ))
 
 
@@ -4808,9 +5677,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
             ok=True,
             data={
                 "contract": {
-                    "taskTemplate": TASK_TEMPLATE_RELATIVE_PATH,
-                    "taskInputExample": _task_input_example(),
-                    "taskTemplateStatus": "deprecated_legacy_import_only",
                     "taskDetailTemplate": TASK_DETAIL_TEMPLATE_RELATIVE_PATH,
                     "taskDetailInputExample": _task_detail_input_example(),
                     "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
@@ -4841,13 +5707,37 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "modelFacingContracts": {
                         "planCore": {
                             "schemaVersion": PLAN_CORE_SCHEMA,
-                            "input": "task-groups.json may use compact tasks[]; writer projects the runtime group contract",
+                            "template": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
+                            "input": "write compact tasks[] only; writer projects the runtime group contract",
+                            "requiredFields": [
+                                "id", "outcome", "dependsOn", "workspace", "writeSet", "refs", "validation",
+                            ],
+                            "taskIdPolicy": {
+                                "format": "TNNN",
+                                "sequence": "ordered tasks start at T001 and increment by one without gaps",
+                            },
+                            "forbiddenNonCoreFields": sorted(COMPACT_PLAN_CORE_FORBIDDEN_FIELDS),
                             "mergedFields": {
                                 "outcome": ["title"],
                                 "dependsOn": ["deps"],
                                 "writeSet": ["touches", "scope.paths", "expectedFiles", "writeTargets.symbols"],
                                 "refs": ["specRefs", "apiIds"],
                                 "validation.seam": ["validationBoundary"],
+                                "validation.mergeJustification": [
+                                    "mergedScenarioRefs", "splitRationale",
+                                ],
+                            },
+                            "conditionalFields": {
+                                "ui": {
+                                    "when": "task_has_a_user_facing_ui_surface",
+                                    "requiredFields": ["pages", "interactions", "visualSources", "route"],
+                                },
+                                "validation.mergeJustification": {
+                                    "when": "any_granularity_soft_limit_is_exceeded",
+                                    "mustMention": "path_qualified scenario refs and relevant API/PAGE/UIX IDs",
+                                    "writerDerives": ["mergedScenarioRefs", "splitRationale"],
+                                    "omitWhen": "all_granularity_dimensions_are_at_or_below_soft_limits",
+                                },
                             },
                         },
                         "taskDetail": {
@@ -4876,7 +5766,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "rematerialize": "finalize-task-draft --force",
                         "guard": "only before code/validation execution and evidence creation",
                     },
-                    "requiredTaskFields": [
+                    "runtimeRequiredTaskFields": [
                         "title",
                         "goal",
                         "specRefs",
@@ -4887,7 +5777,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "nonGoals",
                         "validationCommands",
                     ],
-                    "requiredTaskGroupFields": [
+                    "runtimeProjectedTaskGroupFields": [
                         "id",
                         "title",
                         "deps",
@@ -4898,13 +5788,12 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "validationBoundary",
                         "workspaceRef",
                     ],
-                    "exampleOnlyTaskFields": ["matrixExceptionExample"],
-                    "exampleOnlyTaskGroupFields": [
-                        "externalDependencyExample",
-                        "matrixExceptionExample",
-                        "uiRequiredExample",
+                    "planCoreExamples": [
+                        "externalDependencyTask",
+                        "matrixExceptionTask",
+                        "uiTask",
                     ],
-                    "groupOwnedTaskFields": sorted(DRAFT_GROUP_OWNED_FIELDS),
+                    "runtimeGroupOwnedTaskFields": sorted(DRAFT_GROUP_OWNED_FIELDS),
                     "requiredTaskDetailFields": sorted(DRAFT_REQUIRED_DETAIL_FIELDS),
                     "emptyAllowedTaskDetailFields": [
                         "designRefs",
@@ -4974,6 +5863,60 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "qualityGateCommandKinds": ["static_check"],
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
+                    },
+                    "taskGranularity": {
+                        "softLimits": {
+                            "scenarios": PLAN_TASK_MAX_SCENARIOS,
+                            "apis": PLAN_TASK_MAX_APIS,
+                            "pages": PLAN_TASK_MAX_UI_PAGES,
+                            "interactions": PLAN_TASK_MAX_UI_INTERACTIONS,
+                        },
+                        "hardLimits": {
+                            "scenarios": PLAN_TASK_MATRIX_MAX_SCENARIOS,
+                            "apis": PLAN_TASK_HARD_MAX_APIS,
+                            "pages": PLAN_TASK_HARD_MAX_UI_PAGES,
+                            "interactions": PLAN_TASK_HARD_MAX_UI_INTERACTIONS,
+                        },
+                        "softLimitAction": "validation.mergeJustification is required; otherwise split the task by observable seam",
+                        "hardLimitAction": "must_split_before_draft",
+                        "mergeJustification": {
+                            "minimumLength": PLAN_TASK_SPLIT_RATIONALE_MIN_LENGTH,
+                            "mustExplain": "shared public seam and validation loop; implementation convenience is invalid",
+                            "minimumMentionedIds": dict(PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX),
+                            "scenarioRefs": "use one path-qualified specs/<capability>/spec.md#SCN-NNN reference per scenario",
+                        },
+                        "matrixValidation": {
+                            "when": f"scenarios>{PLAN_TASK_MAX_SCENARIOS}",
+                            "requiredCommandCount": 1,
+                            "backendAllowedKinds": sorted(
+                                set(BEHAVIOR_TASK_VALIDATION_KINDS) - {"static_check"}
+                            ),
+                            "frontendAllowedKinds": sorted(
+                                (set(BEHAVIOR_TASK_VALIDATION_KINDS) - {"static_check"})
+                                | set(FRONTEND_COMPILE_VALIDATION_KINDS)
+                            ),
+                            "covers": (
+                                "omit to auto-cover all generated acceptance criteria; "
+                                "when specified, it must equal all generated acceptance criteria"
+                            ),
+                        },
+                    },
+                    "taskDetailConstraints": {
+                        "implementation": {"minItems": 2, "maxItems": 6},
+                        "acceptance": {
+                            "minItems": 1,
+                            "scenarioRefsMustBeSubsetOf": "Plan Core refs.scenarios",
+                        },
+                        "nonGoals": {"minItems": 1},
+                        "checks": {
+                            "minItemsWhenLocalMode": 1,
+                            "requiredChecksCoverAllAcceptance": True,
+                            "maven": {
+                                "leafModule": "set cwd to the leaf module and omit -pl",
+                                "aggregator": "use -pl only when cwd is a reactor aggregator containing modules",
+                                "duplicateSelector": "-pl may not repeat a non-root cwd",
+                            },
+                        },
                     },
                     "validationCommandPolicy": {
                         "forbiddenExecutables": ["echo", "false", "printf", "true"],
@@ -5047,11 +5990,16 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         },
                     },
                     "taskSetFinalization": {
+                        "coreWriteCommand": "write-task-groups --body-stdin",
                         "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
                         "prepareCommand": (
                             "prepare-task-draft --group-file <file> --code-workspace <path>"
                         ),
                         "detailCommand": "set-draft-task-detail --task-id <id> --body-stdin",
+                        "detailLintCommand": "lint-draft-task-detail --task-id <id> --body-stdin",
+                        "detailBatchCommand": "set-draft-task-details --body-stdin",
+                        "fullDetailLintCommand": "lint-draft-task-details --full --body-stdin",
+                        "fullDetailBatchCommand": "set-draft-task-details --full --body-stdin",
                         "preflightCommand": "preflight-task-draft",
                         "command": "finalize-task-draft",
                         "coverage": "all_path_qualified_spec_scenarios",
@@ -5059,6 +6007,8 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     },
                     "collectingRepairs": {
                         "replace": "set-draft-task-detail --task-id <id> --body-stdin",
+                        "batchReplace": "set-draft-task-details --body-stdin",
+                        "lint": "lint-draft-task-detail --task-id <id> --body-stdin",
                         "rebuild": "rebuild-task-draft --group-file <file>",
                         "atomic": True,
                         "preserveUnchangedTaskDetails": True,
@@ -5083,6 +6033,11 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "autodev-design refreshes .design-contract.lock.json; "
                             "reopen-finalized-draft --design-revision-confirmed --reason <reason> only rebinds Draft"
                         ),
+                        "dualDriftRecovery": (
+                            "diagnose-plan-repair returns full_rebuild_required for Design plus Core drift; "
+                            "run rebuild-finalized-draft --group-file <file> --design-revision-confirmed --reason <reason> "
+                            "only before execution starts"
+                        ),
                         "designChangeError": "confirmed_design_changed_after_draft_created",
                         "groupChangeError": "task_group_changed_after_draft_created",
                         "detailWriteMode": "validate_then_atomic_replace",
@@ -5093,22 +6048,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "defaultValidationCwdSource": "scope.workspaceRoots",
                     },
                     "uiRule": "scope.pages_must_equal_uiRefs.pageRefs_when_uiRequired",
-                    "conditionalFields": {
-                        "uiRefs": {
-                            "when": "uiRequired_is_true",
-                            "requiredFields": [
-                                "pageRefs",
-                                "interactionRefs",
-                                "visualSourceRefs",
-                                "frontendRoute",
-                            ],
-                        },
-                        "mergedScenarioRefs": {
-                            "when": "scenario_refs_count_is_6_to_12",
-                            "requiredFields": [],
-                            "mustEqual": "fully_qualified_scenario_refs_from_specRefs",
-                        },
-                    },
                     "matrixException": {
                         "normalScenarioMaximum": PLAN_TASK_MAX_SCENARIOS,
                         "scenarioMaximum": PLAN_TASK_MATRIX_MAX_SCENARIOS,
@@ -5117,7 +6056,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "frontend": "one_complete_required_behavior_or_matching_compile_command",
                         },
                     },
-                    "matrixExceptionExample": _matrix_exception_example(),
+                    "planCoreMatrixExceptionExample": _task_group_matrix_exception_example(),
                     "projectValidationCommand": {
                         "command": (
                             "add-project-validation-command [--repo <workspaceRef>] "
@@ -6257,6 +7196,40 @@ def main(argv: list[str] | None = None) -> int:
     draft_detail_input.add_argument("--body-json")
     draft_detail.set_defaults(func=_cmd_set_draft_task_detail)
 
+    lint_draft_detail = sub.add_parser("lint-draft-task-detail")
+    _task_selector(lint_draft_detail)
+    lint_draft_detail_input = lint_draft_detail.add_mutually_exclusive_group(required=True)
+    lint_draft_detail_input.add_argument("--body-file")
+    lint_draft_detail_input.add_argument("--body-stdin", action="store_true")
+    lint_draft_detail_input.add_argument("--body-json")
+    lint_draft_detail.set_defaults(func=_cmd_lint_draft_task_detail)
+
+    draft_details = sub.add_parser("set-draft-task-details")
+    _common(draft_details)
+    draft_details_input = draft_details.add_mutually_exclusive_group(required=True)
+    draft_details_input.add_argument("--body-file")
+    draft_details_input.add_argument("--body-stdin", action="store_true")
+    draft_details_input.add_argument("--body-json")
+    draft_details.add_argument(
+        "--full",
+        action="store_true",
+        help="要求 payload 包含 Draft 的每个 Task，并运行与 finalize 相同的聚合预检",
+    )
+    draft_details.set_defaults(func=_cmd_set_draft_task_details)
+
+    lint_draft_details = sub.add_parser("lint-draft-task-details")
+    _common(lint_draft_details)
+    lint_draft_details_input = lint_draft_details.add_mutually_exclusive_group(required=True)
+    lint_draft_details_input.add_argument("--body-file")
+    lint_draft_details_input.add_argument("--body-stdin", action="store_true")
+    lint_draft_details_input.add_argument("--body-json")
+    lint_draft_details.add_argument(
+        "--full",
+        action="store_true",
+        help="要求 payload 包含 Draft 的每个 Task，并运行与 finalize 相同的聚合预检",
+    )
+    lint_draft_details.set_defaults(func=_cmd_lint_draft_task_details)
+
     repair_draft_task = sub.add_parser("repair-draft-task")
     _task_selector(repair_draft_task)
     repair_draft_task_input = repair_draft_task.add_mutually_exclusive_group(required=True)
@@ -6322,7 +7295,24 @@ def main(argv: list[str] | None = None) -> int:
     _common(rebuild_task_draft)
     rebuild_task_draft.add_argument("--group-file", required=True)
     rebuild_task_draft.add_argument("--code-workspace", action="append")
+    rebuild_task_draft.add_argument(
+        "--design-revision-confirmed",
+        action="store_true",
+        help="Design 锁已更新时，显式允许 collecting Draft 绑定到最新已确认设计",
+    )
     rebuild_task_draft.set_defaults(func=_cmd_rebuild_task_draft)
+
+    rebuild_finalized_draft = sub.add_parser("rebuild-finalized-draft")
+    _common(rebuild_finalized_draft)
+    rebuild_finalized_draft.add_argument("--group-file", required=True)
+    rebuild_finalized_draft.add_argument("--code-workspace", action="append")
+    rebuild_finalized_draft.add_argument("--reason", required=True)
+    rebuild_finalized_draft.add_argument(
+        "--design-revision-confirmed",
+        action="store_true",
+        help="仅在 /autodev-design 已重新锁定契约后允许绑定最新设计",
+    )
+    rebuild_finalized_draft.set_defaults(func=_cmd_rebuild_finalized_draft)
 
     finalize_task_draft = sub.add_parser("finalize-task-draft")
     _common(finalize_task_draft)
@@ -6333,6 +7323,20 @@ def main(argv: list[str] | None = None) -> int:
     _common(preflight_task_groups)
     preflight_task_groups.add_argument("--group-file", required=True)
     preflight_task_groups.set_defaults(func=_cmd_preflight_task_groups)
+
+    write_task_groups = sub.add_parser("write-task-groups")
+    _common(write_task_groups)
+    write_task_groups.add_argument(
+        "--group-file",
+        help=(
+            "可选 Core 输出路径；默认写入 Feature 的 .tmp/plan_writer/task-groups.json"
+        ),
+    )
+    write_task_groups_input = write_task_groups.add_mutually_exclusive_group(required=True)
+    write_task_groups_input.add_argument("--body-file")
+    write_task_groups_input.add_argument("--body-stdin", action="store_true")
+    write_task_groups_input.add_argument("--body-json")
+    write_task_groups.set_defaults(func=_cmd_write_task_groups)
 
     preflight_task_set = sub.add_parser("preflight-task-set")
     _common(preflight_task_set)

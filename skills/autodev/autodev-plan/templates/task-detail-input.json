@@ -27,8 +27,7 @@
     {
       "argv": ["[executable]", "[task test arguments]"],
       "kind": "behavior_test",
-      "required": true,
-      "covers": [1]
+      "required": true
     }
   ]
 }
