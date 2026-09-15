@@ -147,7 +147,7 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(
             res["agentConfig"],
             {
-                "agentMode": "solo",
+                "agentMode": "multi",
                 "toolConfig": {"task": {"enabled": True}},
                 "subagentConfig": {
                     "disabledBuiltinSubagents": [],
@@ -251,11 +251,11 @@ class RuntimePolicyTest(unittest.TestCase):
 
     def test_explicit_project_and_feature_select_node_policy(self):
         project, feature, arguments = self._feature_arguments()
-        # biz.* 无子代理配置，保持 solo；dev.* 自 e3abd1f 起改为 multi 以配合子代理注入。
+        # 常规节点采用 multi；代码实现节点改用 workflow。
         cases = (
-            ("prd_in_progress", "solo", False),
+            ("prd_in_progress", "multi", True),
             ("specs_in_progress", "multi", True),
-            ("code_in_progress", "multi", True),
+            ("code_in_progress", "workflow", True),
         )
 
         for checkpoint, expected_agent_mode, expected_enabled in cases:
@@ -290,8 +290,7 @@ class RuntimePolicyTest(unittest.TestCase):
     def test_prd_done_session_gets_the_specs_node_policy(self):
         """回归：prd_done 时宿主已按 nextAction 拉起 /autodev-specs，会话必须拿到 specs 的能力。
 
-        改之前策略取的是 currentNodeId（biz.prd，solo + 禁 task），新开会话因此启动不了
-        autodev-specs 依赖的 Explore 子代理。
+        策略必须随 nextAction 指向的 autodev-specs 节点，才能带上其所需的子代理配置。
         """
         project, feature, arguments = self._feature_arguments()
         self._write_checkpoint(project, feature, "prd_done")
@@ -338,7 +337,7 @@ class RuntimePolicyTest(unittest.TestCase):
         self.assertEqual(checked, len(nodes) - 1)  # ops.archive 无 done 状态
 
     def test_in_progress_checkpoint_keeps_the_current_node_policy(self):
-        """in_progress 的 nextAction 指向节点自身，解析必须退化回当前节点、不得放开 task。"""
+        """in_progress 的 nextAction 指向节点自身，解析必须退化回当前节点。"""
         project, feature, arguments = self._feature_arguments()
         self._write_checkpoint(project, feature, "prd_in_progress")
 
@@ -346,7 +345,7 @@ class RuntimePolicyTest(unittest.TestCase):
             render([], **arguments)["agentConfig"],
             _agent_config(_runtime_policy("biz.prd")),
         )
-        self.assertFalse(render([], **arguments)["agentConfig"]["toolConfig"]["task"]["enabled"])
+        self.assertTrue(render([], **arguments)["agentConfig"]["toolConfig"]["task"]["enabled"])
 
     def test_needs_fix_falls_back_to_the_returning_node_policy(self):
         """needs_fix 映射出的 blocked 状态无人定义，反查落空后退回回流目标节点。"""
@@ -366,11 +365,12 @@ class RuntimePolicyTest(unittest.TestCase):
     def test_explicit_node_id_overrides_project_and_feature_arguments(self):
         _project, _feature, arguments = self._feature_arguments("prd_in_progress")
         policy = render([], node_id="dev.code", **arguments)["agentConfig"]
+        self.assertEqual(policy["agentMode"], "workflow")
         self.assertTrue(policy["toolConfig"]["task"]["enabled"])
 
     def test_missing_arguments_or_feature_falls_back_to_defaults(self):
         expected = {
-            "agentMode": "solo",
+            "agentMode": "multi",
             "toolConfig": {"task": {"enabled": True}},
             "subagentConfig": {
                 "disabledBuiltinSubagents": [],
@@ -385,7 +385,7 @@ class RuntimePolicyTest(unittest.TestCase):
 
     def test_process_environment_is_not_used_for_node_resolution(self):
         expected = {
-            "agentMode": "solo",
+            "agentMode": "multi",
             "toolConfig": {"task": {"enabled": True}},
             "subagentConfig": {
                 "disabledBuiltinSubagents": [],
@@ -419,20 +419,19 @@ class RuntimePolicyTest(unittest.TestCase):
             )
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
-        self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
+        self.assertTrue(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
-    def test_board_config_disables_task_only_for_configured_early_nodes(self):
-        for node_id in ("biz.prd",):
-            policy = _runtime_policy(node_id)
-            self.assertEqual(policy["agentMode"], "solo")
-            self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
-
-        # dev.specs 起各节点配置了子代理，子代理只能经 task 工具启动，因此必须放开 task；
-        # 同时自 e3abd1f（配合 devclaw1.4.9）起 agentMode 为 multi。
-        for node_id in ("dev.specs", "dev.design", "dev.plan", "dev.code"):
-            policy = _runtime_policy(node_id)
-            self.assertEqual(policy["agentMode"], "multi")
-            self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
+    def test_board_config_defaults_code_to_workflow_and_all_other_nodes_to_multi(self):
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        )
+        nodes = config["workflow"]["nodes"]
+        for node in nodes:
+            with self.subTest(node=node["id"]):
+                policy = _runtime_policy(node["id"])
+                expected_mode = "workflow" if node["id"] == "dev.code" else "multi"
+                self.assertEqual(policy["agentMode"], expected_mode)
+                self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
 
     def test_board_config_nodes_with_subagents_keep_task_enabled(self):
         """配置了 customSubagentFiles 的节点必须同时开放 task，否则子代理无法启动。"""
@@ -473,7 +472,7 @@ class RuntimePolicyTest(unittest.TestCase):
 
     def test_missing_node_config_uses_required_defaults(self):
         expected = {
-            "agentMode": "solo",
+            "agentMode": "multi",
             "toolCustomConfig": {"task": {"enabled": True}},
         }
         self.assertEqual(_runtime_policy(None), expected)
@@ -633,7 +632,7 @@ class RuntimePolicyTest(unittest.TestCase):
         self.assertEqual(
             _runtime_policy("dev.code", board_config_path=config_path),
             {
-                "agentMode": "solo",
+                "agentMode": "multi",
                 "toolCustomConfig": {"task": {"enabled": True}},
             },
         )
@@ -645,7 +644,7 @@ class RuntimePolicyTest(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertFalse(payload["ok"])
-        self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
+        self.assertTrue(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
 
 class RenderRemoteTest(unittest.TestCase):

@@ -21,7 +21,7 @@ board_config.json 注册（样例，附件约定）::
   · 当前 workflow 节点通过 ``--plugin-workspace``、``--project``、``--feature``
     显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口
     （显式给出时直接用该节点自身策略，绕过下面的 nextAction 解析）。
-    节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
+    节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"multi\"``、
     ``toolConfig.task.enabled = true``。
 
 ``agentConfig`` 取哪个节点的 ``runtimePolicy``——**跟宿主路由同源**：宿主按当前节点状态的
@@ -29,11 +29,11 @@ board_config.json 注册（样例，附件约定）::
 ``runtimePolicy``，而不是 ``currentNodeId`` 自身的。这条规则无需区分状态：``not_started`` /
 ``in_progress`` / ``archived`` 的 nextAction 恒等于节点自己的 skill，会自然退化回当前节点；只有
 ``done`` 指向下一个节点。它修掉的是「会话策略滞后一个节点」——例如 ``prd_done`` 时宿主已经拉起
-``/autodev-specs``（需要 multi + 子代理），而 ``biz.prd`` 是 ``solo`` + 禁 task，会话拿不到子代理。
+``/autodev-specs``（需要 multi + 子代理）；策略必须始终跟随实际拉起的下一个节点。
 
 策略解析必须用该 Feature **编译后**的 workflow（``build_run_context`` 的第二个返回值），基线
 ``board_config.json`` 里查不到 profile 与动态阶段插入的节点。反查落空时按三级阶梯降级：
-nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``solo`` + task 开启）。
+nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``multi`` + task 开启）。
 ``needs_fix`` 走第二级：它映射的 ``blocked`` 状态没有任何节点定义，退回 ``needsFixFromCheckpoint``
 定位到的回流目标节点，拿到的正是修复所需能力。
 
@@ -42,7 +42,7 @@ nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``
     { "ok": true, "message": "...", "sessionContext": "...",
       "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ],
       "agentConfig": {
-        "agentMode": "solo",
+        "agentMode": "multi",
         "toolConfig": {"task": {"enabled": true}},
         "subagentConfig": {
           "disabledBuiltinSubagents": [],
@@ -127,7 +127,9 @@ WORKSPACE_AGENTS_MD = "AGENTS.md"  # 工程级「会话工作区指令」文件�
 WORKSPACE_CONTEXT_MD = "CONTEXT.md"  # 项目级「领域词汇表」文件名（sessionWorkspacePath 下，④ 层）
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
-DEFAULT_AGENT_MODE = "solo"
+# Auto 托管会话默认采用 Multi；代码实现节点通过 board_config 的显式
+# runtimePolicy 切换到 Workflow。缺失节点配置时仍保持可执行的 Multi 回退。
+DEFAULT_AGENT_MODE = "multi"
 DEFAULT_TASK_ENABLED = True
 
 
@@ -228,7 +230,7 @@ def _runtime_policy(
     profile 与动态阶段插入的节点）；未传入时按 ``board_config_path`` 读基线配置。
 
     session context 是会话启动链路；节点 id 缺失、配置文件不可用或字段类型错误时
-    都不应阻断会话，而是逐字段回退到 ``solo`` / ``task.enabled=true``。
+    都不应阻断会话，而是逐字段回退到 ``multi`` / ``task.enabled=true``。
     """
     agent_mode = DEFAULT_AGENT_MODE
     task_enabled = DEFAULT_TASK_ENABLED
@@ -310,7 +312,7 @@ def _session_policy_node(
     :func:`_policy_target_node_id` 解析到宿主接下来实际会拉起的那个节点。
 
     session context 不应因参数、状态或配置异常中断；任何失败均返回空节点，由 runtime policy
-    使用 ``solo`` / ``task.enabled=true`` 默认值。
+    使用 ``multi`` / ``task.enabled=true`` 默认值。
     """
     explicit = (node_id or "").strip()
     if explicit:
