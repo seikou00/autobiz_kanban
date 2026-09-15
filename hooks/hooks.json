@@ -77,14 +77,21 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python hooks/performance_checker.py",
-          "timeout": 7200,
+          "command": "python hooks/check_state_read.py",
+          "timeout": 300,
           "persistAfterInterrupt": true
         },
         {
           "type": "command",
-          "command": "python hooks/check_state_read.py",
-          "timeout": 300,
+          "command": "python hooks/human_gate_design_done.py",
+          "timeout": 30,
+          "if": "execute(*update_checkpoint.py*)",
+          "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
+          "command": "python hooks/performance_checker.py",
+          "timeout": 7200,
           "persistAfterInterrupt": true
         }
       ]
