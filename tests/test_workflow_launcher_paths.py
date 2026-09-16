@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 import tempfile
 import subprocess
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from hooks.plan_json import PlanBundle
-from hooks.workflow_launcher import analyze_batches
+from hooks.workflow_launcher import analyze_batches, main
 
 
 class WorkflowLauncherPathContractTest(unittest.TestCase):
@@ -29,17 +30,19 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["strategy"], "blocked")
         self.assertTrue(result["reason"].startswith("launcher_error:ValueError:"))
 
-    def test_launcher_uses_static_script_and_artifact_workspace(self) -> None:
+    def test_launcher_uses_static_script_and_mounted_workflow_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_path = root / "plugin"
             artifact_workspace = root / "artifacts" / "project"
+            workflow_workspace = root / "workflow-session"
             code_workspace = root / "business-api"
             feature_dir = artifact_workspace / ".autobizdevops" / "features" / "three-paths"
             (plugin_path / "workflows").mkdir(parents=True)
             script = plugin_path / "workflows" / "code-batched-execution.workflow.js"
             script.write_text("export const meta = {};", encoding="utf-8")
             code_workspace.mkdir(parents=True)
+            workflow_workspace.mkdir()
             subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
             feature_dir.mkdir(parents=True)
             (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
@@ -67,7 +70,13 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "hooks.workflow_launcher.validate_plan_for_parallel",
                 return_value={"canParallel": True, "reason": "parallel_plan_valid"},
             ) as validate:
-                result = analyze_batches("three-paths", plugin_path, artifact_workspace, "Z990692-294")
+                result = analyze_batches(
+                    "three-paths",
+                    plugin_path,
+                    artifact_workspace,
+                    "Z990692-294",
+                    workflow_workspace,
+                )
             self.assertTrue(
                 (
                     artifact_workspace
@@ -77,6 +86,15 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                     / "code-batched-execution.workflow.js"
                 ).is_file()
             )
+            launch_script = (
+                workflow_workspace
+                / ".cmbdevclaw"
+                / "workflows"
+                / "three-paths"
+                / "code-batched-execution.workflow.js"
+            )
+            self.assertTrue(launch_script.is_file())
+            self.assertEqual(launch_script.read_bytes(), script.read_bytes())
 
         self.assertTrue(result["useWorkflow"])
         self.assertEqual(result["strategy"], "fixed")
@@ -84,8 +102,15 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertTrue(result["canStartWorkflow"])
         self.assertEqual(result["requiredAction"], "start_fixed_workflow")
         self.assertEqual(result["artifactWorkspace"], str(artifact_workspace.resolve()))
-        runtime_script = (
+        artifact_runtime_script = (
             artifact_workspace
+            / ".cmbdevclaw"
+            / "workflows"
+            / "three-paths"
+            / "code-batched-execution.workflow.js"
+        )
+        runtime_script = (
+            workflow_workspace
             / ".cmbdevclaw"
             / "workflows"
             / "three-paths"
@@ -93,7 +118,8 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         )
         self.assertEqual(result["workflowScript"], str(runtime_script.resolve()))
         self.assertEqual(result["workflowScriptPath"], str(runtime_script.resolve()))
-        self.assertEqual(result["workflowWorkspaceRoot"], str(artifact_workspace.resolve()))
+        self.assertEqual(result["workflowArtifactScriptPath"], str(artifact_runtime_script.resolve()))
+        self.assertEqual(result["workflowWorkspaceRoot"], str(workflow_workspace.resolve()))
         self.assertEqual(
             result["workflowScriptRelativePath"],
             ".cmbdevclaw/workflows/three-paths/code-batched-execution.workflow.js",
@@ -145,6 +171,19 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         load_bundle.assert_called_once_with(feature_dir.resolve())
         validate.assert_called_once_with(artifact_workspace.resolve(), "three-paths")
         self.assertFalse((code_workspace / ".autobizdevops" / "features" / "three-paths" / "plan.json").exists())
+
+    def test_cli_uses_the_launch_directory_for_the_workflow_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_workspace = Path(tmp) / "mounted-workspace"
+            workflow_workspace.mkdir()
+            with mock.patch("hooks.workflow_launcher.analyze_batches", return_value={"useWorkflow": False, "reason": "plan_not_found"}) as analyze, mock.patch.object(
+                sys,
+                "argv",
+                ["workflow_launcher.py", "--feature", "missing", "--task-card-id", "Z990692-294"],
+            ), mock.patch("hooks.workflow_launcher.Path.cwd", return_value=workflow_workspace):
+                self.assertEqual(main(), 0)
+
+        self.assertEqual(analyze.call_args.args[4], workflow_workspace)
 
     def test_launcher_uses_one_fixed_workflow_for_multiple_worktree_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -131,11 +131,11 @@ def resolve_code_workspace_contract(
     }
 
 
-def materialize_workflow_script(source: Path, artifact_workspace: str, feature: str) -> dict[str, str]:
-    """Copy the fixed workflow into its Feature-owned artifact runtime path."""
-    target_root = Path(artifact_workspace).expanduser().resolve()
+def materialize_workflow_script(source: Path, runtime_workspace: str | Path, feature: str) -> dict[str, str]:
+    """Copy the fixed workflow into one Feature-owned runtime directory."""
+    target_root = Path(runtime_workspace).expanduser().resolve()
     if not target_root.is_dir():
-        raise ValueError(f"workflow_artifact_workspace_missing:{target_root}")
+        raise ValueError(f"workflow_runtime_workspace_missing:{target_root}")
     try:
         source_bytes = source.read_bytes()
     except OSError as exc:
@@ -159,20 +159,20 @@ def materialize_workflow_script(source: Path, artifact_workspace: str, feature: 
     }
 
 
-def workflow_workspace_contract(artifact_workspace: Path, workflow_script: str) -> dict[str, str]:
+def workflow_workspace_contract(workflow_workspace: Path, workflow_script: str) -> dict[str, str]:
     """Describe the platform workspace that is allowed to load the script.
 
     The platform Workflow tool applies its path-containment policy before the
     fixed script can run.  Consequently its workspace root must be the
-    artifact workspace which owns the Feature-specific runtime copy, rather
-    than an unrelated session or business-repository directory.
+    Workflow tool's mounted workspace, rather than only in the artifact
+    workspace or a business-repository directory.
     """
-    root = artifact_workspace.expanduser().resolve()
+    root = workflow_workspace.expanduser().resolve()
     script = Path(workflow_script).expanduser().resolve()
     try:
         relative_script = script.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"workflow_script_outside_artifact_workspace:{script}:{root}") from exc
+        raise ValueError(f"workflow_script_outside_runtime_workspace:{script}:{root}") from exc
     return {
         "workflowWorkspaceRoot": str(root),
         "workflowScriptRelativePath": str(relative_script),
@@ -410,12 +410,16 @@ def analyze_batches(
     plugin_path: Path | None = None,
     workspace: Path | None = None,
     task_card_id: str | None = None,
+    workflow_workspace: Path | None = None,
 ) -> dict:
     """Return the fixed workflow entrypoint for every valid pending Batch."""
     selected_task_card_id = normalize_task_card_id(task_card_id)
     try:
         script_root = (plugin_path or ROOT).expanduser().resolve()
         artifact_workspace = resolve_workspace(workspace)
+        runtime_workspace = (workflow_workspace or artifact_workspace).expanduser().resolve()
+        if not runtime_workspace.is_dir():
+            raise ValueError(f"workflow_runtime_workspace_missing:{runtime_workspace}")
         feat_dir = feature_dir(artifact_workspace, feature)
         plan_path = plan_json_path(feat_dir)
 
@@ -555,13 +559,18 @@ def analyze_batches(
                 "validation": validation,
             }
 
-        runtime_script = materialize_workflow_script(
+        artifact_runtime_script = materialize_workflow_script(
             workflow_script,
-            str(artifact_workspace),
+            artifact_workspace,
             feature,
         )
-        workflow_workspace = workflow_workspace_contract(
-            artifact_workspace,
+        runtime_script = (
+            artifact_runtime_script
+            if runtime_workspace == artifact_workspace
+            else materialize_workflow_script(workflow_script, runtime_workspace, feature)
+        )
+        workflow_contract = workflow_workspace_contract(
+            runtime_workspace,
             runtime_script["workflowScript"],
         )
         common_result = {
@@ -571,8 +580,9 @@ def analyze_batches(
             "batches": launch_batches,
             "artifactWorkspace": str(artifact_workspace),
             **runtime_script,
-            **workflow_workspace,
+            **workflow_contract,
             "workflowScriptPath": runtime_script["workflowScript"],
+            "workflowArtifactScriptPath": artifact_runtime_script["workflowScript"],
             "codeWorkspaces": workspace_contract["codeWorkspaces"],
             "executionIsolation": workspace_contract["executionIsolation"],
             "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
@@ -636,6 +646,10 @@ def main() -> int:
     parser.add_argument("--feature", required=True, help="Feature ID")
     parser.add_argument("--plugin-path", help="Plugin source path; defaults to this repository")
     parser.add_argument("--workspace", help="Artifact workspace containing .autobizdevops/state.json")
+    parser.add_argument(
+        "--workflow-workspace",
+        help="Mounted workspace allowed to load the workflow; defaults to the launch current directory",
+    )
     parser.add_argument("--task-card-id", required=True, help="task card selected before starting the workflow")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     args = parser.parse_args()
@@ -645,6 +659,7 @@ def main() -> int:
         Path(args.plugin_path) if args.plugin_path else None,
         Path(args.workspace) if args.workspace else None,
         args.task_card_id,
+        Path(args.workflow_workspace) if args.workflow_workspace else Path.cwd(),
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -7,13 +7,16 @@ replace it with model output.
 
 ## Start
 
-Run the launcher from the artifact workspace:
+Run the launcher in the mounted workspace of the platform Workflow tool. Keep
+the artifact workspace as the `--workspace` value and pass the mounted path as
+`--workflow-workspace`:
 
 ```bash
 python "${pluginPath}/hooks/workflow_launcher.py" \
   --feature "${feature}" \
   --plugin-path "${pluginPath}" \
   --workspace "${artifactWorkspace}" \
+  --workflow-workspace "$(pwd)" \
   --json
 ```
 
@@ -23,11 +26,14 @@ to that one Workflow. It creates a shared scheduler run and uses `parallel()`
 to start one agent chain for each independently runnable Batch; each chain
 provisions its own repository-native Worktree. The fixed Workflow performs
 B-E2E and final verification after all delivery Batches are promoted. The
-launcher copies the fixed plugin script into
-`artifactWorkspace/.cmbdevclaw/workflows/<feature>/` before the platform call and returns
-its `workflowScriptPath` plus `workflowScriptSha256`.
-`workflowScriptSource` identifies the immutable source. `workflowArgs` is the
-complete argument object for the Workflow call; do not reconstruct it.
+launcher keeps a Feature-scoped archival copy in
+`artifactWorkspace/.cmbdevclaw/workflows/<feature>/`, then copies that fixed
+script into `workflowWorkspace/.cmbdevclaw/workflows/<feature>/` for the
+platform call. `workflowScriptPath` is the mounted-workspace copy and
+`workflowArtifactScriptPath` is the archival copy; both match
+`workflowScriptSha256`. `workflowScriptSource` identifies the immutable
+source. `workflowArgs` is the complete argument object for the Workflow call;
+do not reconstruct it.
 
 - `useWorkflow=true`
 - `canStartWorkflow=true`
@@ -70,8 +76,9 @@ Use the top-level Workflow tool with this native parameter object (not from a wr
 }
 ```
 
-The launcher must materialize the copied artifact script before this call. Do
-not use the plugin source, business repository path, or inline content. Use
+The launcher must materialize the mounted-workspace launch copy before this
+call. Do not use the plugin source, business repository path, or inline
+content. Use
 `resumeFromRunId` only while the platform Workflow itself is interrupted or
 non-terminal. If the platform Workflow already returned a terminal result but
 the scheduler run still has `retry_pending` or stage-recovery Batches, start a
@@ -79,15 +86,14 @@ fresh platform Workflow with the same launcher `scriptPath` and `args` (no
 `resumeFromRunId`). `scheduler ensure` then reuses the durable scheduler run
 and reads its current state instead of replaying a completed platform journal.
 
-Before making this call, configure the platform Workflow tool's session
-workspace root to `launcher.workflowWorkspaceRoot`. This is the same absolute
-directory as `launcher.artifactWorkspace`; it is not a business code
-workspace. `launcher.workflowScriptRelativePath` is an audit value proving
-that the fixed script is contained below that root. If the platform mounts a
-different workspace root, stop with `workflow_workspace_root_mismatch` and
-repair the session configuration. Do not copy, move, or symlink the script
-into the mounted workspace: that creates a second runtime owner and breaks
-Feature-scoped rollback and journal ownership.
+Before making this call, pass the platform Workflow tool's already-mounted
+workspace to the launcher as `--workflow-workspace` (or launch the command
+from that directory). `launcher.workflowWorkspaceRoot` must then equal that
+absolute path, and `workflowScriptRelativePath` proves the returned script is
+contained below it. If the platform mounts a different workspace root, stop
+with `workflow_workspace_root_mismatch` and rerun the launcher with the
+correct mounted path. Do not replace the returned script with the plugin
+source, a business-repository path, or inline content.
 
 The Workflow host workspace is not a Worktree source contract. The plugin
 resolves every repository from the complete `codeWorkspaces` mapping and
