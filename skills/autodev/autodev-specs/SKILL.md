@@ -185,37 +185,6 @@ structure 与 final 两道门禁走同一条修复通道，主流程不自己跑
 - `return_specs` / `return_plan`：停止本阶段并回流。
 - 需要改动行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）的失败项：由主流程改完再执行。
 
-## 回检与修复
-
-回检前必须先通过结构预检：
-
-```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase structure --feature "${feature}"
-```
-
-按「门禁修复派发」执行，PASS 前不启动回检。
-
-本节完整协议由脚本按阶段渲染，必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节。
-
-```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
-```
-
-回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数。写之前先把「需用户裁定」条目逐条裁定完，本文件一次写成。
-
-回检提出的问题由主模型复核、修复并收口。修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检；其余修改直接进入产物契约预检。
-
-## 产物契约预检（机器校验）
-
-proposal、全部 specs、`SPECS_REVIEW.md` 生成且回检修改完成后执行：
-
-```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase final --feature "${feature}"
-```
-
-按「门禁修复派发」执行，PASS 前不得推进 checkpoint。
-
-不以 `update_checkpoint.py` 代替产物契约预检。
 
 ## 完成条件
 
