@@ -313,10 +313,12 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 先调用 launcher：
 
 ```bash
+workflow_workspace="$(pwd)"
 launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
   --feature "${feature}" \
   --plugin-path "${pluginPath}" \
   --workspace "${pluginWorkspace}/${projectDir}" \
+  --workflow-workspace "${workflow_workspace}" \
   --task-card-id "<用户已选择的看板ID>" \
   --json)
 ```
@@ -325,9 +327,9 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 在调用平台 `workflow` 前，必须把 launcher 返回的 `batchExecutionPlan` 展示给用户：逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集，并展示 `initialDispatch`。必须说明运行时不是整波屏障：每当一个 Batch 释放槽位，scheduler 都会从依赖已合并且与当前 active Batch 安全的任务中立即补位，直至 `maxParallel`；同仓库重叠写集和 `proto`/`global`/`integration` 特殊阶段仍会串行。`waves` 仅是 Plan 的兼容预览/审计分组，不代表实际等待边界。展示是执行前的可见性步骤，不额外等待确认，除非用户明确要求审批后再执行。
 
-无论一个或多个物理 Git 根，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`，且 `requiredAction` 为 `start_fixed_workflow` 或 `resume_fixed_workflow`，才使用 launcher 返回的固定脚本路径启动一次 Workflow。前者要求校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`；后者是用户明确要求继续运行时的人工恢复入口，即使 Plan 投影中的 Batch 已是 `failed`，也必须按 launcher 返回的同一 runId 和 `workflowArgs.resumeMode=manual` 恢复。完整的 `codeWorkspaces` 映射必须原样传入该 Workflow；它在同一个共享 scheduler run 中由 `parallel()` 为当前可运行集的每个 Batch 启动独立 agent，并在有空槽时立即补位。各 Batch 仍从自身映射的 Git 根创建原生 Worktree，并按仓库独立走 Merge Train；不得按 Git 根拆成多个平台 Workflow。全部 delivery 推广后，固定 Workflow 自己执行 B-E2E 和 evidence aggregate。launcher 会先把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/`，再返回该 Feature 专属副本的 `workflowScriptPath`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`。Code 回退会归档该目录及其中的 journal、state、toolstream 和锁文件；不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
+无论一个或多个物理 Git 根，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`，且 `requiredAction` 为 `start_fixed_workflow` 或 `resume_fixed_workflow`，才使用 launcher 返回的固定脚本路径启动一次 Workflow。前者要求校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`；后者是用户明确要求继续运行时的人工恢复入口，即使 Plan 投影中的 Batch 已是 `failed`，也必须按 launcher 返回的同一 runId 和 `workflowArgs.resumeMode=manual` 恢复。完整的 `codeWorkspaces` 映射必须原样传入该 Workflow；它在同一个共享 scheduler run 中由 `parallel()` 为当前可运行集的每个 Batch 启动独立 agent，并在有空槽时立即补位。各 Batch 仍从自身映射的 Git 根创建原生 Worktree，并按仓库独立走 Merge Train；不得按 Git 根拆成多个平台 Workflow。全部 delivery 推广后，固定 Workflow 自己执行 B-E2E 和 evidence aggregate。launcher 会保留 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的 Feature 专属归档副本，并将同一 SHA 的启动副本复制到 `workflow_workspace/.cmbdevclaw/workflows/<feature>/`；返回的 `workflowScriptPath` 始终是后者，`workflowArtifactScriptPath` 是前者。不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
 
-调用平台顶层 `workflow` tool 前，必须先将该工具所属会话的 workspace root 配置为 `launcher.workflowWorkspaceRoot`；它必定等于 `launcher.artifactWorkspace`，而不是任一业务代码仓库或其他会话目录。随后唯一允许的调用形式是 `scriptPath=launcher.workflowScriptPath` 且 `args=launcher.workflowArgs`（原生 JSON 对象，不得 `JSON.stringify`）。`launcher.workflowScriptRelativePath` 仅用于审计该脚本确实位于该 root 下，不得改用它重建绝对路径。若平台不能把 workspace root 设置为该值，必须报告 `workflow_workspace_root_mismatch` 并停止；不得复制、移动、符号链接脚本到另一个 workspace，也不得改用插件源码、业务仓库路径或内联脚本。
+调用平台顶层 `workflow` tool 前，先取得其已挂载会话工作路径并作为 `--workflow-workspace` 传给 launcher（默认值就是启动 launcher 的当前路径）。launcher 返回的 `workflowWorkspaceRoot` 必须等于该路径，且 `workflowScriptPath` 必须在其下；随后唯一允许的调用形式是 `scriptPath=launcher.workflowScriptPath` 且 `args=launcher.workflowArgs`（原生 JSON 对象，不得 `JSON.stringify`）。`workflowScriptRelativePath` 仅用于审计该脚本确实位于该 root 下，不得改用它重建绝对路径。若返回 root 与平台实际工作路径不一致，必须报告 `workflow_workspace_root_mismatch` 并停止；不得改用插件源码、业务仓库路径或内联脚本。
 
 固定 Workflow 的启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace` 和以逻辑 `workspaceRef` 为 key 的完整 `codeWorkspaces` 映射；`workflowHostGitRoot` 仅作为可选审计元数据，不决定 Worktree 来源。插件会在创建共享 scheduler run 后校验每个绑定的真实 Git 根，并由 `worktree_manager.py provision` 为对应 Batch 创建原生 Worktree。平台 `agent()` 不承担 Worktree 隔离；同一固定 Workflow 使用 `parallel()` 启动同一安全波内的独立 Batch agent。不同 Git 根的 Batch 不会发生写集冲突，但仍各自在自己的仓库中构建和推广 Merge Train。禁止按仓库新建平台 Workflow、按仓库创建 scheduler run，或以外部协调器阻断一批 Batch agent 的并发执行。
 
