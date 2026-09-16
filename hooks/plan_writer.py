@@ -895,6 +895,11 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         api_ids = _compact_string_list(refs.get("api", []), task_id=task_id, field="refs.api")
         design_refs = _compact_string_list(refs.get("design", []), task_id=task_id, field="refs.design")
         design_refs = [ref if "#" in ref else f"design.md#{ref}" for ref in design_refs]
+        if any(ref.startswith("design.md#D-") for ref in design_refs):
+            raise PlanWriterInputError(
+                "plan_v2_task_decision_must_use_refs_decisions",
+                f"task={task_id};field=refs.design",
+            )
         data_ids = _compact_string_list(refs.get("data", []), task_id=task_id, field="refs.data")
         decision_ids = _compact_string_list(refs.get("decisions", []), task_id=task_id, field="refs.decisions")
         verification = raw.get("verification")
@@ -929,10 +934,16 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         if ui is not None:
             if not isinstance(ui, dict):
                 raise PlanWriterInputError("plan_v2_task_ui_invalid", f"task={task_id}")
+            unknown_ui_fields = sorted(set(ui) - {"pages", "interactions", "route"})
+            if unknown_ui_fields:
+                raise PlanWriterInputError(
+                    "plan_v2_task_ui_field_unknown",
+                    f"task={task_id};fields={','.join(unknown_ui_fields)}",
+                )
             group["uiRefs"] = {
                 "pageRefs": _compact_string_list(ui.get("pages"), task_id=task_id, field="ui.pages"),
                 "interactionRefs": _compact_string_list(ui.get("interactions", []), task_id=task_id, field="ui.interactions"),
-                "visualSourceRefs": _compact_string_list(ui.get("visualSources", []), task_id=task_id, field="ui.visualSources"),
+                "visualSourceRefs": [],
                 "frontendRoute": ui.get("route"),
             }
         if raw.get("external") is not None:
@@ -941,6 +952,45 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
             group["atomicGroup"] = copy.deepcopy(raw["atomic"])
         groups.append(group)
     return {"featureId": feature_id, "groups": groups}
+
+
+def _materialize_v2_ui_visual_sources(feature_dir: Path, group_data: dict[str, Any]) -> None:
+    """Derive each UI task's visual-source union from UI_CONTEXT.json."""
+    ui_groups = [
+        group for group in _task_groups(group_data)
+        if group.get("uiRequired") is True and isinstance(group.get("uiRefs"), dict)
+    ]
+    if not ui_groups:
+        return
+    path = feature_dir / "UI_CONTEXT.json"
+    if not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PlanWriterInputError("plan_v2_ui_context_invalid", str(exc)) from exc
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
+    if not isinstance(capabilities, list):
+        return
+    for group in ui_groups:
+        task_spec_refs = {
+            ref for ref in group.get("specRefs", [])
+            if isinstance(ref, str) and ref.strip()
+        }
+        expected: set[str] = set()
+        for capability in capabilities:
+            if not isinstance(capability, dict) or capability.get("uiRequired") is False:
+                continue
+            capability_refs = {
+                ref for ref in capability.get("specRefs", [])
+                if isinstance(ref, str) and ref.strip()
+            }
+            if task_spec_refs.intersection(capability_refs):
+                expected.update(
+                    ref for ref in capability.get("visualSourceRefs", [])
+                    if isinstance(ref, str) and ref.strip()
+                )
+        group["uiRefs"]["visualSourceRefs"] = sorted(expected)
 
 
 def _compact_detail_to_legacy(detail: dict[str, Any]) -> dict[str, Any]:
@@ -3665,6 +3715,10 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
     if group_data.get("featureId") != feature:
         return render_result(fail("plan_v2_feature_mismatch", f"expected={feature};actual={group_data.get('featureId')}"))
     feature_dir = _path(workspace, feature).parent
+    try:
+        _materialize_v2_ui_visual_sources(feature_dir, group_data)
+    except PlanWriterInputError as exc:
+        return render_result(fail(exc.reason, exc.detail))
     group_errors = _task_group_preflight_errors(feature_dir, group_data)
     blocking_group_errors = [item for item in group_errors if item.get("severity") != "warning"]
     if blocking_group_errors:

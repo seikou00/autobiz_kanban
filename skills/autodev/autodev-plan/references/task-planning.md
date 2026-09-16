@@ -6,4 +6,6 @@ One task owns one meaningful delivery result. It may span several files and impl
 
 Every in-scope scenario must occur in one or more Task `refs.scenarios`. References are individual `specs/.../spec.md#SCN-NNN` strings so coverage remains mechanically verifiable. UI references come from `UI_CONTEXT.json` and are only needed for UI tasks.
 
+Each design decision has one primary behavior-delivery owner in `refs.decisions`. Choose that owner by where users observe the behavior, not by which remote endpoint it calls. `refs.design` is for API/Data context and must not repeat `D-NNN`. For a UI task, the writer derives `visualSourceRefs` as the union of every UI capability matched by the task's `refs.scenarios`; the planner supplies pages, interactions and route only.
+
 `implementationPoints` give Code the intended behavior and boundaries without guessing files or methods. `testPoints` and `verification.intent` tell UTest what to demonstrate, including important boundaries or failure paths. They are not shell commands; UTest selects test files, framework and executable commands after Code has established the implementation surface.

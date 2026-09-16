@@ -26,15 +26,17 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - `workspace`：实际 Git 仓库；
 - `dependsOn`：确实存在的前置交付；
 - `refs.requirements`、`refs.scenarios`：上游行为引用；
-- `refs.api` / `refs.design` / `refs.data` / `refs.decisions`：仅在任务确实依赖相应设计时填写；
+- `refs.api` / `refs.design` / `refs.data`：仅在任务确实依赖相应设计时填写；`D-NNN` 只能写在 `refs.decisions`，表示它的主交付任务；
 - `implementationPoints`：一到数条主要实现方向，描述行为或边界，不写文件、类或方法；
 - `testPoints`：一到数条后续必须证明的行为、边界或失败路径，不写测试命令或文件；
 - `verification.intent`：希望后续测试验证的行为；
-- UI Task 才填写来自 `UI_CONTEXT.json` 的 `ui` 引用。
+- UI Task 才填写来自 `UI_CONTEXT.json` 的 `ui.pages`、`ui.interactions` 和 `ui.route`；writer 按任务命中的全部 capability 自动投影 `visualSourceRefs` 并集。
 
 不要输出文件、目录、方法、`writeSet`、`scope.paths`、`expectedFiles`、`nonGoals`、测试命令、命令 cwd、Batch、验收 ID、测试资产或 `PLAN.md`。实现要点和测试要点只说明目标与边界，不能伪装成文件或命令清单。
 
 场景引用仍必须逐条写成 `specs/<capability>/spec.md#SCN-NNN`；这是覆盖计算的机器事实。任务可以覆盖任意数量的场景、API 或页面。是否拆分只看交付结果和真实依赖，不按固定数量阈值拆分。
+
+写 body 前，先在本轮推理中列一张简短的决策归属矩阵：每个 `D-NNN` 选一个主交付 Task，按可观察行为的落点决定归属，而不是按它调用的接口决定。公共函数、弹窗和页面行为通常属于前端任务；跨端协作的其他任务引用 API/Data/Scenario 即可，不重复占有同一个 `D-NNN`。
 
 ## 发布
 
@@ -48,6 +50,8 @@ python "${pluginPath}/hooks/plan_writer.py" publish-plan \
 ```
 
 writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，并生成 Task/Batch 身份、运行时 workspace roots、验收记录、测试意图、Batch 与投影视图。发布失败时只修返回的业务引用、仓库或依赖；不要补造实现文件清单来通过校验。
+
+发布前把决策归属、UI 页面/交互与测试要点放在同一次检查里统一收口，再只发布一次。正式计划不能就地编辑：需求或设计确有变化时，通过平台的 Plan rollback 回到 `plan_in_progress`，再提交一份完整 Plan v2；不要逐条修改已发布的 JSON 或 `PLAN.md`。
 
 `PLAN.md` 是 `plan.json` 的人类视图，由 writer 同一次发布落盘，不能独立维护。依赖就绪的隔离工作树可乐观并行；真实文件冲突由 Merge Train 处理。
 

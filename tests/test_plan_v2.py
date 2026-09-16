@@ -79,7 +79,7 @@ class PlanV2Test(unittest.TestCase):
                         "requirements": ["specs/cap/spec.md#REQ-001"],
                         "scenarios": ["specs/cap/spec.md#SCN-001"],
                         "api": ["API-001"],
-                        "design": ["API-001", "DATA-001", "D-001"],
+                        "design": ["API-001", "DATA-001"],
                         "data": ["DATA-001"],
                         "decisions": ["D-001"],
                     },
@@ -108,6 +108,54 @@ class PlanV2Test(unittest.TestCase):
             test_plan = load_utest_plan(feature)
             self.assertEqual(test_plan["batches"][0]["tasks"][0]["verificationIntent"], payload["tasks"][0]["verification"]["intent"])
             self.assertEqual(test_plan["batches"][0]["tasks"][0]["testPoints"], payload["tasks"][0]["testPoints"])
+
+    def test_publish_plan_v2_derives_visual_sources_from_all_matching_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            (feature / "UI_CONTEXT.json").write_text(json.dumps({
+                "uiRequired": True,
+                "visualSources": [{"sourceId": "VIS-001"}, {"sourceId": "VIS-002"}],
+                "capabilities": [
+                    {
+                        "capabilityId": "first-ui", "uiRequired": True,
+                        "specRefs": ["specs/cap/spec.md#SCN-001"],
+                        "visualSourceRefs": ["VIS-001"],
+                    },
+                    {
+                        "capabilityId": "second-ui", "uiRequired": True,
+                        "specRefs": ["specs/cap/spec.md#SCN-001"],
+                        "visualSourceRefs": ["VIS-002"],
+                    },
+                ],
+            }), encoding="utf-8")
+            payload = {
+                "schemaVersion": "autodev.plan.v2", "featureId": "alpha",
+                "tasks": [{
+                    "id": "T001", "outcome": "Users configure the capability", "workspace": "default",
+                    "dependsOn": [],
+                    "implementationPoints": ["Render the confirmed configuration flow"],
+                    "testPoints": ["Prove both visual capability paths are available"],
+                    "refs": {
+                        "requirements": ["specs/cap/spec.md#REQ-001"],
+                        "scenarios": ["specs/cap/spec.md#SCN-001"],
+                        "api": ["API-001"], "design": ["API-001", "DATA-001"],
+                        "data": ["DATA-001"], "decisions": ["D-001"],
+                    },
+                    "verification": {"intent": "Users can complete the configuration flow"},
+                    "ui": {"pages": ["PAGE-001"], "interactions": ["UIX-001"], "route": "spec-driven-ui"},
+                }],
+            }
+            result = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "hooks" / "plan_writer.py"), "publish-plan",
+                    "--workspace", str(workspace), "--feature", "alpha",
+                    "--code-workspace", str(ROOT), "--body-stdin",
+                ],
+                input=json.dumps(payload), text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            task = load_plan_bundle(feature).batches["B001"]["tasks"][0]
+            self.assertEqual(task["uiRefs"]["visualSourceRefs"], ["VIS-001", "VIS-002"])
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ disallowedTools: [write_file, edit_file, write_todos]
 只检查三件事：
 
 1. 每个必须交付的 REQ/SCN 是否被某个 TASK 覆盖，且引用真实存在；
-2. TASK 的 `workspace` 是否指向实际仓库，`dependsOn` 是否表达真实前置交付且无环；
+2. 每个 `D-NNN` 是否由其行为交付端的一个 TASK 在 `refs.decisions` 主负责，且 TASK 的 `workspace`、`dependsOn` 可信无环；
 3. `outcome`、`implementationPoints`、`testPoints` 与 `verification.intent` 是否清楚说明后续 Code/UTest 要交付和证明的行为。
 
 不要要求文件、目录、类、方法、实现步骤、`writeSet`、测试类或测试命令。不要因为任务包含较多场景或 API 而要求拆分；是否拆分由交付结果和真实依赖决定。
