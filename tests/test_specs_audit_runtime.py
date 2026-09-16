@@ -119,6 +119,19 @@ class SpecsRuntimeAuditTest(unittest.TestCase):
         spec = feature_dir / "specs" / "order-export" / "spec.md"
         spec.parent.mkdir(parents=True)
         spec.write_text(SPEC, encoding="utf-8")
+        (feature_dir / "UI_CONTEXT.json").write_text(json.dumps({
+            "version": 1,
+            "featureId": "alpha",
+            "uiRequired": False,
+            "decisionStatus": "locked",
+            "decisionSource": "user_confirmed",
+            "notApplicableReason": "API only",
+            "lockedAtCheckpoint": "specs_done",
+            "pages": [],
+            "interactions": [],
+            "visualSources": [],
+            "capabilities": [],
+        }), encoding="utf-8")
         return workspace, feature_dir
 
     def _set_checkpoint(self, workspace, checkpoint):
@@ -274,6 +287,7 @@ class SpecsRuntimeAuditTest(unittest.TestCase):
         ]
         commands = [hook.get("command", "") for hook in post_hooks]
         self.assertNotIn("python hooks/augment_critic_task_prompt.py", pre_commands)
+        self.assertNotIn("python hooks/augment_specs_gate_fixer_task_prompt.py", pre_commands)
         self.assertIn("python hooks/critic_review_log_writer.py", commands)
         self.assertNotIn("python hooks/critic_findings_writer.py", commands)
         self.assertNotIn("python hooks/decision_ledger_writer.py", commands)

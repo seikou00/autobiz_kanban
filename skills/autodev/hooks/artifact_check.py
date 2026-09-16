@@ -55,7 +55,6 @@ from hooks.source_references import (  # noqa: E402
 from hooks.source_context import (  # noqa: E402
     load_source_context,
     referenced_source_requirement_ids,
-    source_ids_for_target,
     source_requirement_ids_for_target,
     source_requirement_index,
     validate_source_context_refs,
@@ -127,24 +126,12 @@ SPEC_SCENARIO_NUMERIC_RE = re.compile(
 CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
 # 二级标题（操作段）；`###` 不算，否则 Requirement 标题会被当成段边界
 SECTION_HEADING = re.compile(r"^##(?!#)\s+\S")
-REMOVED_SECTION = re.compile(
-    r"^##\s+REMOVED\s+Requirements\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
-REMOVED_FIELD = re.compile(
-    r"^\*\*(?P<name>Reason|Migration)[:：]\*\*(?P<value>.*)$", re.MULTILINE
-)
-# `[能力名]` 这类待填槽位。排除所有纯数字 REQ/SCN 记号；位数是否合法由
-# ``spec_id_width_invalid`` 单独判定，避免一个四位 ID 同时报模板残留。
-# `REQ-NNN` / `SCN-NNN` 是模板槽位，由 ``PLACEHOLDER_WORD`` 统一捕获。
-# Markdown 链接 `[文字](url)`、以及任务勾选框 `[ ]` / `[x]`。
 PLACEHOLDER_BRACKET = re.compile(
     r"\[(?!(?:REQ|SCN)-(?:\d+|NNN)\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
 )
 PLACEHOLDER_WORD = re.compile(
     r"\b(?:REQ|SCN)-NNN\b|TBD|待补充|待提供|待定|占位", re.IGNORECASE
 )
-PLACEHOLDER_TEXT = re.compile(r"\[[^\]\n]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 # 规格决策 DEC-NNN：specs 阶段在 proposal `## Decision Log` 定义，design 追踪表引用。
 # 与技术决策 `D-NNN`（plan 阶段自产，见 hooks/plan_json.TECH_DECISION_ID_RE）不是一回事，
 # 两个正则互不误抓：`\bD-\d{3}\b` 要求 D 后紧跟 `-`，`DEC-001` 的 D 后是 E。
@@ -164,17 +151,6 @@ CAPABILITY_ITEM = re.compile(
     r"^[ \t]*[-*][ \t]+`?(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)`?[ \t]*[:：]",
     re.MULTILINE,
 )
-# `### New Capabilities` 等分组小标题，切开 `## Capabilities` 段的三组
-CAPABILITY_GROUP_HEADING = re.compile(
-    r"^###\s+(?P<group>New|Modified|Removed)\s+Capabilities\s*$",
-    re.MULTILINE,
-)
-# spec 的 `## ADDED Requirements` 等操作段
-SPEC_OPERATION_SECTION = re.compile(
-    r"^##\s+(?P<operation>ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
-GROUP_TO_OPERATION = {"New": "ADDED", "Modified": "MODIFIED", "Removed": "REMOVED"}
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
@@ -326,66 +302,23 @@ def validate_proposal_contract(ctx: HookContext) -> int:
     if not is_nonempty(proposal):
         return fail_line(ctx, "missing_proposal")
 
-    text = read_text(proposal)
-    failures = validate_no_template_guidance(ctx, proposal, text)
-    failures += _report_implementation_scope_errors(ctx)
-    required_sections = [
-        "Why",
-        "What Changes",
-        "Capabilities",
-        "Impact",
-        "Out of Scope",
-        # design 的 `Decision` 列按 DEC-NNN 引用本节；节不存在时那些引用
-        # 无处解析，缺口要在 specs 阶段就报，不能拖到 plan 才发现。
-        "Decision Log",
-        # 只校验节存在。`Status` 取值不查：「已确认」是模型能自己给自己写的
-        # 状态词，给它加校验只会教出伪造，不会换来真实裁定。
-        "Open Questions",
-    ]
-    for section in required_sections:
-        if not has_heading(text, section):
-            failures += fail_line(
-                ctx,
-                "invalid_proposal_missing_section",
-                f" section={section!r}",
-                target=section,
-            )
+    # Only the capability list is consumed as a structural contract downstream.
+    # Other proposal sections are authoring guidance, not completion gates.
+    failures = _report_implementation_scope_errors(ctx)
+    if not CAPABILITIES_SECTION.search(read_text(proposal)):
+        failures += fail_line(
+            ctx,
+            "invalid_proposal_missing_section",
+            " section='Capabilities'",
+            target="Capabilities",
+        )
     return failures
 
 
 def has_heading(text: str, name: str) -> bool:
-    """Whether ``name`` appears as a Markdown heading, not just anywhere in prose.
-
-    Substring matching made "delete the whole section" a free pass: a proposal
-    that merely mentions "Open Questions" in a sentence satisfied it. Requiring
-    a heading is what makes the section actually mandatory.
-    """
+    """Whether ``name`` appears as a Markdown heading, not just in prose."""
     pattern = r"^#{1,6}[ \t]+.*" + re.escape(name)
     return re.search(pattern, text, re.MULTILINE) is not None
-
-
-def proposal_capability_groups(text: str) -> dict[str, str]:
-    """Map each capability under ``## Capabilities`` to its New/Modified/Removed group.
-
-    The section body runs from the ``## Capabilities`` heading to the next
-    same-level heading, then splits at the ``### <group> Capabilities`` subheadings.
-    Template placeholders (``[capability-name]``) and the ``无`` filler used for
-    empty groups never match the kebab-case pattern, so they drop out without
-    special-casing. Items listed before any group heading are ignored: they have
-    no declared operation to check against.
-    """
-    section = CAPABILITIES_SECTION.search(text)
-    if not section:
-        return {}
-    body = section.group("body")
-
-    groups: dict[str, str] = {}
-    headings = list(CAPABILITY_GROUP_HEADING.finditer(body))
-    for index, heading in enumerate(headings):
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
-        for item in CAPABILITY_ITEM.finditer(body[heading.end() : end]):
-            groups[item.group("name")] = heading.group("group")
-    return groups
 
 
 def proposal_capabilities(text: str) -> set[str]:
@@ -396,21 +329,6 @@ def proposal_capabilities(text: str) -> set[str]:
     return {
         match.group("name")
         for match in CAPABILITY_ITEM.finditer(section.group("body"))
-    }
-
-
-def spec_operations_with_requirements(text: str) -> set[str]:
-    """Operations whose section actually defines a Requirement.
-
-    Presence of the heading is not the signal. Every spec carries all three
-    sections so the file shape stays uniform, and the unused ones are left
-    empty -- so what distinguishes a New capability from a Modified one is
-    which sections have Requirements under them, not which headings exist.
-    """
-    return {
-        match.group("operation")
-        for match in SPEC_OPERATION_SECTION.finditer(text)
-        if SPEC_REQUIREMENT_DEF_RE.search(match.group("body"))
     }
 
 
@@ -460,54 +378,6 @@ def validate_capability_spec_correspondence(ctx: HookContext) -> int:
             f" capabilities={','.join(unlisted)}",
             target=",".join(unlisted),
         )
-    failures += _capability_operation_failures(ctx, text, declared & present)
-    return failures
-
-
-def _capability_operation_failures(
-    ctx: HookContext,
-    proposal_text: str,
-    capabilities: set[str],
-) -> int:
-    """Check each capability's declared group against the operations its spec uses.
-
-    The rule is deliberately asymmetric. A declared group always obliges the
-    matching operation, but only ``New`` also forbids the others: a brand-new
-    capability has no pre-existing Requirements to modify or remove, so content
-    under those sections contradicts the declaration. A ``Modified`` capability
-    adding a Requirement alongside its edits is ordinary, and flagging it would
-    make the check fire on correct specs.
-    """
-    groups = proposal_capability_groups(proposal_text)
-    failures = 0
-    for capability in sorted(capabilities):
-        group = groups.get(capability)
-        if group is None:
-            # Listed outside any group heading; `proposal_contract` owns the shape.
-            continue
-        expected = GROUP_TO_OPERATION[group]
-        spec = ctx.feature_dir / "specs" / capability / "spec.md"
-        if not is_nonempty(spec):
-            continue
-        actual = spec_operations_with_requirements(read_text(spec))
-        if expected not in actual:
-            failures += fail_line(
-                ctx,
-                "capability_operation_missing",
-                f" capability={capability} group={group} expected={expected}",
-                target=capability,
-                fields={"group": group, "expected": expected},
-            )
-        if group == "New":
-            contradicting = sorted(actual - {"ADDED"})
-            if contradicting:
-                failures += fail_line(
-                    ctx,
-                    "capability_operation_contradicts_new",
-                    f" capability={capability} operations={','.join(contradicting)}",
-                    target=capability,
-                    fields={"operations": "/".join(contradicting)},
-                )
     return failures
 
 
@@ -528,12 +398,9 @@ def validate_specs_contract(ctx: HookContext) -> int:
     for spec in specs:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
-        failures += validate_no_template_guidance(ctx, spec, text)
         _, duplicate_reasons = _spec_definition_index(text)
         for reason in duplicate_reasons:
             failures += fail_line(ctx, reason, f" file={rel}", target=str(rel))
-        if not re.search(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", text, re.MULTILINE):
-            failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}", target=str(rel))
         width_errors = contract_id_width_errors(text, taken)
         for width_error in width_errors:
             if width_error.suggested:
@@ -581,107 +448,7 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 target=str(rel),
                 fields={"scenarios": ",".join(orphans)},
             )
-        missing_fields = removed_requirements_missing_fields(text)
-        if missing_fields:
-            failures += fail_line(
-                ctx,
-                "removed_requirement_missing_field",
-                f" file={rel} fields={','.join(missing_fields)}",
-                target=str(rel),
-                fields={"fields": ",".join(missing_fields)},
-            )
-        residue = placeholder_residue(text)
-        if residue:
-            failures += fail_line(
-                ctx,
-                "spec_placeholder_residue",
-                f" file={rel} placeholders={'; '.join(sorted(set(residue))[:8])}",
-                target=str(rel),
-                fields={"placeholders": "; ".join(sorted(set(residue))[:8])},
-            )
-        source_section = _markdown_section_body(
-            text,
-            "Source References / 外部资料引用",
-        )
-        behavior_text = (
-            text
-            if source_section is None
-            else text.replace(source_section, "", 1)
-        )
-        source_requirement_ids = sorted(referenced_source_requirement_ids(behavior_text))
-        if source_requirement_ids:
-            failures += fail_line(
-                ctx,
-                "spec_source_requirement_in_body",
-                f" file={rel} ids={','.join(source_requirement_ids)}",
-                target=str(rel),
-                fields={"ids": ",".join(source_requirement_ids)},
-            )
     failures += _duplicate_ids_across_specs(ctx, specs)
-    failures += _validate_specs_source_references(ctx, specs)
-    return failures
-
-
-def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> int:
-    """Keep PRD-owned source IDs visible at the behavior-contract boundary."""
-
-    prd = ctx.file("PRD.md")
-    if not is_nonempty(prd):
-        return 0
-    prd_text = read_text(prd)
-    if not has_source_section(prd_text):
-        return 0
-
-    defined = {reference.source_id for reference in extract_source_references(prd_text)}
-    source_context, _ = load_source_context(ctx.feature_dir)
-    required = (
-        defined
-        if source_context is None
-        else defined & source_ids_for_target(source_context, "spec")
-    )
-    cited: set[str] = set()
-    rows: dict[str, list[str]] = {}
-    for spec in specs:
-        source_section = _markdown_section_body(
-            read_text(spec),
-            "Source References / 外部资料引用",
-        )
-        if source_section is not None:
-            section_rows = _source_table_rows(source_section)
-            rows.update(section_rows)
-            cited.update(section_rows)
-
-    failures = 0
-    missing = sorted(required - cited)
-    if missing:
-        failures += fail_line(
-            ctx,
-            "spec_source_reference_missing",
-            f" ids={','.join(missing)}",
-            target=",".join(missing),
-        )
-    unknown = sorted(cited - defined)
-    if unknown:
-        failures += fail_line(
-            ctx,
-            "spec_source_reference_unknown",
-            f" ids={','.join(unknown)}",
-            target=",".join(unknown),
-        )
-    incomplete = sorted(
-        source_id
-        for source_id, cells in rows.items()
-        if len(cells) < 3
-        or _coverage_cell_is_empty(cells[2])
-        or (source_id in required and _coverage_cell_is_empty(cells[1]))
-    )
-    if incomplete:
-        failures += fail_line(
-            ctx,
-            "spec_source_reference_incomplete",
-            f" ids={','.join(incomplete)}",
-            target=",".join(incomplete),
-        )
     return failures
 
 
@@ -787,8 +554,6 @@ def malformed_contract_headings(text: str) -> list[str]:
             continue
         if SPEC_REQUIREMENT_DEF_RE.match(line) or SPEC_SCENARIO_DEF_RE.match(line):
             continue
-        if "REQ-NNN" in line or "SCN-NNN" in line:
-            continue
         # 数字 ID 的标题形状正确但位数错误时，由 ``spec_id_width_invalid``
         # 给唯一根因和替换值；这里不再重复报 malformed。
         if SPEC_REQUIREMENT_NUMERIC_RE.match(line) or SPEC_SCENARIO_NUMERIC_RE.match(line):
@@ -862,34 +627,8 @@ def scenarios_without_requirement(text: str) -> list[str]:
     return orphans
 
 
-def removed_requirements_missing_fields(text: str) -> list[str]:
-    """``<REQ-ID>:<field>`` for REMOVED Requirements lacking Reason/Migration.
-
-    A removal that does not say why or how to migrate leaves downstream stages
-    guessing what to do with the old entry point.
-    """
-    section = REMOVED_SECTION.search(text)
-    if not section:
-        return []
-    body = section.group("body")
-    missing: list[str] = []
-    matches = list(SPEC_REQUIREMENT_DEF_RE.finditer(body))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        block = body[match.end() : end]
-        found = {
-            field.group("name"): field.group("value").strip()
-            for field in REMOVED_FIELD.finditer(block)
-        }
-        for name in ("Reason", "Migration"):
-            value = found.get(name)
-            if not value or PLACEHOLDER_TEXT.search(value):
-                missing.append(f"{match.group(1)}:{name}")
-    return missing
-
-
 def placeholder_residue(text: str) -> list[str]:
-    """Template placeholders left in a generated artifact.
+    """Placeholder detection for the legacy optional specs review format.
 
     Numeric ``[REQ-...]`` / ``[SCN-...]`` tokens are left to the dedicated ID
     validators. ``REQ-NNN`` / ``SCN-NNN`` and bracketed prose are template

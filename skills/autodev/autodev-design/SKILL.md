@@ -27,7 +27,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 - 读取 `proposal.md`、`specs/**/*.md`、`UI_CONTEXT.json`、已有 `design.md`（如有），以及相关代码、测试、配置和接口定义。
 - 探索只用于澄清和调查，不得修改业务代码、测试、配置或迁移脚本；行为契约变更必须回 `/autodev-specs`。
 - 将需求目标、范围、非目标、现有代码约束、集成点、接口、数据模型、权限、兼容性和验证边界与用户讨论。未确认且影响实现路径的事项不得自行假设。
-- 稳定 ID：Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 是本阶段输出的技术决策；规格决策 `DEC-001` 仅来自 `proposal.md` 的 `## Decision Log`，本阶段只引用、不新增。没有规格决策时写「无」。
+- 稳定 ID：Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 是本阶段输出的技术决策；规格决策 `DEC-001` 仅来自 proposal 中可选的 `## Decision Log`，本阶段只引用、不新增 `DEC-NNN`。没有规格决策时追踪表的 Decision 写「无」，不要求回 specs 补建决策记录或问题表。
 - 如果新增或改变可观察行为，回到 `/autodev-specs`；不要只写进 `design.md`。
 - 回检发现缺失或矛盾的 REQ/SCN（例如某能力没有行为契约）时，立即停止并回 `/autodev-specs`；不得把它记为「Plan 首件事」或留给 Code，未补齐前不得推进 `design_done`。
 

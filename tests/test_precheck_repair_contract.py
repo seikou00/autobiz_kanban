@@ -308,43 +308,6 @@ class StructuredOutputTest(unittest.TestCase):
             self.assertTrue(error.get(field), field)
 
 
-PROPOSAL_MISSING_DECISION_LOG = """# Proposal: 导出
-
-## Why
-
-需要导出。
-
-## What Changes
-
-- 新增导出入口
-
-## Capabilities
-
-### New Capabilities
-
-- `order-export`: 说明
-
-### Modified Capabilities
-
-- 无
-
-### Removed Capabilities
-
-- 无
-
-## Impact
-
-- 影响模块: export
-
-## Out of Scope
-
-- 不做批量删除
-
-## Open Questions
-
-无
-"""
-
 SPEC_MALFORMED_HEADING = """## ADDED Requirements
 
 ### Requirement [REQ-001: 方括号未闭合
@@ -435,10 +398,10 @@ class RepresentativeSpecsFailuresTest(unittest.TestCase):
     def test_missing_proposal_section_is_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(PROPOSAL_MISSING_DECISION_LOG, encoding="utf-8")
+            (feature_dir / "proposal.md").write_text("# Proposal\n\nCapabilities are described here.\n", encoding="utf-8")
             errors = self._errors(validate_proposal_contract, project)
             error = self._assert_actionable(errors, "invalid_proposal_missing_section")
-            self.assertEqual(error["target"], "Decision Log")
+            self.assertEqual(error["target"], "Capabilities")
 
     def test_malformed_contract_heading_is_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -563,23 +526,7 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
 class SkillWordingTest(unittest.TestCase):
     SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
     PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
-    REVIEW_PROTOCOLS = (
-        ROOT / "skills" / "references" / "review-protocol-specs.md",
-        ROOT / "skills" / "references" / "review-protocol-plan.md",
-    )
 
-    def test_machine_precheck_is_named_as_such(self) -> None:
-        for path in (self.SPECS_SKILL, self.PLAN_SKILL) + self.REVIEW_PROTOCOLS:
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn("集中校验", text, f"{path.name} 仍在用含糊的「集中校验」")
-            self.assertIn("产物契约预检（机器校验）", text, path.name)
-
-    def test_both_stages_use_stage_gate(self) -> None:
-        for path, stage in ((self.SPECS_SKILL, "dev.specs"), (self.PLAN_SKILL, "dev.plan")):
-            text = path.read_text(encoding="utf-8")
-            self.assertTrue("stage_gate.py" in text, f"{path.name} 未使用统一入口 stage_gate.py")
-            self.assertTrue(f"validate --stage {stage}" in text, f"{path.name} 缺 --stage {stage}")
-            self.assertFalse("artifact_check.py" in text, f"{path.name} 仍在直接调 artifact_check.py")
 
     def test_skills_do_not_enumerate_error_codes(self) -> None:
         """错误码和脚本内部规则留在脚本里，技能只描述处理流程。"""
@@ -587,13 +534,6 @@ class SkillWordingTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for reason in ("missing_plan_json", "invalid_proposal_missing_section", "spec_requirement_without_scenario"):
                 self.assertNotIn(reason, text, f"{path.name} 不应枚举错误码 {reason}")
-
-    def test_route_values_are_mapped_to_review_categories(self) -> None:
-        """预检会给这两个阶段派 route，两份协议都要能把它翻成分类。"""
-        for path in self.REVIEW_PROTOCOLS:
-            text = path.read_text(encoding="utf-8")
-            for route in repair_registry.ROUTES:
-                self.assertIn(route, text, f"{path.name} 缺 route 映射：{route}")
 
 
 if __name__ == "__main__":

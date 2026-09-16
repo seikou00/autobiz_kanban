@@ -1,19 +1,4 @@
-"""specs 阶段的机械规则必须由脚本判定，而不是由模型自证。
-
-以下规则以前都只写在 `autodev-specs/SKILL.md` 里：
-
-1. `Capabilities` 列进去的每一项都要有 `specs/<capability>/spec.md`，反过来
-   每个 spec 文件也要能在 `Capabilities` 里找到出处。技能原来的落地方式是
-   要求模型「推进 specs_done 前在回复中输出对照表 ✓」——自证状态词不构成门。
-2. 每个 Requirement 至少一个 Scenario。旧校验只查「该文件至少有一个 REQ、
-   至少有一个 SCN」，三个 Requirement 共用一个 Scenario 照样放行。
-3. proposal 必须有 `Open Questions` 节。
-4. proposal 的 New/Modified/Removed 分组要和 spec 实际用的操作段对上。
-5. 标题必须能被索引器识别；Requirement/Scenario ID 外的方括号可有可无。
-
-全都是关于文件的机械事实，因此本文件钉的是：正例放行、反例拦住、
-以及缺 proposal 时不重复报错（那是 proposal_contract 的责任）。
-"""
+"""Specs retain identity, ownership and capability coverage, not document ceremony."""
 
 from __future__ import annotations
 
@@ -36,12 +21,8 @@ from artifact_check import (  # noqa: E402
     HookContext,
     contract_id_width_errors,
     malformed_contract_headings,
-    placeholder_residue,
     proposal_capabilities,
-    proposal_capability_groups,
-    removed_requirements_missing_fields,
     scenarios_without_requirement,
-    spec_operations_with_requirements,
     validate_capability_spec_correspondence,
     validate_proposal_contract,
     validate_specs_contract,
@@ -144,27 +125,6 @@ The system SHALL 支持配置提醒频率。
 
 ## REMOVED Requirements
 """
-
-SPEC_REMOVED_REQ = """## ADDED Requirements
-
-## MODIFIED Requirements
-
-## REMOVED Requirements
-
-### Requirement [REQ-001]: 旧同步入口
-
-The system SHALL 不再提供旧同步入口。
-
-#### Scenario [SCN-001]: 调用被拒
-
-- **WHEN** 客户端调用旧入口
-- **THEN** 系统 SHALL 返回 410
-"""
-
-# 三段标题齐全、只有 ADDED 有内容——用户裁定的 New 能力标准形态
-SPEC_ALL_SECTIONS_ADDED_ONLY = (
-    SPEC_ONE_REQ + "\n## MODIFIED Requirements\n\n## REMOVED Requirements\n"
-)
 
 
 class SpecContractValidatorTestBase(unittest.TestCase):
@@ -269,131 +229,6 @@ class RequirementScenarioCoverageTest(SpecContractValidatorTestBase):
             self.assertIn("spec_requirement_without_scenario", output)
             self.assertIn("REQ-002", output)
             self.assertNotIn("REQ-001", output.split("requirements=")[1])
-
-
-class CapabilityOperationConsistencyTest(SpecContractValidatorTestBase):
-    """proposal 的 New/Modified/Removed 分组必须和 spec 实际用的操作段对上。
-
-    判据是「该段下有没有 Requirement」而不是「该段标题在不在」：每个 spec 都带
-    齐三段以保持文件形状统一，用不到的留空。规则有意不对称——声明的分组总是
-    要求对应操作段有内容，但只有 New 额外禁止其他段有内容（全新能力没有存量
-    需求可改可删）；Modified 的 spec 顺手加一条 ADDED 是常规写法，禁掉会误伤。
-    """
-
-    def test_new_capability_with_empty_other_sections_passes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(
-                proposal_text(["order-export"]), encoding="utf-8"
-            )
-            self._write_spec(feature_dir, "order-export", SPEC_ALL_SECTIONS_ADDED_ONLY)
-            failures, output = self._run(validate_capability_spec_correspondence, project)
-            self.assertEqual(failures, 0, output)
-
-    def test_removed_capability_uses_removed_section(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(
-                proposal_text([], removed=["legacy-sync"]), encoding="utf-8"
-            )
-            self._write_spec(feature_dir, "legacy-sync", SPEC_REMOVED_REQ)
-            failures, output = self._run(validate_capability_spec_correspondence, project)
-            self.assertEqual(failures, 0, output)
-
-    def test_modified_capability_may_also_add_requirements(self) -> None:
-        """Modified 的 spec 里出现 ADDED 是常规写法，不该报错。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(
-                proposal_text([], modified=["approval-reminder"]), encoding="utf-8"
-            )
-            body = SPEC_MODIFIED_REQ.replace(
-                "## ADDED Requirements\n",
-                "## ADDED Requirements\n\n### Requirement [REQ-002]: 新增静默时段\n\n"
-                "The system SHALL 支持静默时段。\n\n"
-                "#### Scenario [SCN-002]: 静默时段不提醒\n\n"
-                "- **WHEN** 处于静默时段\n- **THEN** 系统 SHALL 不发提醒\n",
-            )
-            self._write_spec(feature_dir, "approval-reminder", body)
-            failures, output = self._run(validate_capability_spec_correspondence, project)
-            self.assertEqual(failures, 0, output)
-
-    def test_declared_group_without_matching_section_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(
-                proposal_text([], modified=["approval-reminder"]), encoding="utf-8"
-            )
-            # 声明 Modified，却只写了 ADDED 段
-            self._write_spec(feature_dir, "approval-reminder", SPEC_ALL_SECTIONS_ADDED_ONLY)
-            failures, output = self._run(validate_capability_spec_correspondence, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("capability_operation_missing", output)
-            self.assertIn("expected=MODIFIED", output)
-            self.assertIn("POST_SKILL_REPAIR", output)
-
-    def test_new_capability_with_filled_modified_section_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(
-                proposal_text(["order-export"]), encoding="utf-8"
-            )
-            body = SPEC_ONE_REQ + (
-                "\n## MODIFIED Requirements\n\n"
-                "### Requirement [REQ-002]: 改了存量\n\n"
-                "The system SHALL 改动已有行为。\n\n"
-                "#### Scenario [SCN-002]: s\n\n- **WHEN** a\n- **THEN** b\n"
-            )
-            self._write_spec(feature_dir, "order-export", body)
-            failures, output = self._run(validate_capability_spec_correspondence, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("capability_operation_contradicts_new", output)
-            self.assertIn("MODIFIED", output)
-
-    def test_empty_section_headings_do_not_count_as_content(self) -> None:
-        """标题存在但段内无 Requirement 时，不算该能力用了这个操作。"""
-        self.assertEqual(
-            spec_operations_with_requirements(SPEC_ALL_SECTIONS_ADDED_ONLY), {"ADDED"}
-        )
-        self.assertEqual(spec_operations_with_requirements(SPEC_MODIFIED_REQ), {"MODIFIED"})
-        self.assertEqual(spec_operations_with_requirements(SPEC_REMOVED_REQ), {"REMOVED"})
-
-    def test_capability_group_parsing(self) -> None:
-        text = proposal_text(["order-export"], modified=["billing"], removed=["legacy-sync"])
-        self.assertEqual(
-            proposal_capability_groups(text),
-            {"order-export": "New", "billing": "Modified", "legacy-sync": "Removed"},
-        )
-
-    def test_capability_names_match_group_keys(self) -> None:
-        """两个解析函数不得漂移——分组表的键集合就是名字集合。"""
-        text = proposal_text(["order-export"], modified=["billing"], removed=["legacy-sync"])
-        self.assertEqual(set(proposal_capability_groups(text)), proposal_capabilities(text))
-
-    def test_spec_template_keeps_all_three_operation_sections(self) -> None:
-        """模板保持三段式，用不到的段由作者留空——校验器数的是段下的 Requirement。
-
-        规则文本本身钉在 SKILL.md（见下一条），不在这里重复断言：模板里的
-        措辞可以被精简，段结构不能变。
-        """
-        template = (ROOT / "skills/autodev/autodev-specs/templates/spec.md").read_text(
-            encoding="utf-8"
-        )
-        for operation in ("ADDED", "MODIFIED", "REMOVED"):
-            with self.subTest(operation=operation):
-                self.assertIn(f"## {operation} Requirements", template)
-
-    def test_specs_skill_teaches_the_group_to_operation_rule(self) -> None:
-        """规则与校验器不得分叉：SKILL 教的写法必须正是校验器放行的写法。
-
-        SKILL 只写产物形态，不点校验器名字——validator 是脚本的实现细节，
-        写进技能只会让模型去猜脚本内部逻辑。
-        """
-        skill = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
-        self.assertNotIn("capability_spec_correspondence", skill)
-        self.assertIn("ADDED Requirements", skill)
-        self.assertIn("不得有 Requirement", skill)
-        self.assertIn("段下不写 Requirement", skill)
 
 
 class MalformedContractHeadingTest(SpecContractValidatorTestBase):
@@ -560,117 +395,6 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             self.assertGreaterEqual(failures, 1)
             self.assertIn("spec_scenario_without_requirement", output)
             self.assertIn("SCN-009", output)
-
-
-class RemovedRequirementFieldsTest(SpecContractValidatorTestBase):
-    """移除必须说明原因与迁移方式，否则下游只能猜旧入口该怎么办。"""
-
-    HEAD = "## REMOVED Requirements\n\n### Requirement [REQ-003]: 旧导出入口\n\n"
-
-    def test_both_fields_present_pass(self) -> None:
-        text = self.HEAD + "**Reason:** 已被 /v2/export 取代\n**Migration:** 调用方改用 /v2/export\n"
-        self.assertEqual(removed_requirements_missing_fields(text), [])
-
-    def test_missing_migration_is_reported(self) -> None:
-        text = self.HEAD + "**Reason:** 已被 /v2/export 取代\n"
-        self.assertEqual(removed_requirements_missing_fields(text), ["REQ-003:Migration"])
-
-    def test_placeholder_value_counts_as_missing(self) -> None:
-        text = self.HEAD + "**Reason:** [移除原因]\n**Migration:** [迁移方式]\n"
-        self.assertEqual(
-            removed_requirements_missing_fields(text),
-            ["REQ-003:Reason", "REQ-003:Migration"],
-        )
-
-    def test_added_only_spec_has_nothing_to_report(self) -> None:
-        self.assertEqual(removed_requirements_missing_fields(SPEC_ONE_REQ), [])
-
-    def test_missing_field_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            body = SPEC_ONE_REQ + (
-                "\n## REMOVED Requirements\n\n### Requirement [REQ-003]: 旧入口\n\n"
-                "**Reason:** 已被取代\n\n"
-                "#### Scenario [SCN-003]: 旧入口被调用\n\n- **WHEN** a\n- **THEN** 410\n"
-            )
-            self._write_spec(feature_dir, "order-export", body)
-            failures, output = self._run(validate_specs_contract, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("removed_requirement_missing_field", output)
-            self.assertIn("REQ-003:Migration", output)
-
-
-class PlaceholderResidueTest(SpecContractValidatorTestBase):
-    """模板槽位留在产物里就是没写完；具体 ID 和 Markdown 链接不是槽位。"""
-
-    def test_id_syntax_is_not_a_placeholder(self) -> None:
-        self.assertEqual(placeholder_residue(SPEC_ONE_REQ), [])
-
-    def test_markdown_link_is_not_a_placeholder(self) -> None:
-        self.assertEqual(placeholder_residue("见 [设计文档](design.md) 第三节\n"), [])
-
-    def test_checkbox_is_not_a_placeholder(self) -> None:
-        self.assertEqual(placeholder_residue("- [ ] 待办\n- [x] 已做\n"), [])
-
-    def test_template_slot_is_reported(self) -> None:
-        self.assertEqual(
-            placeholder_residue("### Requirement [REQ-001]: [能力名]\n"), ["[能力名]"]
-        )
-
-    def test_id_template_slots_are_reported(self) -> None:
-        self.assertEqual(
-            placeholder_residue(
-                "### Requirement [REQ-NNN]: 标题\n映射：REQ-NNN / SCN-NNN\n"
-            ),
-            ["REQ-NNN", "REQ-NNN", "SCN-NNN"],
-        )
-
-    def test_tbd_words_are_reported(self) -> None:
-        self.assertEqual(placeholder_residue("错误码 TBD\n"), ["TBD"])
-        self.assertEqual(placeholder_residue("字段语义待补充\n"), ["待补充"])
-
-    def test_residue_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            body = SPEC_ONE_REQ.replace("创建导出任务", "[能力名]")
-            self._write_spec(feature_dir, "order-export", body)
-            failures, output = self._run(validate_specs_contract, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("spec_placeholder_residue", output)
-
-
-class ProposalOpenQuestionsTest(SpecContractValidatorTestBase):
-    def test_proposal_with_all_sections_passes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            (feature_dir / "proposal.md").write_text(
-                proposal_text(["order-export"]), encoding="utf-8"
-            )
-            failures, output = self._run(validate_proposal_contract, project)
-            self.assertEqual(failures, 0, output)
-
-    def test_proposal_without_open_questions_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            text = proposal_text(["order-export"]).replace("## Open Questions\n\n无\n", "")
-            (feature_dir / "proposal.md").write_text(text, encoding="utf-8")
-            failures, output = self._run(validate_proposal_contract, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("invalid_proposal_missing_section", output)
-            self.assertIn("Open Questions", output)
-
-    def test_section_name_in_prose_does_not_satisfy_the_gate(self) -> None:
-        """删掉整节、正文里提一句名字，不构成免检出口。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            text = proposal_text(["order-export"]).replace(
-                "## Open Questions\n\n无\n",
-                "本轮没有 Open Questions 需要处理。\n",
-            )
-            (feature_dir / "proposal.md").write_text(text, encoding="utf-8")
-            failures, output = self._run(validate_proposal_contract, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("Open Questions", output)
 
 
 class ValidatorRegistrationTest(unittest.TestCase):

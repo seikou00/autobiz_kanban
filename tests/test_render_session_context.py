@@ -300,7 +300,7 @@ class RuntimePolicyTest(unittest.TestCase):
         self.assertTrue(policy["toolConfig"]["task"]["enabled"])
         self.assertEqual(
             [Path(item).name for item in policy["subagentConfig"]["customSubagentFiles"]],
-            ["explore.md", "critic_autodev_zh.md", "specs-gate-fixer.md"],
+            ["explore.md", "critic.md"],
         )
 
     def test_done_checkpoint_resolves_policy_through_next_action(self):

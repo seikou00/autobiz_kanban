@@ -130,12 +130,12 @@ class DecisionPatternTest(unittest.TestCase):
 class TemplateAndSkillWiringTest(unittest.TestCase):
     """模板与技能教的写法必须正好是校验器认的写法。"""
 
-    def test_proposal_template_defines_the_section(self) -> None:
+    def test_default_proposal_template_needs_no_decision_record(self) -> None:
         template = (ROOT / "skills/autodev/autodev-specs/templates/proposal.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("## Decision Log", template)
-        self.assertEqual(SPEC_DECISION_HEADING.findall(template), ["DEC-001"])
+        self.assertNotIn("## Decision Log", template)
+        self.assertEqual(SPEC_DECISION_HEADING.findall(template), [])
 
     def test_design_template_cites_dec_not_d(self) -> None:
         template = (ROOT / "skills/autodev/autodev-design/templates/design.md").read_text(
@@ -201,8 +201,8 @@ class DecisionLogSectionScopeTest(unittest.TestCase):
         self.assertEqual(self._resolve(proposal), 1)
 
 
-class ProposalRequiresDecisionLogTest(unittest.TestCase):
-    """节缺失要在 specs 阶段就报，不能拖到 plan 才由引用解析发现。"""
+class ProposalOptionalDecisionLogTest(unittest.TestCase):
+    """无决策记录可以完成规格；实际存在的下游 DEC 引用仍必须可解析。"""
 
     def _run(self, proposal: str) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,12 +219,10 @@ class ProposalRequiresDecisionLogTest(unittest.TestCase):
 
     SECTIONS = ("Why", "What Changes", "Capabilities", "Impact", "Out of Scope", "Open Questions")
 
-    def test_missing_decision_log_is_reported(self) -> None:
+    def test_missing_decision_log_is_allowed(self) -> None:
         proposal = "".join(f"## {name}\n\n无\n\n" for name in self.SECTIONS)
         failures, output = self._run(proposal)
-        self.assertGreaterEqual(failures, 1)
-        self.assertIn("invalid_proposal_missing_section", output)
-        self.assertIn("Decision Log", output)
+        self.assertEqual(failures, 0, output)
 
     def test_all_sections_present_passes(self) -> None:
         names = (*self.SECTIONS[:-1], "Decision Log", "Open Questions")

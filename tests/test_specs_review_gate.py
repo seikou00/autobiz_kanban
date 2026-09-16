@@ -1,15 +1,9 @@
-"""dev.specs 的回检必须落盘成产物，否则协议写得再严也没有门。
-
-机器只判三件事：`## Verdict` 是终态、`## Findings` 有内容、`## Unresolved` 已清空。
-回检内容本身（需求覆盖、范围、分类事实、来源引用、待确认消解）由 critic 判定：
-用正则去核对固定表格和分类措辞，只会推着模型改词，不会提高审查质量。
-"""
+"""The legacy review validator remains usable by explicitly configured workflows."""
 
 from __future__ import annotations
 
 import contextlib
 import io
-import json
 import sys
 import tempfile
 import unittest
@@ -25,15 +19,9 @@ if str(HOOKS) not in sys.path:
 
 from artifact_check import (  # noqa: E402
     HookContext,
-    review_verdict,
     validate_specs_review_verdict,
 )
 from hooks.init_workspace import create_feature, init_workspace  # noqa: E402
-SPECS_PROTOCOL = ROOT / "skills" / "references" / "review-protocol-specs.md"
-
-
-def specs_protocol() -> str:
-    return SPECS_PROTOCOL.read_text(encoding="utf-8")
 
 
 FINDING_ROW = (
@@ -145,97 +133,6 @@ class SpecsReviewGateTest(unittest.TestCase):
             self._write(feature_dir, review_text(findings=[row]))
             failures, output = self._run(project)
             self.assertEqual(failures, 0, output)
-
-    def test_untouched_template_cannot_pass(self) -> None:
-        template = (
-            ROOT / "skills" / "autodev" / "autodev-specs" / "templates" / "specs-review.md"
-        ).read_text(encoding="utf-8")
-        self.assertIsNone(review_verdict(template))
-
-
-class SpecsReviewWiringTest(unittest.TestCase):
-    """dev.specs 只留四个阻断器；账本与新鲜度是日志，不决定能否进下一阶段。"""
-
-    BLOCKING = [
-        "proposal_contract",
-        "specs_contract",
-        "capability_spec_correspondence",
-        "specs_review_verdict",
-    ]
-
-    def _specs_node(self) -> dict:
-        config = json.loads(
-            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
-        )
-        return next(
-            node for node in config["workflow"]["nodes"] if node.get("id") == "dev.specs"
-        )
-
-    def test_dev_specs_blocks_on_exactly_four_validators(self) -> None:
-        self.assertEqual(self._specs_node()["validators"], self.BLOCKING)
-
-    def test_review_artifact_is_a_required_output(self) -> None:
-        outputs = self._specs_node()["artifacts"]["outputs"]
-        review = next(item for item in outputs if item["path"] == "SPECS_REVIEW.md")
-        self.assertTrue(review["required"])
-
-    def test_protocol_tells_the_stage_to_persist_its_conclusions(self) -> None:
-        output = specs_protocol()
-
-        self.assertIn("SPECS_REVIEW.md", output)
-        for section in ("## Verdict", "## Findings", "## Unresolved"):
-            self.assertIn(section, output)
-        self.assertNotIn("## Review Baseline", output)
-
-    def test_protocol_hands_the_five_review_items_to_critic(self) -> None:
-        output = specs_protocol()
-
-        for item in (
-            "需求覆盖",
-            "实现范围符合性",
-            "操作分类与代码事实",
-            "上游资料引用",
-            "待确认项消解",
-        ):
-            self.assertIn(item, output)
-
-    def test_protocol_adjudicates_before_the_review_is_written(self) -> None:
-        """裁定发生在写 SPECS_REVIEW.md 之前，不靠 final gate 反弹回来。"""
-        output = specs_protocol()
-
-        self.assertIn("裁定在写本文件之前完成", output)
-        self.assertNotIn("尚未拿到答复的条目", output)
-
-        writing = output.index("一次写成 `SPECS_REVIEW.md`")
-        self.assertLess(output.index("逐条裁定「需用户裁定」条目"), writing)
-        self.assertLess(writing, output.index("最后运行 final gate"))
-
-    def test_skill_puts_the_same_ordering_where_the_review_is_written(self) -> None:
-        """技能正文里「写进 SPECS_REVIEW.md」那句是模型建立错误顺序的地方。"""
-        skill = (ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("写之前先把「需用户裁定」条目逐条裁定完，本文件一次写成。", skill)
-
-    def test_protocol_does_not_force_a_rerun_on_every_edit(self) -> None:
-        """critic 提出的问题由主模型收口；只有行为契约变了才重跑回检。"""
-        output = specs_protocol()
-
-        self.assertIn("不必重新调用 critic", output)
-        self.assertNotIn("specs_review_state.py", output)
-
-    def test_protocol_fixes_the_critic_input_materials(self) -> None:
-        output = specs_protocol()
-
-        for material in (
-            "PRD.md",
-            "proposal.md",
-            "specs/**/*.md",
-            "IMPLEMENTATION_SCOPE.json",
-            "source-context.json",
-            "现有 specs 与源码",
-        ):
-            self.assertIn(material, output)
 
 
 if __name__ == "__main__":

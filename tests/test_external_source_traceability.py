@@ -150,14 +150,13 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
             failures = validator(HookContext(skill=skill, slug="alpha", root=self.project))
         return failures, output.getvalue()
 
-    def test_specs_must_preserve_every_prd_source_id(self) -> None:
+    def test_specs_allow_optional_source_table(self) -> None:
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         spec_path.write_text(SPEC.format(source_rows="无"), encoding="utf-8")
 
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
 
-        self.assertGreater(failures, 0)
-        self.assertIn("spec_source_reference_missing", output)
+        self.assertEqual(failures, 0, output)
 
         spec_path.write_text(
             SPEC.format(source_rows="| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"),
@@ -176,7 +175,7 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
 
         self.assertEqual(failures, 0, output)
 
-    def test_specs_reject_source_requirement_ids_in_behavior_body(self) -> None:
+    def test_specs_allow_inline_source_references(self) -> None:
         self._write_source_context(["spec"])
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         source_row = "| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"
@@ -188,8 +187,7 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
             encoding="utf-8",
         )
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
-        self.assertGreater(failures, 0)
-        self.assertIn("spec_source_requirement_in_body", output)
+        self.assertEqual(failures, 0, output)
 
     def test_background_source_without_spec_requirements_needs_no_fake_mapping(self) -> None:
         self._write_source_context(None)
@@ -208,14 +206,13 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
         self.assertEqual(failures, 0, output)
 
-    def test_spec_targeted_source_still_requires_a_real_mapping(self) -> None:
+    def test_spec_targeted_source_does_not_force_a_mapping_table(self) -> None:
         self._write_source_context(["spec"])
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         spec_path.write_text(SPEC.format(source_rows="无"), encoding="utf-8")
 
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
-        self.assertGreater(failures, 0)
-        self.assertIn("spec_source_reference_missing", output)
+        self.assertEqual(failures, 0, output)
 
     def test_design_requires_source_coverage_and_api_link(self) -> None:
         missing_section = DESIGN.format(source_section="", api_source="无")

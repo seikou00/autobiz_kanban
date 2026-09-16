@@ -16,8 +16,7 @@ from __future__ import annotations
 from typing import Dict, NamedTuple
 
 
-# route 取值闭集。语义见 skills/references/review-protocol-specs.md 与
-# review-protocol-plan.md 的「与机器预检的分工」映射表。
+# route 取值闭集；调用方按当前产物修复、回流或用户裁定处理。
 ROUTE_FIX_CURRENT = "fix_current"      # 在当前阶段按 action 修
 ROUTE_RETURN_SPECS = "return_specs"    # 停止当前阶段，回 dev.specs
 ROUTE_RETURN_PLAN = "return_plan"      # 停止当前阶段，回 dev.plan
@@ -100,7 +99,7 @@ _SPECS: Dict[str, Repair] = {
     "missing_proposal": Repair(
         artifact="proposal.md",
         problem="proposal.md 不存在或为空",
-        action="生成 proposal.md，必备章节为 Why / What Changes / Capabilities / Impact / Out of Scope / Decision Log / Open Questions。",
+        action="生成非空 proposal.md，在「## Capabilities」中列出能力名及说明，与 specs/<capability>/spec.md 对应。",
     ),
     "missing_specs": Repair(
         artifact="specs/**/spec.md",
@@ -110,7 +109,7 @@ _SPECS: Dict[str, Repair] = {
     "invalid_proposal_missing_section": Repair(
         artifact="proposal.md",
         problem="proposal.md 缺少必备章节「{target}」",
-        action="在 proposal.md 补齐「## {target}」节；Open Questions 无待确认项时正文写「无」。",
+        action="在 proposal.md 补齐「## {target}」，用 kebab-case 能力名列表对应实际 spec 文件。",
     ),
     "artifact_template_guidance_residue": Repair(
         artifact="{target}",
@@ -121,11 +120,6 @@ _SPECS: Dict[str, Repair] = {
         artifact=".autobizdevops/features/<feature>/implementation-scope.json",
         problem="实现范围声明不合法：{target}",
         action="使用 hooks/implementation_scope.py set 写入 full_stack、backend_only 或 frontend_only，并确保 featureId 与当前 Feature 一致。",
-    ),
-    "invalid_spec_missing_operation_header": Repair(
-        artifact="{target}",
-        problem="{target} 没有任何操作段标题",
-        action="补上「## ADDED Requirements」/「## MODIFIED Requirements」/「## REMOVED Requirements」中至少一个，并把 Requirement 放到对应段下。",
     ),
     "invalid_spec_missing_requirement": Repair(
         artifact="{target}",
@@ -149,8 +143,8 @@ _SPECS: Dict[str, Repair] = {
         artifact="{target}",
         problem="{target} 中的规格 ID {id} 不是三位数字",
         action=(
-            "把 {id} 改为 {suggested}，并同步本文件 Source References 及其他引用。"
-            "该错误只处理位数，不要改操作分组或 Requirement 内容。"
+            "把 {id} 改为 {suggested}，并同步已有引用。"
+            "该错误只处理位数，不要改 Requirement 内容。"
         ),
     ),
     "spec_requirement_without_scenario": Repair(
@@ -167,59 +161,6 @@ _SPECS: Dict[str, Repair] = {
         action=(
             "把报错的每个 Scenario 移到它所属的「### Requirement REQ-NNN:」标题之下；"
             "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
-        ),
-    ),
-    "spec_id_out_of_order": Repair(
-        artifact="{target}",
-        problem="{target} 中这些 REQ/SCN 编号没有按文档顺序递增：{ids}",
-        action=(
-            "按文档顺序重排 REQ/SCN 编号，使其数值递增。"
-            "允许跳号（删除后 ID 不复用会留下空档），但后出现的编号不得小于先出现的。"
-        ),
-    ),
-    "removed_requirement_missing_field": Repair(
-        artifact="{target}",
-        problem="{target} 的 REMOVED Requirement 缺字段：{fields}",
-        action=(
-            "为「## REMOVED Requirements」下报错的 Requirement 补齐"
-            "「**Reason:** <移除原因>」与「**Migration:** <迁移方式>」，写实际内容而非占位符。"
-        ),
-    ),
-    "spec_placeholder_residue": Repair(
-        artifact="{target}",
-        problem="{target} 中残留模板槽位：{placeholders}",
-        action=(
-            "把报错的模板槽位替换成实际内容。"
-            "`REQ-NNN` / `SCN-NNN` 必须替换成三位数字 ID；Markdown 链接不算槽位。"
-        ),
-    ),
-    "spec_source_reference_missing": Repair(
-        artifact="specs/**/spec.md",
-        problem="这些含 spec 目标要求的来源未被任何 spec 保留：{target}",
-        action=(
-            "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
-            "同一来源的一组语义约束可映射到同一个 REQ/SCN。"
-        ),
-    ),
-    "spec_source_requirement_in_body": Repair(
-        artifact="{target}",
-        problem="{target} 的 Requirement/Scenario 正文堆放了来源要求 ID：{ids}",
-        action=(
-            "从行为正文移除 SRC-NNN-RNNN；在 Source References 表用 SRC-NNN 映射实际 REQ/SCN，"
-            "正文只保留对应的可验证行为。"
-        ),
-    ),
-    "spec_source_reference_unknown": Repair(
-        artifact="specs/**/spec.md",
-        problem="spec 引用了 PRD 外部资料索引中不存在的来源：{target}",
-        action="修正或移除这些 SRC-NNN；确有新资料时先回 PRD 登记稳定 ID，再重新生成 specs。",
-    ),
-    "spec_source_reference_incomplete": Repair(
-        artifact="specs/**/spec.md",
-        problem="这些来源引用缺少 Requirement/Scenario 映射或 Usage：{target}",
-        action=(
-            "含 spec 目标要求的来源补齐 REQ/SCN 与 Usage；无 spec 要求的来源可删除该行，"
-            "或保留 `-` 映射并填写 Usage。"
         ),
     ),
     "duplicate_spec_id_across_specs": Repair(
@@ -253,25 +194,8 @@ _SPECS: Dict[str, Repair] = {
         artifact="proposal.md",
         problem="这些 spec 目录在 proposal.md 的 Capabilities 中没有出处：{target}",
         action=(
-            "把报错的每个 capability 按 New / Modified / Removed 补进 proposal.md 的「## Capabilities」节；"
+            "把报错的每个 capability 补进 proposal.md 的「## Capabilities」列表；"
             "若该 spec 不属于本轮范围，删除对应 specs/<capability>/ 目录。"
-        ),
-    ),
-    "capability_operation_missing": Repair(
-        artifact="specs/{target}/spec.md",
-        problem="capability {target} 在 proposal 中声明为 {group}，但 spec 的「## {expected} Requirements」段下没有 Requirement",
-        action=(
-            "在 specs/{target}/spec.md 的「## {expected} Requirements」段下写出 Requirement；"
-            "若该能力实际不是 {group}，改 proposal.md 把它挪到正确的分组。"
-        ),
-    ),
-    "capability_operation_contradicts_new": Repair(
-        artifact="specs/{target}/spec.md",
-        problem="capability {target} 声明为 New，却在 {operations} 段下写了 Requirement",
-        action=(
-            "specs/{target}/spec.md 声明为 New，不该有存量需求可改可删："
-            "把 {operations} 段下的 Requirement 移到「## ADDED Requirements」（段标题可以保留，留空即可）；"
-            "若该能力实际是在改存量，改 proposal.md 把它挪到 Modified / Removed 组。"
         ),
     ),
 }
@@ -327,8 +251,8 @@ _DESIGN: Dict[str, Repair] = {
         artifact="design.md",
         problem="design.md 引用的 DEC 编号在 proposal.md 的「## Decision Log」节内不存在：{target}",
         action=(
-            "在 proposal.md 的「## Decision Log」节下补上「### DEC-NNN: <标题>」，"
-            "或把该单元格改成实际存在的编号／「无」。只认该节内的定义，写在 proposal 别处不算。"
+            "把该单元格改成 proposal.md 的「## Decision Log」中实际存在的编号；没有对应规格决策时写「无」。"
+            "不要为满足引用而补造决策记录。"
             "技术决策用 Design Coverage 列的 D-NNN，不要写进 Decision 列。"
         ),
     ),
