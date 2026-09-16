@@ -182,7 +182,7 @@ def workflow_workspace_contract(workflow_workspace: Path, workflow_script: str) 
 def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     """Load and validate runtime configuration from .autobiz/runtime_config.json."""
     defaults: dict[str, Any] = {
-        "parallelSchedulingMode": "conservative",
+        "parallelSchedulingMode": "optimistic",
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
         "conflictResolution": {
             "maxAttempts": 2,
@@ -365,7 +365,7 @@ def _batch_execution_plan(
             "batchIds": initial_dispatch,
             "rule": "dependency_ready_and_safe_within_available_parallel_slots",
         },
-        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
+        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
         "deliveryStages": ["prepare", "implement", "review", "test"],
         "optionalDeliveryStage": {
             "stage": "quality_gate",

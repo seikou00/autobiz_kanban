@@ -413,7 +413,10 @@ def create_manifest(
     if runtime_config is None:
         runtime_config = {}
     final_runtime_config = {
-        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
+        # Plan v2 deliberately does not predict implementation file lists.
+        # Isolated worktrees can therefore start dependency-ready work in
+        # parallel; the merge train remains the authority for real conflicts.
+        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
         "maxParallel": max_parallel,  # Use the max_parallel parameter as source of truth
         "conflictResolution": runtime_config.get("conflictResolution", {
             "maxAttempts": 2,
@@ -791,14 +794,14 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
     immediately receive another dependency-ready, non-conflicting Batch.
 
     Behavior depends on parallelSchedulingMode in runtime config:
-    - optimistic: Ignores write-set conflicts for parallel stage, groups by maxParallel
-    - conservative (default): Serializes batches with write-set conflicts
+    - optimistic (default): starts dependency-ready isolated worktrees up to maxParallel
+    - conservative: serializes batches with declared write-set conflicts
 
-    Worktrees isolate checkouts, not shared delivery risk.  A batch with an
-    unknown write set is therefore serialized with another batch in the same
-    repository (in conservative mode only).  Known paths conflict when they are
-    equal or one is an ancestor of the other.  Special stages (proto/global/integration)
-    are always single-batch waves and are ordered before ordinary implementation.
+    Optimistic mode deliberately accepts unknown Plan-v2 write scope; Merge
+    Train resolves actual conflicts. Conservative mode serializes unknown scope
+    within a repository. Known paths conflict when they are equal or one is an
+    ancestor of the other. Special stages (proto/global/integration) are always
+    single-batch waves and are ordered before ordinary implementation.
     """
     ids = sorted(set(batch_ids or ready_batches(manifest)))
     if not ids:

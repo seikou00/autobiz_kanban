@@ -134,6 +134,7 @@ DRAFT_PLAN_FILE = "plan.json"
 DRAFT_TRANSACTION_FILE = ".draft-write-transaction.json"
 DRAFT_REPAIR_WORK_RELATIVE_DIR = ".tmp/plan_writer/repair-work"
 PLAN_CORE_SCHEMA = "autodev.plan-core.v1"
+PLAN_SCHEMA = "autodev.plan.v2"
 PLAN_DETAIL_SCHEMA = "autodev.plan-detail.v1"
 PLAN_REPAIR_WORK_SCHEMA = "autodev.plan-repair-work.v1"
 PLAN_REPAIR_PATCH_SCHEMA = "autodev.plan-repair-patch.v1"
@@ -760,6 +761,8 @@ def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     ``task-groups.json`` files and all downstream schedulers.
     """
 
+    if data.get("schemaVersion") == PLAN_SCHEMA:
+        return _plan_v2_to_groups(data)
     if data.get("schemaVersion") != PLAN_CORE_SCHEMA:
         return data
     feature_id = data.get("featureId")
@@ -837,6 +840,105 @@ def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         atomic = raw.get("atomic")
         if atomic is not None:
             group["atomicGroup"] = copy.deepcopy(atomic)
+        groups.append(group)
+    return {"featureId": feature_id, "groups": groups}
+
+
+def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
+    """Project the intentionally small Plan v2 input into runtime groups.
+
+    Plan v2 is the only model-facing contract. It contains outcomes, repository
+    ownership, dependencies, references, outcome-level implementation points
+    and test points. File lists, symbols, concrete commands and batch mechanics
+    are discovered or derived by later stages.
+    """
+    feature_id = data.get("featureId")
+    raw_tasks = data.get("tasks")
+    if not isinstance(feature_id, str) or not feature_id.strip():
+        raise PlanWriterInputError("plan_v2_feature_id_missing")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise PlanWriterInputError("plan_v2_tasks_missing")
+
+    groups: list[dict[str, Any]] = []
+    allowed_task_fields = {
+        "id", "outcome", "workspace", "dependsOn", "refs", "implementationPoints",
+        "testPoints", "verification",
+        "ui", "mode", "stage", "external", "atomic", "notes",
+    }
+    for index, raw in enumerate(raw_tasks, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("plan_v2_task_must_be_object", f"index={index}")
+        task_id = raw.get("id")
+        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
+            raise PlanWriterInputError("plan_v2_task_id_invalid", f"index={index};task={task_id}")
+        unknown = sorted(set(raw) - allowed_task_fields)
+        if unknown:
+            raise PlanWriterInputError("plan_v2_task_field_unknown", f"task={task_id};fields={','.join(unknown)}")
+        outcome = raw.get("outcome")
+        if not isinstance(outcome, str) or not outcome.strip():
+            raise PlanWriterInputError("plan_v2_task_outcome_missing", f"task={task_id}")
+        implementation_points = _compact_string_list(
+            raw.get("implementationPoints"), task_id=task_id, field="implementationPoints",
+        )
+        if not implementation_points:
+            raise PlanWriterInputError("plan_v2_task_implementation_points_missing", f"task={task_id}")
+        test_points = _compact_string_list(
+            raw.get("testPoints"), task_id=task_id, field="testPoints",
+        )
+        if not test_points:
+            raise PlanWriterInputError("plan_v2_task_test_points_missing", f"task={task_id}")
+        refs = raw.get("refs")
+        if not isinstance(refs, dict):
+            raise PlanWriterInputError("plan_v2_task_refs_missing", f"task={task_id}")
+        requirements = _compact_string_list(refs.get("requirements"), task_id=task_id, field="refs.requirements")
+        scenarios = _compact_string_list(refs.get("scenarios"), task_id=task_id, field="refs.scenarios")
+        api_ids = _compact_string_list(refs.get("api", []), task_id=task_id, field="refs.api")
+        design_refs = _compact_string_list(refs.get("design", []), task_id=task_id, field="refs.design")
+        design_refs = [ref if "#" in ref else f"design.md#{ref}" for ref in design_refs]
+        data_ids = _compact_string_list(refs.get("data", []), task_id=task_id, field="refs.data")
+        decision_ids = _compact_string_list(refs.get("decisions", []), task_id=task_id, field="refs.decisions")
+        verification = raw.get("verification")
+        if verification is None:
+            verification = {}
+        if not isinstance(verification, dict):
+            raise PlanWriterInputError("plan_v2_task_verification_invalid", f"task={task_id}")
+        intent = verification.get("intent")
+        if intent is not None and (not isinstance(intent, str) or not intent.strip()):
+            raise PlanWriterInputError("plan_v2_task_verification_intent_invalid", f"task={task_id}")
+        group: dict[str, Any] = {
+            "id": task_id,
+            "title": outcome.strip(),
+            "executionMode": raw.get("mode", "code"),
+            "executionStage": raw.get("stage", "parallel"),
+            "touches": [],
+            "writeTargets": [],
+            "deps": _compact_string_list(raw.get("dependsOn", []), task_id=task_id, field="dependsOn"),
+            "workspaceRef": raw.get("workspace", "default"),
+            "specRefs": [*requirements, *scenarios],
+            "apiIds": api_ids,
+            "designRefs": design_refs,
+            "dataIds": data_ids,
+            "decisionIds": decision_ids,
+            "validationBoundary": str(intent or outcome).strip(),
+            "verificationIntent": str(intent or outcome).strip(),
+            "implementationPoints": implementation_points,
+            "testPoints": test_points,
+        }
+        ui = raw.get("ui")
+        group["uiRequired"] = ui is not None
+        if ui is not None:
+            if not isinstance(ui, dict):
+                raise PlanWriterInputError("plan_v2_task_ui_invalid", f"task={task_id}")
+            group["uiRefs"] = {
+                "pageRefs": _compact_string_list(ui.get("pages"), task_id=task_id, field="ui.pages"),
+                "interactionRefs": _compact_string_list(ui.get("interactions", []), task_id=task_id, field="ui.interactions"),
+                "visualSourceRefs": _compact_string_list(ui.get("visualSources", []), task_id=task_id, field="ui.visualSources"),
+                "frontendRoute": ui.get("route"),
+            }
+        if raw.get("external") is not None:
+            group["externalDependency"] = copy.deepcopy(raw["external"])
+        if raw.get("atomic") is not None:
+            group["atomicGroup"] = copy.deepcopy(raw["atomic"])
         groups.append(group)
     return {"featureId": feature_id, "groups": groups}
 
@@ -1024,8 +1126,6 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(ui_required, bool):
             errors.append({"reason": f"{task_id}.uiRequired_must_be_bool"})
             ui_required = False
-        if frontend_seen and not ui_required:
-            errors.append({"reason": "backend_task_after_frontend", "detail": f"task={task_id}"})
         frontend_seen = frontend_seen or ui_required
 
         ui_refs = raw_group.get("uiRefs")
@@ -1065,8 +1165,8 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
                 errors.append({"reason": f"{task_id}.frontendRoute_invalid"})
 
         validation_boundary = raw_group.get("validationBoundary")
-        if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
-            errors.append({"reason": f"{task_id}.validationBoundary_missing_or_too_short"})
+        if not isinstance(validation_boundary, str) or not validation_boundary.strip():
+            errors.append({"reason": f"{task_id}.validationBoundary_missing"})
         workspace_ref = raw_group.get("workspaceRef")
         if not isinstance(workspace_ref, str) or not REPOSITORY_ID_RE.fullmatch(workspace_ref):
             errors.append({"reason": f"{task_id}.workspaceRef_invalid"})
@@ -1334,7 +1434,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "splitRationale": item.get("splitRationale") or None,
     }
-    if "touches" in item or (
+    if (isinstance(item.get("touches"), list) and item.get("touches")) or (
         isinstance(item.get("scope"), dict)
         and isinstance(item["scope"].get("paths"), list)
         and bool(item["scope"]["paths"])
@@ -2051,6 +2151,51 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
     rationale = group.get("splitRationale")
     if isinstance(rationale, str) and rationale.strip():
         task["splitRationale"] = rationale
+    return task
+
+
+def _plan_v2_runtime_task(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
+    """Create a complete runtime task without asking the planner for code detail.
+
+    The generated fields preserve the planner's high-level implementation and
+    test guidance. Code and UTest select actual files, symbols and executable
+    commands against the codebase in their respective stages.
+    """
+    task = _draft_task_skeleton(group, workspace_roots)
+    task_id = str(task["id"])
+    outcome = str(group.get("title") or "").strip()
+    scenario_refs = [
+        ref for ref in task.get("specRefs", [])
+        if isinstance(ref, str) and "#SCN-" in ref
+    ]
+    task["goal"] = outcome
+    task["implementationPoints"] = copy.deepcopy(group.get("implementationPoints", []))
+    task["testPoints"] = copy.deepcopy(group.get("testPoints", []))
+    task["acceptanceCriteria"] = [{
+        "id": f"AC-{task_id}-01",
+        "text": outcome,
+        "scenarioRefs": scenario_refs,
+    }]
+    task["nonGoals"] = []
+    task["designRefs"] = copy.deepcopy(group.get("designRefs", []))
+    task["dataIds"] = copy.deepcopy(group.get("dataIds", []))
+    task["decisionIds"] = copy.deepcopy(group.get("decisionIds", []))
+    task["validationCommands"] = []
+    task["verificationIntent"] = str(group.get("verificationIntent") or outcome).strip()
+    if task_execution_mode(task) == "external_dependency":
+        task["validationTestPlan"] = []
+    else:
+        task["validationTestPlan"] = [{
+            "id": f"TEST-{task_id}-01",
+            "assetType": "e2e_test" if task.get("uiRequired") is True else "unit_test",
+            "executionStage": "post_batch" if task.get("uiRequired") is True else "with_code",
+            "covers": [f"AC-{task_id}-01"],
+            "testIntent": {
+                "behavior": task["verificationIntent"],
+                "acceptanceCriteria": copy.deepcopy(task["acceptanceCriteria"]),
+                "testPoints": copy.deepcopy(task["testPoints"]),
+            },
+        }]
     return task
 
 
@@ -3495,6 +3640,76 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
     }
     result = _write_draft_bundle(workspace, feature, data, lock)
     return render_result(with_result_data(result, draft=_draft_summary(lock, data)))
+
+
+def _cmd_publish_plan(args: argparse.Namespace) -> int:
+    """Publish a complete Plan v2 in one atomic operation.
+
+    This is the normal planner entry point.  It intentionally bypasses the old
+    Core/Draft/Detail choreography: planner input is converted directly into a
+    finalized, runtime-valid Bundle only after every structural and coverage
+    check succeeds.
+    """
+    workspace, feature = _resolve(args)
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    body = _plan_writer_stdin_body() if args.body_stdin else read_object_file(Path(args.body_file))
+    if not isinstance(body, dict):
+        return render_result(fail("plan_v2_body_must_be_object"))
+    if body.get("schemaVersion") != PLAN_SCHEMA:
+        return render_result(fail("plan_v2_schema_required", f"expected={PLAN_SCHEMA};actual={body.get('schemaVersion')}"))
+    try:
+        group_data = _compact_plan_core_to_groups(body)
+    except PlanWriterInputError as exc:
+        return render_result(fail(exc.reason, exc.detail))
+    if group_data.get("featureId") != feature:
+        return render_result(fail("plan_v2_feature_mismatch", f"expected={feature};actual={group_data.get('featureId')}"))
+    feature_dir = _path(workspace, feature).parent
+    group_errors = _task_group_preflight_errors(feature_dir, group_data)
+    blocking_group_errors = [item for item in group_errors if item.get("severity") != "warning"]
+    if blocking_group_errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=blocking_group_errors))
+    try:
+        workspace_contexts = _code_workspace_contexts(args.code_workspace)
+        implementation_scope, scope_errors = load_scope(feature_dir)
+        if scope_errors:
+            return render_result(WriterResult(
+                ok=False,
+                path=_path(workspace, feature),
+                errors=[{"reason": error} for error in scope_errors],
+            ))
+        data = _initial(feature)
+        data["implementationScope"] = implementation_scope
+        data["codeWorkspaces"] = _code_workspace_bindings(
+            workspace_contexts,
+            {str(group.get("workspaceRef")) for group in _task_groups(group_data)},
+        )
+        data["tasks"] = [
+            _plan_v2_runtime_task(group, _draft_task_workspace_roots(group, workspace_contexts))
+            for group in _task_groups(group_data)
+        ]
+        data["taskSetStatus"] = "finalized"
+        plan_errors = _task_set_preflight_errors(
+            feature_dir,
+            data,
+            group_data,
+            [str(Path(value).expanduser().resolve()) for value in args.code_workspace],
+            require_engineering_commands=False,
+        )
+        blocking_plan_errors = [item for item in plan_errors if item.get("severity") != "warning"]
+        if blocking_plan_errors:
+            return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=blocking_plan_errors))
+        result = _write(workspace, feature, data, plan_markdown=_render_plan_md(data))
+        return render_result(with_result_data(
+            result,
+            planSchema=PLAN_SCHEMA,
+            warnings=[item for item in [*group_errors, *plan_errors] if item.get("severity") == "warning"],
+            materialized=_task_set_summary(data),
+        ))
+    except (PlanWriterInputError, ValueError) as exc:
+        if isinstance(exc, PlanWriterInputError):
+            return render_result(fail(exc.reason, exc.detail))
+        return render_result(fail("plan_v2_publish_failed", str(exc)))
 
 
 def _cmd_import_task_directory(args: argparse.Namespace) -> int:
@@ -7158,6 +7373,14 @@ def _list_command(sub: argparse._SubParsersAction, name: str, field: str, *, rem
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Incrementally write plan.json")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    publish = sub.add_parser("publish-plan", help="atomically publish one Plan v2 input")
+    _common(publish)
+    publish.add_argument("--code-workspace", required=True, action="append")
+    publish_input = publish.add_mutually_exclusive_group(required=True)
+    publish_input.add_argument("--body-stdin", action="store_true")
+    publish_input.add_argument("--body-file")
+    publish.set_defaults(func=_cmd_publish_plan)
 
     init = sub.add_parser("init")
     _common(init)

@@ -27,7 +27,7 @@
 <!-- section: 前提与角色 | stages: dev.plan -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`design.md` 与 `plan.json`、`PLAN.md` 进行严格审查：任务拆分是否覆盖全部 REQ/SCN 与设计决策，DAG、代码仓库、写集、验证命令和测试意图是否能真实执行。
+使用 task 工具，指定 `critic-autodev-plan-zh` 角色，对比 `specs/**/*.md`、`design.md` 与 `plan.json`、`PLAN.md`：确认任务覆盖全部 REQ/SCN 与需要落地的设计决策，DAG 与代码仓库归属可信，交付结果和测试意图清晰。不要因未提前列出文件、方法、实现步骤、测试类或测试命令拒绝计划；这些在 Code/UTest 阶段才有可靠上下文。
 
 <!-- section: 前提与角色 | stages: dev.code -->
 ## 前提与角色
@@ -46,13 +46,21 @@
 
 子代理若仍然改了文件（它有写权限，约束只在 prompt 层），不要自行还原——本阶段无法重验，静默还原可能覆盖用户自己的改动。改为在结论块中把「子代理已直接修改 <文件清单>，未经任何验证」作为一条 `仅列出` 结论如实记录，交由用户处置。
 
-<!-- section: 严重度词表 | stages: dev.specs,dev.design,dev.plan -->
+<!-- section: 严重度词表 | stages: dev.specs,dev.design -->
 ## 严重度词表
 
 使用 `critic-autodev` 的原文分节名，不要改写成别的词：
 
 - `Critical Findings` 与 `Major Findings` 下的每一条都必须落入下方分类表的一个分类，不得省略。
 - `Minor Findings` 与 `Open Questions (unscored)` 不单独触发改产物。其中涉及取舍的按「需用户裁定」处理，其余归「仅列出」。
+
+<!-- section: 严重度词表 | stages: dev.plan -->
+## 严重度词表
+
+Plan 使用 `critic-autodev-plan-zh` 的原文分节名：`Critical Findings`、`Major Findings`、`Minor Findings` 与 `Open Questions (unscored)`。Critical 和 Major 只能报告覆盖、引用、仓库归属或依赖的事实问题；没有证据的内容归入 `Open Questions (unscored)`。
+
+<!-- section: Plan 回检输入 | stages: dev.plan -->
+派发给 reviewer 的 prompt 必须包含 feature 目录的绝对路径和输入材料清单；路径缺失时停止回检，不自行搜索工作区。
 
 <!-- section: 严重度词表 | stages: dev.code -->
 ## 严重度词表
@@ -115,14 +123,14 @@
 
 | 分类 | 判定 | 动作 |
 |------|------|------|
-| 产物可修 | 任务拆分、DAG、覆盖缺口、写集或验证方法不足 | 只改候选分组、Draft 或由 writer 生成的计划，不改写 design.md |
+| 产物可修 | DAG、覆盖缺口、仓库归属或交付意图不足 | 重新发布完整 Plan v2，不改写 design.md |
 | 引用与事实不符 | 任务引用的 REQ/SCN/API/DATA/D 不存在或与设计不符 | 修正任务引用；若设计本身需要改变，回 `/autodev-design` |
-| 需用户裁定 | 有真实备选且改变任务边界、执行顺序或验证策略 | 停止并向用户裁定；不得借 Draft 默认选择 |
+| 需用户裁定 | 有真实备选且改变任务边界、执行顺序或验证策略 | 停止并向用户裁定，不自行选择 |
 | 回流上游 | 行为或技术设计契约缺失、矛盾 | 分别回 `/autodev-specs` 或 `/autodev-design`，不在本阶段补写 |
 | 仅列出 | 成立但不足以改产物 | 不改产物，在结论块中列出 |
 | 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明 |
 
-- TASK 稳定 ID 不重排、不复用；不得靠删任务、缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
+- TASK 稳定 ID 不复用；不得靠删任务或缩小 Contract Coverage 消除覆盖类结论。
 
 <!-- section: 分类表 | stages: dev.code -->
 ## 分类表

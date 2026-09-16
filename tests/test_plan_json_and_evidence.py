@@ -413,7 +413,7 @@ class PlanJsonTest(unittest.TestCase):
                         item["reason"]
                         for item in validate_plan_task_granularity_item(task, task_id="T001")
                     ],
-                    ["oversized_plan_task_must_split"],
+                    [],
                 )
 
     def test_external_dependency_scenario_matrix_has_a_satisfiable_form(self) -> None:
@@ -678,17 +678,17 @@ class PlanJsonTest(unittest.TestCase):
         self.assertIn("T001.uiRefs.visualSourceRefs_missing", errors)
         self.assertIn("T001.uiRefs.frontendRoute_missing", errors)
 
-    def test_every_task_requires_non_goals_in_detail_schema(self) -> None:
+    def test_tasks_may_omit_non_goals_until_code_discovers_adjacent_scope(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         task = plan["tasks"][0]
         task["nonGoals"] = []
 
         errors = validate_test_tasks(plan, require_initial_status=True)
 
-        self.assertIn("T001.nonGoals_missing", errors)
+        self.assertNotIn("T001.nonGoals_missing", errors)
 
     def test_every_task_requires_non_empty_validation_boundary(self) -> None:
-        for boundary in (None, "   ", "too short"):
+        for boundary in (None, "   "):
             plan = valid_plan(status="todo", evidence_ids=[])
             task = plan["tasks"][0]
             if boundary is None:
@@ -698,7 +698,7 @@ class PlanJsonTest(unittest.TestCase):
 
             errors = validate_test_tasks(plan, require_initial_status=True)
 
-            self.assertIn("T001.validationBoundary_missing_or_too_short", errors)
+            self.assertIn("T001.validationBoundary_missing", errors)
 
     def test_every_task_requires_workspace_ref(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])

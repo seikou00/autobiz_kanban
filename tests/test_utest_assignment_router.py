@@ -31,6 +31,9 @@ def task(task_id, workspace_ref="default", behavior="observable behavior"):
             "implement {}".format(behavior),
             "expose the public seam",
         ],
+        "testPoints": [
+            "prove {} through the public seam".format(behavior),
+        ],
         "workspaceRef": workspace_ref,
         "validationBoundary": "public service seam",
         "nonGoals": ["unrelated pricing behavior"],
@@ -112,7 +115,10 @@ class UTestAssignmentRouterTest(unittest.TestCase):
         self.assertNotIn("tasks", assignment)
         self.assertEqual(["T001"], assignment["taskIds"])
         self.assertEqual(
-            {"id", "implementationPoints", "nonGoals", "validationLocations"},
+            {
+                "id", "outcome", "implementationPoints", "testPoints",
+                "verificationIntent", "validationLocations",
+            },
             set(prompt["tasks"][0]),
         )
         for field in (
@@ -164,13 +170,13 @@ class UTestAssignmentRouterTest(unittest.TestCase):
             task("T001")["implementationPoints"],
             content["tasks"][0]["implementationPoints"],
         )
-        self.assertEqual(
-            task("T001")["nonGoals"],
-            content["tasks"][0]["nonGoals"],
-        )
+        self.assertEqual(task("T001")["testPoints"], content["tasks"][0]["testPoints"])
         self.assertEqual(str((feature_dir / "plans/B001/plan.json").resolve()), content["batchPlanPath"])
         self.assertEqual(
-            {"id", "implementationPoints", "nonGoals", "validationLocations"},
+            {
+                "id", "outcome", "implementationPoints", "testPoints",
+                "verificationIntent", "validationLocations",
+            },
             set(content["tasks"][0]),
         )
         self.assertNotIn("validationCommands", assignment["promptContent"])
@@ -228,7 +234,7 @@ class UTestWorkflowTextContractTest(unittest.TestCase):
         self.assertIn("系统约束与工程事实冲突：`contract_gap`", skill)
         self.assertIn("assignment 的 `promptContent`", skill)
         self.assertIn("`implementationPoints`", skill)
-        self.assertIn("从 `validationCommands` 提取的 `validationLocations.repo/cwd`", skill)
+        self.assertIn("`testPoints`、`verificationIntent` 和 `validationLocations.repo/cwd`", skill)
         self.assertIn("Batch plan 的绝对路径", skill)
         self.assertIn("不得附加 plan TASK JSON", skill)
         self.assertIn("--test-file \"<RELATIVE_TEST_FILE>\"", skill)

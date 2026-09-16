@@ -178,7 +178,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 
 该脚本输出是当前 Task 的上游上下文，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`runtimeIgnoreIssues` 与 `startArgv`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位生产源码和理解既有实现。脚本返回 `ok=false`、存在 `runtimeIgnoreIssues` 或 `startAllowed=false` 时必须停止编码，修复后重新运行。若返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
 
-必须读取当前 task 的 `workspaceRef`、`goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `workspaceRef` / `goal` / `scope` / `validationBoundary` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
+必须读取当前 task 的 `workspaceRef`、`goal`、`implementationPoints`、`testPoints`、`acceptanceCriteria`、`validationBoundary`、`verificationIntent`、`specRefs` 与 `designRefs`。Plan 提供交付结果、主要实现方向和测试关注点；实现文件、方法、模块和具体步骤由当前 Agent 结合真实代码决定。缺少业务引用、仓库归属或要点时回到 `/autodev-plan`，不要把文件或方法尚未确定误判为计划缺失。
 3. 改代码前，只在当前 Task 的 `scope`、入口点和 1-hop 依赖内阅读生产代码，识别项目分层、命名、错误处理、校验与日志风格，形成简短修改映射（依据、拟改生产文件、复用模式）再动手。可以只读既有测试理解行为契约，但不得在 Code 阶段创建、修改或执行测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. context 返回 `startAllowed=true` 后，在修改业务代码前启动任务运行并保存 Git 快照：
 
@@ -196,8 +196,8 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 
 5. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
-   - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的业务范围；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
-   - 只读取 `validationTestPlan[].testIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
+   - 最小 patch：只实现 `goal`、`implementationPoints` 与 `acceptanceCriteria` 指向的业务范围；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。`testPoints` 用于检查实现是否覆盖测试关注的边界，不等于在 Code 阶段写测试。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
+   - 读取 `testPoints`、`verificationIntent` 和 `validationTestPlan[].testIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 7. **实现差异协议**：固定 Code Workflow 内不得为以下差异发起用户确认或创建阻断。`EVD` / design 与代码现实不符，或必须偏离 `API` / `DATA` / `D` 形态时，始终采用不违反 `REQ` / `SCN` 的最小兼容实现并在非阻断 Evidence 中记录差异。行为契约存在歧义时，按明确的 `REQ` / `SCN`、再按 Plan、最后按现有工程模式确定实现；TASK 状态由 runner 负责流转，不得手工置「失败」。
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：

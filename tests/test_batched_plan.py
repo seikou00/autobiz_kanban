@@ -900,7 +900,7 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             self.assertIn("B001.mixed_execution_lanes", errors)
 
-    def test_bundle_rejects_backend_batch_after_frontend_batch(self) -> None:
+    def test_bundle_allows_dependency_order_to_cross_execution_lanes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
@@ -916,7 +916,7 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
-            self.assertIn("backend_batch_after_frontend:B002", errors)
+        self.assertNotIn("backend_batch_after_frontend:B002", errors)
 
     def test_plan_writer_does_not_backfill_an_earlier_capability_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

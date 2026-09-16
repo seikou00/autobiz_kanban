@@ -1,58 +1,25 @@
 {
-  "schemaVersion": "autodev.plan-core.v1",
+  "schemaVersion": "autodev.plan.v2",
   "featureId": "[feature]",
   "tasks": [
     {
       "id": "T001",
-      "outcome": "[single observable behavior]",
+      "outcome": "[one observable delivery result]",
+      "workspace": "[repository id]",
       "dependsOn": [],
-      "mode": "code",
-      "stage": "parallel",
-      "workspace": "[backend-repository-id]",
-      "writeSet": [
-        {"path": "[backend-repository-id]:src/path/to/owned-file"}
-      ],
+      "implementationPoints": ["[main behavior or boundary to implement]"],
+      "testPoints": ["[behavior, boundary, or failure path to prove]"],
       "refs": {
         "requirements": ["specs/[capability]/spec.md#REQ-001"],
         "scenarios": ["specs/[capability]/spec.md#SCN-001"],
-        "api": []
+        "api": [],
+        "design": [],
+        "data": [],
+        "decisions": []
       },
-      "validation": {
-        "seam": "[public seam plus one executable validation command or assertion]"
+      "verification": {
+        "intent": "[behavior that a later test should prove]"
       }
     }
-  ],
-  "examples": {
-    "writerDerivesForMatrixException": ["mergedScenarioRefs", "splitRationale"],
-    "matrixExceptionTask": {
-      "when": "any SCN/API/PAGE/UIX soft limit is exceeded but no hard limit is exceeded",
-      "id": "T002",
-      "outcome": "[shared observable matrix behavior]",
-      "refs": {
-        "requirements": ["specs/[capability]/spec.md#REQ-001"],
-        "scenarios": [
-          "specs/[capability]/spec.md#SCN-001",
-          "specs/[capability]/spec.md#SCN-002",
-          "specs/[capability]/spec.md#SCN-003",
-          "specs/[capability]/spec.md#SCN-004",
-          "specs/[capability]/spec.md#SCN-005",
-          "specs/[capability]/spec.md#SCN-006"
-        ],
-        "api": []
-      },
-      "validation": {
-        "seam": "[one request plus one executable assertion validates the complete matrix]",
-        "mergeJustification": "specs/[capability]/spec.md#SCN-001, specs/[capability]/spec.md#SCN-003, specs/[capability]/spec.md#SCN-006 share one request/response and one validation loop and cannot be validated independently."
-      }
-    }
-  },
-  "notes": {
-    "input": "实际候选文件只写 schemaVersion、featureId、tasks；examples 和 notes 只作说明，不复制到 tasks[]。",
-    "taskIds": "tasks[] 必须按顺序从 T001 连续编号；不得跳号、重复、加字母或使用版本后缀。",
-    "writeSet": "默认同一 workspace 下每个路径只能有一个 owner；消费者通过 dependsOn 使用其产出，不重复声明文件。仅 Controller/Service 等可稳定按方法切分的文件可由多 Task 声明相同 path，但每项都必须提供互不重叠的 symbols（如 ActivityController#approve）；未声明 symbols 仍是整文件 owner。共享写入预检失败时保留本文件，使用 create-repair-work --group-file 与 apply-draft-patch 做定点修复。",
-    "merge": "软上限：SCN=5、API=2、PAGE=1、UIX=3；硬上限：SCN=12、API=3、PAGE=2、UIX=4。任一软上限超出时必须写 validation.mergeJustification：至少 30 字、说明共享公开 seam 与验证闭环，并点名足够的真实 ID（SCN 至少 3、API/PAGE 至少 2、UIX 至少 3）；SCN 必须逐条使用完整 specs/.../spec.md#SCN-NNN，API/PAGE/UIX 使用真实 ID。超过硬上限必须拆 Task。脚本仅在 mergeJustification 存在时从 refs.scenarios 派生 mergedScenarioRefs。",
-    "specRefs": "每个 SCN 必须逐条使用完整路径 specs/<capability>/spec.md#SCN-NNN；preflight 会检查该 SCN 是否真实定义在该文件中，不能只写 SCN-NNN 或把 SCN 放到错误 spec 路径。",
-    "ui": "UI task 添加 ui: {pages, interactions, visualSources, route}；是否前端由 ui 是否存在派生。",
-    "atomic": "默认一 Task 一 Batch。仅不可独立交付时使用 atomic: {id, rationale}，每个成员必须相同。"
-  }
+  ]
 }

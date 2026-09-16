@@ -565,7 +565,7 @@
             ],
             "customSubagentFiles": [
               "agents/explore.md",
-              "agents/critic.md"
+              "agents/critic_autodev_plan_zh.md"
             ]
           }
         },
