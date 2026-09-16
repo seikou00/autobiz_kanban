@@ -52,6 +52,60 @@ def _legacy_plugin_root() -> Path:
 
 
 class CollectedSessionContextTest(unittest.TestCase):
+    def test_installs_missing_dependency_once_then_reuses_files(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            collector = Path(directory) / "collect-knowledge.js"
+            collector.write_text("", encoding="utf-8")
+
+            def fake_run(command, **kwargs):
+                calls.append(command)
+                if command[-1] == "install":
+                    self.assertEqual(kwargs["cwd"], str(collector.resolve().parent))
+                    package = collector.parent / "node_modules" / "gray-matter"
+                    package.mkdir(parents=True)
+                    (package / "package.json").write_text("{}", encoding="utf-8")
+                    (package / "index.js").write_text("", encoding="utf-8")
+                    return _proc("")
+                if "--listDeployUnits" in command:
+                    return _proc(["U1"])
+                if "--deployUnit" in command:
+                    return _proc({"systemPrompt": "# 远端知识\n"})
+                self.fail("不应额外启动依赖检查进程: {}".format(command))
+
+            with patch(
+                "hooks.render_collected_session_context.subprocess.run", side_effect=fake_run
+            ):
+                for _ in range(2):
+                    result = render(
+                        [{"deployUnitId": "U1", "localRepoPath": ""}],
+                        collector_script=str(collector),
+                    )
+                    self.assertEqual(result["message"], "remote 1 / local 0 / 缺 0")
+                    self.assertIn("# 远端知识", result["sessionContext"])
+
+        self.assertEqual(sum(command[-1] == "install" for command in calls), 1)
+        self.assertEqual(len(calls), 5)
+
+    def test_incomplete_dependency_files_still_trigger_install(self):
+        for files in ((), ("package.json",), ("index.js",)):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as directory:
+                collector = Path(directory) / "collect-knowledge.js"
+                package = collector.parent / "node_modules" / "gray-matter"
+                package.mkdir(parents=True)
+                for name in files:
+                    (package / name).write_text("", encoding="utf-8")
+                with patch(
+                    "hooks.render_collected_session_context.subprocess.run",
+                    side_effect=[_proc(""), _proc(["U1"]), _proc({"systemPrompt": "知识"})],
+                ) as run:
+                    result = render(
+                        [{"deployUnitId": "U1", "localRepoPath": ""}],
+                        collector_script=str(collector),
+                    )
+                self.assertTrue(result["ok"])
+                self.assertEqual(run.call_args_list[0][0][0][-1], "install")
+
     def test_calls_list_then_deploy_and_injects_system_prompt(self):
         calls = []
 

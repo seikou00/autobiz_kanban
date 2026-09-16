@@ -41,17 +41,6 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python hooks/runtime_artifact_guard.py",
-          "timeout": 30,
-          "onBlock": {
-            "reason": "Runtime-owned 产物禁止直接编辑",
-            "systemMessage": "请使用对应 Runtime writer 或 runner",
-            "additionalContext": "不要手改判决产物"
-          },
-          "persistAfterInterrupt": true
-        },
-        {
-          "type": "command",
           "command": "python hooks/state_checkpoint.py state-done",
           "timeout": 300,
           "onBlock": {

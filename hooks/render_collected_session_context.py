@@ -4,7 +4,7 @@
 
 本脚本是 ``render_session_context.py`` 之上的兼容适配层，不修改旧加载器：
 
-1. 在 collector 所在目录执行 ``npm install``（每次都执行，不判断是否首次）；
+1. 检查 collector 同目录的 ``node_modules/gray-matter`` 关键文件，缺失时执行 ``npm install``；
 2. 调用 ``node collect-knowledge.js --listDeployUnits --knowledgePath <path>``；
 3. 对选中的 deployUnit 调用 ``--deployUnit <id>``；
 4. 将返回 JSON 的 ``systemPrompt`` 放入原有 ``sessionContext`` 契约；
@@ -12,15 +12,19 @@
 
 部署单元接口失败时仍可回退到 ``<localRepoPath>/AGENTS.md``。除入参 JSON
 非法外，外部接口故障不会中断会话。
+
+各阶段的开始、结束和耗时输出到 stderr，stdout 保持原有 JSON 契约。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
@@ -67,15 +71,63 @@ def _short_error(text: str, limit: int = 500) -> str:
     return compact[: limit - 1] + "…"
 
 
+def _timing_log(stage, event, detail=""):
+    print(
+        "[session-context] {} pid={} {} {} {}".format(
+            time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            os.getpid(), stage, event, _short_error(detail),
+        ).rstrip(),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _timed_call(stage, function, *args, **kwargs):
+    started = time.perf_counter()
+    _timing_log(stage, "start")
+    try:
+        result = function(*args, **kwargs)
+    except Exception as exc:
+        _timing_log(stage, "error", "elapsed={:.3f}s {}: {}".format(
+            time.perf_counter() - started, type(exc).__name__, exc,
+        ))
+        raise
+    detail = "elapsed={:.3f}s".format(time.perf_counter() - started)
+    if hasattr(result, "returncode"):
+        detail += " returncode={}".format(result.returncode)
+    elif isinstance(result, str):
+        detail += " chars={}".format(len(result))
+    _timing_log(stage, "end", detail)
+    return result
+
+
+def _dependency_files_present(workdir):
+    """只检查本地目录和关键文件，不启动 Node/npm。"""
+    node_modules = workdir / "node_modules"
+    if not node_modules.is_dir():
+        return False
+    gray_matter = node_modules / "gray-matter"
+    return (
+        (gray_matter / "package.json").is_file()
+        and (gray_matter / "index.js").is_file()
+    )
+
+
 def _npm_install(collector_script: str, *, npm_command: str = "npm") -> str:
-    """在 collector 所在目录安装依赖；每次都执行，不判断是否首次。
+    """依赖关键文件缺失时，在 collector 所在目录安装依赖。
 
     返回空串表示成功，否则返回失败原因，由调用方决定是否继续。
     """
     workdir = Path(collector_script).resolve().parent
+    if _timed_call("dependencies.files", _dependency_files_present, workdir):
+        _timing_log("npm.install", "skip", "gray-matter package.json/index.js 已存在")
+        return ""
+    _timing_log("npm.install", "required", "gray-matter 依赖目录或关键文件缺失")
     executable = shutil.which(npm_command) or npm_command
     try:
-        proc = subprocess.run(
+        proc = _timed_call(
+            "npm.install(timeout={}s)".format(NPM_INSTALL_TIMEOUT_SECONDS),
+            subprocess.run,
             [executable, "install"],
             cwd=str(workdir),
             capture_output=True,
@@ -115,7 +167,11 @@ def _run_collector(
         knowledge_path,
     ]
     try:
-        proc = subprocess.run(
+        proc = _timed_call(
+            "collector.{}(timeout={}s)".format(
+                " ".join(collector_args), KNOWLEDGE_COLLECT_TIMEOUT_SECONDS,
+            ),
+            subprocess.run,
             command,
             capture_output=True,
             text=True,
@@ -174,8 +230,10 @@ def list_supported_deploy_units(
     node_command: str = "node",
     npm_command: str = "npm",
 ) -> List[str]:
-    """安装 collector 依赖并读取其支持的部署单元。"""
+    """按需安装 collector 依赖并读取其支持的部署单元。"""
     npm_error = _npm_install(collector_script, npm_command=npm_command)
+    if npm_error:
+        _timing_log("npm.install", "warning", npm_error)
     try:
         return _list_deploy_units(
             collector_script,
@@ -223,7 +281,9 @@ def _legacy_result(
     feature: Optional[str],
     board_config_path: Optional[Path],
 ) -> dict:
-    result = render_legacy(
+    _timing_log("legacy.render", "fallback", reason)
+    result = _timed_call(
+        "legacy.render", render_legacy,
         selected,
         plugin_root=plugin_root,
         session_workspace_path=session_workspace_path,
@@ -276,6 +336,7 @@ def _resolve_unit(
                 prompt,
             )
 
+    _timing_log("unit.{}".format(uid), "local_fallback", collector_error)
     local_repo = selected.get("localRepoPath", "")
     local_path = Path(local_repo) / LOCAL_AGENTS_MD if local_repo else None
     local_display = (
@@ -325,7 +386,8 @@ def render(
 ) -> dict:
     """使用新接口渲染；接口不可用时委托旧 renderer。"""
     if not selected:
-        return render_legacy(
+        return _timed_call(
+            "legacy.render(empty_selection)", render_legacy,
             selected,
             plugin_root=plugin_root,
             session_workspace_path=session_workspace_path,
@@ -364,7 +426,8 @@ def render(
         )
 
     agent_config = _agent_config(
-        _session_runtime_policy(
+        _timed_call(
+            "runtime.policy", _session_runtime_policy,
             node_id,
             plugin_workspace=plugin_workspace,
             project=project,
@@ -374,15 +437,20 @@ def render(
         plugin_root=plugin_root,
         platform=platform,
     )
-    workspace_content = _build_workspace_content(session_workspace_path)
-    domain_context = _build_domain_context(session_workspace_path)
+    workspace_content = _timed_call(
+        "workspace.agents", _build_workspace_content, session_workspace_path,
+    )
+    domain_context = _timed_call(
+        "workspace.domain", _build_domain_context, session_workspace_path,
+    )
     load_status: List[dict] = []
     unit_sections: List[dict] = []
     unit_has_section: Set[str] = set()
     seen_local_paths: Set[Path] = set()
 
     for item in selected:
-        status, local_path, content = _resolve_unit(
+        status, local_path, content = _timed_call(
+            "unit.{}.resolve".format(item["deployUnitId"]), _resolve_unit,
             item,
             supported_units=supported_units,
             collector_script=collector_script,
@@ -432,7 +500,8 @@ def render(
             }
         )
 
-    prompt = _compose_prompt(
+    prompt = _timed_call(
+        "context.compose", _compose_prompt,
         bindings,
         [],
         workspace_content,
@@ -461,7 +530,7 @@ def render(
     }
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="session_context_inject: collect-knowledge.js -> sessionContext JSON",
         allow_abbrev=False,
@@ -507,7 +576,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             ),
         }
     else:
-        result = render(
+        result = _timed_call(
+            "context.render(units={})".format(len(selected)), render,
             selected,
             session_workspace_path=args.session_workspace_path,
             platform=args.platform,
@@ -526,14 +596,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 runtime_workspace = get_plugin_output_workspace_from_args(
                     args.plugin_workspace, args.project
                 )
-                runtime_context = persist_run_context(
+                runtime_context = _timed_call(
+                    "runtime.resolve_and_persist", persist_run_context,
                     runtime_workspace, args.feature, selected
                 )
-                runtime_capabilities = persist_validation_capabilities(
+                runtime_capabilities = _timed_call(
+                    "runtime.discover_capabilities", persist_validation_capabilities,
                     runtime_workspace / ".autobizdevops" / "features" / args.feature,
                     runtime_context,
                 )
-                runtime_broadcast = run_context_breadcrumb(
+                runtime_broadcast = _timed_call(
+                    "runtime.breadcrumb", run_context_breadcrumb,
                     runtime_workspace, args.feature
                 )
                 current_context = str(result.get("sessionContext", "") or "")
@@ -560,9 +633,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "errors": [{"code": "SCOPE_UNRESOLVED", "detail": str(exc)}],
                 }
 
-    json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+    _timing_log("session.result", "ready", "ok={} context_chars={}".format(
+        result.get("ok"), len(result.get("sessionContext", "")),
+    ))
+    _timed_call("output.json", json.dump, result, sys.stdout, ensure_ascii=False, indent=2)
     print()
     return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    return _timed_call("session.total", _main, argv)
 
 
 if __name__ == "__main__":
