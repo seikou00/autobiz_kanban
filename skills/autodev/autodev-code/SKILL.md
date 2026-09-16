@@ -288,11 +288,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 ### 回检与交接
 
-本节完整协议由脚本渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
-
-```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
-```
+本节完整协议在 `${pluginPath}/skills/references/review-protocol-code.md`：必须先读取并完整遵循该文件，不得凭记忆执行本节。
 
 推进 `code_done` 前先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。
 

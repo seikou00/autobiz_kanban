@@ -1,6 +1,6 @@
 """回检与修复引导的契约测试。
 
-协议正文按阶段各成一份：skills/references/review-protocol-{specs,plan,code}.md，
+协议正文按阶段各成一份：skills/references/review-protocol-{specs,design,code}.md，
 三个 SKILL.md 只保留「读取并遵循」的指向。因此绝大多数语义断言打在**协议文件**上，
 而不是 SKILL.md 文本上；三份文件必须共有的骨架由 ReviewSkeletonIsUnifiedTest 守住。
 
@@ -22,24 +22,22 @@ if str(ROOT) not in sys.path:
 
 CODE_SKILL = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
 SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
-PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
 DESIGN_SKILL = ROOT / "skills" / "autodev" / "autodev-design" / "SKILL.md"
 SIMPLIFIER_AGENT = ROOT / "agents" / "code-simplifier.md"
 EXPLORE_AGENT = ROOT / "agents" / "explore.md"
 VERIFICATION_AGENT = ROOT / "agents" / "verification.md"
-PLAN_CRITIC_AGENT = ROOT / "agents" / "critic_autodev_plan_zh.md"
+DESIGN_CRITIC_AGENT = ROOT / "agents" / "critic_autodev_design_zh.md"
 BOARD_CONFIG = ROOT / "board_core" / "board_config.json"
 REFERENCES = ROOT / "skills" / "references"
 
 SKILL_BY_STAGE = {
     "dev.specs": SPECS_SKILL,
     "dev.design": DESIGN_SKILL,
-    "dev.plan": PLAN_SKILL,
     "dev.code": CODE_SKILL,
 }
 PROTOCOL_BY_STAGE = {
     "dev.specs": REFERENCES / "review-protocol-specs.md",
-    "dev.plan": REFERENCES / "review-protocol-plan.md",
+    "dev.design": REFERENCES / "review-protocol-design.md",
     "dev.code": REFERENCES / "review-protocol-code.md",
 }
 STAGES = tuple(SKILL_BY_STAGE)
@@ -145,7 +143,7 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
 
     def test_upstream_stages_bind_to_critic_section_names(self) -> None:
         """严重度必须用 critic 的原文分节名，否则与 code-reviewer 的词表混淆。"""
-        for stage in ("dev.specs", "dev.design", "dev.plan"):
+        for stage in ("dev.specs", "dev.design"):
             with self.subTest(stage=stage):
                 output = protocol(stage)
 
@@ -273,29 +271,29 @@ class BatchCompileRoleIsResolvableTest(unittest.TestCase):
         self.assertIn("verification", subagents["disabledBuiltinSubagents"])
 
 
-class PlanCriticRoleIsResolvableTest(unittest.TestCase):
-    """dev.plan 的回检角色是精简版 critic：读码入口收敛到 EVD，且必须能被宿主解析。"""
+class DesignCriticRoleIsResolvableTest(unittest.TestCase):
+    """dev.design 的回检角色是精简版 critic：读码入口收敛到 EVD，且必须能被宿主解析。"""
 
-    def test_protocol_dispatches_the_plan_specific_role(self) -> None:
-        output = protocol("dev.plan")
+    def test_protocol_dispatches_the_design_specific_role(self) -> None:
+        output = protocol("dev.design")
 
-        self.assertIn("critic-autodev-plan-zh", output)
-        # 通用 critic 会自主探索代码库，dev.plan 不再派发它。
+        self.assertIn("critic-autodev-design-zh", output)
+        # 通用 critic 会自主探索代码库，dev.design 不再派发它。
         self.assertNotIn("`critic-autodev`", output)
 
     def test_agent_name_matches_the_protocol_directive(self) -> None:
-        self.assertIn("name: critic-autodev-plan-zh", _read(PLAN_CRITIC_AGENT))
+        self.assertIn("name: critic-autodev-design-zh", _read(DESIGN_CRITIC_AGENT))
 
-    def test_dev_plan_injects_the_plan_critic_agent(self) -> None:
+    def test_dev_design_injects_the_design_critic_agent(self) -> None:
         """agents/ 下放了文件还不够：节点的 customSubagentFiles 没列上就加载不到。"""
-        subagents = _node_subagents("dev.plan")
+        subagents = _node_subagents("dev.design")
 
-        self.assertIn("agents/critic_autodev_plan_zh.md", subagents["customSubagentFiles"])
+        self.assertIn("agents/critic_autodev_design_zh.md", subagents["customSubagentFiles"])
         self.assertIn("critic", subagents["disabledBuiltinSubagents"])
 
     def test_code_reading_entry_is_bounded_to_code_evidence(self) -> None:
         """augment hook 删除后没有运行时注入通道，读码边界只能写在代理定义里。"""
-        agent = _read(PLAN_CRITIC_AGENT)
+        agent = _read(DESIGN_CRITIC_AGENT)
 
         self.assertIn("Code Evidence", agent)
         self.assertIn("追调用方", agent)
@@ -303,7 +301,7 @@ class PlanCriticRoleIsResolvableTest(unittest.TestCase):
 
     def test_agent_never_reads_plugin_source_or_runs_commands(self) -> None:
         """弱模型会去翻门禁脚本找修法；可读范围必须是白名单，且明确禁执行。"""
-        agent = _read(PLAN_CRITIC_AGENT)
+        agent = _read(DESIGN_CRITIC_AGENT)
 
         self.assertIn("## 可读范围", agent)
         self.assertIn("只有两类文件可读", agent)
@@ -311,22 +309,22 @@ class PlanCriticRoleIsResolvableTest(unittest.TestCase):
 
     def test_artifact_paths_come_from_the_dispatch_prompt(self) -> None:
         """没有 augment hook，绝对路径只能由派发点写进 prompt；缺了就退回，不自己搜。"""
-        agent = _read(PLAN_CRITIC_AGENT)
+        agent = _read(DESIGN_CRITIC_AGENT)
         self.assertIn("feature 目录绝对路径", agent)
         self.assertIn("不要自己去搜工作区", agent)
 
-        output = protocol("dev.plan")
+        output = protocol("dev.design")
         self.assertIn("feature 目录的绝对路径", output)
         self.assertIn("输入材料清单", output)
 
     def test_agent_is_read_only_and_terminal(self) -> None:
-        agent = _read(PLAN_CRITIC_AGENT)
+        agent = _read(DESIGN_CRITIC_AGENT)
 
         self.assertIn("disallowedTools", agent.split("---")[1])
         self.assertIn("不得再派发任何子代理", agent)
 
     def test_agent_keeps_the_section_names_the_protocol_binds_to(self) -> None:
-        agent = _read(PLAN_CRITIC_AGENT)
+        agent = _read(DESIGN_CRITIC_AGENT)
 
         for section in (
             "Critical Findings",

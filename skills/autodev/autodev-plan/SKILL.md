@@ -143,11 +143,9 @@ Draft 已创建后，候选 Core 的 `refs`、`writeSet`、`dependsOn`、`worksp
 
 ## 阶段门与完成
 
-finalize 后先运行机器阶段门，再按渲染出的协议进行回检，并完整遵循其输出；不得凭记忆执行本节。回检改动产物后重跑阶段门。
+finalize 后运行机器阶段门；失败项按返回的 `artifact` / `target` / `problem` / `action` / `route` 修完重跑，通过后推进 `plan_done`。本阶段不重复审查 design.md。
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 ```
