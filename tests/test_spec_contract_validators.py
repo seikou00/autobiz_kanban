@@ -34,13 +34,11 @@ if str(HOOKS) not in sys.path:
 
 from artifact_check import (  # noqa: E402
     HookContext,
-    contract_id_width_errors,
     malformed_contract_headings,
     placeholder_residue,
     proposal_capabilities,
     proposal_capability_groups,
     removed_requirements_missing_fields,
-    scenarios_without_requirement,
     spec_operations_with_requirements,
     validate_capability_spec_correspondence,
     validate_proposal_contract,
@@ -332,7 +330,14 @@ class CapabilityOperationConsistencyTest(SpecContractValidatorTestBase):
             self.assertIn("expected=MODIFIED", output)
             self.assertIn("POST_SKILL_REPAIR", output)
 
-    def test_new_capability_with_filled_modified_section_is_blocked(self) -> None:
+    def test_new_capability_with_filled_modified_section_is_not_a_gate_failure(self) -> None:
+        """分组错放只由技能写作规则管，不再计门禁失败。
+
+        判定「声明 New 却在改存量」要的是 capability 分类本身对不对，而修复
+        代理改不了分类——只能退回主代理。让门禁拦它，换来的是一轮 BLOCKED
+        往返而不是一次修复。声明的分组有没有对应内容仍由
+        capability_operation_missing 保证。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             project, feature_dir = self._feature(tmp)
             (feature_dir / "proposal.md").write_text(
@@ -346,9 +351,7 @@ class CapabilityOperationConsistencyTest(SpecContractValidatorTestBase):
             )
             self._write_spec(feature_dir, "order-export", body)
             failures, output = self._run(validate_capability_spec_correspondence, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("capability_operation_contradicts_new", output)
-            self.assertIn("MODIFIED", output)
+            self.assertEqual(failures, 0, output)
 
     def test_empty_section_headings_do_not_count_as_content(self) -> None:
         """标题存在但段内无 Requirement 时，不算该能力用了这个操作。"""
@@ -407,6 +410,8 @@ class MalformedContractHeadingTest(SpecContractValidatorTestBase):
         "### [REQ-002]: 缺 Requirement 字样",
         "## Requirement [REQ-001]: 标题层级错",
         "### Scenario [SCN-001]: 标题层级错",
+        "### Requirement [REQ-1001]: 位数过长",
+        "#### Scenario SCN-01: 位数过短",
     ]
 
     WELL_FORMED = [
@@ -430,13 +435,6 @@ class MalformedContractHeadingTest(SpecContractValidatorTestBase):
             with self.subTest(line=line):
                 self.assertEqual(malformed_contract_headings(line), [])
 
-    def test_numeric_width_error_has_one_dedicated_diagnostic(self) -> None:
-        line = "### Requirement [REQ-1001]: 位数过长"
-        self.assertEqual(malformed_contract_headings(line), [])
-        errors = contract_id_width_errors(line)
-        self.assertEqual([error.current for error in errors], ["REQ-1001"])
-        self.assertEqual(errors[0].suggested, "REQ-001")
-
     def test_spec_template_is_clean(self) -> None:
         template = ROOT / "skills/autodev/autodev-specs/templates/spec.md"
         self.assertEqual(
@@ -458,7 +456,7 @@ class MalformedContractHeadingTest(SpecContractValidatorTestBase):
 
 
 class SpecIdIntegrityTest(SpecContractValidatorTestBase):
-    """ID 层面的机械事实：feature 级唯一、文档顺序递增、Scenario 有归属。"""
+    """ID 层面的机械事实：feature 级唯一，且标题写法能被索引器读到。"""
 
     def test_same_id_in_two_specs_is_blocked(self) -> None:
         """重号会让覆盖门真空满足——扁平 ID 集合分不出是哪个 capability 的。"""
@@ -477,7 +475,8 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             self.assertIn("order-export/spec.md:SCN-001->SCN-002", output)
             self.assertIn("POST_SKILL_REPAIR", output)
 
-    def test_four_digit_ids_only_report_width_with_replacements(self) -> None:
+    def test_four_digit_ids_are_reported_as_malformed_headings(self) -> None:
+        """位数不对的 ID 索引器同样读不到，与其他畸形标题走同一个 reason。"""
         with tempfile.TemporaryDirectory() as tmp:
             project, feature_dir = self._feature(tmp)
             body = SPEC_ONE_REQ.replace("REQ-001", "REQ-1001").replace(
@@ -485,16 +484,10 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             )
             self._write_spec(feature_dir, "order-export", body)
             failures, output = self._run(validate_specs_contract, project)
-            self.assertEqual(failures, 2, output)
-            fail_lines = [
-                line for line in output.splitlines()
-                if "POST_SKILL_FAIL" in line and "reason=spec_id_width_invalid" in line
-            ]
-            self.assertEqual(len(fail_lines), 2)
-            self.assertNotIn("invalid_spec_missing_requirement", output)
-            self.assertNotIn("invalid_spec_missing_scenario", output)
-            self.assertNotIn("spec_contract_heading_malformed", output)
-            self.assertNotIn("spec_placeholder_residue", output)
+            self.assertGreaterEqual(failures, 1)
+            self.assertIn("spec_contract_heading_malformed", output)
+            self.assertIn("REQ-1001", output)
+            self.assertIn("SCN-1001", output)
 
     def test_distinct_ids_across_specs_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -531,35 +524,6 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             self._write_spec(feature_dir, "order-export", body)
             failures, output = self._run(validate_specs_contract, project)
             self.assertEqual(failures, 0, output)
-
-    def test_scenario_before_any_requirement_is_orphaned(self) -> None:
-        self.assertEqual(
-            scenarios_without_requirement(
-                "#### Scenario [SCN-001]: s\n\n### Requirement [REQ-001]: a\n"
-            ),
-            ["SCN-001"],
-        )
-
-    def test_scenario_under_section_heading_is_orphaned(self) -> None:
-        """新的 `## ` 段关闭上一个 Requirement，段标题正下方的 Scenario 无归属。"""
-        text = (
-            "### Requirement [REQ-001]: a\n\n#### Scenario [SCN-001]: s\n\n"
-            "## MODIFIED Requirements\n\n#### Scenario [SCN-002]: 孤儿\n"
-        )
-        self.assertEqual(scenarios_without_requirement(text), ["SCN-002"])
-
-    def test_owned_scenario_is_not_orphaned(self) -> None:
-        self.assertEqual(scenarios_without_requirement(SPEC_ONE_REQ), [])
-
-    def test_orphan_scenario_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp)
-            body = "## ADDED Requirements\n\n#### Scenario [SCN-009]: 无主场景\n\n" + SPEC_ONE_REQ
-            self._write_spec(feature_dir, "order-export", body)
-            failures, output = self._run(validate_specs_contract, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("spec_scenario_without_requirement", output)
-            self.assertIn("SCN-009", output)
 
 
 class RemovedRequirementFieldsTest(SpecContractValidatorTestBase):

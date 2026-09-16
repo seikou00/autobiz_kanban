@@ -145,36 +145,12 @@ _SPECS: Dict[str, Repair] = {
             "「#### Scenario SCN-NNN: <标题>」。NNN 是三位数字，ID 外的方括号可有可无。"
         ),
     ),
-    "spec_id_width_invalid": Repair(
-        artifact="{target}",
-        problem="{target} 中的规格 ID {id} 不是三位数字",
-        action=(
-            "把 {id} 改为 {suggested}，并同步本文件 Source References 及其他引用。"
-            "该错误只处理位数，不要改操作分组或 Requirement 内容。"
-        ),
-    ),
     "spec_requirement_without_scenario": Repair(
         artifact="{target}",
         problem="{target} 中这些 Requirement 自身块内没有 Scenario：{requirements}",
         action=(
             "为报错的每个 Requirement 补至少一个「#### Scenario SCN-NNN: <标题>」；"
             "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
-        ),
-    ),
-    "spec_scenario_without_requirement": Repair(
-        artifact="{target}",
-        problem="{target} 中这些 Scenario 不归属任何 Requirement：{scenarios}",
-        action=(
-            "把报错的每个 Scenario 移到它所属的「### Requirement REQ-NNN:」标题之下；"
-            "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
-        ),
-    ),
-    "spec_id_out_of_order": Repair(
-        artifact="{target}",
-        problem="{target} 中这些 REQ/SCN 编号没有按文档顺序递增：{ids}",
-        action=(
-            "按文档顺序重排 REQ/SCN 编号，使其数值递增。"
-            "允许跳号（删除后 ID 不复用会留下空档），但后出现的编号不得小于先出现的。"
         ),
     ),
     "removed_requirement_missing_field": Repair(
@@ -199,27 +175,6 @@ _SPECS: Dict[str, Repair] = {
         action=(
             "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
             "同一来源的一组语义约束可映射到同一个 REQ/SCN。"
-        ),
-    ),
-    "spec_source_requirement_in_body": Repair(
-        artifact="{target}",
-        problem="{target} 的 Requirement/Scenario 正文堆放了来源要求 ID：{ids}",
-        action=(
-            "从行为正文移除 SRC-NNN-RNNN；在 Source References 表用 SRC-NNN 映射实际 REQ/SCN，"
-            "正文只保留对应的可验证行为。"
-        ),
-    ),
-    "spec_source_reference_unknown": Repair(
-        artifact="specs/**/spec.md",
-        problem="spec 引用了 PRD 外部资料索引中不存在的来源：{target}",
-        action="修正或移除这些 SRC-NNN；确有新资料时先回 PRD 登记稳定 ID，再重新生成 specs。",
-    ),
-    "spec_source_reference_incomplete": Repair(
-        artifact="specs/**/spec.md",
-        problem="这些来源引用缺少 Requirement/Scenario 映射或 Usage：{target}",
-        action=(
-            "含 spec 目标要求的来源补齐 REQ/SCN 与 Usage；无 spec 要求的来源可删除该行，"
-            "或保留 `-` 映射并填写 Usage。"
         ),
     ),
     "duplicate_spec_id_across_specs": Repair(
@@ -263,15 +218,6 @@ _SPECS: Dict[str, Repair] = {
         action=(
             "在 specs/{target}/spec.md 的「## {expected} Requirements」段下写出 Requirement；"
             "若该能力实际不是 {group}，改 proposal.md 把它挪到正确的分组。"
-        ),
-    ),
-    "capability_operation_contradicts_new": Repair(
-        artifact="specs/{target}/spec.md",
-        problem="capability {target} 声明为 New，却在 {operations} 段下写了 Requirement",
-        action=(
-            "specs/{target}/spec.md 声明为 New，不该有存量需求可改可删："
-            "把 {operations} 段下的 Requirement 移到「## ADDED Requirements」（段标题可以保留，留空即可）；"
-            "若该能力实际是在改存量，改 proposal.md 把它挪到 Modified / Removed 组。"
         ),
     ),
 }

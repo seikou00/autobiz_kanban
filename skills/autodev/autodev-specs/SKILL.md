@@ -140,27 +140,17 @@ capability 的变更分类写进 `## Capabilities` 节：
 规则：
 
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
-- `UI_CONTEXT.json` 是 UI 范围机器事实源；生成或修改它必须使用 `${pluginPath}/hooks/ui_context_writer.py`，不得直接整份写入或编辑。调试只使用 `validate` / `show --summary`。
-- `uiRequired=true` 时，UI 行为应形成独立 capability，并在 `UI_CONTEXT.json.capabilities[]` 回链对应 `REQ-xxx` 与 `SCN-xxx`；必须至少有一个 UI capability。
-- 每个 UI capability 按自身需求决定是否有高保真输入：有则绑定真实 `VIS-xxx`；无则明确写 `visualSourceRefs=[]`，不得为普通 UI 行为伪造高保真引用。
-- `uiRequired=false` 时不生成 UI capability，并在 `UI_CONTEXT.json.notApplicableReason` 说明原因。
-- specs 完成时将 `UI_CONTEXT.json.decisionStatus` 固化为 `locked`，`lockedAtCheckpoint` 写 `specs_done`。
-- **列入即生成**：`Capabilities` 中每一项（正文「无」除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，回到 proposal 将其移除或并入其他 capability。
-- specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- `source-context.json` 中 `targets` 含 `spec` 的 `SRC-NNN` 必须进入 spec 的 `Source References / 外部资料引用` 表并映射 REQ/SCN；同一来源或一组模板约束可映射到同一个 REQ/SCN。`background`、`duplicate` 等无 spec 要求的来源无需列入，保留时映射写 `-` 并填写 Usage。只能引用 PRD 已定义的 `SRC-NNN`；PRD 无来源项时该节正文写「无」。
-- Source References 表承担来源追溯；Requirement 与 Scenario 正文只写可验证行为，不得堆放 `SRC-NNN-RNNN` 列表。
+- UI 范围只以 `UI_CONTEXT.json` 为准，且只通过 `${pluginPath}/hooks/ui_context_writer.py` 更新（调试只用 `validate` / `show --summary`），字段规则见 `skills/autobiz/references/ui-context.md`。本阶段负责：`uiRequired=true` 时至少有一个 UI capability，并在 `capabilities[]` 回链对应 `REQ-xxx` 与 `SCN-xxx`；`uiRequired=false` 时不生成 UI capability 并写明 `notApplicableReason`；完成时固化 `decisionStatus=locked`、`lockedAtCheckpoint=specs_done`。
+- specs 定义 **WHAT**：用 SHALL/MUST 写外部可观察行为，不写实现步骤、类名、SQL 细节或任务拆分。
+- `Capabilities` 与 `specs/<capability>/spec.md` 双向一一对应；不值得单独成 spec 的 capability 回到 proposal 移除或并入其他 capability。
+- 操作段与 proposal 分组对齐：`New` 的 spec 在 `ADDED Requirements` 下写 Requirement，`MODIFIED`/`REMOVED` 段下不得有 Requirement；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 允许。每个 Requirement 只进一个操作段；无内容的操作段保留标题，段下不写 Requirement。
+- Requirement 用 `### Requirement REQ-NNN: <标题>`，Scenario 用四级标题 `#### Scenario SCN-NNN: <标题>` 写在所属 Requirement 之下（ID 外的方括号可有可无），每个 Requirement 至少一个 Scenario。
+- `NNN` 三位数字，同一 feature 内唯一，跨 spec 文件不得重号；改标题不改 ID，删除后不复用，允许跳号，不得为顺序重排已有 ID。
+- `MODIFIED Requirements` 写修改后的完整行为，覆盖旧行为受影响的触发条件和新期望，不写「新增字段」这类差异片段。
+- `REMOVED Requirements` 写 `**Reason:**` 与 `**Migration:**` 两行，并用 Scenario 描述旧入口被触发时的期望响应。
+- `source-context.json` 中 `targets` 含 `spec` 的 `SRC-NNN` 进入 `Source References / 外部资料引用` 表并映射 REQ/SCN（同一来源或一组模板约束可映射同一个 REQ/SCN）；来源追溯只放这张表，Requirement/Scenario 正文不堆 `SRC-NNN-RNNN`。无 spec 要求的来源无需列入；PRD 无来源项时该节正文写「无」。
 - 外部接口资料至少核对 method/path、鉴权、请求/响应、错误和超时中与本期有关的内容；资料与用户已确认行为矛盾时回流澄清，不得自行选择一个版本。
-- Requirement 使用 `### Requirement REQ-NNN: <标题>`，Scenario 使用四级标题 `#### Scenario SCN-NNN: <标题>` 并写在所属 Requirement 标题之下；ID 外的方括号可有可无。
-- `NNN` 是三位数字；ID 在同一 feature 内全局唯一，跨 spec 文件也不得重号。改标题不改 ID，删除后 ID 不复用。新增时取一个未使用的编号即可，允许跳号，不要求与文档顺序一致——不得为了顺序重排已有 ID。
-- 每个 Requirement 至少一个 Scenario；REMOVED Requirement 也必须用 Scenario 描述旧入口被触发时的期望响应。
-- 使用 SHALL/MUST 表达可验证行为。
-- 每个 Requirement 只能放入一个操作段：`ADDED Requirements`、`MODIFIED Requirements` 或 `REMOVED Requirements`。只是已有行为增加条件、字段、状态或分支的，放入 `MODIFIED Requirements`。
-- `MODIFIED Requirements` 必须写修改后的完整行为，并覆盖旧行为受影响的触发条件和新期望；不要只写「新增字段」「调整逻辑」这类差异片段。
-- `REMOVED Requirements` 必须写 `**Reason:** <移除原因>` 与 `**Migration:** <迁移方式>` 两行，并用 Scenario 描述旧入口被触发时系统应该如何响应。
-- 操作段要与 proposal 的分组对上：`New Capabilities` 的 spec 在 `ADDED Requirements` 下写 Requirement，`MODIFIED`/`REMOVED` 段下不得有 Requirement；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 是允许的。
-- 模板槽位必须全部替换成实际内容：`[能力名]`、`[触发条件]`、`REQ-NNN`、`SCN-NNN` 以及 `TBD`／`待补充`／`待提供`／`待定` 都不得留在产物里；Markdown 链接不算槽位。
-- 某个操作段无内容时保留段标题，段下不写 Requirement。
-- 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
+- 模板槽位与 `TBD`／`待补充`／`待提供`／`待定` 不得留在产物里（Markdown 链接不算槽位）。
 
 ## 门禁修复派发
 
@@ -180,8 +170,7 @@ structure 与 final 两道门禁走同一条修复通道，主流程不自己跑
 
 - 「输入与输出」列出的产物都已生成，`specs/` 下至少存在一个 `spec.md`。
 - `UI_CONTEXT.json` 已生成或更新，格式符合 `skills/autobiz/references/ui-context.md`；`decisionStatus=locked`，UI capability 的 `specRefs` 可解析。
-- 能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
-- specs 只描述行为契约，不包含实现任务。
+- 能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节由 structure / final 门禁判定，失败无法写入 specs_done。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 
 产物契约预检与回检修复均通过后推进 checkpoint：

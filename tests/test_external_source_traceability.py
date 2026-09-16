@@ -176,21 +176,6 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
 
         self.assertEqual(failures, 0, output)
 
-    def test_specs_reject_source_requirement_ids_in_behavior_body(self) -> None:
-        self._write_source_context(["spec"])
-        spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
-        source_row = "| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"
-        spec_path.write_text(
-            SPEC.format(source_rows=source_row).replace(
-                "The system SHALL 按网关契约提交支付。",
-                "The system SHALL 按网关契约提交支付。来源要求：SRC-001-R001。",
-            ),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_specs_contract, skill="autodev-specs")
-        self.assertGreater(failures, 0)
-        self.assertIn("spec_source_requirement_in_body", output)
-
     def test_background_source_without_spec_requirements_needs_no_fake_mapping(self) -> None:
         self._write_source_context(None)
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"

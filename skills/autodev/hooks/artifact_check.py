@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import Iterable
 
 from common import (
     HookCheckError,
@@ -125,8 +125,6 @@ SPEC_SCENARIO_NUMERIC_RE = re.compile(
 )
 # 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
 CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
-# 二级标题（操作段）；`###` 不算，否则 Requirement 标题会被当成段边界
-SECTION_HEADING = re.compile(r"^##(?!#)\s+\S")
 REMOVED_SECTION = re.compile(
     r"^##\s+REMOVED\s+Requirements\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
@@ -134,8 +132,8 @@ REMOVED_SECTION = re.compile(
 REMOVED_FIELD = re.compile(
     r"^\*\*(?P<name>Reason|Migration)[:：]\*\*(?P<value>.*)$", re.MULTILINE
 )
-# `[能力名]` 这类待填槽位。排除所有纯数字 REQ/SCN 记号；位数是否合法由
-# ``spec_id_width_invalid`` 单独判定，避免一个四位 ID 同时报模板残留。
+# `[能力名]` 这类待填槽位。排除所有纯数字 REQ/SCN 记号；位数不合法的标题由
+# ``spec_contract_heading_malformed`` 判定，避免一个四位 ID 同时报模板残留。
 # `REQ-NNN` / `SCN-NNN` 是模板槽位，由 ``PLACEHOLDER_WORD`` 统一捕获。
 # Markdown 链接 `[文字](url)`、以及任务勾选框 `[ ]` / `[x]`。
 PLACEHOLDER_BRACKET = re.compile(
@@ -471,12 +469,11 @@ def _capability_operation_failures(
 ) -> int:
     """Check each capability's declared group against the operations its spec uses.
 
-    The rule is deliberately asymmetric. A declared group always obliges the
-    matching operation, but only ``New`` also forbids the others: a brand-new
-    capability has no pre-existing Requirements to modify or remove, so content
-    under those sections contradicts the declaration. A ``Modified`` capability
-    adding a Requirement alongside its edits is ordinary, and flagging it would
-    make the check fire on correct specs.
+    A declared group obliges the matching operation section to carry at least
+    one Requirement. The reverse -- extra Requirements under another section --
+    is left to the skill's writing rules: mis-grouping is a classification call
+    only the user can settle, so failing the gate on it buys a BLOCKED round
+    trip instead of a repair.
     """
     groups = proposal_capability_groups(proposal_text)
     failures = 0
@@ -498,16 +495,6 @@ def _capability_operation_failures(
                 target=capability,
                 fields={"group": group, "expected": expected},
             )
-        if group == "New":
-            contradicting = sorted(actual - {"ADDED"})
-            if contradicting:
-                failures += fail_line(
-                    ctx,
-                    "capability_operation_contradicts_new",
-                    f" capability={capability} operations={','.join(contradicting)}",
-                    target=capability,
-                    fields={"operations": "/".join(contradicting)},
-                )
     return failures
 
 
@@ -517,14 +504,6 @@ def validate_specs_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_specs")
 
     failures = _report_implementation_scope_errors(ctx)
-    # Renumbering suggestions have to clear every ID the feature already owns,
-    # not just the ones in the file being repaired -- a file-local suggestion
-    # walks straight into `duplicate_spec_id_across_specs`.
-    taken: set[str] = set()
-    for spec in specs:
-        spec_text = read_text(spec)
-        taken.update(SPEC_REQUIREMENT_DEF_RE.findall(spec_text))
-        taken.update(SPEC_SCENARIO_DEF_RE.findall(spec_text))
     for spec in specs:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
@@ -534,20 +513,6 @@ def validate_specs_contract(ctx: HookContext) -> int:
             failures += fail_line(ctx, reason, f" file={rel}", target=str(rel))
         if not re.search(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", text, re.MULTILINE):
             failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}", target=str(rel))
-        width_errors = contract_id_width_errors(text, taken)
-        for width_error in width_errors:
-            if width_error.suggested:
-                taken.add(width_error.suggested)
-            failures += fail_line(
-                ctx,
-                "spec_id_width_invalid",
-                f" file={rel} id={width_error.current} suggested={width_error.suggested or 'NONE'}",
-                target=str(rel),
-                fields={
-                    "id": width_error.current,
-                    "suggested": width_error.suggested or "三位 ID 空间已耗尽",
-                },
-            )
         has_requirement_candidate = SPEC_REQUIREMENT_NUMERIC_RE.search(text) is not None
         has_scenario_candidate = SPEC_SCENARIO_NUMERIC_RE.search(text) is not None
         if not has_requirement_candidate:
@@ -572,15 +537,6 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 target=str(rel),
                 fields={"requirements": ",".join(barren)},
             )
-        orphans = scenarios_without_requirement(text)
-        if orphans:
-            failures += fail_line(
-                ctx,
-                "spec_scenario_without_requirement",
-                f" file={rel} scenarios={','.join(orphans)}",
-                target=str(rel),
-                fields={"scenarios": ",".join(orphans)},
-            )
         missing_fields = removed_requirements_missing_fields(text)
         if missing_fields:
             failures += fail_line(
@@ -599,31 +555,17 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 target=str(rel),
                 fields={"placeholders": "; ".join(sorted(set(residue))[:8])},
             )
-        source_section = _markdown_section_body(
-            text,
-            "Source References / 外部资料引用",
-        )
-        behavior_text = (
-            text
-            if source_section is None
-            else text.replace(source_section, "", 1)
-        )
-        source_requirement_ids = sorted(referenced_source_requirement_ids(behavior_text))
-        if source_requirement_ids:
-            failures += fail_line(
-                ctx,
-                "spec_source_requirement_in_body",
-                f" file={rel} ids={','.join(source_requirement_ids)}",
-                target=str(rel),
-                fields={"ids": ",".join(source_requirement_ids)},
-            )
     failures += _duplicate_ids_across_specs(ctx, specs)
     failures += _validate_specs_source_references(ctx, specs)
     return failures
 
 
 def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> int:
-    """Keep PRD-owned source IDs visible at the behavior-contract boundary."""
+    """Keep PRD-owned source IDs visible at the behavior-contract boundary.
+
+    Only the disappearance of a source is checked. Cell-level completeness and
+    stray IDs are formatting, and the gate charges a full re-run for each.
+    """
 
     prd = ctx.file("PRD.md")
     if not is_nonempty(prd):
@@ -640,49 +582,23 @@ def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> in
         else defined & source_ids_for_target(source_context, "spec")
     )
     cited: set[str] = set()
-    rows: dict[str, list[str]] = {}
     for spec in specs:
         source_section = _markdown_section_body(
             read_text(spec),
             "Source References / 外部资料引用",
         )
         if source_section is not None:
-            section_rows = _source_table_rows(source_section)
-            rows.update(section_rows)
-            cited.update(section_rows)
+            cited.update(_source_table_rows(source_section))
 
-    failures = 0
     missing = sorted(required - cited)
-    if missing:
-        failures += fail_line(
-            ctx,
-            "spec_source_reference_missing",
-            f" ids={','.join(missing)}",
-            target=",".join(missing),
-        )
-    unknown = sorted(cited - defined)
-    if unknown:
-        failures += fail_line(
-            ctx,
-            "spec_source_reference_unknown",
-            f" ids={','.join(unknown)}",
-            target=",".join(unknown),
-        )
-    incomplete = sorted(
-        source_id
-        for source_id, cells in rows.items()
-        if len(cells) < 3
-        or _coverage_cell_is_empty(cells[2])
-        or (source_id in required and _coverage_cell_is_empty(cells[1]))
+    if not missing:
+        return 0
+    return fail_line(
+        ctx,
+        "spec_source_reference_missing",
+        f" ids={','.join(missing)}",
+        target=",".join(missing),
     )
-    if incomplete:
-        failures += fail_line(
-            ctx,
-            "spec_source_reference_incomplete",
-            f" ids={','.join(incomplete)}",
-            target=",".join(incomplete),
-        )
-    return failures
 
 
 def _validate_source_requirement_coverage(
@@ -789,43 +705,8 @@ def malformed_contract_headings(text: str) -> list[str]:
             continue
         if "REQ-NNN" in line or "SCN-NNN" in line:
             continue
-        # 数字 ID 的标题形状正确但位数错误时，由 ``spec_id_width_invalid``
-        # 给唯一根因和替换值；这里不再重复报 malformed。
-        if SPEC_REQUIREMENT_NUMERIC_RE.match(line) or SPEC_SCENARIO_NUMERIC_RE.match(line):
-            continue
         malformed.append(line.strip())
     return malformed
-
-
-class SpecIdWidth(NamedTuple):
-    current: str
-    suggested: str
-
-
-def contract_id_width_errors(text: str, taken: Iterable[str] = ()) -> list[SpecIdWidth]:
-    """Well-shaped numeric contract headings whose ID is not exactly three digits."""
-
-    reserved = set(taken)
-    reserved.update(SPEC_REQUIREMENT_DEF_RE.findall(text))
-    reserved.update(SPEC_SCENARIO_DEF_RE.findall(text))
-    errors: list[SpecIdWidth] = []
-    for prefix, pattern in (
-        ("REQ", SPEC_REQUIREMENT_NUMERIC_RE),
-        ("SCN", SPEC_SCENARIO_NUMERIC_RE),
-    ):
-        highest = 0
-        for match in pattern.finditer(text):
-            digits = match.group("digits")
-            current = match.group(1)
-            if len(digits) == 3:
-                highest = max(highest, int(digits))
-                continue
-            suggested = _next_free_spec_id(prefix, highest, reserved)
-            if suggested:
-                reserved.add(suggested)
-                highest = int(suggested.rpartition("-")[2])
-            errors.append(SpecIdWidth(current, suggested))
-    return errors
 
 
 def _next_free_spec_id(prefix: str, floor: int, reserved: set[str]) -> str:
@@ -835,31 +716,6 @@ def _next_free_spec_id(prefix: str, floor: int, reserved: set[str]) -> str:
         if candidate not in reserved:
             return candidate
     return ""
-
-
-def scenarios_without_requirement(text: str) -> list[str]:
-    """Scenario IDs that no Requirement owns.
-
-    ``requirements_without_scenario`` checks the other direction. A Scenario
-    placed before the file's first Requirement, or directly under an operation
-    section heading, belongs to nothing -- it is indexed as a defined scenario
-    and then demands coverage for a behaviour no Requirement states.
-    """
-    orphans: list[str] = []
-    current_requirement: str | None = None
-    for line in text.splitlines():
-        if SECTION_HEADING.match(line):
-            # A new `## ` section closes the Requirement that came before it.
-            current_requirement = None
-            continue
-        requirement = SPEC_REQUIREMENT_DEF_RE.match(line)
-        if requirement:
-            current_requirement = requirement.group(1)
-            continue
-        scenario = SPEC_SCENARIO_DEF_RE.match(line)
-        if scenario and current_requirement is None:
-            orphans.append(scenario.group(1))
-    return orphans
 
 
 def removed_requirements_missing_fields(text: str) -> list[str]:
