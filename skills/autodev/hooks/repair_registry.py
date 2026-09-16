@@ -93,8 +93,8 @@ _ENTRY: Dict[str, Repair] = {
 _SPECS: Dict[str, Repair] = {
     "invalid_source_context": Repair(
         artifact="source-context.json / sources/",
-        problem="来源要求索引或快照不合法：{target}",
-        action="按预检详情修正 source-context.json 的来源、快照路径、原文条目或要求定义后重跑；已有快照时不要改成 never_provided。",
+        problem="来源索引或快照不合法：{target}",
+        action="按预检详情修正 source-context.json 的来源、快照路径或 targets 后重跑；已有快照时不要改成 never_provided。",
     ),
     "missing_proposal": Repair(
         artifact="proposal.md",

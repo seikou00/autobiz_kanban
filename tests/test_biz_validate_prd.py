@@ -95,9 +95,9 @@ PRD_WITH_SOURCE = VALID_PRD.replace(
     "### 2.7. 外部资料与实现约束\n\n无",
     """### 2.7. 外部资料与实现约束
 
-| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-| SRC-001 | 外部接口 | 支付接口 | sources/SRC-001/payment.md | 支付超时与降级 | Specs、Plan、Code、Reviewer、E2E | snapshot_only |""",
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| SRC-001 | 外部接口 | 支付接口 | sources/SRC-001/payment.md | 支付超时与降级 | snapshot_only |""",
 )
 
 
@@ -105,8 +105,8 @@ def with_source_table(rows: str) -> str:
     return VALID_PRD.replace(
         "### 2.7. 外部资料与实现约束\n\n无",
         "### 2.7. 外部资料与实现约束\n\n"
-        "| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |\n"
-        "| --- | --- | --- | --- | --- | --- | --- |\n" + rows,
+        "| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 状态 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n" + rows,
     )
 
 
@@ -144,21 +144,7 @@ class BizValidatePrdTests(unittest.TestCase):
                     "availability": "snapshot_only",
                     "readStatus": "complete",
                     "freshness": "unknown",
-                    "items": [
-                        {
-                            "id": "SRC-001-I001",
-                            "location": "第 1 行",
-                            "original": "支付接口调用超时时间为 3 秒。",
-                            "disposition": "requirement",
-                            "requirements": [
-                                {
-                                    "id": "SRC-001-R001",
-                                    "text": "支付接口调用超时时间为 3 秒",
-                                    "targets": ["spec", "design", "plan", "code", "reviewer", "e2e"],
-                                }
-                            ],
-                        }
-                    ],
+                    "targets": ["spec", "design", "plan", "code", "reviewer", "e2e"],
                 }
             ],
         }
@@ -330,23 +316,10 @@ class BizValidatePrdTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
 
-    def test_rejects_external_interface_source_without_downstream_stages(self) -> None:
-        workspace = self.make_workspace(
-            with_source_table(
-                "| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | "
-                "REQ-001 支付提交 | Specs、Plan | 可访问 |\n"
-            )
-        )
-
-        result = validate_prd("alpha", workspace)
-
-        self.assertFalse(result["ok"])
-        self.assertIn("Code、Reviewer、E2E", "\n".join(result["errors"]))
-
     def test_missing_fields_on_non_interface_source_is_only_a_warning(self) -> None:
         workspace = self.make_workspace(
             with_source_table(
-                "| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | Specs、Plan |  |\n"
+                "| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 |  |\n"
             )
         )
         self.write_source_context(workspace)
@@ -359,8 +332,8 @@ class BizValidatePrdTests(unittest.TestCase):
     def test_rejects_duplicate_external_source_ids(self) -> None:
         workspace = self.make_workspace(
             with_source_table(
-                "| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | Specs、Plan | 可访问 |\n"
-                "| SRC-001 | 数据字典 | 付款字典 | /tmp/dict.xlsx | REQ-002 | Specs、Plan | 可访问 |\n"
+                "| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | 可访问 |\n"
+                "| SRC-001 | 数据字典 | 付款字典 | /tmp/dict.xlsx | REQ-002 | 可访问 |\n"
             )
         )
 

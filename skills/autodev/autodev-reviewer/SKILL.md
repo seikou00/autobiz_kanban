@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
-version: v1.6.08311
+version: v1.7.0917
 ---
 
 ## 缺失产物处理
@@ -47,7 +47,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 按 references/schemas.md 创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/completion-proposal.json`，描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。两个输入入口：
 
 - **PRD**：Feature 目录存在 `PRD.md` 时，无论用户是否在当前回合再次点名，都必须自动写入 `prd_references`；用户另外提供的 PRD 路径也逐项原样写入，支持多个。所有路径只记录文件位置与说明，不用主 agent 摘要替代原件。Feature PRD 的 `外部资料与实现约束` 是 reviewer 的强制来源索引，不因 specs 只保留 WHAT 而降级为可选背景；Feature PRD 不存在且用户也未提供时才写空数组。
-- **来源上下文**：存在 `source-context.json` 时，读取 `targets` 含 `reviewer` 的要求及对应 `sources/` 快照。每个要求 ID 必须出现在 `REQUIREMENTS_EVAL.md` 的来源契约证据或 finding 中；`snapshot_only` 直接以快照为准。
+- **来源上下文**：存在 `source-context.json` 时，读取其中登记的资料及对应 `sources/` 快照。与本次评审相关的 `SRC-NNN` 出现在 `REQUIREMENTS_EVAL.md` 的来源契约证据或 finding 中；`snapshot_only` 直接以快照为准。
 - **跨仓库**：跨仓库任务必须写 `affected_repositories`（字段规则和示例见 references/schemas.md），且 `files_changed` 每项带 `repository_id`；单仓库任务省略，reviewer 会把当前 cwd 当作唯一仓库。用户主动输入的仓库必须以 `source: "user_input"` 记录并转写依据到 `source_evidence`。
 
 ### 3. 启动 reviewer 角色

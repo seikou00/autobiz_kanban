@@ -1,58 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Read and validate the compact, PRD-owned external source context."""
+"""Read and validate the compact, PRD-owned external source context.
+
+记录单位是文件：一份外部资料对应一个 ``SRC-NNN`` 和一个快照文件，不再向下
+拆条目、行、列或段落。
+"""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
-import shutil
-import subprocess
 import sys
-import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from xml.etree import ElementTree
 
 
 SOURCE_CONTEXT_FILE = "source-context.json"
-SOURCE_REQUIREMENT_RE = re.compile(r"\bSRC-\d{3}-R\d{3}\b")
-SOURCE_ITEM_RE = re.compile(r"^SRC-\d{3}-I\d{3}$")
 SOURCE_ID_RE = re.compile(r"^SRC-\d{3}$")
+SOURCE_ID_SCAN_RE = re.compile(r"\bSRC-\d{3}\b")
 VALID_AVAILABILITY = {"live", "snapshot_only", "never_provided"}
 VALID_READ_STATUS = {"complete", "partial", "unreadable"}
 VALID_FRESHNESS = {"current", "stale", "unknown"}
-VALID_DISPOSITIONS = {
-    "requirement",
-    "background",
-    "non_goal",
-    "duplicate",
-    "superseded",
-}
-VALID_TARGETS = {"spec", "design", "plan", "code", "reviewer", "e2e"}
-TEXT_SUFFIXES = {
-    ".txt",
-    ".md",
-    ".markdown",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".html",
-    ".htm",
-    ".xml",
-    ".csv",
-    ".tsv",
-}
 
 
 def source_context_path(feature_dir: Path) -> Path:
     return feature_dir / SOURCE_CONTEXT_FILE
 
 
-def referenced_source_requirement_ids(text: str) -> Set[str]:
-    return set(SOURCE_REQUIREMENT_RE.findall(text))
+def referenced_source_ids(text: str) -> Set[str]:
+    return set(SOURCE_ID_SCAN_RE.findall(text))
 
 
 def load_source_context(feature_dir: Path) -> Tuple[Optional[Dict[str, Any]], List[str]]:
@@ -68,7 +45,8 @@ def load_source_context(feature_dir: Path) -> Tuple[Optional[Dict[str, Any]], Li
     return data, []
 
 
-def source_requirement_index(data: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def source_index(data: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """按 SRC-NNN 索引每份资料，下游只透传这些字段。"""
     result = {}  # type: Dict[str, Dict[str, Any]]
     if not isinstance(data, dict):
         return result
@@ -79,231 +57,17 @@ def source_requirement_index(data: Optional[Dict[str, Any]]) -> Dict[str, Dict[s
         if not isinstance(source, dict):
             continue
         source_id = source.get("id")
-        source_path = source.get("path")
-        for item in source.get("items", []) if isinstance(source.get("items"), list) else []:
-            if not isinstance(item, dict):
-                continue
-            for requirement in item.get("requirements", []) if isinstance(item.get("requirements"), list) else []:
-                if not isinstance(requirement, dict):
-                    continue
-                requirement_id = requirement.get("id")
-                if not isinstance(requirement_id, str):
-                    continue
-                result[requirement_id] = {
-                    "id": requirement_id,
-                    "text": requirement.get("text"),
-                    "targets": requirement.get("targets"),
-                    "sourceId": source_id,
-                    "sourcePath": source_path,
-                    "availability": source.get("availability"),
-                    "readStatus": source.get("readStatus"),
-                    "freshness": source.get("freshness", "unknown"),
-                    "itemId": item.get("id"),
-                    "location": item.get("location"),
-                    "original": item.get("original"),
-                }
+        if not isinstance(source_id, str):
+            continue
+        result[source_id] = {
+            "id": source_id,
+            "name": source.get("name"),
+            "sourcePath": source.get("path"),
+            "availability": source.get("availability"),
+            "readStatus": source.get("readStatus"),
+            "freshness": source.get("freshness", "unknown"),
+        }
     return result
-
-
-def source_requirement_ids_for_target(data: Optional[Dict[str, Any]], target: str) -> Set[str]:
-    return {
-        requirement_id
-        for requirement_id, requirement in source_requirement_index(data).items()
-        if isinstance(requirement.get("targets"), list) and target in requirement["targets"]
-    }
-
-
-def source_ids_for_target(data: Optional[Dict[str, Any]], target: str) -> Set[str]:
-    return {
-        requirement["sourceId"]
-        for requirement in source_requirement_index(data).values()
-        if isinstance(requirement.get("sourceId"), str)
-        and isinstance(requirement.get("targets"), list)
-        and target in requirement["targets"]
-    }
-
-
-def resolve_source_requirement_refs(
-    feature_dir: Path,
-    refs: List[str],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    validation_errors = validate_source_context_refs(feature_dir) if refs else []
-    data, load_errors = load_source_context(feature_dir)
-    resolved = []  # type: List[Dict[str, Any]]
-    errors = [
-        {"reason": "invalid_source_context", "detail": error}
-        for error in (validation_errors or load_errors)
-    ]
-    if data is None:
-        if refs:
-            errors.append({
-                "reason": "missing_source_context",
-                "detail": SOURCE_CONTEXT_FILE,
-            })
-        return resolved, errors
-
-    index = source_requirement_index(data)
-    seen = set()  # type: Set[str]
-    for ref in refs:
-        if ref in seen:
-            continue
-        seen.add(ref)
-        item = index.get(ref)
-        if item is None:
-            resolved.append({"ref": ref, "found": False})
-            errors.append({
-                "reason": "unknown_source_requirement_ref",
-                "detail": ref,
-            })
-            continue
-        resolved.append({"ref": ref, "found": True, **item})
-    return resolved, errors
-
-
-def _normalize_evidence(value: str) -> str:
-    return re.sub(r"[\s|]+", "", value).casefold()
-
-
-def _decode_xml_text(element: ElementTree.Element, text_tag: str) -> str:
-    return "".join(node.text or "" for node in element.iter(text_tag)).strip()
-
-
-def _read_docx(path: Path) -> Tuple[str, List[Tuple[str, str]]]:
-    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    with zipfile.ZipFile(str(path)) as archive:
-        root = ElementTree.fromstring(archive.read("word/document.xml"))
-    text_tag = namespace + "t"
-    paragraphs = [
-        _decode_xml_text(paragraph, text_tag)
-        for paragraph in root.iter(namespace + "p")
-    ]
-    rows = []  # type: List[Tuple[str, str]]
-    for table_index, table in enumerate(root.iter(namespace + "tbl"), start=1):
-        table_rows = list(table.iter(namespace + "tr"))
-        for row_index, row in enumerate(table_rows, start=1):
-            cells = [
-                _decode_xml_text(cell, text_tag)
-                for cell in list(row.iter(namespace + "tc"))
-            ]
-            value = " | ".join(cell for cell in cells if cell)
-            if value and row_index > 1:
-                rows.append(("表 %d 第 %d 行" % (table_index, row_index), value))
-    return "\n".join(value for value in paragraphs if value), rows
-
-
-def _xlsx_shared_strings(archive: zipfile.ZipFile) -> List[str]:
-    name = "xl/sharedStrings.xml"
-    if name not in archive.namelist():
-        return []
-    root = ElementTree.fromstring(archive.read(name))
-    strings = []  # type: List[str]
-    for item in root:
-        strings.append("".join(node.text or "" for node in item.iter() if node.tag.endswith("}t")))
-    return strings
-
-
-def _read_xlsx(path: Path) -> Tuple[str, List[Tuple[str, str]]]:
-    values = []  # type: List[str]
-    rows = []  # type: List[Tuple[str, str]]
-    with zipfile.ZipFile(str(path)) as archive:
-        shared = _xlsx_shared_strings(archive)
-        sheet_names = sorted(
-            name for name in archive.namelist()
-            if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
-        )
-        for sheet_index, name in enumerate(sheet_names, start=1):
-            root = ElementTree.fromstring(archive.read(name))
-            nonempty_index = 0
-            for row in (node for node in root.iter() if node.tag.endswith("}row")):
-                cells = []  # type: List[str]
-                for cell in (node for node in row if node.tag.endswith("}c")):
-                    cell_type = cell.attrib.get("t")
-                    raw = next((node.text or "" for node in cell if node.tag.endswith("}v")), "")
-                    if cell_type == "s" and raw.isdigit() and int(raw) < len(shared):
-                        raw = shared[int(raw)]
-                    if cell_type == "inlineStr":
-                        raw = "".join(node.text or "" for node in cell.iter() if node.tag.endswith("}t"))
-                    if raw:
-                        cells.append(raw)
-                if not cells:
-                    continue
-                nonempty_index += 1
-                value = " | ".join(cells)
-                values.append(value)
-                if nonempty_index > 1:
-                    rows.append(("工作表 %d 第 %s 行" % (sheet_index, row.attrib.get("r", nonempty_index)), value))
-    return "\n".join(values), rows
-
-
-def _read_delimited(path: Path, delimiter: str) -> Tuple[str, List[Tuple[str, str]]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        parsed = list(csv.reader(handle, delimiter=delimiter))
-    rows = []  # type: List[Tuple[str, str]]
-    values = []  # type: List[str]
-    for index, cells in enumerate(parsed, start=1):
-        value = " | ".join(cell.strip() for cell in cells if cell.strip())
-        if not value:
-            continue
-        values.append(value)
-        if index > 1:
-            rows.append(("第 %d 行" % index, value))
-    return "\n".join(values), rows
-
-
-def _markdown_rows(text: str) -> List[Tuple[str, str]]:
-    lines = text.splitlines()
-    separators = set()  # type: Set[int]
-    separator_re = re.compile(r"^\s*\|?\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)+\s*\|?\s*$")
-    for index, line in enumerate(lines):
-        if separator_re.fullmatch(line):
-            separators.add(index)
-    rows = []  # type: List[Tuple[str, str]]
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if "|" not in stripped or index in separators or index + 1 in separators:
-            continue
-        if stripped.startswith("|") and stripped.endswith("|"):
-            rows.append(("第 %d 行" % (index + 1), stripped))
-    return rows
-
-
-def _read_pdf(path: Path) -> Tuple[Optional[str], List[Tuple[str, str]]]:
-    executable = shutil.which("pdftotext")
-    if executable is None:
-        return None, []
-    completed = subprocess.run(
-        [executable, str(path), "-"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if completed.returncode != 0:
-        return None, []
-    try:
-        return completed.stdout.decode("utf-8"), []
-    except UnicodeDecodeError:
-        return completed.stdout.decode("utf-8", errors="replace"), []
-
-
-def _read_snapshot(path: Path) -> Tuple[Optional[str], List[Tuple[str, str]]]:
-    suffix = path.suffix.casefold()
-    try:
-        if suffix == ".docx":
-            return _read_docx(path)
-        if suffix == ".xlsx":
-            return _read_xlsx(path)
-        if suffix == ".csv":
-            return _read_delimited(path, ",")
-        if suffix == ".tsv":
-            return _read_delimited(path, "\t")
-        if suffix == ".pdf":
-            return _read_pdf(path)
-        if suffix in TEXT_SUFFIXES:
-            text = path.read_text(encoding="utf-8")
-            return text, _markdown_rows(text) if suffix in {".md", ".markdown"} else []
-    except (OSError, UnicodeDecodeError, csv.Error, zipfile.BadZipFile, ElementTree.ParseError):
-        return None, []
-    return None, []
 
 
 def _safe_snapshot_path(feature_dir: Path, source_id: str, raw_path: Any) -> Tuple[Optional[Path], Optional[str]]:
@@ -332,10 +96,9 @@ def validate_source_context(
 ) -> Tuple[List[str], List[str]]:
     """校验 source-context.json，返回 (errors, warnings)。
 
-    errors 只保留会让下游引用悬空的项：ID 可解析、requirement 可被
-    ``SRC-NNN-RNNN`` 引用、targets 可用于阶段过滤、PRD 与 json 的来源集合一致。
-    其余字段下游只做透传渲染，一律降级为 warnings，避免 discuss 阶段的
-    严格度阻断 Plan / Code。逐字原文与表格行覆盖由 ``sync`` 子命令生成，不再校验。
+    errors 只保留会让下游引用悬空的项：ID 可解析、
+    PRD 与 json 的来源集合一致。其余字段下游只做透传渲染，一律降级为
+    warnings，避免 discuss 阶段的严格度阻断 Plan / Code。
     """
     data, load_errors = load_source_context(feature_dir)
     errors = list(load_errors)  # type: List[str]
@@ -359,11 +122,9 @@ def validate_source_context(
         return errors, warnings
 
     seen_sources = set()  # type: Set[str]
-    seen_items = set()  # type: Set[str]
-    seen_requirements = set()  # type: Set[str]
 
-    for source_index, source in enumerate(sources):
-        context = "sources[%d]" % source_index
+    for source_index_position, source in enumerate(sources):
+        context = "sources[%d]" % source_index_position
         if not isinstance(source, dict):
             errors.append("%s 必须是对象" % context)
             continue
@@ -413,106 +174,6 @@ def validate_source_context(
                 "%s；修复：运行 source_context.py sync 自动写入快照路径" % path_error
             )
 
-        items = source.get("items")
-        if not isinstance(items, list) or not items:
-            warnings.append(
-                "%s.items 为空；修复：运行 source_context.py sync 依据快照生成原文条目" % source_id
-            )
-            continue
-
-        undecided = 0
-        for item_index, item in enumerate(items):
-            item_context = "%s.items[%d]" % (source_id, item_index)
-            if not isinstance(item, dict):
-                warnings.append("%s 必须是对象" % item_context)
-                continue
-            item_id = item.get("id")
-            if (
-                not isinstance(item_id, str)
-                or SOURCE_ITEM_RE.fullmatch(item_id) is None
-                or not item_id.startswith(source_id + "-I")
-            ):
-                warnings.append("%s.id 格式非法（应为 %s-Innn）" % (item_context, source_id))
-            elif item_id in seen_items:
-                warnings.append("原文条目 ID 重复: %s" % item_id)
-            else:
-                seen_items.add(item_id)
-            if not isinstance(item.get("location"), str) or not item.get("location").strip():
-                warnings.append("%s.location 缺失" % item_context)
-            if not isinstance(item.get("original"), str) or not item.get("original").strip():
-                warnings.append("%s.original 缺失" % item_context)
-
-            disposition = item.get("disposition")
-            if disposition not in VALID_DISPOSITIONS:
-                warnings.append(
-                    "%s.disposition 非法；可选值: %s"
-                    % (item_context, "/".join(sorted(VALID_DISPOSITIONS)))
-                )
-            requirements = item.get("requirements")
-            if not isinstance(requirements, list):
-                if requirements is not None:
-                    warnings.append("%s.requirements 必须是数组" % item_context)
-                requirements = []
-            if disposition == "requirement" and not requirements:
-                warnings.append("%s 标为 requirement 但没有提取 requirements" % item_context)
-            if disposition == "superseded" and not isinstance(item.get("replacedBy"), str):
-                warnings.append("%s.replacedBy 缺失" % item_context)
-
-            for requirement_index, requirement in enumerate(requirements):
-                requirement_context = "%s.requirements[%d]" % (item_context, requirement_index)
-                if not isinstance(requirement, dict):
-                    errors.append("%s 必须是对象" % requirement_context)
-                    continue
-                requirement_id = requirement.get("id")
-                if (
-                    not isinstance(requirement_id, str)
-                    or SOURCE_REQUIREMENT_RE.fullmatch(requirement_id) is None
-                    or not requirement_id.startswith(source_id + "-R")
-                ):
-                    errors.append(
-                        "%s.id 格式非法；修复：改为 %s-R001 形式，下游 task-groups.json 按该 ID 引用"
-                        % (requirement_context, source_id)
-                    )
-                elif requirement_id in seen_requirements:
-                    errors.append(
-                        "要求 ID 重复: %s；修复：同一 ID 只能出现一次，重复项改用未使用编号"
-                        % requirement_id
-                    )
-                else:
-                    seen_requirements.add(requirement_id)
-                text = requirement.get("text")
-                if not isinstance(text, str) or not text.strip():
-                    errors.append(
-                        "%s.text 缺失；修复：用一句话写明这条要求约束了什么" % requirement_context
-                    )
-                targets = requirement.get("targets")
-                if not isinstance(targets, list) or not targets:
-                    errors.append(
-                        "%s.targets 必须是非空数组；修复：从 %s 中选择该要求需要送达的阶段"
-                        % (requirement_context, "/".join(sorted(VALID_TARGETS)))
-                    )
-                else:
-                    invalid_targets = [t for t in targets if t not in VALID_TARGETS]
-                    if invalid_targets:
-                        errors.append(
-                            "%s.targets 非法: %s；可选值: %s"
-                            % (
-                                requirement_context,
-                                ",".join(map(str, invalid_targets)),
-                                "/".join(sorted(VALID_TARGETS)),
-                            )
-                        )
-                    if len(targets) != len(set(targets)):
-                        errors.append("%s.targets 不得重复" % requirement_context)
-
-            if disposition == "background" and not requirements:
-                undecided += 1
-        if undecided == len(items):
-            warnings.append(
-                "%s 当前没有下游语义要求；若原件只含背景、布局或重复结构可保持现状，"
-                "否则仅为独立影响行为、实现或验收的条目补 requirement" % source_id
-            )
-
     if expected_source_ids is not None:
         missing = sorted(expected_source_ids - seen_sources)
         unknown = sorted(seen_sources - expected_source_ids)
@@ -530,15 +191,6 @@ def validate_source_context(
     return errors, warnings
 
 
-def validate_source_context_refs(
-    feature_dir: Path,
-    expected_source_ids: Optional[Set[str]] = None,
-) -> List[str]:
-    """下游门禁用：只返回阻断项，不带 discuss 阶段的提示。"""
-    errors, _ = validate_source_context(feature_dir, expected_source_ids)
-    return errors
-
-
 def _snapshot_for_source(feature_dir: Path, source_id: str, declared: Any) -> Optional[Path]:
     """定位来源快照：优先用已登记的 path，否则取 sources/SRC-NNN/ 下的第一个文件。"""
     candidate, error = _safe_snapshot_path(feature_dir, source_id, declared)
@@ -554,45 +206,10 @@ def _snapshot_for_source(feature_dir: Path, source_id: str, declared: Any) -> Op
     return files[0] if files else None
 
 
-def _sync_items(
-    source_id: str,
-    rows: List[Tuple[str, str]],
-    existing_items: Any,
-) -> Tuple[List[Dict[str, Any]], int, int]:
-    """按快照行重建 items，按 location 保留模型已填的 disposition / requirements。"""
-    kept = {}  # type: Dict[str, Dict[str, Any]]
-    if isinstance(existing_items, list):
-        for item in existing_items:
-            if isinstance(item, dict) and isinstance(item.get("location"), str):
-                kept[item["location"]] = item
-
-    items = []  # type: List[Dict[str, Any]]
-    reused = 0
-    for index, (location, text) in enumerate(rows, start=1):
-        previous = kept.get(location)
-        item = {
-            "id": "%s-I%03d" % (source_id, index),
-            "location": location,
-            "original": text,
-            "disposition": "background",
-            "requirements": [],
-        }
-        if previous is not None:
-            reused += 1
-            if previous.get("disposition") in VALID_DISPOSITIONS:
-                item["disposition"] = previous["disposition"]
-            if isinstance(previous.get("requirements"), list):
-                item["requirements"] = previous["requirements"]
-            if isinstance(previous.get("replacedBy"), str):
-                item["replacedBy"] = previous["replacedBy"]
-        items.append(item)
-    return items, len(items) - reused, reused
-
-
 def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[int, List[str]]:
-    """依据 PRD 来源表与 sources/ 快照重建 source-context.json 的机械字段。
+    """依据 PRD 来源表与 sources/ 快照重建 source-context.json。
 
-    模型只需保留两个判断动作：给每行标 disposition，给 requirement 行写 text 与 targets。
+    全部字段都是机械投影：快照路径来自 sources/ 目录。
     """
     try:
         from hooks.source_references import extract_source_references, has_source_section
@@ -632,7 +249,6 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
                 existing_by_id[source["id"]] = source
 
     sources = []  # type: List[Dict[str, Any]]
-    background_count = 0
     for reference in references:
         source_id = reference.source_id
         if only and source_id != only:
@@ -651,7 +267,6 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
         if snapshot is None:
             source["availability"] = "never_provided"
             source["readStatus"] = "unreadable"
-            source["items"] = []
             sources.append(source)
             messages.append(
                 "%s 未找到快照（sources/%s/ 为空）：请提供资料、移除该依赖或暂停" % (source_id, source_id)
@@ -659,38 +274,14 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
             continue
         relative = snapshot.resolve(strict=False).relative_to(feature_dir.resolve(strict=False))
         source["path"] = "/".join(relative.parts)
-        _, rows = _read_snapshot(snapshot)
-        if not rows:
-            messages.append(
-                "%s 快照 %s 未解析出表格/字段行，items 保持原样，请人工登记要点"
-                % (source_id, source["path"])
-            )
-            source["items"] = previous.get("items") if isinstance(previous.get("items"), list) else []
-        else:
-            items, added, reused = _sync_items(source_id, rows, previous.get("items"))
-            source["items"] = items
-            undecided = sum(
-                1 for item in items
-                if item["disposition"] == "background" and not item["requirements"]
-            )
-            background_count += undecided
-            messages.append(
-                "%s: 共 %d 个证据条目（新增 %d，保留判定 %d），background %d 个"
-                % (source_id, len(items), added, reused, undecided)
-            )
+        messages.append("%s: 快照 %s" % (source_id, source["path"]))
         sources.append(source)
 
     payload = {"version": 1, "sources": sources}
     source_context_path(feature_dir).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    messages.append(
-        "已写入 %s。仅为独立影响行为、实现或验收的语义约束生成 requirement；"
-        "布局和重复结构保留为 background 或 duplicate"
-        % source_context_path(feature_dir)
-    )
-    if background_count:
-        messages.append("当前有 %d 个 background 证据条目，不要求逐条生成下游要求" % background_count)
+    messages.append("已写入 %s" % source_context_path(feature_dir))
     return 0, messages
 
 

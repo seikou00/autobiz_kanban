@@ -28,9 +28,9 @@ PRD = """# 需求正式稿
 
 ## 外部资料与实现约束
 
-| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | REQ-001 / SCN-001 | Specs、Plan、Code、Reviewer、E2E | 可访问 |
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | REQ-001 / SCN-001 | 可访问 |
 """
 
 SPEC = """# Payment Specification
@@ -104,43 +104,33 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         (self.feature_dir / "specs" / "payment").mkdir(parents=True)
         (self.feature_dir / "PRD.md").write_text(PRD, encoding="utf-8")
 
-    def _write_source_context(self, targets: list[str] | None) -> None:
-        snapshot = self.feature_dir / "sources" / "SRC-001" / "payment.md"
-        snapshot.parent.mkdir(parents=True, exist_ok=True)
-        snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
+    def _write_source_context(
+        self,
+        first: bool,
+        *,
+        second: bool = False,
+    ) -> None:
+        """记录单位是文件：一份资料一条 source，没有阶段路由字段。"""
+        sources = []
+        for source_id, filename, body, include in (
+            ("SRC-001", "payment.md", "支付接口调用超时时间为 3 秒。", first),
+            ("SRC-002", "reconcile.md", "每日 02:00 生成对账文件。", second),
+        ):
+            if not include:
+                continue
+            snapshot = self.feature_dir / "sources" / source_id / filename
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.write_text(body, encoding="utf-8")
+            sources.append({
+                "id": source_id,
+                "name": source_id,
+                "path": "sources/%s/%s" % (source_id, filename),
+                "availability": "snapshot_only",
+                "readStatus": "complete",
+                "freshness": "unknown",
+            })
         (self.feature_dir / "source-context.json").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "sources": [
-                        {
-                            "id": "SRC-001",
-                            "name": "支付接口",
-                            "path": "sources/SRC-001/payment.md",
-                            "availability": "snapshot_only",
-                            "readStatus": "complete",
-                            "freshness": "unknown",
-                            "items": [
-                                {
-                                    "id": "SRC-001-I001",
-                                    "location": "第 1 行",
-                                    "original": "支付接口调用超时时间为 3 秒。",
-                                    "disposition": "requirement" if targets else "background",
-                                    "requirements": ([
-                                        {
-                                            "id": "SRC-001-R001",
-                                            "text": "支付接口调用超时时间为 3 秒",
-                                            "targets": targets,
-                                        }
-                                    ] if targets else []),
-                                }
-                            ],
-                        }
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps({"version": 1, "sources": sources}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -166,7 +156,7 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         self.assertEqual(failures, 0, output)
 
     def test_specs_map_spec_sources_without_copying_requirement_ids_into_body(self) -> None:
-        self._write_source_context(["spec"])
+        self._write_source_context(True)
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         source_row = "| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"
         spec_path.write_text(SPEC.format(source_rows=source_row), encoding="utf-8")
@@ -176,13 +166,13 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         self.assertEqual(failures, 0, output)
 
     def test_specs_allow_inline_source_references(self) -> None:
-        self._write_source_context(["spec"])
+        self._write_source_context(True)
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         source_row = "| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"
         spec_path.write_text(
             SPEC.format(source_rows=source_row).replace(
                 "The system SHALL 按网关契约提交支付。",
-                "The system SHALL 按网关契约提交支付。来源要求：SRC-001-R001。",
+                "The system SHALL 按网关契约提交支付。来源：SRC-001。",
             ),
             encoding="utf-8",
         )
@@ -190,7 +180,7 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         self.assertEqual(failures, 0, output)
 
     def test_background_source_without_spec_requirements_needs_no_fake_mapping(self) -> None:
-        self._write_source_context(None)
+        self._write_source_context(False)
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         spec_path.write_text(SPEC.format(source_rows="无"), encoding="utf-8")
 
@@ -207,138 +197,12 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         self.assertEqual(failures, 0, output)
 
     def test_spec_targeted_source_does_not_force_a_mapping_table(self) -> None:
-        self._write_source_context(["spec"])
+        self._write_source_context(True)
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         spec_path.write_text(SPEC.format(source_rows="无"), encoding="utf-8")
 
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
         self.assertEqual(failures, 0, output)
-
-    def test_design_requires_source_coverage_and_api_link(self) -> None:
-        missing_section = DESIGN.format(source_section="", api_source="无")
-        (self.feature_dir / "design.md").write_text(missing_section, encoding="utf-8")
-
-        failures, output = self._run(validate_design_contract, skill="autodev-plan")
-
-        self.assertGreater(failures, 0)
-        self.assertIn("invalid_design_missing_section", output)
-
-        coverage = """## External Source Coverage / 外部资料覆盖
-
-| Source ID | Related Requirement / Scenario | Design Coverage | Consumption Evidence | Status |
-|---|---|---|---|---|
-| SRC-001 | REQ-001 / SCN-001 | API-001 | https://example.test/openapi；POST /payments | 已消费 |"""
-        empty_evidence = coverage.replace(
-            "https://example.test/openapi；POST /payments",
-            "无",
-        )
-        (self.feature_dir / "design.md").write_text(
-            DESIGN.format(source_section=empty_evidence, api_source="SRC-001"),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_design_contract, skill="autodev-plan")
-        self.assertGreater(failures, 0)
-        self.assertIn("design_source_consumption_evidence_missing", output)
-
-        (self.feature_dir / "design.md").write_text(
-            DESIGN.format(source_section=coverage, api_source="SRC-001"),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_design_contract, skill="autodev-plan")
-        self.assertEqual(failures, 0, output)
-
-    def test_design_must_consume_requirements_targeted_to_design(self) -> None:
-        self._write_source_context(["design"])
-        coverage = """## External Source Coverage / 外部资料覆盖
-
-| Source ID | Related Requirement / Scenario | Design Coverage | Consumption Evidence | Status |
-|---|---|---|---|---|
-| SRC-001 | REQ-001 / SCN-001 | API-001 | sources/SRC-001/payment.md；3 秒超时 | 已消费 |"""
-        design = DESIGN.format(source_section=coverage, api_source="SRC-001")
-        (self.feature_dir / "design.md").write_text(design, encoding="utf-8")
-
-        failures, output = self._run(validate_design_contract, skill="autodev-plan")
-
-        self.assertGreater(failures, 0)
-        self.assertIn("design_source_requirement_missing", output)
-
-        (self.feature_dir / "design.md").write_text(
-            design.replace("复用支付适配器并校验网关响应。", "复用支付适配器并校验网关响应。设计依据：SRC-001-R001。"),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_design_contract, skill="autodev-plan")
-        self.assertEqual(failures, 0, output)
-
-    def test_e2e_cases_must_cover_external_interface_sources(self) -> None:
-        cases = """id: E2E-alpha-001
-status: pending
-title: 支付成功
-execution_mode: api
-ui_required: false
-source:
-  feature: alpha
-  external_sources: []
-  specs_contract:
-    - requirement: REQ-001
-      scenario: SCN-001
-steps:
-  - verification: api
-"""
-        (self.feature_dir / "E2E_TEST_CASES.yaml").write_text(cases, encoding="utf-8")
-        (self.feature_dir / "e2e-run.log").write_text("{}\n", encoding="utf-8")
-
-        failures, output = self._run(validate_e2e_cases_contract, skill="autodev-e2e")
-
-        self.assertGreater(failures, 0)
-        self.assertIn("e2e_external_source_coverage_missing", output)
-
-        (self.feature_dir / "E2E_TEST_CASES.yaml").write_text(
-            cases.replace("external_sources: []", "external_sources: [SRC-001]"),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_e2e_cases_contract, skill="autodev-e2e")
-        self.assertEqual(failures, 0, output)
-
-        (self.feature_dir / "E2E_TEST_CASES.yaml").write_text(
-            cases.replace("external_sources: []", "external_sources: [SRC-001, SRC-999]"),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_e2e_cases_contract, skill="autodev-e2e")
-        self.assertGreater(failures, 0)
-        self.assertIn("e2e_external_source_unknown", output)
-
-    def test_e2e_cases_must_consume_requirements_targeted_to_e2e(self) -> None:
-        self._write_source_context(["e2e"])
-        cases = """id: E2E-alpha-001
-status: pending
-title: 支付超时
-execution_mode: api
-ui_required: false
-source:
-  feature: alpha
-  external_sources: [SRC-001]
-  source_requirements: []
-  specs_contract:
-    - requirement: REQ-001
-      scenario: SCN-001
-steps:
-  - verification: api
-"""
-        (self.feature_dir / "E2E_TEST_CASES.yaml").write_text(cases, encoding="utf-8")
-        (self.feature_dir / "e2e-run.log").write_text("{}\n", encoding="utf-8")
-
-        failures, output = self._run(validate_e2e_cases_contract, skill="autodev-e2e")
-
-        self.assertGreater(failures, 0)
-        self.assertIn("e2e_source_requirement_coverage_missing", output)
-
-        (self.feature_dir / "E2E_TEST_CASES.yaml").write_text(
-            cases.replace("source_requirements: []", "source_requirements: [SRC-001-R001]"),
-            encoding="utf-8",
-        )
-        failures, output = self._run(validate_e2e_cases_contract, skill="autodev-e2e")
-        self.assertEqual(failures, 0, output)
-
 
 if __name__ == "__main__":
     unittest.main()

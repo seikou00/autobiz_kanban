@@ -45,25 +45,10 @@ from hooks.e2e_trust_common import (  # noqa: E402
 )
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
 from hooks.candidate_digest import compute as compute_candidate_digest  # noqa: E402
-from hooks.source_references import (  # noqa: E402
-    SOURCE_ID_RE,
-    extract_source_references,
-    external_interface_ids as prd_external_interface_ids,
-    has_source_section,
-    source_ids as referenced_source_ids,
-)
-from hooks.source_context import (  # noqa: E402
-    load_source_context,
-    referenced_source_requirement_ids,
-    source_requirement_ids_for_target,
-    source_requirement_index,
-    validate_source_context_refs,
-)
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_marker_value,
     load_design_contract,
     validate_plan_design_coverage,
-    validate_plan_source_coverage,
     validate_task_artifact_refs,
 )
 from hooks.design_contract_lock import (  # noqa: E402
@@ -452,55 +437,6 @@ def validate_specs_contract(ctx: HookContext) -> int:
     return failures
 
 
-def _validate_source_requirement_coverage(
-    ctx: HookContext,
-    texts: list[str],
-    target: str,
-    missing_reason: str,
-    unknown_reason: str,
-) -> int:
-    """Validate compact source requirement IDs against the actual artifact text."""
-
-    validation_errors = validate_source_context_refs(ctx.feature_dir)
-    data, load_errors = load_source_context(ctx.feature_dir)
-    failures = 0
-    for error in (validation_errors or load_errors):
-        failures += fail_line(
-            ctx,
-            "invalid_source_context",
-            f" detail={error}",
-            target="source-context.json",
-            repair="按错误提示修正 source-context.json 及对应 sources/ 快照后重试。",
-        )
-    if data is None:
-        return failures
-
-    known = set(source_requirement_index(data))
-    expected = source_requirement_ids_for_target(data, target)
-    cited: set[str] = set()
-    for text in texts:
-        cited.update(referenced_source_requirement_ids(text))
-    missing = sorted(expected - cited)
-    unknown = sorted(cited - known)
-    if missing:
-        failures += fail_line(
-            ctx,
-            missing_reason,
-            f" ids={','.join(missing)}",
-            target=",".join(missing),
-            repair=f"在当前 {target} 产物中引用缺失的 SRC-NNN-RNNN，并落实对应要求。",
-        )
-    if unknown:
-        failures += fail_line(
-            ctx,
-            unknown_reason,
-            f" ids={','.join(unknown)}",
-            target=",".join(unknown),
-            repair="修正来源要求 ID，只引用 source-context.json 中已有的 SRC-NNN-RNNN。",
-        )
-    return failures
-
-
 def _duplicate_ids_across_specs(ctx: HookContext, specs: list[Path]) -> int:
     """One REQ/SCN ID must name one thing across the whole feature.
 
@@ -705,14 +641,6 @@ def validate_design_contract(ctx: HookContext) -> int:
             target=f"{len(pending)} 处",
         )
     failures += _unresolved_decision_refs(ctx, text)
-    failures += _validate_design_source_references(ctx, text)
-    failures += _validate_source_requirement_coverage(
-        ctx,
-        [text],
-        "design",
-        "design_source_requirement_missing",
-        "design_source_requirement_unknown",
-    )
     return failures
 
 
@@ -726,101 +654,6 @@ def _markdown_section_body(text: str, title: str) -> str | None:
     end_match = next_heading.search(text, match.end())
     end = end_match.start() if end_match else len(text)
     return text[match.end():end]
-
-
-def _source_table_rows(section: str) -> dict[str, list[str]]:
-    rows: dict[str, list[str]] = {}
-    for line in section.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|") or not stripped.endswith("|"):
-            continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if not cells or SOURCE_ID_RE.fullmatch(cells[0]) is None:
-            continue
-        rows[cells[0]] = cells
-    return rows
-
-
-def _coverage_cell_is_empty(value: str) -> bool:
-    return value.strip().casefold() in {"", "-", "—", "无", "none", "n/a", "na"}
-
-
-def _validate_design_source_references(ctx: HookContext, design_text: str) -> int:
-    prd = ctx.file("PRD.md")
-    if not is_nonempty(prd):
-        return 0
-    prd_text = read_text(prd)
-    references = extract_source_references(prd_text)
-    if not references:
-        return 0
-
-    coverage = _markdown_section_body(design_text, "External Source Coverage")
-    if coverage is None:
-        return fail_line(
-            ctx,
-            "invalid_design_missing_section",
-            " section='External Source Coverage / 外部资料覆盖'",
-            target="External Source Coverage / 外部资料覆盖",
-        )
-
-    failures = 0
-    defined = {reference.source_id for reference in references}
-    coverage_rows = _source_table_rows(coverage)
-    covered = set(coverage_rows)
-    missing = sorted(defined - covered)
-    if missing:
-        failures += fail_line(
-            ctx,
-            "design_source_reference_missing",
-            f" ids={','.join(missing)}",
-            target=",".join(missing),
-        )
-    unknown = sorted(covered - defined)
-    if unknown:
-        failures += fail_line(
-            ctx,
-            "design_source_reference_unknown",
-            f" ids={','.join(unknown)}",
-            target=",".join(unknown),
-        )
-    incomplete = sorted(
-        source_id
-        for source_id, cells in coverage_rows.items()
-        if len(cells) < 5
-        or _coverage_cell_is_empty(cells[1])
-        or _coverage_cell_is_empty(cells[2])
-        or _coverage_cell_is_empty(cells[3])
-    )
-    if incomplete:
-        failures += fail_line(
-            ctx,
-            "design_source_consumption_evidence_missing",
-            f" ids={','.join(incomplete)}",
-            target=",".join(incomplete),
-        )
-    blocked = sorted(
-        source_id
-        for source_id, cells in coverage_rows.items()
-        if len(cells) >= 5 and re.search(r"阻断|不可访问|inaccessible|blocked", cells[4], re.IGNORECASE)
-    )
-    if blocked:
-        failures += fail_line(
-            ctx,
-            "design_source_consumption_blocked",
-            f" ids={','.join(blocked)}",
-            target=",".join(blocked),
-        )
-
-    api_section = _markdown_section_body(design_text, "API Decisions") or ""
-    missing_api_refs = sorted(prd_external_interface_ids(prd_text) - referenced_source_ids(api_section))
-    if missing_api_refs:
-        failures += fail_line(
-            ctx,
-            "design_external_interface_api_reference_missing",
-            f" ids={','.join(missing_api_refs)}",
-            target=",".join(missing_api_refs),
-        )
-    return failures
 
 
 def validate_design_contract_lock(ctx: HookContext) -> int:
@@ -1511,70 +1344,7 @@ def validate_requirements_eval_verdict(ctx: HookContext) -> int:
             target="REQUIREMENTS_EVAL.md",
             repair="没有真实 warning 时将 verdict 记为 PASS；否则在 Warnings 段写出可定位的非阻塞 finding。",
         )
-    prd = ctx.file("PRD.md")
-    external_ids = prd_external_interface_ids(read_text(prd)) if is_nonempty(prd) else set()
-    if external_ids:
-        coverage = _markdown_section_body(text, "External Interface Coverage")
-        if coverage is None:
-            return fail_line(
-                ctx,
-                "missing_requirements_eval_external_interface_section",
-                target="REQUIREMENTS_EVAL.md",
-                repair="增加 `## External Interface Coverage`，逐项核对 PRD 外部接口 SRC-NNN 的原契约、设计、实现与验证证据。",
-            )
-        coverage_rows = _source_table_rows(coverage)
-        missing = sorted(external_ids - set(coverage_rows))
-        if missing:
-            return fail_line(
-                ctx,
-                "missing_requirements_eval_external_interface_coverage",
-                f" ids={','.join(missing)}",
-                target=",".join(missing),
-                repair="在 External Interface Coverage 表逐项补齐这些 SRC-NNN；已有快照时以快照为准，无法读取快照时 verdict 必须为 DEGRADED，契约或实现不符时必须为 FAIL。",
-            )
-        incomplete = sorted(
-            source_id
-            for source_id in external_ids
-            if source_id in coverage_rows
-            and (
-                len(coverage_rows[source_id]) < 6
-                or any(_coverage_cell_is_empty(cell) for cell in coverage_rows[source_id][1:5])
-            )
-        )
-        if incomplete:
-            return fail_line(
-                ctx,
-                "incomplete_requirements_eval_external_interface_coverage",
-                f" ids={','.join(incomplete)}",
-                target=",".join(incomplete),
-                repair="补齐每个 SRC-NNN 的快照契约、design、实现与验证证据；这些列为空时不能给出 PASS 类结论。",
-            )
-        non_covered = sorted(
-            source_id
-            for source_id in external_ids
-            if source_id in coverage_rows
-            and len(coverage_rows[source_id]) >= 6
-            and re.search(
-                r"mismatch|inaccessible|missing|blocked|不一致|不可访问|缺失|阻断",
-                coverage_rows[source_id][5],
-                re.IGNORECASE,
-            )
-        )
-        if non_covered:
-            return fail_line(
-                ctx,
-                "non_covered_requirements_eval_external_interface",
-                f" ids={','.join(non_covered)}",
-                target=",".join(non_covered),
-                repair="External Interface Coverage 仍有 mismatch/inaccessible/missing/blocked 时，verdict 必须为 FAIL 或 DEGRADED，不能以 PASS 类结论收口。",
-            )
-    return _validate_source_requirement_coverage(
-        ctx,
-        [text],
-        "reviewer",
-        "requirements_eval_source_requirement_missing",
-        "requirements_eval_source_requirement_unknown",
-    )
+    return 0
 
 
 def validate_unit_test_result_json(ctx: HookContext) -> int:
@@ -2460,8 +2230,6 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
             "missing_design_data_id": "Data Decisions",
         }.get(reason, "plan.json")
         failures += _emit_artifact_issue(ctx, issue, fallback)
-    for issue in validate_plan_source_coverage(ctx.feature_dir, raw_tasks):
-        failures += _emit_artifact_issue(ctx, issue, "source-context.json")
     return failures
 
 
@@ -2885,73 +2653,6 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
         failures += fail_line(ctx, "missing_e2e_execution_mode")
     if "ui_required:" not in cases_text:
         failures += fail_line(ctx, "missing_e2e_ui_required")
-    prd = ctx.file("PRD.md")
-    external_ids = prd_external_interface_ids(read_text(prd)) if is_nonempty(prd) else set()
-    if external_ids:
-        if "external_sources:" not in cases_text:
-            failures += fail_line(
-                ctx,
-                "missing_e2e_external_sources_field",
-                repair="在 E2E_TEST_CASES.yaml 的 source 下增加 external_sources，并为每个相关用例列出 SRC-NNN。",
-            )
-        declared_external = _yaml_external_source_ids(cases_text)
-        missing_external = sorted(external_ids - declared_external)
-        if missing_external:
-            failures += fail_line(
-                ctx,
-                "e2e_external_source_coverage_missing",
-                f" ids={','.join(missing_external)}",
-                target=",".join(missing_external),
-                repair="为每个外部接口 SRC-NNN 增加安全环境下的 E2E 用例；无法执行时保留用例并给出 blocked/missing 结论，不得静默省略。",
-            )
-        unknown_external = sorted(declared_external - referenced_source_ids(read_text(prd)))
-        if unknown_external:
-            failures += fail_line(
-                ctx,
-                "e2e_external_source_unknown",
-                f" ids={','.join(unknown_external)}",
-                target=",".join(unknown_external),
-                repair="修正 source.external_sources 中的 SRC-NNN；新增来源必须先回 PRD 登记，E2E 不得自行创建来源 ID。",
-            )
-    source_context_validation_errors = validate_source_context_refs(ctx.feature_dir)
-    source_context, source_context_errors = load_source_context(ctx.feature_dir)
-    for error in (source_context_validation_errors or source_context_errors):
-        failures += fail_line(
-            ctx,
-            "invalid_source_context",
-            f" detail={error}",
-            target="source-context.json",
-            repair="按错误提示修正 source-context.json 及对应 sources/ 快照后重试。",
-        )
-    if source_context is not None:
-        expected_requirements = source_requirement_ids_for_target(source_context, "e2e")
-        if expected_requirements and "source_requirements:" not in cases_text:
-            failures += fail_line(
-                ctx,
-                "missing_e2e_source_requirements_field",
-                repair="在 E2E_TEST_CASES.yaml 的 source 下增加 source_requirements，并列出相关 SRC-NNN-RNNN。",
-            )
-        declared_requirements = _yaml_source_requirement_ids(cases_text)
-        missing_requirements = sorted(expected_requirements - declared_requirements)
-        unknown_requirements = sorted(
-            declared_requirements - set(source_requirement_index(source_context))
-        )
-        if missing_requirements:
-            failures += fail_line(
-                ctx,
-                "e2e_source_requirement_coverage_missing",
-                f" ids={','.join(missing_requirements)}",
-                target=",".join(missing_requirements),
-                repair="为 targets 含 e2e 的来源要求补充用例来源；无法执行时保留用例并给出 blocked/missing 结论。",
-            )
-        if unknown_requirements:
-            failures += fail_line(
-                ctx,
-                "e2e_source_requirement_unknown",
-                f" ids={','.join(unknown_requirements)}",
-                target=",".join(unknown_requirements),
-                repair="修正 source.source_requirements；E2E 不得自行创建来源要求 ID。",
-            )
     yaml_case_ids = set(E2E_ID.findall(cases_text))
     result_path = ctx.file("E2E_RESULT.json")
     if is_nonempty(result_path):
@@ -2981,55 +2682,6 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
                     f" ids={','.join(sorted(missing_in_yaml))}",
                 )
     return failures
-
-
-def _yaml_external_source_ids(text: str) -> set[str]:
-    """Extract IDs only from YAML ``external_sources`` fields.
-
-    E2E case files can contain one case, a list, or multiple documents.  A
-    small indentation-aware scan is enough for inline and block-list forms and
-    avoids treating an ID mentioned in a title/comment as source coverage.
-    """
-
-    lines = text.splitlines()
-    found: set[str] = set()
-    field_re = re.compile(r"^(?P<indent>\s*)external_sources\s*:\s*(?P<inline>.*)$")
-    for index, line in enumerate(lines):
-        match = field_re.match(line)
-        if match is None:
-            continue
-        found.update(referenced_source_ids(match.group("inline")))
-        base_indent = len(match.group("indent"))
-        for following in lines[index + 1 :]:
-            stripped = following.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = len(following) - len(following.lstrip())
-            if indent <= base_indent:
-                break
-            found.update(referenced_source_ids(following))
-    return found
-
-
-def _yaml_source_requirement_ids(text: str) -> set[str]:
-    lines = text.splitlines()
-    found: set[str] = set()
-    field_re = re.compile(r"^(?P<indent>\s*)source_requirements\s*:\s*(?P<inline>.*)$")
-    for index, line in enumerate(lines):
-        match = field_re.match(line)
-        if match is None:
-            continue
-        found.update(referenced_source_requirement_ids(match.group("inline")))
-        base_indent = len(match.group("indent"))
-        for child in lines[index + 1:]:
-            stripped = child.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            child_indent = len(child) - len(child.lstrip())
-            if child_indent <= base_indent:
-                break
-            found.update(referenced_source_requirement_ids(child))
-    return found
 
 
 VALIDATORS = {

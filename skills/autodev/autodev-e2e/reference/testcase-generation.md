@@ -2,7 +2,7 @@
 
 ## 输入优先级
 
-1. `source-context.json` 中 `targets` 含 `e2e` 的要求及其 `sources/` 快照
+1. `source-context.json` 中登记的资料及其 `sources/` 快照
 2. `PRD.md` 的 `外部资料与实现约束`
 3. `proposal.md`
 4. `specs/**/*.md`
@@ -14,7 +14,7 @@
 
 各输入用途：
 
-- `source-context.json` 与快照：提取 `SRC-NNN-RNNN` 要求，核对其逐字证据、位置和测试落点
+- `source-context.json` 与快照：提取 `SRC-NNN` 来源，核对其快照内容和测试落点
 - `PRD.md`：确认来源范围与业务背景
 - `proposal.md`：提取能力边界、影响面、非目标
 - `specs/**/*.md`：提取 Requirement / Scenario 行为契约，作为 pass/fail 的主要行为依据
@@ -34,7 +34,7 @@
 - 必须为 `specs/**/*.md` 中每个用户可见 Requirement / Scenario 生成最少一条用例
 - proposal 中每个本轮能力边界必须能追溯到至少一个 specs 场景，或明确标记不适合 E2E
 - `specs/**/*.md` 中每个属于用户主链路的 Requirement / Scenario 至少要被一条用例覆盖；API Decision 或 Data Decision 作为执行和断言上下文
-- `targets` 含 `e2e` 的每个来源要求必须至少映射到一条用例的 `source.source_requirements`；用例必须实际验证对应契约，不能只挂 ID
+- PRD 中类型为外部接口的每个 `SRC-NNN` 必须至少映射到一条用例的 `source.external_sources`；用例必须实际验证对应契约，不能只挂 ID
 - 没有安全测试环境或凭据时，仍保留对应用例并形成 BLOCKED/missing 结论；`snapshot_only` 直接读取快照
 - 有副作用的外部调用只允许测试/沙箱环境；生产环境除非用户明确授权，否则只能做只读验证
 - 每个用例必须标注 `execution_mode: browser | api | mixed | database_assisted`
@@ -83,8 +83,6 @@ source:
   feature: {slug}
   external_sources:
     - SRC-001
-  source_requirements:
-    - SRC-001-R001
   proposal_capability:
     - comments
   design_contract:
@@ -155,8 +153,7 @@ cleanup:
 `source` 用于建立用例和 feature 输入之间的追溯关系。
 
 - `feature`：必填
-- `external_sources`：必填；填写该用例实际消费的 PRD `SRC-NNN` 列表，没有外部来源时写 `[]`
-- `source_requirements`：必填；填写该用例实际消费的 `SRC-NNN-RNNN` 列表，没有来源要求时写 `[]`
+- `external_sources`：必填；填写该用例实际消费的 `SRC-NNN` 列表，没有外部来源时写 `[]`
 - `proposal_capability`：建议填写
 - `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario
 - `design_contract`：涉及 HTTP/API 或数据变更时建议填写 API/Data Decision
@@ -207,7 +204,7 @@ cleanup:
 
 - 目标是用户可见或外部可观察行为
 - 用例能追溯到 specs Requirement / Scenario、API operation 或当前风险点
-- `targets` 含 `e2e` 的每个来源要求都被至少一条用例真实消费，且断言与快照证据一致
+- 每个外部接口 `SRC-NNN` 都被至少一条用例真实消费，且断言与快照证据一致
 - 前置条件和测试数据写清楚了
 - 每一步都有可执行断言
 - 用例足够聚焦，失败时有单一主要原因

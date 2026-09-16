@@ -1,7 +1,7 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清与正式 PRD 生成技能。
-version: v1.3.09032
+version: v1.4.0917
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清与 PRD 生成
@@ -49,18 +49,7 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 同时在 `PRD.md` 写入 `## 当前实现范围`。
 
-
-## 缺失产物处理
-
-```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
-```
-
-
-
 ## 需求澄清
-
-
 ### 流程管控
 
 > 执行开始时用 `write_todos` 建立 todo 列表，每完成一步立即标记完成。以下环节不得跳过，可按实际情况增补条目：
@@ -88,7 +77,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 ### 保存原始材料快照
 将原始需求文档复制到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/prd_original/`（目录不存在则创建）保留快照
 
-用户提供的外部接口、补充接口说明按  `SRC-NNN` 保存到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/sources/SRC-NNN/`。已经取得快照时后续阶段以快照为本 Feature 的依据。
+用户提供的外部接口、补充接口说明按  `SRC-NNN` 保存到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/sources/SRC-NNN/`。
 
 ### 需求内容格式改造
 
@@ -97,11 +86,9 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - **关键** ：根据 `prd-formatter.md`进行格式化。
 - 写入`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`。
 - **关键** ：以原需求文档为基准，核对生成的 `PRD.md` 是否遗漏功能说明；逐项检查功能清单、功能详情、字段/表格行、规则、链接、文案、状态、外部协作规则和验收项。发现遗漏、弱化或错位时，先更新 `PRD.md`，再重新核对。
-- 从原需求、初始上传与讨论补充资料中提取会约束实现或验收的外部接口文档、数据字典、协议和附件，在 `## 外部资料与实现约束` 建立索引。每项分配稳定 `SRC-NNN`，后续增量只追加，禁止重编号或复用已删除 ID；没有此类资料时正文写“无”。
-- 链接本身不是充分摘要，接口方法、路径、请求/响应结构、错误与超时等已知约束仍须写入对应 FR 或验收标准。
-- 存在来源项时完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/source-context.md`，直接生成 `source-context.json`。逐项保留快照定位、逐字原文、提取要求及多值 `targets`。
-- `source-context.json` 由本技能直接生成。只有独立影响行为、实现或验收的语义约束生成 requirement。
-
+- 从原需求、初始上传与讨论补充资料中提取会约束实现或验收的外部接口文档、sql脚本等，在 `## 外部资料与实现约束` 建立索引。每项分配稳定 `SRC-NNN`，后续增量只追加，禁止重编号或复用已删除 ID；没有此类资料时正文写“无”。
+- 接口方法、路径、请求/响应结构、错误与超时等已知约束仍须写入对应 FR 或验收标准。
+- 存在来源项时完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/source-context.md`，按其中的脚本生成 `source-context.json`。
 ### 需求分析
 
 - 严格按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单。
@@ -207,7 +194,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 5. **假设与风险**
 6. **历次讨论记录**：按时间记录
 7. **讨论补充资料**：讨论过程中新增文件的名称、绝对路径和用途；前端角色下用户提供的 HTML 文件逐项登记，用途填“前端页面/交互分析”。初始上传的原始需求文档不入本清单（快照在 `prd_original`）；无新增文件时保留空清单说明
-8. **外部资料与实现约束**：只登记会约束实现或验收的资料，以稳定 `SRC-NNN` 建立跨阶段引用；它与“讨论补充资料”的过程记录用途不同，不得互相替代
+8. **外部资料与实现约束**：只登记会约束实现或验收的资料，以稳定 `SRC-NNN` 建立跨阶段引用；它与“讨论补充资料”的过程记录用途不同
 
 #### 写作要求
 
@@ -215,7 +202,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 迭代直到收敛
 
-将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都向用户展示检查结果；命中下方终止条件时自动收敛，只对仍会改变行为或范围的实质问题请用户裁定。
+将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
 
 #### 迭代终止条件
 
@@ -225,16 +212,15 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - 用户表示"不需要""不考虑"等问题暂存的相似语句
 - 所有 P0 / P1 已处理完毕，只剩可接受的 P2 建议
 - 连续两次检查没有新增实质问题
-- 范围：`PRD.md` 的 `待确认事项` / `待确认项` 章节中每个实质条目，以及每一处 `【待确认】`；同一决策去重后逐条裁定。章节正文仅为「无」时直接移除该空章节。
-- 展示：裁定前展示 `待确认内容 / 所在上下文 / 当前建议 / 备选 / 影响`。
+- 范围：`PRD.md` 的 `待确认事项` / `待确认项` 章节中每个实质条目，以及每一处 `【待确认】`；同一决策去重后逐条询问用户。章节正文仅为「无」时直接移除该空章节。
+- 展示：向用户确认前展示 `待确认内容 / 所在上下文 / 当前建议 / 备选 / 影响`。
 - 协议：先读取 `${pluginPath}/skills/references/ask-user-question.md`，再用 `request_user_input` 逐项提问，每轮最多 3 项；`id` 用条目内容的简短 snake_case 概括。不设置 `autoResolutionMs`。
-- 选项：每条给 2–3 个互斥选项，只使用「按当前建议确认 (Recommended)」「采纳备选：<方案>」「需要调整」；信息缺口型条目还可使用「暂停，拿到材料后继续」。
-- 信息缺口型条目在 `question` 中提示用户通过「其他」粘贴具体内容。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口，不得以任何措辞重新引入。探索期的延后模板在裁定阶段禁止使用。
+- 信息缺口型条目在 `question` 中提示用户通过「其他」粘贴具体内容。
 - 回写：立即将具体结论写入对应需求正文；无对应位置时写入「当前已确认结论」。用户裁定本期不做时，在对应需求标注「本期不做」或「二期」。声称拥有 ≠ 提供；仅声称稍后提供时追问一次，仍未提供则重新裁定为移除依赖或暂停。
-- 消解：具体结论已落盘，原待确认条目和标记已移除，才算完成。禁止自行消解；展示不等于裁定。凡选中后条目仍处于待确认状态的选项都是非法选项，延后判定按语义不按字面。
+- 消解：具体结论已落盘，原待确认条目和标记已移除，才算完成。禁止自行消解。
 - 自由回复：用户直接提供实质结论时，吸收并更新当前条目，不重复弹出相同选择。
 - 消解自查：不得残留待确认章节、`【待确认】`、TBD、待补充、待提供、后续确认或「以实际接口为准」「开发阶段补充」等延后占位。
-- 来源自查：逐项确认 `SRC-NNN` 的名称、地址/路径、约束范围、必读阶段与状态完整；外部接口资料无法访问或契约仍不明确时，按信息缺口处理，禁止以“后续阶段读取”代替本阶段收敛。
+- 来源自查：逐项确认 `SRC-NNN` 的名称、地址/路径、约束范围与状态完整；外部接口资料无法访问或契约仍不明确时，按信息缺口处理。
 
 全部条目裁定并回写前，禁止更新 `prd_done` 或运行完成校验。
 
@@ -260,6 +246,6 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${fea
 - PRD 存在 `SRC-NNN` 时，对应快照与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/source-context.json` 已通过校验
 - Feature checkpoint 为 `prd_done`
 - 所有 P0 / P1 与待确认项已完成裁定并回写
-- 所有实现承重资料均已进入 `外部资料与实现约束`
+- 所有实现外部依赖材料均已进入 `外部资料与实现约束`
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

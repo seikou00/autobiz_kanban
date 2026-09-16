@@ -19,54 +19,50 @@ if str(ROOT) not in sys.path:
 from hooks.artifact_ref_validator import (  # noqa: E402
     ArtifactRefError,
     design_contract_id_universe,
-    plan_source_requirement_universe,
     design_marker_value,
     load_design_contract,
     validate_artifact_ref,
     validate_plan_design_coverage,
-    validate_plan_source_coverage,
     validate_task_artifact_refs,
     validate_task_design_contract,
 )
 
 
-def _feature_with_source_requirements(base: Path) -> Path:
-    """A Feature whose source context routes two requirements to the Plan stage."""
+def _feature_with_external_sources(base: Path) -> Path:
+    """A Feature whose source context routes two external files to the Plan stage."""
 
-    snapshot = base / "sources" / "SRC-001" / "payment.md"
-    snapshot.parent.mkdir(parents=True, exist_ok=True)
-    body = "支付接口调用超时时间为 3 秒。\n活动审批流程由外部系统承担。"
-    snapshot.write_text(body, encoding="utf-8")
+    payment_body = "支付接口调用超时时间为 3 秒。"
+    approval_body = "活动审批流程由外部系统承担。"
+    for source_id, filename, body in (
+        ("SRC-001", "payment.md", payment_body),
+        ("SRC-002", "approval.md", approval_body),
+    ):
+        snapshot = base / "sources" / source_id / filename
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_text(body, encoding="utf-8")
     (base / "source-context.json").write_text(
         json.dumps({
             "version": 1,
-            "sources": [{
-                "id": "SRC-001",
-                "name": "支付接口",
-                "path": "sources/SRC-001/payment.md",
-                "availability": "snapshot_only",
-                "readStatus": "complete",
-                "freshness": "unknown",
-                "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
-                "items": [{
-                    "id": "SRC-001-I001",
-                    "location": "第 1 行",
-                    "original": body,
-                    "disposition": "requirement",
-                    "requirements": [
-                        {
-                            "id": "SRC-001-R001",
-                            "text": "支付接口调用超时时间为 3 秒",
-                            "targets": ["plan"],
-                        },
-                        {
-                            "id": "SRC-001-R002",
-                            "text": "活动审批流程由外部系统承担",
-                            "targets": ["plan"],
-                        },
-                    ],
-                }],
-            }],
+            "sources": [
+                {
+                    "id": "SRC-001",
+                    "name": "支付接口",
+                    "path": "sources/SRC-001/payment.md",
+                    "availability": "snapshot_only",
+                    "readStatus": "complete",
+                    "freshness": "unknown",
+                    "sha256": hashlib.sha256(payment_body.encode("utf-8")).hexdigest(),
+                },
+                {
+                    "id": "SRC-002",
+                    "name": "活动审批说明",
+                    "path": "sources/SRC-002/approval.md",
+                    "availability": "snapshot_only",
+                    "readStatus": "complete",
+                    "freshness": "unknown",
+                    "sha256": hashlib.sha256(approval_body.encode("utf-8")).hexdigest(),
+                },
+            ],
         }, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -174,28 +170,6 @@ class ArtifactRefValidatorTests(unittest.TestCase):
             design_contract_id_universe(contract),
             {"API-001", "DATA-001", "D-001"},
         )
-
-    def test_deferred_source_requirements_do_not_demand_coverage(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = _feature_with_source_requirements(Path(tmpdir))
-            tasks = [{"id": "T001", "sourceRefs": ["SRC-001-R001"]}]
-
-            self.assertEqual(
-                [item["reason"] for item in validate_plan_source_coverage(base, tasks)],
-                ["missing_plan_source_requirement_coverage"],
-            )
-            self.assertEqual(
-                validate_plan_source_coverage(
-                    base,
-                    tasks,
-                    included_ids={"SRC-001-R001"},
-                ),
-                [],
-            )
-            self.assertEqual(
-                plan_source_requirement_universe(base),
-                {"SRC-001-R001", "SRC-001-R002"},
-            )
 
     def test_valid_design_ref_with_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

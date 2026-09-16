@@ -27,7 +27,6 @@ class SourceReference:
     name: str
     locator: str
     scope: str
-    required_stages: str
     status: str
 
     @property
@@ -109,7 +108,6 @@ def extract_source_references(text: str) -> list[SourceReference]:
         "name": {"名称", "资料名称", "name"},
         "locator": {"地址/路径", "地址路径", "地址", "路径", "url/path", "locator"},
         "scope": {"约束范围", "关联需求", "适用范围", "scope"},
-        "required_stages": {"必读阶段", "消费阶段", "requiredstages"},
         "status": {"状态", "status"},
     }
     positions: dict[str, int] = {}
@@ -141,7 +139,6 @@ def extract_source_references(text: str) -> list[SourceReference]:
                 name=value("name"),
                 locator=value("locator"),
                 scope=value("scope"),
-                required_stages=value("required_stages"),
                 status=value("status"),
             )
         )
@@ -183,7 +180,7 @@ def split_source_reference_section(text: str) -> tuple[list[str], list[str]]:
         return (
             [
                 f"{SOURCE_SECTION_TITLE} 必须写“无”，或使用包含 ID、类型、名称、地址/路径、"
-                "约束范围、必读阶段、状态的表格；修复：补齐表头后每行以 SRC-NNN 开头"
+                "约束范围、状态的表格；修复：补齐表头后每行以 SRC-NNN 开头"
             ],
             [],
         )
@@ -206,8 +203,6 @@ def split_source_reference_section(text: str) -> tuple[list[str], list[str]]:
             missing.append("地址/路径")
         if reference.scope.casefold() in _EMPTY_VALUES:
             missing.append("约束范围")
-        if reference.required_stages.casefold() in _EMPTY_VALUES:
-            missing.append("必读阶段")
         if reference.status.casefold() in _EMPTY_VALUES:
             missing.append("状态")
 
@@ -217,14 +212,6 @@ def split_source_reference_section(text: str) -> tuple[list[str], list[str]]:
                     f"{reference.source_id} 是外部接口，缺少字段: {', '.join(missing)}；"
                     "修复：补齐后续阶段据以调用的地址/路径、约束范围与状态"
                 )
-            required = ("spec", "plan", "code", "review", "e2e")
-            stages = reference.required_stages.casefold()
-            missing_stages = [stage for stage in required if stage not in stages]
-            if missing_stages:
-                errors.append(
-                    f"{reference.source_id} 是外部接口，必读阶段必须覆盖 Specs、Plan、Code、Reviewer、E2E；"
-                    f"当前缺少: {', '.join(missing_stages)}"
-                )
         elif missing:
             warnings.append(f"{reference.source_id} 缺少字段: {', '.join(missing)}")
     return errors, warnings
@@ -233,10 +220,3 @@ def split_source_reference_section(text: str) -> tuple[list[str], list[str]]:
 def source_ids(text: str) -> set[str]:
     return set(SOURCE_ID_RE.findall(text))
 
-
-def external_interface_ids(text: str) -> set[str]:
-    return {
-        reference.source_id
-        for reference in extract_source_references(text)
-        if reference.is_external_interface
-    }

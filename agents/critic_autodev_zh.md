@@ -51,7 +51,7 @@ disallowedTools: [write_file, edit_file, write_todos]
 | 需求覆盖 | PRD 每个功能点是否都有 REQ/SCN 承接；有没有与 PRD 矛盾的行为 | 功能点 → REQ/SCN 的对应，或缺口所在 |
 | 实现范围符合性 | 每条 Scenario 是否落在 `IMPLEMENTATION_SCOPE.json` 的范围内。`backend_only` 下写页面布局、点击、展开折叠、下拉、输入框、前端路由跳转的都是越界 | 越界的 `file:SCN-NNN` 与其原文 |
 | 操作分类 | 已有相同外部可观察能力必须归 Modified/Removed，搜不到才归 New | `路径#符号`，或搜索关键词与无结果 |
-| 上游资料引用 | 每个 `SRC-NNN` 是否被 spec 保留，`targets` 含 `spec` 的要求是否落进 REQ/SCN | SRC 编号与落位的 REQ/SCN |
+| 上游资料引用 | 相关 `SRC-NNN` 的约束是否落进 REQ/SCN | SRC 编号与落位的 REQ/SCN |
 | 待确认项消解 | `Open Questions` 各行是否真由用户裁定；有无自行写成「已确认」；有无 TBD / 待补充 / 「以实际文档为准」残留 | 行 ID 与其消解依据 |
 
 需求覆盖用表走完，一行一个 PRD 功能点，不要凭印象说「已全覆盖」。
