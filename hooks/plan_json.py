@@ -677,8 +677,6 @@ def _validate_tasks_container(
             errors.append(f"{task_id}.validationCommands_must_be_array")
         elif execution_mode == "external_dependency" and commands:
             errors.append(f"{task_id}.external_dependency_validationCommands_forbidden")
-        elif execution_mode != "external_dependency" and not commands:
-            errors.append(f"{task_id}.validationCommands_missing")
         else:
             required_coverage: set[str] = set()
             for command_index, command in enumerate(commands):
@@ -697,7 +695,7 @@ def _validate_tasks_container(
                     required_coverage.update(
                         item for item in (command.get("covers") or []) if isinstance(item, str)
                     )
-            if execution_mode != "external_dependency":
+            if commands and execution_mode != "external_dependency":
                 for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
                     errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
         raw_validation_test_plan = raw_task.get("validationTestPlan")
@@ -1196,31 +1194,28 @@ def _validate_validation_test_plan(
         errors.append(f"{context}_must_be_array")
         return
 
-    command_ids = {
-        str(command.get("id"))
-        for command in task.get("validationCommands", [])
-        if isinstance(command, dict) and isinstance(command.get("id"), str)
-    }
-
     for index, item in enumerate(raw_plan):
         item_context = f"{context}[{index}]"
         if not isinstance(item, dict):
             errors.append(f"{item_context}_must_be_object")
             continue
-        command_id = item.get("commandId")
-        if command_id not in command_ids:
-            errors.append(f"{item_context}.commandId_invalid")
-
         allowed_fields = {
+            "id",
             "commandId",
             "assetType",
             "executionStage",
             "covers",
             "testIntent",
+            "targets",
         }
         for field in sorted(set(item) - allowed_fields):
             errors.append(f"{item_context}.{field}_forbidden")
+        intent_id = item.get("id") or item.get("commandId")
+        if not isinstance(intent_id, str) or not intent_id.strip():
+            errors.append(f"{item_context}.id_missing")
         targets = item.get("targets")
+        if targets is not None:
+            errors.append(f"{item_context}.targets_forbidden")
         if isinstance(targets, list) and any(
             isinstance(target, dict) and target.get("mode") == "create_in_code"
             for target in targets
@@ -1914,10 +1909,6 @@ def _validate_task_details(
     implementation_points = _string_list(task.get("implementationPoints"))
     if implementation_points is None:
         errors.append(f"{task_id}.implementationPoints_must_be_string_array")
-    elif len(implementation_points) < 2:
-        errors.append(f"{task_id}.implementationPoints_too_few")
-    elif len(implementation_points) > 6:
-        errors.append(f"{task_id}.implementationPoints_too_many")
 
     _validate_acceptance_criteria(errors, task, task_id)
     completion_policy = task.get("completionPolicy")
@@ -1932,15 +1923,13 @@ def _validate_task_details(
         errors.append(f"{task_id}.completionPolicy_executionMode_mismatch")
 
     validation_boundary = task.get("validationBoundary")
-    if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
-        errors.append(f"{task_id}.validationBoundary_missing_or_too_short")
+    if not isinstance(validation_boundary, str) or not validation_boundary.strip():
+        errors.append(f"{task_id}.validationBoundary_missing")
 
     raw_non_goals = task.get("nonGoals")
     non_goals = _string_list(task.get("nonGoals"))
     if non_goals is None:
         errors.append(f"{task_id}.nonGoals_must_be_string_array")
-    elif not non_goals:
-        errors.append(f"{task_id}.nonGoals_missing")
     elif isinstance(raw_non_goals, list) and len(non_goals) != len(raw_non_goals):
         errors.append(f"{task_id}.nonGoals_empty_item")
 
@@ -2100,24 +2089,18 @@ def _bundle_consistency_errors(
         ))
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
     task_by_id = {str(item.get("id")): item for item in all_tasks}
-    # scope.paths/expectedFiles are the scheduler's physical write set.  More
-    # than one Batch claiming a file produces a pseudo-parallel Plan: the DAG
-    # looks concurrent, but conservative scheduling must serialize it.  Reject
-    # that shape at Plan time so a single owner Batch can be introduced instead.
+    # Plan v2 has no speculative physical write set. When a producer later
+    # records actual changes, impact analysis invalidates same-repository
+    # concurrent evidence conservatively; Merge Train handles real conflicts.
     errors.extend(write_ownership_error_codes(
         all_tasks,
         ownership_scope_by_task=task_batches,
     ))
     deps_by_task: dict[str, list[str]] = {}
-    frontend_batch_seen = False
     for entry in entries:
         batch_id = str(entry.get("id"))
         data = batch_data[batch_id]
         entry_lane = entry.get("executionLane")
-        if entry_lane == "frontend":
-            frontend_batch_seen = True
-        elif entry_lane == "backend" and frontend_batch_seen:
-            errors.append(f"backend_batch_after_frontend:{batch_id}")
         errors.extend(
             validate_batch_plan_data(
                 data,
@@ -2194,8 +2177,6 @@ def _bundle_consistency_errors(
                 dep_batch = task_batches.get(dep)
                 if dep_batch is None:
                     continue
-                if task_execution_lane(item) == "backend" and task_execution_lane(task_by_id[dep]) == "frontend":
-                    errors.append(f"{task_id}.backend_dependency_on_frontend:{dep}")
                 if batch_order[dep_batch] > batch_order[batch_id]:
                     errors.append(f"{task_id}.dependency_not_in_earlier_batch:{dep}")
                 elif dep_batch != batch_id:

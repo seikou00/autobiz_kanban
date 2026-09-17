@@ -12,6 +12,7 @@ import re
 import shlex
 import sys
 from datetime import datetime, timezone
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,8 @@ from hooks.json_writer_common import (  # noqa: E402
 )
 from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
 from hooks.implementation_scope import load_scope  # noqa: E402
+from hooks.spec_contract import SPEC_SCENARIO_DEF_RE  # noqa: E402
+from hooks.plan_scope import resolve_plan_scope, scope_report  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
     BATCH_STRATEGY,
@@ -101,6 +104,7 @@ from hooks.validation_policy import (  # noqa: E402
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_contract_snapshot,
     validate_plan_design_coverage,
+    validate_plan_source_coverage,
     validate_task_artifact_refs,
     validate_task_group_design_contract,
 )
@@ -108,6 +112,7 @@ from hooks.design_contract_lock import (  # noqa: E402
     DESIGN_CONTRACT_LOCK_FILE,
     load_confirmed_design_contract,
 )
+from hooks.source_context import load_source_context, source_requirement_index  # noqa: E402
 from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 
@@ -115,8 +120,9 @@ from board_core.state_store import load_state_json_records_result  # noqa: E402
 PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
 PLAN_WRITE_TRANSACTION_FILE = ".plan-write-transaction.json"
-SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 SCENARIO_ID_RE = re.compile(r"\bSCN-\d{3}\b")
+SOURCE_ID_RE = re.compile(r"^SRC-\d{3}$")
+SPEC_REFERENCE_ID_RE = re.compile(r"\b(?:REQ|SCN)-\d{3}\b")
 TASK_GROUP_TASK_ID_RE = re.compile(r"^T\d{3}$")
 TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 TASK_GROUP_API_ID_RE = re.compile(r"^API-\d{3}$")
@@ -134,6 +140,7 @@ DRAFT_PLAN_FILE = "plan.json"
 DRAFT_TRANSACTION_FILE = ".draft-write-transaction.json"
 DRAFT_REPAIR_WORK_RELATIVE_DIR = ".tmp/plan_writer/repair-work"
 PLAN_CORE_SCHEMA = "autodev.plan-core.v1"
+PLAN_SCHEMA = "autodev.plan.v2"
 PLAN_DETAIL_SCHEMA = "autodev.plan-detail.v1"
 PLAN_REPAIR_WORK_SCHEMA = "autodev.plan-repair-work.v1"
 PLAN_REPAIR_PATCH_SCHEMA = "autodev.plan-repair-patch.v1"
@@ -760,10 +767,15 @@ def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     ``task-groups.json`` files and all downstream schedulers.
     """
 
+    if data.get("schemaVersion") == PLAN_SCHEMA:
+        return _plan_v2_to_groups(data)
     if data.get("schemaVersion") != PLAN_CORE_SCHEMA:
         return data
     feature_id = data.get("featureId")
     raw_tasks = data.get("tasks")
+    unknown_root = sorted(set(data) - {"schemaVersion", "featureId", "tasks"})
+    if unknown_root:
+        raise PlanWriterInputError("plan_v2_field_unknown", f"fields={','.join(unknown_root)}")
     if not isinstance(feature_id, str) or not feature_id.strip():
         raise PlanWriterInputError("compact_plan_core_feature_id_missing")
     if not isinstance(raw_tasks, list) or not raw_tasks:
@@ -841,6 +853,273 @@ def _compact_plan_core_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     return {"featureId": feature_id, "groups": groups}
 
 
+def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
+    """Project the intentionally small Plan v2 input into runtime groups.
+
+    Plan v2 is the only model-facing contract. It contains outcomes, repository
+    ownership, dependencies, references, outcome-level implementation points
+    and test points. File lists, symbols, concrete commands and batch mechanics
+    are discovered or derived by later stages.
+    """
+    feature_id = data.get("featureId")
+    raw_tasks = data.get("tasks")
+    if not isinstance(feature_id, str) or not feature_id.strip():
+        raise PlanWriterInputError("plan_v2_feature_id_missing")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise PlanWriterInputError("plan_v2_tasks_missing")
+
+    groups: list[dict[str, Any]] = []
+    allowed_task_fields = {
+        "id", "outcome", "workspace", "dependsOn", "refs", "implementationPoints",
+        "testPoints", "verification",
+        "ui", "mode", "stage", "external", "atomic",
+    }
+    for index, raw in enumerate(raw_tasks, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("plan_v2_task_must_be_object", f"index={index}")
+        task_id = raw.get("id")
+        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
+            raise PlanWriterInputError("plan_v2_task_id_invalid", f"index={index};task={task_id}")
+        unknown = sorted(set(raw) - allowed_task_fields)
+        if unknown:
+            raise PlanWriterInputError("plan_v2_task_field_unknown", f"task={task_id};fields={','.join(unknown)}")
+        outcome = raw.get("outcome")
+        if not isinstance(outcome, str) or not outcome.strip():
+            raise PlanWriterInputError("plan_v2_task_outcome_missing", f"task={task_id}")
+        implementation_points = _compact_string_list(
+            raw.get("implementationPoints"), task_id=task_id, field="implementationPoints",
+        )
+        if not implementation_points:
+            raise PlanWriterInputError("plan_v2_task_implementation_points_missing", f"task={task_id}")
+        test_points = _compact_string_list(
+            raw.get("testPoints"), task_id=task_id, field="testPoints",
+        )
+        if not test_points:
+            raise PlanWriterInputError("plan_v2_task_test_points_missing", f"task={task_id}")
+        refs = raw.get("refs")
+        if not isinstance(refs, dict):
+            raise PlanWriterInputError("plan_v2_task_refs_missing", f"task={task_id}")
+        unknown_refs = sorted(set(refs) - {"requirements", "scenarios", "api", "design", "data", "decisions"})
+        if unknown_refs:
+            raise PlanWriterInputError("plan_v2_task_refs_field_unknown", f"task={task_id};fields={','.join(unknown_refs)}")
+        requirements = _compact_string_list(refs.get("requirements"), task_id=task_id, field="refs.requirements")
+        scenarios = _compact_string_list(refs.get("scenarios"), task_id=task_id, field="refs.scenarios")
+        api_ids = _compact_string_list(refs.get("api", []), task_id=task_id, field="refs.api")
+        design_refs = _compact_string_list(refs.get("design", []), task_id=task_id, field="refs.design")
+        design_refs = [ref if "#" in ref else f"design.md#{ref}" for ref in design_refs]
+        if any(ref.startswith("design.md#D-") for ref in design_refs):
+            raise PlanWriterInputError(
+                "plan_v2_task_decision_must_use_refs_decisions",
+                f"task={task_id};field=refs.design",
+            )
+        data_ids = _compact_string_list(refs.get("data", []), task_id=task_id, field="refs.data")
+        decision_ids = _compact_string_list(refs.get("decisions", []), task_id=task_id, field="refs.decisions")
+        verification = raw.get("verification")
+        if not isinstance(verification, dict):
+            raise PlanWriterInputError("plan_v2_task_verification_invalid", f"task={task_id}")
+        if set(verification) - {"intent"}:
+            raise PlanWriterInputError("plan_v2_task_verification_field_unknown", f"task={task_id}")
+        intent = verification.get("intent")
+        if not isinstance(intent, str) or not intent.strip():
+            raise PlanWriterInputError("plan_v2_task_verification_intent_invalid", f"task={task_id}")
+        if not isinstance(raw.get("workspace"), str) or not raw["workspace"].strip():
+            raise PlanWriterInputError("plan_v2_task_workspace_missing", f"task={task_id}")
+        group: dict[str, Any] = {
+            "id": task_id,
+            "title": outcome.strip(),
+            "executionMode": raw.get("mode", "code"),
+            "executionStage": raw.get("stage", "parallel"),
+            "touches": [],
+            "writeTargets": [],
+            "deps": _compact_string_list(raw.get("dependsOn", []), task_id=task_id, field="dependsOn"),
+            "workspaceRef": raw["workspace"].strip(),
+            "specRefs": [*requirements, *scenarios],
+            "apiIds": api_ids,
+            "designRefs": design_refs,
+            "dataIds": data_ids,
+            "decisionIds": decision_ids,
+            "validationBoundary": str(intent or outcome).strip(),
+            "verificationIntent": str(intent or outcome).strip(),
+            "implementationPoints": implementation_points,
+            "testPoints": test_points,
+        }
+        ui = raw.get("ui")
+        group["uiRequired"] = ui is not None
+        if ui is not None:
+            if not isinstance(ui, dict):
+                raise PlanWriterInputError("plan_v2_task_ui_invalid", f"task={task_id}")
+            unknown_ui_fields = sorted(set(ui) - {"pages", "interactions", "route"})
+            if unknown_ui_fields:
+                raise PlanWriterInputError(
+                    "plan_v2_task_ui_field_unknown",
+                    f"task={task_id};fields={','.join(unknown_ui_fields)}",
+                )
+            group["uiRefs"] = {
+                "pageRefs": _compact_string_list(ui.get("pages"), task_id=task_id, field="ui.pages"),
+                "interactionRefs": _compact_string_list(ui.get("interactions", []), task_id=task_id, field="ui.interactions"),
+                "visualSourceRefs": [],
+                "frontendRoute": ui.get("route"),
+            }
+        if raw.get("external") is not None:
+            group["externalDependency"] = copy.deepcopy(raw["external"])
+        if raw.get("atomic") is not None:
+            group["atomicGroup"] = copy.deepcopy(raw["atomic"])
+        groups.append(group)
+    by_id = {group["id"]: group for group in groups}
+    if len(by_id) != len(groups):
+        raise PlanWriterInputError("plan_v2_task_id_duplicate")
+    for group in groups:
+        unknown = sorted(set(group["deps"]) - set(by_id))
+        if unknown:
+            raise PlanWriterInputError("plan_v2_dependency_unknown", f"task={group['id']};ids={','.join(unknown)}")
+    try:
+        order = list(TopologicalSorter({group["id"]: group["deps"] for group in groups}).static_order())
+    except CycleError as exc:
+        raise PlanWriterInputError("plan_v2_dependency_cycle", str(exc)) from exc
+    # Legacy runtime projection expects dependency order; it must not impose
+    # that serialization rule on model input or renumber task identities.
+    return {"featureId": feature_id, "groups": [by_id[task_id] for task_id in order]}
+
+
+def _materialize_v2_ui_visual_sources(feature_dir: Path, group_data: dict[str, Any]) -> None:
+    """Derive each UI task's visual-source union from UI_CONTEXT.json."""
+    ui_groups = [
+        group for group in _task_groups(group_data)
+        if group.get("uiRequired") is True and isinstance(group.get("uiRefs"), dict)
+    ]
+    if not ui_groups:
+        return
+    path = feature_dir / "UI_CONTEXT.json"
+    if not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PlanWriterInputError("plan_v2_ui_context_invalid", str(exc)) from exc
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
+    if not isinstance(capabilities, list):
+        return
+    for group in ui_groups:
+        task_spec_refs = {
+            ref for ref in group.get("specRefs", [])
+            if isinstance(ref, str) and ref.strip()
+        }
+        expected: set[str] = set()
+        for capability in capabilities:
+            if not isinstance(capability, dict) or capability.get("uiRequired") is False:
+                continue
+            capability_refs = {
+                ref for ref in capability.get("specRefs", [])
+                if isinstance(ref, str) and ref.strip()
+            }
+            if task_spec_refs.intersection(capability_refs):
+                expected.update(
+                    ref for ref in capability.get("visualSourceRefs", [])
+                    if isinstance(ref, str) and ref.strip()
+                )
+        group["uiRefs"]["visualSourceRefs"] = sorted(expected)
+
+
+def _markdown_section_body(text: str, title: str) -> str | None:
+    """Return a Markdown section body without importing the stage-gate module."""
+
+    heading = re.compile(
+        rf"^ {{0,3}}(?P<marks>#{{1,6}})\s+.*{re.escape(title)}.*$",
+        re.MULTILINE,
+    )
+    match = heading.search(text)
+    if match is None:
+        return None
+    level = len(match.group("marks"))
+    next_heading = re.compile(rf"^ {{0,3}}#{{1,{level}}}\s+\S", re.MULTILINE)
+    end_match = next_heading.search(text, match.end())
+    return text[match.end():end_match.start() if end_match else len(text)]
+
+
+def _spec_source_reference_index(feature_dir: Path) -> dict[str, set[str]]:
+    """Map each PRD source to the REQ/SCN refs declared by Specs."""
+
+    index: dict[str, set[str]] = {}
+    specs_dir = feature_dir / "specs"
+    if not specs_dir.is_dir():
+        return index
+    for path in sorted(specs_dir.glob("**/*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        section = _markdown_section_body(text, "Source References / 外部资料引用")
+        if section is None:
+            continue
+        relative = path.relative_to(feature_dir).as_posix()
+        for line in section.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|") or not stripped.endswith("|"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) < 2 or SOURCE_ID_RE.fullmatch(cells[0]) is None:
+                continue
+            refs = {
+                f"{relative}#{ref}"
+                for ref in SPEC_REFERENCE_ID_RE.findall(cells[1])
+            }
+            if refs:
+                index.setdefault(cells[0], set()).update(refs)
+    return index
+
+
+def _materialize_v2_source_references(feature_dir: Path, group_data: dict[str, Any]) -> None:
+    """Assign Plan/Code source requirements through confirmed Specs refs."""
+
+    context, load_errors = load_source_context(feature_dir)
+    if load_errors:
+        raise PlanWriterInputError("plan_v2_source_context_invalid", ";".join(load_errors))
+    requirements = source_requirement_index(context)
+    selections, scope_errors = resolve_plan_scope(feature_dir)
+    if scope_errors:
+        raise PlanWriterInputError("plan_v2_scope_invalid", json.dumps(scope_errors, ensure_ascii=False))
+    required = {
+        requirement_id: detail
+        for requirement_id, detail in requirements.items()
+        if requirement_id in selections["source"].included
+        and isinstance(detail.get("targets"), list)
+        and ({"plan", "code"} & set(detail["targets"]))
+    }
+    if not required:
+        return
+
+    spec_index = _spec_source_reference_index(feature_dir)
+    owners_by_source: dict[str, list[dict[str, Any]]] = {}
+    for source_id, refs in spec_index.items():
+        owners = [
+            group for group in _task_groups(group_data)
+            if refs.intersection({ref for ref in group.get("specRefs", []) if isinstance(ref, str)})
+        ]
+        if owners:
+            owners_by_source[source_id] = owners
+
+    unresolved = sorted(
+        requirement_id
+        for requirement_id, detail in required.items()
+        if not isinstance(detail.get("sourceId"), str)
+        or detail["sourceId"] not in owners_by_source
+    )
+    if unresolved:
+        raise PlanWriterInputError(
+            "plan_v2_source_requirement_unmapped",
+            "ids=" + ",".join(unresolved)
+            + ";map each source in Specs Source References to a REQ/SCN covered by this Plan",
+        )
+
+    for requirement_id, detail in required.items():
+        for group in owners_by_source[str(detail["sourceId"])]:
+            group.setdefault("sourceRefs", []).append(requirement_id)
+    for group in _task_groups(group_data):
+        refs = group.get("sourceRefs")
+        if isinstance(refs, list):
+            group["sourceRefs"] = sorted({ref for ref in refs if isinstance(ref, str) and ref})
+
+
 def _compact_detail_to_legacy(detail: dict[str, Any]) -> dict[str, Any]:
     """Accept the terse Detail contract while preserving legacy command input."""
 
@@ -913,16 +1192,16 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         return [*errors, {"reason": "task_groups_missing"}]
 
     prior_ids: set[str] = set()
-    frontend_seen = False
     for index, raw_group in enumerate(raw_groups, start=1):
         if not isinstance(raw_group, dict):
             errors.append({"reason": f"task_groups[{index - 1}]_must_be_object"})
             continue
-        expected_id = f"T{index:03d}"
         task_id = raw_group.get("id")
-        if task_id != expected_id:
-            errors.append({"reason": "task_group_sequence_invalid", "detail": f"expected={expected_id};actual={task_id}"})
-            task_id = expected_id
+        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
+            errors.append({"reason": "task_group_id_invalid", "detail": f"index={index};actual={task_id}"})
+            task_id = f"invalid-{index}"
+        elif task_id in prior_ids:
+            errors.append({"reason": "task_group_id_duplicate", "detail": f"task={task_id}"})
         title = raw_group.get("title")
         if not isinstance(title, str) or not title.strip():
             errors.append({"reason": f"{task_id}.title_missing"})
@@ -1024,9 +1303,6 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(ui_required, bool):
             errors.append({"reason": f"{task_id}.uiRequired_must_be_bool"})
             ui_required = False
-        if frontend_seen and not ui_required:
-            errors.append({"reason": "backend_task_after_frontend", "detail": f"task={task_id}"})
-        frontend_seen = frontend_seen or ui_required
 
         ui_refs = raw_group.get("uiRefs")
         if ui_required and not isinstance(ui_refs, dict):
@@ -1065,8 +1341,8 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
                 errors.append({"reason": f"{task_id}.frontendRoute_invalid"})
 
         validation_boundary = raw_group.get("validationBoundary")
-        if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
-            errors.append({"reason": f"{task_id}.validationBoundary_missing_or_too_short"})
+        if not isinstance(validation_boundary, str) or not validation_boundary.strip():
+            errors.append({"reason": f"{task_id}.validationBoundary_missing"})
         workspace_ref = raw_group.get("workspaceRef")
         if not isinstance(workspace_ref, str) or not REPOSITORY_ID_RE.fullmatch(workspace_ref):
             errors.append({"reason": f"{task_id}.workspaceRef_invalid"})
@@ -1169,6 +1445,8 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
     """
 
     errors = _with_validation_stage("structure", _task_group_structure_errors(data))
+    _, partition_errors = resolve_plan_scope(feature_dir)
+    errors.extend(_with_validation_stage("scope", partition_errors))
     implementation_scope, scope_errors = load_scope(feature_dir)
     errors.extend(_with_validation_stage(
         "scope", [{"reason": error} for error in scope_errors],
@@ -1182,13 +1460,13 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
             grouping_errors.append({
                 "reason": "implementation_scope_frontend_task_forbidden",
                 "detail": f"scope=backend_only;task={task_id}",
-                "repairSuggestion": f"当前实现范围为 backend_only，但任务 {task_id} 标记为需要前端（uiRequired=true）。请将该任务的 uiRequired 改为 false，或修改 scope.md 中的实现范围"
+                "repairSuggestion": f"当前范围为 backend_only，请从本期 Plan 移出前端任务 {task_id}；若实际范围已变更，先更新已确认的 IMPLEMENTATION_SCOPE.json。不要改 UI 标记伪装任务归属。"
             })
         elif implementation_scope == "frontend_only" and not ui_required:
             grouping_errors.append({
                 "reason": "implementation_scope_backend_task_forbidden",
                 "detail": f"scope=frontend_only;task={task_id}",
-                "repairSuggestion": f"当前实现范围为 frontend_only，但任务 {task_id} 标记为后端任务（uiRequired=false）。请将该任务的 uiRequired 改为 true，或修改 scope.md 中的实现范围"
+                "repairSuggestion": f"当前范围为 frontend_only，请从本期 Plan 移出后端任务 {task_id}；若实际范围已变更，先更新已确认的 IMPLEMENTATION_SCOPE.json。不要改 UI 标记伪装任务归属。"
             })
         grouping_errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
     errors.extend(_with_validation_stage("granularity", grouping_errors))
@@ -1334,7 +1612,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "splitRationale": item.get("splitRationale") or None,
     }
-    if "touches" in item or (
+    if (isinstance(item.get("touches"), list) and item.get("touches")) or (
         isinstance(item.get("scope"), dict)
         and isinstance(item["scope"].get("paths"), list)
         and bool(item["scope"]["paths"])
@@ -2021,6 +2299,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "workspaceRef": group.get("workspaceRef"),
         "nonGoals": [],
         "specRefs": copy.deepcopy(group.get("specRefs", [])),
+        "sourceRefs": copy.deepcopy(group.get("sourceRefs", [])),
         "mergedScenarioRefs": copy.deepcopy(group.get("mergedScenarioRefs", [])),
         "designRefs": [],
         "apiIds": copy.deepcopy(group.get("apiIds", [])),
@@ -2051,6 +2330,51 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
     rationale = group.get("splitRationale")
     if isinstance(rationale, str) and rationale.strip():
         task["splitRationale"] = rationale
+    return task
+
+
+def _plan_v2_runtime_task(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
+    """Create a complete runtime task without asking the planner for code detail.
+
+    The generated fields preserve the planner's high-level implementation and
+    test guidance. Code and UTest select actual files, symbols and executable
+    commands against the codebase in their respective stages.
+    """
+    task = _draft_task_skeleton(group, workspace_roots)
+    task_id = str(task["id"])
+    outcome = str(group.get("title") or "").strip()
+    scenario_refs = [
+        ref for ref in task.get("specRefs", [])
+        if isinstance(ref, str) and "#SCN-" in ref
+    ]
+    task["goal"] = outcome
+    task["implementationPoints"] = copy.deepcopy(group.get("implementationPoints", []))
+    task["testPoints"] = copy.deepcopy(group.get("testPoints", []))
+    task["acceptanceCriteria"] = [{
+        "id": f"AC-{task_id}-01",
+        "text": outcome,
+        "scenarioRefs": scenario_refs,
+    }]
+    task["nonGoals"] = []
+    task["designRefs"] = copy.deepcopy(group.get("designRefs", []))
+    task["dataIds"] = copy.deepcopy(group.get("dataIds", []))
+    task["decisionIds"] = copy.deepcopy(group.get("decisionIds", []))
+    task["validationCommands"] = []
+    task["verificationIntent"] = str(group.get("verificationIntent") or outcome).strip()
+    if task_execution_mode(task) == "external_dependency":
+        task["validationTestPlan"] = []
+    else:
+        task["validationTestPlan"] = [{
+            "id": f"TEST-{task_id}-01",
+            "assetType": "e2e_test" if task.get("uiRequired") is True else "unit_test",
+            "executionStage": "post_batch" if task.get("uiRequired") is True else "with_code",
+            "covers": [f"AC-{task_id}-01"],
+            "testIntent": {
+                "behavior": task["verificationIntent"],
+                "acceptanceCriteria": copy.deepcopy(task["acceptanceCriteria"]),
+                "testPoints": copy.deepcopy(task["testPoints"]),
+            },
+        }]
     return task
 
 
@@ -2476,11 +2800,8 @@ def _require_collecting(data: dict[str, Any]) -> None:
 
 
 def _scenario_coverage(feature_dir: Path, task_items: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
-    expected: set[str] = set()
-    for spec_path in sorted((feature_dir / "specs").glob("**/*.md")):
-        relative = spec_path.relative_to(feature_dir).as_posix()
-        text = spec_path.read_text(encoding="utf-8")
-        expected.update(f"{relative}#{scenario_id}" for scenario_id in SPEC_SCENARIO_DEF_RE.findall(text))
+    selections, _ = resolve_plan_scope(feature_dir)
+    expected = selections["scenario"].included
 
     covered: set[str] = set()
     for task in task_items:
@@ -2493,6 +2814,11 @@ def _scenario_coverage(feature_dir: Path, task_items: list[dict[str, Any]]) -> t
             if normalized_path:
                 covered.update(f"{normalized_path}#{scenario_id}" for scenario_id in scenario_ids)
     return expected, covered
+
+
+def _feature_scope_report(feature_dir: Path, task_items: list[dict[str, Any]]) -> dict[str, Any]:
+    selections, _ = resolve_plan_scope(feature_dir)
+    return scope_report(selections)
 
 
 def _find_task(data: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -3355,7 +3681,11 @@ def _task_set_preflight_errors(
             design_contract=design_contract,
             check_design_artifact=False,
         ))
-    errors.extend(validate_plan_design_coverage(design_contract, _tasks(data)))
+    selections, partition_errors = resolve_plan_scope(feature_dir)
+    errors.extend(partition_errors)
+    errors.extend(validate_plan_design_coverage(
+        design_contract, _tasks(data), included_ids=selections["design"].included,
+    ))
     # A task detail may add scope.paths/expectedFiles beyond its group-owned
     # touches.  Recheck the final write sets before projecting Batches.
     _, projected_batches = _project_batches(copy.deepcopy(data))
@@ -3495,6 +3825,93 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
     }
     result = _write_draft_bundle(workspace, feature, data, lock)
     return render_result(with_result_data(result, draft=_draft_summary(lock, data)))
+
+
+def _cmd_publish_plan(args: argparse.Namespace) -> int:
+    """Publish a complete Plan v2 in one atomic operation.
+
+    This is the normal planner entry point.  It intentionally bypasses the old
+    Core/Draft/Detail choreography: planner input is converted directly into a
+    finalized, runtime-valid Bundle only after every structural and coverage
+    check succeeds.
+    """
+    workspace, feature = _resolve(args)
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    body = _plan_writer_stdin_body() if args.body_stdin else read_object_file(Path(args.body_file))
+    if not isinstance(body, dict):
+        return render_result(fail("plan_v2_body_must_be_object"))
+    if body.get("schemaVersion") != PLAN_SCHEMA:
+        return render_result(fail("plan_v2_schema_required", f"expected={PLAN_SCHEMA};actual={body.get('schemaVersion')}"))
+    try:
+        group_data = _compact_plan_core_to_groups(body)
+    except PlanWriterInputError as exc:
+        return render_result(fail(exc.reason, exc.detail))
+    if group_data.get("featureId") != feature:
+        return render_result(fail("plan_v2_feature_mismatch", f"expected={feature};actual={group_data.get('featureId')}"))
+    feature_dir = _path(workspace, feature).parent
+    try:
+        _materialize_v2_ui_visual_sources(feature_dir, group_data)
+        _materialize_v2_source_references(feature_dir, group_data)
+    except PlanWriterInputError as exc:
+        return render_result(fail(exc.reason, exc.detail))
+    group_errors = _task_group_preflight_errors(feature_dir, group_data)
+    blocking_group_errors = [item for item in group_errors if item.get("severity") != "warning"]
+    if blocking_group_errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=blocking_group_errors))
+    try:
+        workspace_contexts = _code_workspace_contexts(args.code_workspace)
+        implementation_scope, scope_errors = load_scope(feature_dir)
+        if scope_errors:
+            return render_result(WriterResult(
+                ok=False,
+                path=_path(workspace, feature),
+                errors=[{"reason": error} for error in scope_errors],
+            ))
+        data = _initial(feature)
+        data["implementationScope"] = implementation_scope
+        data["codeWorkspaces"] = _code_workspace_bindings(
+            workspace_contexts,
+            {str(group.get("workspaceRef")) for group in _task_groups(group_data)},
+        )
+        data["tasks"] = [
+            _plan_v2_runtime_task(group, _draft_task_workspace_roots(group, workspace_contexts))
+            for group in _task_groups(group_data)
+        ]
+        data["scopeReport"] = _feature_scope_report(feature_dir, _tasks(data))
+        data["taskSetStatus"] = "finalized"
+        selections, _ = resolve_plan_scope(feature_dir)
+        source_coverage_errors = validate_plan_source_coverage(
+            feature_dir, _tasks(data), included_ids=selections["source"].included,
+        )
+        if source_coverage_errors:
+            return render_result(WriterResult(
+                ok=False,
+                path=_path(workspace, feature),
+                errors=source_coverage_errors,
+            ))
+        plan_errors = _task_set_preflight_errors(
+            feature_dir,
+            data,
+            group_data,
+            [str(Path(value).expanduser().resolve()) for value in args.code_workspace],
+            require_engineering_commands=False,
+        )
+        blocking_plan_errors = [item for item in plan_errors if item.get("severity") != "warning"]
+        if blocking_plan_errors:
+            return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=blocking_plan_errors))
+        result = _write(workspace, feature, data, plan_markdown=_render_plan_md(data))
+        return render_result(with_result_data(
+            result,
+            planSchema=PLAN_SCHEMA,
+            warnings=[item for item in [*group_errors, *plan_errors] if item.get("severity") == "warning"],
+            materialized=_task_set_summary(data),
+            scopeReport=_feature_scope_report(feature_dir, _tasks(data)),
+        ))
+    except (PlanWriterInputError, ValueError) as exc:
+        if isinstance(exc, PlanWriterInputError):
+            return render_result(fail(exc.reason, exc.detail))
+        return render_result(fail("plan_v2_publish_failed", str(exc)))
 
 
 def _cmd_import_task_directory(args: argparse.Namespace) -> int:
@@ -7003,6 +7420,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                 f"- api_id: {_fmt(task.get('apiIds'))}",
                 f"- data_id: {_fmt(task.get('dataIds'))}",
                 f"- decision_id: {_fmt(task.get('decisionIds'))}",
+                f"- 来源要求: {_fmt(task.get('sourceRefs'))}",
                 f"- 涉及范围: modules={_fmt(task.get('scope', {}).get('modules') if isinstance(task.get('scope'), dict) else [])}; entrypoints={_fmt(task.get('scope', {}).get('entrypoints') if isinstance(task.get('scope'), dict) else [])}; pages={_fmt(task.get('scope', {}).get('pages') if isinstance(task.get('scope'), dict) else [])}",
                 f"- 验证边界: {task.get('validationBoundary', '')}",
                 f"- 代码工作区: {task.get('workspaceRef', '')}",
@@ -7011,13 +7429,18 @@ def _render_plan_md(data: dict[str, Any]) -> str:
         )
         for index, point in enumerate(task.get("implementationPoints", []) if isinstance(task.get("implementationPoints"), list) else [], start=1):
             lines.append(f"  {index}. {point}")
+        lines.append("- 测试要点:")
+        for index, point in enumerate(task.get("testPoints", []), start=1):
+            lines.append(f"  {index}. {point}")
+        lines.append(f"- 验证意图: {task.get('verificationIntent') or task.get('validationBoundary', '')}")
         lines.append("- 验收标准:")
         for index, criterion in enumerate(task.get("acceptanceCriteria", []) if isinstance(task.get("acceptanceCriteria"), list) else [], start=1):
             text = criterion.get("text", "") if isinstance(criterion, dict) else criterion
             criterion_id = criterion.get("id") if isinstance(criterion, dict) else None
             label = f"{criterion_id}: {text}" if criterion_id else text
             lines.append(f"  {index}. {label}")
-        lines.append(f"- 非目标: {_fmt(task.get('nonGoals'))}")
+        if task.get("nonGoals"):
+            lines.append(f"- 非目标: {_fmt(task.get('nonGoals'))}")
         external_dependency = task.get("externalDependency")
         if isinstance(external_dependency, dict):
             lines.append(
@@ -7038,7 +7461,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                     command_id = command.get("id")
                     lines.append(f"  - {command_id}: {rendered}" if command_id else f"  - {rendered}")
         else:
-            lines.append("  - -")
+            lines.append("  - 由 UTest/E2E 根据实际实现生成")
         lines.append(f"- 状态: {task.get('status', '')}")
         disposition = task.get("validationDisposition")
         if isinstance(disposition, dict):
@@ -7049,6 +7472,12 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                 f"command={disposition.get('commandId', '')}; "
                 f"repairAttempts={disposition.get('repairAttempts', 0)}"
             )
+        lines.append("")
+    report = data.get("scopeReport")
+    if isinstance(report, dict) and report:
+        lines.extend(["## 本期范围之外", ""])
+        for kind, selection in sorted(report.items()):
+            lines.append(f"- {kind}: 后续={_fmt(selection.get('deferred'))}; 未分配={_fmt(selection.get('unpartitioned'))}")
         lines.append("")
     deferred_issues = data.get("deferredValidationIssues")
     if isinstance(deferred_issues, list) and deferred_issues:
@@ -7158,6 +7587,14 @@ def _list_command(sub: argparse._SubParsersAction, name: str, field: str, *, rem
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Incrementally write plan.json")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    publish = sub.add_parser("publish-plan", help="atomically publish one Plan v2 input")
+    _common(publish)
+    publish.add_argument("--code-workspace", required=True, action="append")
+    publish_input = publish.add_mutually_exclusive_group(required=True)
+    publish_input.add_argument("--body-stdin", action="store_true")
+    publish_input.add_argument("--body-file")
+    publish.set_defaults(func=_cmd_publish_plan)
 
     init = sub.add_parser("init")
     _common(init)

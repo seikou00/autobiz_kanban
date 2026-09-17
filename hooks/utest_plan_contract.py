@@ -15,8 +15,10 @@ TASK_CONTRACT_FIELDS = (
     "title",
     "goal",
     "implementationPoints",
+    "testPoints",
     "nonGoals",
     "validationBoundary",
+    "verificationIntent",
     "workspaceRef",
     "specRefs",
     "acceptanceCriteria",
@@ -196,13 +198,18 @@ def _validate_task(task, batch_id):
     implementation_points = _string_list(
         task.get("implementationPoints"),
         "{} implementationPoints".format(context),
+        allow_empty=True,
     )
+    test_points = _string_list(task.get("testPoints", []), "{} testPoints".format(context), allow_empty=True)
     workspace_ref = task.get("workspaceRef")
     if not isinstance(workspace_ref, str) or not workspace_ref.strip():
         _error("{} workspaceRef 缺失".format(context))
     boundary = task.get("validationBoundary")
     if not isinstance(boundary, str) or not boundary.strip():
         _error("{} validationBoundary 缺失".format(context))
+    verification_intent = task.get("verificationIntent") or boundary
+    if not isinstance(verification_intent, str) or not verification_intent.strip():
+        _error("{} verificationIntent 缺失".format(context))
     non_goals = _string_list(task.get("nonGoals"), "{} nonGoals".format(context), allow_empty=True)
     spec_refs = _string_list(task.get("specRefs"), "{} specRefs".format(context))
 
@@ -249,8 +256,10 @@ def _validate_task(task, batch_id):
         "title": title,
         "goal": goal,
         "implementationPoints": implementation_points,
+        "testPoints": test_points,
         "workspaceRef": workspace_ref,
         "validationBoundary": boundary,
+        "verificationIntent": verification_intent,
         "nonGoals": non_goals,
         "specRefs": spec_refs,
         "acceptanceCriteria": raw_acceptance,
@@ -318,8 +327,10 @@ def assignment_task(projected):
         "title": projected["title"],
         "goal": projected["goal"],
         "implementationPoints": projected["implementationPoints"],
+        "testPoints": projected["testPoints"],
         "nonGoals": projected["nonGoals"],
         "validationBoundary": projected["validationBoundary"],
+        "verificationIntent": projected["verificationIntent"],
         "workspaceRef": projected["workspaceRef"],
         "specRefs": projected["specRefs"],
         "acceptanceCriteria": projected["acceptanceCriteria"],

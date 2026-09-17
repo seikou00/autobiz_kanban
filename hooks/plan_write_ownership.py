@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Write ownership checks for generated Plans.
+"""Ownership helpers for plans that already have observed write paths.
 
-``scope.paths`` and ``expectedFiles`` are the physical write set consumed by
-the conservative Batch scheduler.  They must not make several *Batches* claim
-the same file: that looks parallel in the Task DAG but is necessarily
-serialized at runtime.  A shared schema, route registry, or global
-configuration file is instead owned by one earlier Batch; its consumers
-depend on that Batch without also listing the file in their write sets.
-
-A Controller or service may opt into member ownership with stable
-``writeTargets: [{path, symbols}]`` anchors. Only disjoint anchors may be
-owned by different Batches; all legacy paths remain whole-file claims.
+Plan v2 does not ask the model to predict files or symbols. These helpers keep
+the integrity checks for an artifact after a producer has recorded actual
+paths; optimistic scheduling and Merge Train handle the absence of that data.
 """
 
 from __future__ import annotations
@@ -92,8 +85,7 @@ def task_write_paths(task: dict[str, Any]) -> set[str]:
 def task_write_targets(task: dict[str, Any]) -> dict[str, set[str] | None]:
     """Return physical paths and optional member anchors for one task.
 
-    ``None`` denotes a whole-file claim.  Empty or malformed target data never
-    weakens that conservative default, preserving legacy Plan behavior.
+    ``None`` denotes a whole-file claim for an observed ownership record.
     """
 
     workspace_ref = task.get("workspaceRef")

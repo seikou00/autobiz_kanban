@@ -109,7 +109,7 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
             for index, intent in enumerate(task.get("validationTestPlan", []), start=1):
                 if not isinstance(intent, dict):
                     continue
-                command_id = str(intent.get("commandId") or intent.get("id") or f"TEST-{task['id']}-{index:02d}")
+                command_id = str(intent.get("id") or intent.get("commandId") or f"TEST-{task['id']}-{index:02d}")
                 asset_type = str(intent.get("assetType") or "unit_test")
                 # A Batch owns every test intent that can be authored and
                 # exercised in its native worktree.  ``e2e_test`` remains the
@@ -202,7 +202,7 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
                 continue
             for index, intent in enumerate(task.get("validationTestPlan", []), start=1):
                 if isinstance(intent, dict):
-                    source_ids.append(str(intent.get("commandId") or intent.get("id") or f"TEST-{task['id']}-{index:02d}"))
+                    source_ids.append(str(intent.get("id") or intent.get("commandId") or f"TEST-{task['id']}-{index:02d}"))
     for index, command in enumerate(root.get("projectValidationCommands", []), start=1):
         if isinstance(command, dict):
             source_ids.append(str(command.get("id") or f"PROJECT-VAL-{index:03d}"))

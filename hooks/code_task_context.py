@@ -38,6 +38,8 @@ from hooks.repository_snapshot import (  # noqa: E402
     resolve_repositories,
     unignored_runtime_artifact_paths,
 )
+from hooks.spec_contract import spec_heading  # noqa: E402
+from hooks.source_context import load_source_context, source_requirement_index  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -106,18 +108,13 @@ def _resolve_path(base: Path, ref: str, anchor: str, *, design: bool) -> Path:
 
 
 def _extract_spec_snippet(text: str, anchor: str) -> tuple[str, int] | None:
-    if anchor.startswith("REQ-"):
-        start_re = re.compile(rf"^###\s+Requirement\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
-        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
-    elif anchor.startswith("SCN-"):
-        start_re = re.compile(rf"^####\s+Scenario\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
-        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
-    else:
+    if not anchor.startswith(("REQ-", "SCN-")):
         return None
-
-    match = start_re.search(text)
+    match = spec_heading(text, anchor)
     if not match:
         return None
+    # Stop at the next peer or enclosing section, including mixed ID styles.
+    end_re = re.compile(r"^#{1,4}\s+\S", re.MULTILINE)
     end_match = end_re.search(text, match.end())
     end = end_match.start() if end_match else len(text)
     snippet = text[match.start() : end].strip()
@@ -195,6 +192,8 @@ def _resolve_refs(base: Path, refs: list[str], *, design: bool) -> tuple[list[di
 def resolve_task_refs(base: Path, task: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     spec_refs = [ref for ref in task.get("specRefs", []) if isinstance(ref, str)]
     design_refs = [ref for ref in task.get("designRefs", []) if isinstance(ref, str)]
+    for field in ("apiIds", "dataIds", "decisionIds"):
+        design_refs.extend(f"design.md#{value}" for value in task.get(field, []) if isinstance(value, str))
     resolved_specs, spec_errors = _resolve_refs(base, spec_refs, design=False)
     resolved_design, design_errors = _resolve_refs(base, design_refs, design=True)
     return resolved_specs, resolved_design, spec_errors + design_errors
@@ -331,6 +330,17 @@ def build_context(
         return fail("task_not_found", task_id, path=plan_path)
 
     resolved_specs, resolved_design, errors = resolve_task_refs(base, task)
+    resolved_sources = []
+    source_refs = task.get("sourceRefs") or []
+    if source_refs:
+        source_context, source_errors = load_source_context(base)
+        errors.extend({"reason": "invalid_source_context", "detail": error} for error in source_errors)
+        source_index = source_requirement_index(source_context)
+        for ref in source_refs:
+            if ref in source_index:
+                resolved_sources.append(source_index[ref])
+            else:
+                errors.append({"reason": "unknown_plan_source_requirement_ref", "detail": str(ref)})
 
     data_out = {
         "feature": feature,
@@ -365,16 +375,17 @@ def build_context(
             "uiRequired": task.get("uiRequired") is True,
             "uiRefs": task.get("uiRefs") if isinstance(task.get("uiRefs"), dict) else {},
             "workspaceRef": task.get("workspaceRef"),
-            "writeTargets": task.get("writeTargets") if isinstance(task.get("writeTargets"), list) else [],
-            "implementationPoints": task.get("implementationPoints"),
             "acceptanceCriteria": task.get("acceptanceCriteria"),
+            "implementationPoints": task.get("implementationPoints", []),
+            "testPoints": task.get("testPoints", []),
             "validationBoundary": task.get("validationBoundary"),
-            "nonGoals": task.get("nonGoals"),
-            "splitRationale": task.get("splitRationale", ""),
-            "validationCommands": task.get("validationCommands"),
+            "verificationIntent": task.get("verificationIntent"),
+            "sourceRefs": source_refs,
+            "testIntent": task.get("validationTestPlan", []),
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
+        "resolvedSourceRefs": resolved_sources,
     }
     if code_workspaces:
         try:

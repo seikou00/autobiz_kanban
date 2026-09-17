@@ -55,12 +55,22 @@ def compute_impact_set(manifest: dict[str, Any], batch_id: str, changed_files: l
         if other_id == batch_id or not isinstance(other, dict):
             continue
         paths = [str(path) for path in other.get("writeSet", []) if isinstance(path, str)]
+        # Plan v2 intentionally has no speculative file manifest.  When a
+        # concurrent Batch has no recorded actual write set yet, invalidate
+        # conservatively within its repository instead of silently missing an
+        # affected test result.
+        same_repository = (
+            other.get("gitRoot") or other.get("repositoryRef") or other.get("workspaceRef")
+        ) == (
+            source.get("gitRoot") or source.get("repositoryRef") or source.get("workspaceRef")
+        )
         l1 = any(_overlap(file_name, path) for file_name in changed for path in paths)
+        unknown_scope = same_repository and not paths
         dependency = _depends_on(manifest, other_id, batch_id)
-        if l1 or dependency:
+        if l1 or unknown_scope or dependency:
             impacted.append({
                 "batchId": other_id,
-                "reasons": (["l1_path_overlap"] if l1 else []) + (["dag_dependency"] if dependency else []),
+                "reasons": (["l1_path_overlap"] if l1 else []) + (["unknown_write_scope"] if unknown_scope else []) + (["dag_dependency"] if dependency else []),
                 "staleStages": [stage for stage in delivery_stage_names(other) if stage in {"test", "quality_gate"}],
             })
     return {

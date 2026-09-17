@@ -5,9 +5,11 @@
 使用 task 工具，指定 `critic-autodev-plan-zh` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`plan.json` 进行严格审查，从四个维度核查：
 
 1. 技术选择是否合理；
-2. 规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对）；
-3. 测试是否合理和完备；
+2. 规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对，任务覆盖全部 REQ/SCN 与需要落地的设计决策）；
+3. 任务是否可交付：DAG 与代码仓库归属可信，交付结果和测试意图清晰，任务不过大也不机械碎片化；
 4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/D-xxx 在上游真实存在）。
+
+不要因未提前列出文件、方法、实现步骤、测试类或测试命令拒绝计划；这些在 Code/UTest 阶段才有可靠上下文。
 
 启动时必须在 task prompt 中写全 feature 目录的绝对路径与下面这份清单。回检角色不搜索工作区、不执行任何命令，路径没给它就直接退回。
 
@@ -28,6 +30,7 @@
 使用回检角色的原文分节名，不要改写成别的词：
 
 - `Critical Findings` 与 `Major Findings` 下的每一条都必须落入下方分类表的一个分类，不得省略。
+- Critical 和 Major 只报告有证据的覆盖、引用、仓库归属、依赖、交付意图或任务粒度问题；没有证据的内容归入 `Open Questions (unscored)`。
 - `Minor Findings` 与 `Open Questions (unscored)` 不单独触发改产物。其中涉及取舍的按「需用户裁定」处理，其余归「仅列出」。
 
 角色的总评行（critic 的 `VERDICT`）只是总评，不作为动作依据。即使总评是 `ACCEPT`，下方逐条处理仍须完整完成。
@@ -38,14 +41,14 @@
 
 | 分类 | 判定 | 动作                                                |
 |------|------|---------------------------------------------------|
-| 产物可修 | 技术方案、接口/数据形态、任务拆分、覆盖缺口、验证方法不足 | 技术结论改 design.md，执行结论改 PLAN.json，两边受影响处同步          |
+| 产物可修 | 技术方案、接口/数据形态、DAG、覆盖缺口、仓库归属、交付意图不足、任务过大或机械碎片化 | 技术结论改 design.md；执行结论尚未发布则修正输入，已发布且未执行则通过 Plan rollback 回到 `plan_in_progress` 后重新发布完整 Plan v2，不就地编辑已发布的 plan.json / PLAN.md |
 | 引用与事实不符 | Code Evidence 与代码不一致，或引用的 REQ/SCN/D-xxx 不存在 | 更新 EVD-xxx 与引用；与 spec/D-xxx 冲突记 R-xxx（Type=读码差异）走裁定门 |
-| 需用户裁定 | 有真实备选且改变实现路径，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xxx（Type=待确认），按「design.md 确认规则」第一步逐条裁定         |
+| 需用户裁定 | 必须改变已确认的业务范围、公开契约或用户取舍，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xxx（Type=待确认），仅就该决策按「design.md 确认规则」第一步逐条裁定；既定范围内的任务拆分、真实依赖排序和内部验证组织由主代理自行修复 |
 | 回流上游 | 行为契约本身缺失或矛盾 | 停止并建议回 `/autodev-specs`，不在本阶段补写行为契约               |
 | 仅列出 | 成立但不足以改产物（Minor、低置信、风格类） | 不改产物，在结论块中列出                                      |
 | 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明                     |
 
-- 只改被指出的条目；TASK/EVD/R/API/DATA/D 稳定 ID 不重排、不复用，已裁定行不因回检改写。
+- 只改被指出的条目；TASK 稳定 ID 不复用，EVD/R/API/DATA/D 稳定 ID 不重排、不复用，已裁定行不因回检改写。
 - 不得靠删任务、缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
 
 ## 产出义务

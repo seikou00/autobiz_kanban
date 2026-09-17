@@ -8,6 +8,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any
+from hooks.spec_contract import spec_heading
 
 from hooks.source_context import (
     load_source_context,
@@ -489,20 +490,9 @@ def _find_unique_anchor_file(base: Path, anchor: str, *, design: bool) -> Path:
 
 def _extract_spec_snippet(text: str, anchor: str) -> str | None:
     """Extract spec snippet for REQ/SCN anchors."""
-    if anchor.startswith("REQ-"):
-        start_re = re.compile(
-            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
-            re.MULTILINE,
-        )
-    elif anchor.startswith("SCN-"):
-        start_re = re.compile(
-            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
-            re.MULTILINE,
-        )
-    else:
+    if not anchor.startswith(("REQ-", "SCN-")):
         return None
-
-    match = start_re.search(text)
+    match = spec_heading(text, anchor)
     return text[match.start():match.end()] if match else None
 
 
@@ -776,7 +766,7 @@ def validate_plan_source_coverage(
             "detail": f"ids={','.join(missing)}",
             "field": "sourceRefs",
             "repairTarget": "task_group",
-            "repairSuggestion": "在 task-groups.json 中把缺失的 SRC-NNN-RNNN 分配给实际实施这些要求的任务组",
+            "repairSuggestion": "修正 Specs Source References 的来源到 REQ/SCN 映射及 Plan v2 行为引用，再由 writer 投影 sourceRefs；不要手写派生字段",
         })
     if unknown:
         errors.append({
@@ -784,6 +774,6 @@ def validate_plan_source_coverage(
             "detail": f"ids={','.join(unknown)}",
             "field": "sourceRefs",
             "repairTarget": "task_group",
-            "repairSuggestion": "修正 task-groups.json 的 sourceRefs，只引用 source-context.json 中已有的 SRC-NNN-RNNN",
+            "repairSuggestion": "核对 source-context.json 与 Specs 来源映射，再重新发布 Plan v2 生成 sourceRefs",
         })
     return errors

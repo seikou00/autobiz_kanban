@@ -529,35 +529,13 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
             self.assertEqual(unknown_decision["artifact"], "design.md")
             self.assertEqual(unknown_decision["route"], "fix_current")
 
-    def test_oversized_task_is_actionable(self) -> None:
+    def test_task_size_is_not_a_plan_blocker(self) -> None:
         task = {
             "id": "T001",
             "specRefs": [f"specs/order-export/spec.md#SCN-{index:03d}" for index in range(1, 20)],
         }
         item_errors = validate_plan_task_granularity_item(task, task_id="T001")
-        reasons = {error["reason"] for error in item_errors}
-        self.assertTrue(reasons, "粒度校验没有报错，测试样本失效")
-        ctx = HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp"))
-
-        def emit() -> int:
-            failures = 0
-            for error in item_errors:
-                failures += fail_line(
-                    ctx,
-                    error["reason"],
-                    " " + error.get("detail", ""),
-                    target="T001",
-                    fields={"detail": error.get("detail", "")},
-                    diagnostics=error,
-                )
-            return failures
-
-        _, output = run_capture(emit)
-        for error in parse_postcheck_output(output):
-            for field in ("artifact", "target", "problem", "action", "route"):
-                self.assertTrue(error.get(field), f"{error['reason']} 缺 {field}")
-            self.assertEqual(error["target"], "T001")
-            self.assertTrue(error.get("diagnostics", {}).get("violations"))
+        self.assertEqual(item_errors, [])
 
 
 class SkillWordingTest(unittest.TestCase):
