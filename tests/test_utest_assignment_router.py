@@ -3,18 +3,27 @@
 
 from __future__ import print_function
 
+import contextlib
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.utest_assignment_router import UTestAssignmentError, build_assignments  # noqa: E402
+from hooks.utest_assignment_router import (  # noqa: E402
+    UTestAssignmentError,
+    build_assignments,
+    main,
+    validate_assignment_prompt_payload,
+)
 
 
 SKILL_PATH = ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md"
@@ -224,6 +233,97 @@ class UTestAssignmentRouterTest(unittest.TestCase):
             [{"repo": "ruoyi-vue-pro", "cwd": "."}],
             prompt["tasks"][0]["validationLocations"],
         )
+
+    def test_assignment_validation_uses_its_batch_when_another_batch_is_missing(self):
+        feature_dir = self._feature(
+            [
+                ("B001", "backend", [task("T001")]),
+                ("B002", "frontend", [task("T002")]),
+            ]
+        )
+        assignment = build_assignments(feature_dir)[0]
+        payload = json.loads(
+            assignment["promptContent"].split("\n", 1)[1].rsplit("\n", 1)[0]
+        )
+        (feature_dir / "plans" / "B002" / "plan.json").unlink()
+
+        validated = validate_assignment_prompt_payload(payload)
+
+        self.assertEqual("B001", validated["batchId"])
+        self.assertEqual(["T001"], [item["id"] for item in validated["tasks"]])
+
+    def test_assignment_validation_uses_its_batch_when_root_plan_is_invalid(self):
+        feature_dir = self._feature([("B001", "backend", [task("T001")])])
+        assignment = build_assignments(feature_dir)[0]
+        payload = json.loads(
+            assignment["promptContent"].split("\n", 1)[1].rsplit("\n", 1)[0]
+        )
+        (feature_dir / "plan.json").write_text("{", encoding="utf-8")
+
+        validated = validate_assignment_prompt_payload(payload)
+
+        self.assertEqual("B001", validated["batchId"])
+        self.assertEqual(["T001"], [item["id"] for item in validated["tasks"]])
+
+    def test_assignment_validation_rejects_unregistered_batch_when_root_is_valid(self):
+        feature_dir = self._feature([("B001", "backend", [task("T001")])])
+        batch_path = feature_dir / "plans" / "B002" / "plan.json"
+        batch_path.parent.mkdir(parents=True)
+        batch_path.write_text(
+            json.dumps(
+                {
+                    "batchId": "B002",
+                    "executionLane": "backend",
+                    "tasks": [task("T002")],
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = {
+            "batchPlanPath": str(batch_path.resolve()),
+            "batchId": "B002",
+            "executionLane": "backend",
+            "workspaceRef": "backend-repo",
+            "tasks": [],
+        }
+
+        with self.assertRaises(UTestAssignmentError) as caught:
+            validate_assignment_prompt_payload(payload)
+
+        self.assertIn("未登记到当前 Feature", str(caught.exception))
+
+    def test_cli_uses_plugin_environment_when_paths_are_omitted(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        workspace = root / "output" / "project-a"
+        feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+        feature_dir.mkdir(parents=True)
+        (workspace / ".autobizdevops" / "state.json").write_text("{}\n", encoding="utf-8")
+        batch_path = feature_dir / "plans" / "B001" / "plan.json"
+        batch_path.parent.mkdir(parents=True)
+        batch_path.write_text(
+            json.dumps({"batchId": "B001", "executionLane": "backend", "tasks": [task("T001")]}),
+            encoding="utf-8",
+        )
+        (feature_dir / "plan.json").write_text(
+            json.dumps({"batches": [{"id": "B001", "path": "plans/B001/plan.json"}]}),
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PLUGIN_WORKSPACE": str(workspace.parent),
+                "PROJECT_DIR": workspace.name,
+                "FEATURE_ID": "alpha",
+            },
+            clear=False,
+        ), contextlib.redirect_stdout(stdout):
+            exit_code = main([])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("B001", json.loads(stdout.getvalue())["assignments"][0]["batchId"])
 
 
 class UTestWorkflowTextContractTest(unittest.TestCase):

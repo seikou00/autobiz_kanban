@@ -101,6 +101,48 @@ def _batch_path(feature_dir, raw_path):
     return resolved
 
 
+def load_utest_batch_plan(batch_plan_path, feature_dir=None):
+    """Load one canonical Batch without requiring the root plan."""
+    requested = Path(batch_plan_path).expanduser()
+    if not requested.is_absolute():
+        _error("batchPlanPath 必须是绝对路径：{}".format(batch_plan_path))
+    path = requested.resolve()
+    if feature_dir is not None:
+        feature_root = Path(feature_dir).expanduser().resolve()
+        try:
+            path.relative_to(feature_root)
+        except ValueError:
+            _error("batchPlanPath 不属于当前 Feature：{}".format(path))
+    else:
+        feature_root = None
+    batch = _read_object(path)
+    batch_id = batch.get("batchId")
+    lane = batch.get("executionLane")
+    if not isinstance(batch_id, str) or not batch_id.strip():
+        _error("Batch 缺少 batchId：{}".format(path))
+    if not isinstance(lane, str) or not lane.strip():
+        _error("{} executionLane 缺失".format(batch_id))
+    tasks = batch.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        _error("{} tasks 必须是非空数组".format(batch_id))
+    projected_tasks = []
+    seen_tasks = set()
+    for task in tasks:
+        projected = _validate_task(task, batch_id)
+        if projected["id"] in seen_tasks:
+            _error("{} TASK ID 重复：{}".format(batch_id, projected["id"]))
+        seen_tasks.add(projected["id"])
+        projected_tasks.append(projected)
+    return {
+        "batchId": batch_id,
+        "executionLane": lane,
+        "planPath": str(path),
+        "rootOrder": None,
+        "tasks": projected_tasks,
+        "featureDir": feature_root,
+    }
+
+
 def validation_locations(task):
     """Project validationCommands to repository locations only."""
     if not isinstance(task, dict):

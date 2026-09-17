@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -521,6 +522,35 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertIn(
             "separator-ok",
+            (self.feature_dir / "test-output.log").read_text(encoding="utf-8"),
+        )
+
+    def test_cli_uses_plugin_environment_when_workspace_and_feature_are_omitted(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PLUGIN_WORKSPACE": str(self.workspace.parent),
+                "PROJECT_DIR": self.workspace.name,
+                "FEATURE_ID": "alpha",
+            },
+            clear=False,
+        ):
+            exit_code = main(
+                [
+                    "--kind",
+                    "setup",
+                    "--task-id",
+                    "T001",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "print('env-ok')",
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertIn(
+            "env-ok",
             (self.feature_dir / "test-output.log").read_text(encoding="utf-8"),
         )
 

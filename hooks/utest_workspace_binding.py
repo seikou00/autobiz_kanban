@@ -16,7 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
+from hooks.json_writer_common import (  # noqa: E402
+    WriterError,
+    resolve_feature,
+    resolve_workspace,
+)
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
     load_utest_plan,
@@ -475,8 +479,8 @@ def resolve_feature_bindings(workspace, feature):
 
 def main(argv=None):
     parser = RepairArgumentParser(description="从当前 Plan 解析 UTest workspace")
-    parser.add_argument("--workspace", required=True)
-    parser.add_argument("--feature", required=True)
+    parser.add_argument("--workspace")
+    parser.add_argument("--feature")
     parser.add_argument("--json", action="store_true")
     try:
         args = parser.parse_args(argv)
@@ -488,7 +492,7 @@ def main(argv=None):
         result = exc.payload()
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=False))
         return 2
-    except (ValueError, OSError) as exc:
+    except (WriterError, ValueError, OSError) as exc:
         result = {
             "status": "workspace_binding_failed",
             "owner": "utest_workspace_binding",

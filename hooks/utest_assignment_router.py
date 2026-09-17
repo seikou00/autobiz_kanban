@@ -18,6 +18,7 @@ from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa:
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
     assignment_task,
+    load_utest_batch_plan,
     load_utest_plan,
 )
 
@@ -82,23 +83,38 @@ def _plan_for_batch_path(batch_plan_path):
                 batch_plan_path
             )
         )
-    for feature_dir in path.parents:
-        root_plan = feature_dir / "plan.json"
-        if not root_plan.is_file() or root_plan.resolve() == path:
-            continue
+    if path.name != "plan.json" or path.parent.parent.name != "plans":
+        raise UTestAssignmentError(
+            "batchPlanPath 不是 plans/<batch>/plan.json：{}。修复：重新运行 router，原样使用 promptContent。".format(
+                path
+            )
+        )
+    feature_dir = path.parents[2]
+    root_plan = feature_dir / "plan.json"
+    if root_plan.is_file():
         try:
             plan = load_utest_plan(feature_dir)
         except UTestPlanContractError:
-            continue
-        for batch in plan["batches"]:
-            candidate = (plan["featureDir"] / batch["planPath"]).resolve()
-            if candidate == path:
-                return plan, batch
-    raise UTestAssignmentError(
-        "batchPlanPath 不属于可验证的 Feature plan：{}。修复：重新运行 router，原样使用 promptContent。".format(
-            path
+            plan = None
+        if plan is not None:
+            for batch in plan["batches"]:
+                candidate = (plan["featureDir"] / batch["planPath"]).resolve()
+                if candidate == path:
+                    return plan, batch
+            raise UTestAssignmentError(
+                "batchPlanPath 未登记到当前 Feature：{}。修复：重新运行 router，原样使用 promptContent。".format(
+                    path
+                )
+            )
+    try:
+        batch = load_utest_batch_plan(path, feature_dir=feature_dir)
+    except UTestPlanContractError as exc:
+        raise UTestAssignmentError(str(exc))
+    if path.parent.name != batch["batchId"]:
+        raise UTestAssignmentError(
+            "batchPlanPath 与 batchId 不一致。修复：重新运行 router，原样使用 promptContent。"
         )
-    )
+    return {"featureDir": None, "root": None, "batches": [batch]}, batch
 
 
 def validate_assignment_prompt_payload(payload):
@@ -107,7 +123,8 @@ def validate_assignment_prompt_payload(payload):
         raise UTestAssignmentError(
             "UTEST_ASSIGNMENT 顶层不是 object。修复：重新运行 router，原样使用 promptContent。"
         )
-    plan, batch = _plan_for_batch_path(payload.get("batchPlanPath"))
+    batch_plan_path = payload.get("batchPlanPath")
+    _, batch = _plan_for_batch_path(batch_plan_path)
     workspace_ref = payload.get("workspaceRef")
     matching_tasks = [
         assignment_task(task)
@@ -120,7 +137,7 @@ def validate_assignment_prompt_payload(payload):
         )
     expected = assignment_prompt_payload(
         {
-            "planPath": str((plan["featureDir"] / batch["planPath"]).resolve()),
+            "planPath": str(Path(batch_plan_path).expanduser().resolve()),
             "batchId": batch["batchId"],
             "executionLane": batch["executionLane"],
             "workspaceRef": workspace_ref,
@@ -191,10 +208,6 @@ def main(argv=None):
                 )
             feature_dir = Path(args.feature_dir)
         else:
-            if not args.workspace or not args.feature:
-                raise UTestAssignmentError(
-                    "缺少 --workspace/--feature。修复：传入插件输出工作区和 Feature。"
-                )
             workspace = resolve_workspace(args.workspace)
             feature = resolve_feature(args.feature)
             feature_dir = workspace / ".autobizdevops" / "features" / feature

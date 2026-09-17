@@ -543,8 +543,8 @@ def _record_blocked_if_requested(args, payload):
 
 def main(argv=None):
     parser = RepairArgumentParser(description="按当前 plan 自动定位单测环境，并可落盘阻断交接")
-    parser.add_argument("--workspace", required=True)
-    parser.add_argument("--feature", required=True)
+    parser.add_argument("--workspace")
+    parser.add_argument("--feature")
     parser.add_argument("--task-id", action="append")
     parser.add_argument(
         "--batch-worktree",

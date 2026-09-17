@@ -127,6 +127,7 @@ class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
         ):
             with self.subTest(classification=classification):
                 self.assertIn("`{}`".format(classification), description)
+        self.assertIn("continue testing the assigned TASK IDs", description)
         self.assertIn("appended", stderr.getvalue())
 
     def test_framework_and_runner_sources_are_explicit(self):

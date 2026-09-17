@@ -421,8 +421,6 @@ def main(argv=None):
             name
             for name, value in (
                 ("--kind", args.kind),
-                ("--workspace", args.workspace),
-                ("--feature", args.feature),
                 ("--task-id", args.task_id),
             )
             if not value

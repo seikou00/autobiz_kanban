@@ -31,7 +31,7 @@ APPEND_INSTRUCTION = """
 
 - This is post-implementation testing: `post_implementation=true`, `tdd_rebuild=false`. Preserve existing production implementation; do not apply the role's TDD deletion rule.
 - Read `<AGENTS_INSTRUCTIONS>`, then resolve the assignment's `<SCOPE>`, `<SYSTEM>`, and `<UNIT>` references through tools before editing. `<SCOPE>` owns the deploy-unit and repository boundary; system/unit documents own framework constraints.
-- Treat the supplied `<UTEST_ASSIGNMENT>` block as the complete testing context. Use `implementationPoints` as the required testing focus, exclude every `nonGoals` item, and use `validationLocations` only to confirm the assigned repo/cwd. `batchPlanPath` is traceability evidence; do not open plan.json to fetch, reconstruct, summarize, or replace fields.
+- Use the supplied `<UTEST_ASSIGNMENT>` fields, focus on `implementationPoints`, and exclude `nonGoals`. If root Plan loading fails, continue testing the assigned TASK IDs. Do not scan other plans.
 - Treat `executionLane` and `workspaceRef` in that block as authoritative. Work only in the assigned workspace and do not combine backend and frontend lanes.
 - Do not author or pass repository paths or cwd values to UTest scripts. Use repository/module paths returned by the environment inspector for file access; the runner resolves and validates its execution directory from the current binding and task.
 - Resolve `framework` only from actually opened `<SYSTEM>`/`<UNIT>` documents. Resolve `runner` and package manager only from real manifests, lock files, and test config. A conflict is a blocking `contract_gap`; when the constraint is absent, fall back to repository facts and add a warning.
