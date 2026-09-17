@@ -185,7 +185,7 @@ def _unknown_design_id_issue(
         "currentValue": value,
         "repairTarget": repair_target,
         "designMutationAllowed": False,
-        "repairSuggestion": f"任务 {task_id} 引用了 design.md 中不存在的{kind_label} ID：{value}。请在 task-groups.json 或任务详情中删除该引用，或先在 design.md 的对应表格中添加该 ID 定义"
+        "repairSuggestion": f"任务 {task_id} 引用了 design.md 中不存在的{kind_label} ID：{value}。请在 Plan v2 输入的 refs 中删除该引用，或先在 design.md 的对应表格中添加该 ID 定义"
     }
 
 
@@ -221,7 +221,7 @@ def validate_task_group_design_contract(
     contract: dict[str, Any],
     groups: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Reject invented API IDs before a Draft can be prepared."""
+    """Reject Design IDs that the confirmed design contract does not define."""
 
     contract = _reference_validation_contract(contract) or {
         "ids": {"API": set(), "DATA": set(), "D": set()},
@@ -701,7 +701,7 @@ def validate_task_artifact_refs(
                     "field": f"sourceRefs[{index}]",
                     "currentValue": ref,
                     "repairTarget": "task_group",
-                    "repairSuggestion": "修正 task-groups.json 的 sourceRefs，只引用 source-context.json 中已有的 SRC-NNN-RNNN",
+                    "repairSuggestion": "sourceRefs 由 writer 按 Specs Source References 投影：修正 Specs 中的来源映射，只引用 source-context.json 中已有的 SRC-NNN-RNNN",
                 })
 
     if contract is not None:

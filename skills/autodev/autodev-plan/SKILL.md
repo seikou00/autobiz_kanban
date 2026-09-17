@@ -64,7 +64,7 @@ writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，保留输
 
 `PLAN.md` 是 `plan.json` 的人类视图，由 writer 同一次发布落盘，不能独立维护。依赖就绪的隔离工作树可乐观并行；真实文件冲突由 Merge Train 处理。
 
-Plan v2 的正常路径没有 Draft、Detail、全量 lint 或 hash patch；未出错且输入未变时不重复提交。已发布但尚未执行的计划需要修正时，通过 Plan rollback 后重新发布一份完整 Plan v2；已经执行的计划由 Code workflow 的受控恢复处理。
+未出错且输入未变时不重复提交。已发布但尚未执行的计划需要修正时，通过 Plan rollback 后重新发布一份完整 Plan v2；已经执行的计划由 Code workflow 的受控恢复处理。
 
 ## 完成
 
@@ -72,11 +72,7 @@ Plan 回检检查：本期行为是否覆盖、任务归属和依赖是否可信
 
 运行「产物契约预检（机器校验）」只验证引用、覆盖、仓库绑定和 DAG 等机器事实；失败时修正对应 Plan v2 字段或上游映射，不增加实现细节来绕过校验。
 
-```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
-```
-
-完整遵循其输出，不得凭记忆执行本节。
+回检协议在 `${pluginPath}/skills/references/review-protocol-plan.md`，必须先读取并完整遵循该文件，不得凭记忆执行本节。
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"

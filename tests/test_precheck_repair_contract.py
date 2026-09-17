@@ -71,10 +71,6 @@ DYNAMIC_REASONS = {
     # hooks/plan_granularity.py
     "invalid_plan_task_scenario_reference",
     "oversized_plan_task_must_split",
-    "missing_plan_task_merged_scenario_refs",
-    "invalid_plan_task_merged_scenario_refs",
-    "missing_plan_task_split_rationale",
-    "invalid_plan_task_split_rationale",
     "invalid_plan_task_matrix_validation",
     # hooks/code_task_context.py resolve_task_refs
     "invalid_artifact_ref",
@@ -260,13 +256,13 @@ class StructuredOutputTest(unittest.TestCase):
     def test_registered_failure_preserves_structured_diagnostics(self) -> None:
         diagnostics = {
             "taskId": "T013",
-            "field": "splitRationale",
-            "violations": [{"code": "split_rationale_missing_related_ids"}],
+            "field": "specRefs",
+            "violations": [{"code": "scenario_count_exceeds_limit"}],
         }
         _, output = run_capture(
             lambda: fail_line(
                 HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp")),
-                "invalid_plan_task_split_rationale",
+                "oversized_plan_task_must_split",
                 " task=T013 detail=scenarios=8",
                 target="T013",
                 fields={"detail": "task=T013 detail=scenarios=8"},

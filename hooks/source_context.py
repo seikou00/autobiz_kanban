@@ -470,7 +470,7 @@ def validate_source_context(
                     or not requirement_id.startswith(source_id + "-R")
                 ):
                     errors.append(
-                        "%s.id 格式非法；修复：改为 %s-R001 形式，下游 task-groups.json 按该 ID 引用"
+                        "%s.id 格式非法；修复：改为 %s-R001 形式，下游 Plan 按该 ID 投影 sourceRefs"
                         % (requirement_context, source_id)
                     )
                 elif requirement_id in seen_requirements:
