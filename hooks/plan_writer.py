@@ -78,6 +78,7 @@ from hooks.artifact_ref_validator import (  # noqa: E402
 from hooks.design_contract_lock import (  # noqa: E402
     load_confirmed_design_contract,
 )
+from hooks.source_context import load_source_context, source_index  # noqa: E402
 from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 
 
@@ -85,6 +86,8 @@ PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
 PLAN_WRITE_TRANSACTION_FILE = ".plan-write-transaction.json"
 SCENARIO_ID_RE = re.compile(r"\bSCN-\d{3}\b")
+SOURCE_ID_RE = re.compile(r"^SRC-\d{3}$")
+SPEC_REFERENCE_ID_RE = re.compile(r"\b(?:REQ|SCN)-\d{3}\b")
 TASK_GROUP_TASK_ID_RE = re.compile(r"^T\d{3}$")
 TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 TASK_GROUP_API_ID_RE = re.compile(r"^API-\d{3}$")
@@ -389,6 +392,77 @@ def _materialize_v2_ui_visual_sources(feature_dir: Path, group_data: dict[str, A
                     if isinstance(ref, str) and ref.strip()
                 )
         group["uiRefs"]["visualSourceRefs"] = sorted(expected)
+
+
+def _markdown_section_body(text: str, title: str) -> str | None:
+    match = re.search(rf"^ {{0,3}}(?P<marks>#+)\s+{re.escape(title)}\s*$", text, re.MULTILINE)
+    if match is None:
+        return None
+    level = len(match.group("marks"))
+    next_heading = re.compile(rf"^ {{0,3}}#{{1,{level}}}\s+\S", re.MULTILINE)
+    end_match = next_heading.search(text, match.end())
+    return text[match.end():end_match.start() if end_match else len(text)]
+
+
+def _spec_source_reference_index(feature_dir: Path) -> dict[str, set[str]]:
+    """Map a source snapshot to the REQ/SCN references it constrains."""
+
+    index: dict[str, set[str]] = {}
+    specs_dir = feature_dir / "specs"
+    if not specs_dir.is_dir():
+        return index
+    for path in sorted(specs_dir.glob("**/*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PlanWriterInputError("plan_v2_spec_unreadable", str(path)) from exc
+        section = _markdown_section_body(text, "Source References / 外部资料引用")
+        if section is None:
+            continue
+        relative = path.relative_to(feature_dir).as_posix()
+        for line in section.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 2 or SOURCE_ID_RE.fullmatch(cells[0]) is None:
+                continue
+            refs = {
+                f"{relative}#{ref}"
+                for ref in SPEC_REFERENCE_ID_RE.findall(cells[1])
+            }
+            if refs:
+                index.setdefault(cells[0], set()).update(refs)
+    return index
+
+
+def _materialize_v2_source_references(feature_dir: Path, group_data: dict[str, Any]) -> None:
+    """Project Specs' source-to-behavior mappings onto the owning Plan tasks.
+
+    ``source-context.json`` is intentionally file-level now: it supplies a
+    stable source ID and snapshot metadata, not model-authored requirement
+    fragments.  Specs is the semantic bridge from that source to REQ/SCN; the
+    planner never repeats source IDs in its v2 body.
+    """
+
+    context, source_errors = load_source_context(feature_dir)
+    if source_errors:
+        raise PlanWriterInputError("plan_v2_source_context_invalid", ";".join(source_errors))
+    known_sources = source_index(context)
+    source_to_refs = _spec_source_reference_index(feature_dir)
+    unknown = sorted(set(source_to_refs) - set(known_sources))
+    if unknown:
+        raise PlanWriterInputError("plan_v2_source_reference_unknown", "ids=" + ",".join(unknown))
+
+    for source_id, spec_refs in source_to_refs.items():
+        for group in _task_groups(group_data):
+            task_refs = {
+                ref for ref in group.get("specRefs", [])
+                if isinstance(ref, str) and ref.strip()
+            }
+            if task_refs.intersection(spec_refs):
+                group.setdefault("sourceRefs", []).append(source_id)
+    for group in _task_groups(group_data):
+        refs = group.get("sourceRefs")
+        if isinstance(refs, list):
+            group["sourceRefs"] = sorted({ref for ref in refs if isinstance(ref, str) and ref})
 
 
 def _group_string_list(
@@ -776,6 +850,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "deps": item.get("deps") if isinstance(item.get("deps"), list) else [],
         "uiRequired": item.get("uiRequired"),
         "specRefs": item.get("specRefs") if isinstance(item.get("specRefs"), list) else [],
+        "sourceRefs": item.get("sourceRefs") if isinstance(item.get("sourceRefs"), list) else [],
         "mergedScenarioRefs": (
             item.get("mergedScenarioRefs") if isinstance(item.get("mergedScenarioRefs"), list) else []
         ),
@@ -1193,6 +1268,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "workspaceRef": group.get("workspaceRef"),
         "nonGoals": [],
         "specRefs": copy.deepcopy(group.get("specRefs", [])),
+        "sourceRefs": copy.deepcopy(group.get("sourceRefs", [])),
         "mergedScenarioRefs": copy.deepcopy(group.get("mergedScenarioRefs", [])),
         "designRefs": [],
         "apiIds": copy.deepcopy(group.get("apiIds", [])),
@@ -1525,6 +1601,7 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
     feature_dir = _path(workspace, feature).parent
     try:
         _materialize_v2_ui_visual_sources(feature_dir, group_data)
+        _materialize_v2_source_references(feature_dir, group_data)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))
     group_errors = _task_group_preflight_errors(feature_dir, group_data)
@@ -1774,6 +1851,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                 f"- api_id: {_fmt(task.get('apiIds'))}",
                 f"- data_id: {_fmt(task.get('dataIds'))}",
                 f"- decision_id: {_fmt(task.get('decisionIds'))}",
+                f"- 外部资料: {_fmt(task.get('sourceRefs'))}",
                 f"- 涉及范围: modules={_fmt(task.get('scope', {}).get('modules') if isinstance(task.get('scope'), dict) else [])}; entrypoints={_fmt(task.get('scope', {}).get('entrypoints') if isinstance(task.get('scope'), dict) else [])}; pages={_fmt(task.get('scope', {}).get('pages') if isinstance(task.get('scope'), dict) else [])}",
                 f"- 验证边界: {task.get('validationBoundary', '')}",
                 f"- 代码工作区: {task.get('workspaceRef', '')}",

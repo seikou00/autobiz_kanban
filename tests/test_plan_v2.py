@@ -229,6 +229,75 @@ class PlanV2Test(unittest.TestCase):
             self.assertEqual({item["anchor"] for item in specs}, {"REQ-001", "SCN-001"})
             self.assertEqual({item["anchor"] for item in design}, {"API-001", "DATA-001", "D-001"})
 
+    def test_publish_plan_v2_projects_file_level_source_refs_to_code_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            snapshot = feature / "sources" / "SRC-001" / "capability.md"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("The external capability has a bounded timeout.", encoding="utf-8")
+            (feature / "source-context.json").write_text(json.dumps({
+                "version": 1,
+                "sources": [{
+                    "id": "SRC-001", "name": "Capability contract",
+                    "path": "sources/SRC-001/capability.md",
+                    "availability": "snapshot_only", "readStatus": "complete", "freshness": "unknown",
+                }],
+            }), encoding="utf-8")
+            spec = feature / "specs" / "cap" / "spec.md"
+            spec.write_text(spec.read_text(encoding="utf-8") + "\n".join([
+                "", "## Source References / 外部资料引用", "",
+                "| Source ID | Requirement / Scenario | Usage |",
+                "|---|---|---|",
+                "| SRC-001 | REQ-001 / SCN-001 | Capability timeout contract |",
+            ]), encoding="utf-8")
+
+            result = self._publish(workspace, self._payload())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            task = load_plan_bundle(feature).batches["B001"]["tasks"][0]
+            self.assertEqual(task["sourceRefs"], ["SRC-001"])
+            context = build_context(workspace=workspace, feature="alpha", task_id="T001")
+            self.assertTrue(context.ok, context.errors)
+            self.assertEqual(context.data["taskContract"]["sourceRefs"], ["SRC-001"])
+            self.assertEqual(context.data["resolvedSourceRefs"][0]["sourcePath"], "sources/SRC-001/capability.md")
+
+    def test_plan_design_scope_uses_confirmed_lock_not_mutable_design_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            design = feature / "design.md"
+            design.write_text(
+                "\n".join(line for line in design.read_text(encoding="utf-8").splitlines() if "D-001" not in line),
+                encoding="utf-8",
+            )
+            payload = self._payload()
+            payload["tasks"][0]["refs"]["decisions"] = []
+
+            result = self._publish(workspace, payload)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing_plan_json_decision_coverage", result.stdout)
+
+    def test_mapped_source_requires_a_readable_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            (feature / "source-context.json").write_text(json.dumps({
+                "version": 1,
+                "sources": [{
+                    "id": "SRC-001", "name": "Capability contract",
+                    "path": "sources/SRC-001/missing.md",
+                    "availability": "snapshot_only", "readStatus": "complete", "freshness": "unknown",
+                }],
+            }), encoding="utf-8")
+            spec = feature / "specs" / "cap" / "spec.md"
+            spec.write_text(spec.read_text(encoding="utf-8") + "\n".join([
+                "", "## Source References / 外部资料引用", "",
+                "| Source ID | Requirement / Scenario | Usage |",
+                "|---|---|---|",
+                "| SRC-001 | REQ-001 / SCN-001 | Capability timeout contract |",
+            ]), encoding="utf-8")
+
+            result = self._publish(workspace, self._payload())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("plan_source_snapshot_missing", result.stdout)
+
     def test_forward_dependencies_preserve_ids_and_publish_in_runtime_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace, feature = self._feature(Path(directory))

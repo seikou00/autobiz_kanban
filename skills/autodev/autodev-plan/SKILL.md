@@ -29,6 +29,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - `workspace`：仓库逻辑 ID，不是路径；单仓库可用 `default`，多仓库用 Git 根目录名，分别通过可重复的 `--code-workspace` 绑定真实路径；
 - `dependsOn`：确实存在的前置交付；
 - `refs.requirements`、`refs.scenarios`：上游行为引用；
+- `sourceRefs` 不属于模型输入。对实现或验收有约束的外部资料，先在对应 Spec 的 `## Source References / 外部资料引用` 表把 `SRC-NNN` 映射到 REQ/SCN；writer 会把它投影到命中该行为的 Task，Code 再通过 `source-context.json` 取得快照路径与资料元数据；
 - `refs.api` / `refs.design` / `refs.data`：仅在任务确实依赖相应设计时填写；`D-NNN` 只能写在 `refs.decisions`，表示它的主交付任务；
 - `implementationPoints`：只列交付这个 `outcome` 所需的主要实现方向和边界，不写文件、类或方法；若其中一条本身可形成独立交付结果，就拆成另一个 Task；
 - `testPoints`：只列证明同一个 `outcome` 的行为、边界或失败路径，不写测试命令或文件；若某项验证的是另一个可单独交付的能力，就拆成另一个 Task；同一行为的正常、边界、失败和权限分支应保留在一起；
@@ -58,7 +59,7 @@ python "${pluginPath}/hooks/plan_writer.py" publish-plan \
   --body-stdin
 ```
 
-writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，保留输入 Task ID，并生成 Batch 身份、运行时 workspace roots、验收记录、测试意图、Batch 与投影视图。发布失败时按结构化错误修正对应 Plan v2 字段；来源映射或上游契约有误时修对应上游；不要补造实现文件清单来通过校验。
+writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，保留输入 Task ID，并生成 Batch 身份、运行时 workspace roots、验收记录、测试意图、外部资料投影、Batch 与投影视图。发布失败时按结构化错误修正对应 Plan v2 字段；来源映射或上游契约有误时修对应上游；不要补造实现文件清单来通过校验。
 
 发布前把决策归属、UI 页面/交互与测试要点放在同一次检查里统一收口，再提交发布；失败时修正后重试。正式计划不能就地编辑：回检发现计划错误或需求/设计确有变化且尚未执行时，通过平台的 Plan rollback 回到 `plan_in_progress`，再提交一份完整 Plan v2；不要逐条修改已发布的 JSON 或 `PLAN.md`。
 

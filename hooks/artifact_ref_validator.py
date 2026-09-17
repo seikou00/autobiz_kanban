@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 from hooks.spec_contract import spec_heading
+from hooks.source_context import load_source_context, source_index
 
 
 
@@ -663,6 +664,70 @@ def validate_task_artifact_refs(
                 "currentValue": ref,
                 "repairTarget": "task_group",
             })
+
+    # sourceRefs is writer-owned.  It contains file-level SRC IDs projected
+    # from Specs' Source References table, which must resolve to a registered
+    # snapshot before Code is allowed to consume the task.
+    source_refs = task.get("sourceRefs", [])
+    if not isinstance(source_refs, list):
+        errors.append({
+            "reason": "plan_source_refs_invalid",
+            "detail": f"task={task_id};sourceRefs_must_be_array",
+            "taskIds": [task_id],
+            "field": "sourceRefs",
+            "repairTarget": "task_group",
+        })
+    elif source_refs:
+        source_context, source_errors = load_source_context(base)
+        for source_error in source_errors:
+            errors.append({
+                "reason": "invalid_source_context",
+                "detail": source_error,
+                "taskIds": [task_id],
+                "field": "sourceRefs",
+                "repairTarget": "source_context",
+            })
+        known_sources = source_index(source_context)
+        for index, ref in enumerate(source_refs):
+            if not isinstance(ref, str) or ref not in known_sources:
+                errors.append({
+                    "reason": "unknown_plan_source_ref",
+                    "detail": f"task={task_id};ref={ref}",
+                    "taskIds": [task_id],
+                    "field": f"sourceRefs[{index}]",
+                    "currentValue": ref,
+                    "repairTarget": "source_context",
+                    "repairSuggestion": "修正 Specs Source References 与 source-context.json 的 SRC-NNN 对应关系后重新发布 Plan。",
+                })
+                continue
+            source = known_sources[ref]
+            source_path = source.get("sourcePath")
+            candidate = (base / source_path).resolve() if isinstance(source_path, str) else None
+            if candidate is not None:
+                try:
+                    candidate.relative_to(base.resolve())
+                except ValueError:
+                    candidate = None
+            if source.get("availability") == "never_provided":
+                errors.append({
+                    "reason": "plan_source_snapshot_unavailable",
+                    "detail": f"task={task_id};ref={ref};availability=never_provided",
+                    "taskIds": [task_id],
+                    "field": f"sourceRefs[{index}]",
+                    "currentValue": ref,
+                    "repairTarget": "source_context",
+                    "repairSuggestion": "该资料已约束本任务，先提供并同步来源快照，或从 Specs 中移除对应行为依赖。",
+                })
+            elif candidate is None or not candidate.is_file():
+                errors.append({
+                    "reason": "plan_source_snapshot_missing",
+                    "detail": f"task={task_id};ref={ref};path={source_path}",
+                    "taskIds": [task_id],
+                    "field": f"sourceRefs[{index}]",
+                    "currentValue": ref,
+                    "repairTarget": "source_context",
+                    "repairSuggestion": "补齐 sources/SRC-NNN/ 下的快照后运行 source_context.py sync，再重新发布 Plan。",
+                })
 
     if contract is not None:
         errors.extend(validate_task_design_contract(contract, task))

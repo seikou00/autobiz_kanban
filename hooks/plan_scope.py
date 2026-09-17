@@ -27,6 +27,8 @@ if str(ROOT) not in sys.path:
 
 from hooks.implementation_scope import resolve_feature_dir, scope_path  # noqa: E402
 from hooks.spec_contract import SPEC_SCENARIO_DEF_RE  # noqa: E402
+from hooks.design_contract_lock import load_confirmed_design_contract  # noqa: E402
+from hooks.source_context import load_source_context, source_index  # noqa: E402
 from hooks.json_writer_common import (  # noqa: E402
     WriterError,
     atomic_write_json,
@@ -189,16 +191,25 @@ def resolve_plan_scope(feature_dir: Path) -> tuple[dict[str, ScopeSelection], li
             f"{spec.relative_to(feature_dir).as_posix()}#{anchor}"
             for anchor in SPEC_SCENARIO_DEF_RE.findall(spec.read_text(encoding="utf-8"))
         )
-    design = feature_dir / "design.md"
-    design_ids = set(re.findall(
-        r"^\|\s*((?:API|DATA|D)-\d{3})\s*\|",
-        design.read_text(encoding="utf-8") if design.is_file() else "",
-        re.MULTILINE,
-    ))
+    # Plan must use the Design snapshot already accepted by dev.design.  Reading
+    # design.md here would let an unvalidated edit silently narrow Plan
+    # coverage after the lock was produced.
+    design_contract, design_errors = load_confirmed_design_contract(feature_dir, feature_dir.name)
+    errors.extend(design_errors)
+    design_ids = {
+        value
+        for kind in ("API", "DATA", "D")
+        for value in design_contract.get("ids", {}).get(kind, set())
+        if isinstance(value, str)
+    }
+    context, source_errors = load_source_context(feature_dir)
+    errors.extend({"reason": "invalid_source_context", "detail": error} for error in source_errors)
+    source_ids = set(source_index(context))
     selections: dict[str, ScopeSelection] = {}
     for kind, universe in (
         ("scenario", scenarios),
         ("design", design_ids),
+        ("source", source_ids),
     ):
         selections[kind], issues = scope.select(kind, universe)
         errors.extend(issues)

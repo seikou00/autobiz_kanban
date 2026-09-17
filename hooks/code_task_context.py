@@ -39,6 +39,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     unignored_runtime_artifact_paths,
 )
 from hooks.spec_contract import spec_heading  # noqa: E402
+from hooks.source_context import load_source_context, source_index  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -329,6 +330,21 @@ def build_context(
         return fail("task_not_found", task_id, path=plan_path)
 
     resolved_specs, resolved_design, errors = resolve_task_refs(base, task)
+    source_refs = task.get("sourceRefs", [])
+    resolved_sources: list[dict[str, Any]] = []
+    if not isinstance(source_refs, list):
+        errors.append({"reason": "plan_source_refs_invalid", "detail": "sourceRefs_must_be_array"})
+        source_refs = []
+    elif source_refs:
+        source_context, source_errors = load_source_context(base)
+        errors.extend({"reason": "invalid_source_context", "detail": error} for error in source_errors)
+        known_sources = source_index(source_context)
+        for ref in source_refs:
+            source = known_sources.get(ref) if isinstance(ref, str) else None
+            if source is None:
+                errors.append({"reason": "unknown_plan_source_ref", "detail": str(ref)})
+            else:
+                resolved_sources.append(source)
 
     data_out = {
         "feature": feature,
@@ -352,6 +368,7 @@ def build_context(
             "base": "artifactFeatureDir",
             "specRefs": "relative-to-artifactFeatureDir",
             "designRefs": "relative-to-artifactFeatureDir",
+            "sourceRefs": "source-context.json sourcePath relative-to-artifactFeatureDir",
             "codeWorkspace": "current working directory / project repository",
         },
         "task": task,
@@ -368,10 +385,12 @@ def build_context(
             "testPoints": task.get("testPoints", []),
             "validationBoundary": task.get("validationBoundary"),
             "verificationIntent": task.get("verificationIntent"),
+            "sourceRefs": source_refs,
             "testIntent": task.get("validationTestPlan", []),
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
+        "resolvedSourceRefs": resolved_sources,
     }
     if code_workspaces:
         try:
