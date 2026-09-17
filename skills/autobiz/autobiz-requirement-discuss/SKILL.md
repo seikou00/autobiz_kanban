@@ -49,6 +49,8 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 同时在 `PRD.md` 写入 `## 当前实现范围`。
 
+当用户已明确选择 `backend_only` 时，该选择同时确认了“本 Feature 不需要 UI 实现”，不得再单独询问 UI 范围。立即使用 `ui_context_writer.py set-ui-required false` 写入具体的 `--reason` 与 `--decision-source user_confirmed`，再使用 `confirm --decision-source user_confirmed` 将该 UI 决策收口为 `confirmed`。
+
 ## 需求澄清
 ### 流程管控
 
@@ -97,7 +99,7 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 ### UI 范围收口
 
 - 需求澄清阶段必须读取 `${pluginPath}/skills/autobiz/references/ui-context.md`，并使用 `hooks/ui_context_writer.py` 创建或更新 Feature 的 `UI_CONTEXT.json`；不能只把页面范围写在 PRD Markdown 中。
-- 初次生成时 `decisionStatus` 使用 `defaulted`，并记录页面、核心交互、加载/空/错误/成功状态及视觉来源类型；展示问题清单时必须让用户确认 UI 范围。用户确认后使用 writer 的 `confirm` 命令写入 `decisionStatus=confirmed`，PRD 阶段不要凭空写入尚未定义的 capability/specRefs。
+- 初次生成时 `decisionStatus` 使用 `defaulted`，并记录页面、核心交互、加载/空/错误/成功状态及视觉来源类型。除已确认 `backend_only` 的情况外，展示问题清单时必须让用户确认 UI 范围；用户确认后使用 writer 的 `confirm` 命令写入 `decisionStatus=confirmed`。PRD 阶段不要凭空写入尚未定义的 capability/specRefs。
 - 只要需求涉及页面、交互、设计稿、HTML 或前端路由，必须设置 `uiRequired=true`，并把页面与交互写入 JSON；纯后端需求设置 `uiRequired=false` 并填写 `notApplicableReason`。
 - 用户提供高保真 HTML 时，使用 `ui_context_writer.py add-visual-source --source-file ...` 归档到 `feature/frontend-html/VIS`；需要高保真但暂时没有文件时登记缺失视觉来源，不能伪造文件路径。
 - 需求阶段只收口 UI 范围和视觉来源，不创建 capability 的规格引用；规格阶段负责锁定 `UI_CONTEXT.json`，后续 Plan/Code 只能消费该 JSON。
