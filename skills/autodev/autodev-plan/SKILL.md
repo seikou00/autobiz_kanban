@@ -29,7 +29,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - `workspace`：仓库逻辑 ID，不是路径；单仓库可用 `default`，多仓库用 Git 根目录名，分别通过可重复的 `--code-workspace` 绑定真实路径；
 - `dependsOn`：确实存在的前置交付；
 - `refs.requirements`、`refs.scenarios`：上游行为引用；
-- `sourceRefs` 不属于模型输入。对实现或验收有约束的外部资料，先在对应 Spec 的 `## Source References / 外部资料引用` 表把 `SRC-NNN` 映射到 REQ/SCN；writer 会把它投影到命中该行为的 Task，Code 再通过 `source-context.json` 取得快照路径与资料元数据；
+- `sourceRefs` 不属于模型输入。对实现或验收有约束的外部资料，先在对应 Spec 的 `## Source References / 外部资料引用` 表把 `SRC-NNN` 映射到 REQ/SCN；writer 会把它投影到命中该行为的 Task。`source-context.json` 或快照缺失、资料从未提供时仍可发布，Code 会收到该资料的不可用状态而非假定内容；
 - `refs.api` / `refs.design` / `refs.data`：仅在任务确实依赖相应设计时填写；`D-NNN` 只能写在 `refs.decisions`，表示它的主交付任务；
 - `implementationPoints`：只列交付这个 `outcome` 所需的主要实现方向和边界，不写文件、类或方法；若其中一条本身可形成独立交付结果，就拆成另一个 Task；
 - `testPoints`：只列证明同一个 `outcome` 的行为、边界或失败路径，不写测试命令或文件；若某项验证的是另一个可单独交付的能力，就拆成另一个 Task；同一行为的正常、边界、失败和权限分支应保留在一起；

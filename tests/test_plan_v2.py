@@ -275,7 +275,7 @@ class PlanV2Test(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("missing_plan_json_decision_coverage", result.stdout)
 
-    def test_mapped_source_requires_a_readable_snapshot(self) -> None:
+    def test_mapped_source_without_context_or_snapshot_does_not_block_plan(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace, feature = self._feature(Path(directory))
             (feature / "source-context.json").write_text(json.dumps({
@@ -295,8 +295,26 @@ class PlanV2Test(unittest.TestCase):
             ]), encoding="utf-8")
 
             result = self._publish(workspace, self._payload())
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("plan_source_snapshot_missing", result.stdout)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            context = build_context(workspace=workspace, feature="alpha", task_id="T001")
+            self.assertTrue(context.ok, context.errors)
+            self.assertEqual(context.data["resolvedSourceRefs"][0]["resolution"], "snapshot_missing")
+
+            (feature / "source-context.json").write_text(json.dumps({
+                "version": 1,
+                "sources": [{
+                    "id": "SRC-001", "name": "Capability contract",
+                    "availability": "never_provided", "readStatus": "unreadable", "freshness": "unknown",
+                }],
+            }), encoding="utf-8")
+            context = build_context(workspace=workspace, feature="alpha", task_id="T001")
+            self.assertTrue(context.ok, context.errors)
+            self.assertEqual(context.data["resolvedSourceRefs"][0]["resolution"], "never_provided")
+
+            (feature / "source-context.json").unlink()
+            context = build_context(workspace=workspace, feature="alpha", task_id="T001")
+            self.assertTrue(context.ok, context.errors)
+            self.assertEqual(context.data["resolvedSourceRefs"][0]["resolution"], "not_registered")
 
     def test_forward_dependencies_preserve_ids_and_publish_in_runtime_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

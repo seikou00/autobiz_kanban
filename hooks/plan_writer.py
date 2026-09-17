@@ -78,7 +78,6 @@ from hooks.artifact_ref_validator import (  # noqa: E402
 from hooks.design_contract_lock import (  # noqa: E402
     load_confirmed_design_contract,
 )
-from hooks.source_context import load_source_context, source_index  # noqa: E402
 from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 
 
@@ -436,20 +435,13 @@ def _spec_source_reference_index(feature_dir: Path) -> dict[str, set[str]]:
 def _materialize_v2_source_references(feature_dir: Path, group_data: dict[str, Any]) -> None:
     """Project Specs' source-to-behavior mappings onto the owning Plan tasks.
 
-    ``source-context.json`` is intentionally file-level now: it supplies a
-    stable source ID and snapshot metadata, not model-authored requirement
-    fragments.  Specs is the semantic bridge from that source to REQ/SCN; the
-    planner never repeats source IDs in its v2 body.
+    Specs is the semantic bridge from a source ID to REQ/SCN; the planner never
+    repeats source IDs in its v2 body.  A mapped source is allowed to be absent,
+    never provided, or missing its snapshot: Plan records the declared ID and
+    Code receives its resolution state without blocking publication.
     """
 
-    context, source_errors = load_source_context(feature_dir)
-    if source_errors:
-        raise PlanWriterInputError("plan_v2_source_context_invalid", ";".join(source_errors))
-    known_sources = source_index(context)
     source_to_refs = _spec_source_reference_index(feature_dir)
-    unknown = sorted(set(source_to_refs) - set(known_sources))
-    if unknown:
-        raise PlanWriterInputError("plan_v2_source_reference_unknown", "ids=" + ",".join(unknown))
 
     for source_id, spec_refs in source_to_refs.items():
         for group in _task_groups(group_data):

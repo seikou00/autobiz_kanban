@@ -337,14 +337,26 @@ def build_context(
         source_refs = []
     elif source_refs:
         source_context, source_errors = load_source_context(base)
-        errors.extend({"reason": "invalid_source_context", "detail": error} for error in source_errors)
         known_sources = source_index(source_context)
         for ref in source_refs:
             source = known_sources.get(ref) if isinstance(ref, str) else None
             if source is None:
-                errors.append({"reason": "unknown_plan_source_ref", "detail": str(ref)})
+                resolved_sources.append({
+                    "id": ref,
+                    "resolution": "source_context_unavailable" if source_errors else "not_registered",
+                    "detail": "; ".join(source_errors) if source_errors else "未在 source-context.json 登记",
+                })
             else:
-                resolved_sources.append(source)
+                resolved = dict(source)
+                source_path = resolved.get("sourcePath")
+                candidate = (base / source_path).resolve() if isinstance(source_path, str) else None
+                if resolved.get("availability") == "never_provided":
+                    resolved["resolution"] = "never_provided"
+                elif candidate is None or not _inside_base(candidate, base.resolve()) or not candidate.is_file():
+                    resolved["resolution"] = "snapshot_missing"
+                else:
+                    resolved["resolution"] = "available"
+                resolved_sources.append(resolved)
 
     data_out = {
         "feature": feature,
@@ -368,7 +380,7 @@ def build_context(
             "base": "artifactFeatureDir",
             "specRefs": "relative-to-artifactFeatureDir",
             "designRefs": "relative-to-artifactFeatureDir",
-            "sourceRefs": "source-context.json sourcePath relative-to-artifactFeatureDir",
+            "sourceRefs": "optional source-context.json metadata; missing sources are returned with resolution state",
             "codeWorkspace": "current working directory / project repository",
         },
         "task": task,
