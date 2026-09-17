@@ -1,4 +1,0 @@
-{
-  "deprecated": true,
-  "message": "This compatibility filename is not a Plan input template. Use task-groups.json for autodev.plan-core.v1 and task-detail-input.json for autodev.plan-detail.v1. Do not copy runtime fields from older plans."
-}

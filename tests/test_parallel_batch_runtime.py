@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import copy
-import os
 import re
 import subprocess
 import sys
@@ -13,8 +12,8 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 from pathlib import Path
 
-from hooks.batch_merger import _merge_probe, merge_run, preflight_merge, recover_plan_state_after_merge, resolve_merge_conflict
-from hooks.parallel_batch_lifecycle import cleanup_merged_batches, cleanup_run, rollback_run
+from hooks.batch_merger import _merge_probe, preflight_merge, recover_plan_state_after_merge
+from hooks.parallel_batch_lifecycle import cleanup_run, rollback_run
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
     acquire_lease,
@@ -27,7 +26,6 @@ from hooks.parallel_runtime import (
     ready_batches,
     release_lease,
     resource_groups,
-    run_lock,
     save_manifest,
 )
 from hooks.repository_snapshot import current_git_branch, git_status_porcelain
@@ -42,7 +40,7 @@ from hooks.parallel_batch_scheduler import (
     schedule,
     validate_plan_for_parallel,
 )
-from hooks.plan_json import PlanBundle, load_plan_bundle
+from hooks.plan_json import PlanBundle
 from hooks.plan_json import task_set_digest
 from hooks.worktree_manager import provision_parallel_worktree, remove_parallel_worktree, seal_parallel_batch
 from hooks.task_runner import _assert_parallel_context
@@ -1049,98 +1047,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001")
                 self.assertTrue(removed["success"], removed)
 
-    @unittest.skip("native-rebase merger removed; candidate Merge Train coverage is in test_parallel_staged_pipeline")
-    def test_native_rebase_mode_auto_merges_parallel_deliveries(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir, repo = _workspace(root)
-            _configure_defer_to_test_stages(feature_dir)
-            _add_second_compile_only_batch(feature_dir)
-            b1_path = feature_dir / "plans" / "B001" / "plan.json"
-            b2_path = feature_dir / "plans" / "B002" / "plan.json"
-            b1 = json.loads(b1_path.read_text(encoding="utf-8"))
-            b2 = json.loads(b2_path.read_text(encoding="utf-8"))
-            b2["tasks"][0]["deps"] = []
-            b2_path.write_text(json.dumps(b2), encoding="utf-8")
-            root_path = feature_dir / "plan.json"
-            plan = json.loads(root_path.read_text(encoding="utf-8"))
-            plan["batches"][1]["deps"] = []
-            plan["taskSetDigest"] = task_set_digest(plan, {"B001": b1, "B002": b2})
-            root_path.write_text(json.dumps(plan), encoding="utf-8")
-
-            scheduled = create_run(
-                workspace,
-                "alpha",
-                max_parallel=4,
-                timeout_seconds=60,
-                code_workspaces=[str(repo)],
-                workflow_workspace=repo,
-            )
-            run_id = scheduled["runId"]
-            manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(manifest["batches"]["B001"]["taskIds"], ["T001"])
-            self.assertEqual(manifest["batches"]["B002"]["taskIds"], ["T002"])
-            scheduled_again = schedule(workspace, "alpha", run_id)
-            self.assertEqual(scheduled_again["batchTaskIds"]["B001"], ["T001"])
-            self.assertEqual(scheduled_again["batchTaskIds"]["B002"], ["T002"])
-            self.assertTrue(all(
-                "canParallelInSameLane" not in item and "canParallelInSameRepository" not in item
-                for item in manifest["batches"].values()
-            ))
-            base_sha = _git(repo, "rev-parse", "HEAD")
-            deliveries = []
-            for batch_id, filename in (("B001", "first.txt"), ("B002", "second.txt")):
-                worktree = workspace.parent / "native-worktrees" / run_id / f"native-{batch_id}"
-                worktree.parent.mkdir(parents=True, exist_ok=True)
-                branch = f"cmb/workflow-{batch_id.lower()}"
-                task_runner_git(repo, "worktree", "add", "-b", branch, str(worktree), base_sha)
-                (worktree / filename).write_text(f"{batch_id}\n", encoding="utf-8")
-                task_runner_git(worktree, "add", filename)
-                task_runner_git(worktree, "commit", "-m", f"implement {batch_id}")
-                commit_sha = _git(worktree, "rev-parse", "HEAD")
-                mark_batch(
-                    workspace,
-                    "alpha",
-                    run_id,
-                    batch_id,
-                    "ready_to_merge",
-                    worktreePath=str(worktree),
-                    branchName=branch,
-                    commitSha=commit_sha,
-                    compileStatus="passed",
-                )
-                deliveries.append(worktree)
-
-            merged = merge_run(
-                workspace,
-                "alpha",
-                run_id,
-                conflict_mode="native-rebase",
-            )
-
-            self.assertTrue(merged["success"], merged)
-            self.assertEqual((repo / "first.txt").read_text(encoding="utf-8"), "B001\n")
-            self.assertEqual((repo / "second.txt").read_text(encoding="utf-8"), "B002\n")
-            manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(manifest["status"], "verifying")
-            self.assertEqual(manifest["isolation"]["mode"], "native_git_worktrees")
-
-            cleaned = cleanup_merged_batches(
-                workspace,
-                "alpha",
-                run_id,
-                batch_ids=["B001", "B002"],
-            )
-            self.assertTrue(cleaned["success"], cleaned)
-            self.assertEqual(cleaned["cleanedBatchIds"], ["B001", "B002"])
-            self.assertEqual(cleaned["errors"], [])
-            for worktree in deliveries:
-                self.assertFalse(worktree.exists())
-            cleaned_manifest = load_manifest(workspace, "alpha", run_id)
-            for batch_id in ("B001", "B002"):
-                self.assertIsNone(cleaned_manifest["batches"][batch_id]["worktreePath"])
-                self.assertIsNone(cleaned_manifest["batches"][batch_id]["branchName"])
-                self.assertEqual(cleaned_manifest["mergedBatchCleanup"][batch_id]["status"], "cleaned")
 
     def test_scheduler_rejects_dirty_repository_without_explicit_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1427,15 +1333,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             root_path = feature_dir / "plan.json"
             plan = json.loads(root_path.read_text(encoding="utf-8"))
             plan["batches"][1].update({"workspaceRef": "web", "deps": []})
-            plan["projectValidationCommands"][0]["repo"] = "default"
-            plan["projectValidationCommands"].append({
-                "id": "PROJECT-VAL-002",
-                "argv": [sys.executable, "-c", "print('web project validation')"],
-                "cwd": ".",
-                "repo": "web",
-                "kind": "integration_test",
-                "required": True,
-            })
             plan["taskSetDigest"] = task_set_digest(plan, {"B001": b1, "B002": b2})
             root_path.write_text(json.dumps(plan), encoding="utf-8")
             _refresh_parallel_pipeline(feature_dir)
@@ -1473,291 +1370,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(waiting["waitingForRepositories"])
             self.assertEqual(waiting["scheduledGroups"], [])
 
-    @unittest.skip("direct cross-root merger removed; repository coordinator now uses per-root Merge Trains")
-    def test_multi_repository_worktrees_merge_back_to_their_own_roots(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir, api = _workspace(root)
-            _configure_defer_to_test_stages(feature_dir)
-            _add_second_compile_only_batch(feature_dir)
-            (api / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
-            task_runner_git(api, "add", ".gitignore")
-            task_runner_git(api, "commit", "-m", "ignore worktrees")
-            web = root / "web"
-            web.mkdir()
-            task_runner_git(web, "init", "-b", "main")
-            task_runner_git(web, "config", "user.email", "test@example.com")
-            task_runner_git(web, "config", "user.name", "Test")
-            _configure_runtime_ignore(web)
-            (web / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
-            (web / "site.txt").write_text("base\n", encoding="utf-8")
-            task_runner_git(web, "add", ".")
-            task_runner_git(web, "commit", "-m", "initial")
-
-            b1_path = feature_dir / "plans" / "B001" / "plan.json"
-            b2_path = feature_dir / "plans" / "B002" / "plan.json"
-            b1 = json.loads(b1_path.read_text(encoding="utf-8"))
-            b2 = json.loads(b2_path.read_text(encoding="utf-8"))
-            b2["tasks"][0].update({"workspaceRef": "web", "deps": []})
-            b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "."}
-            for command in b2["tasks"][0]["validationCommands"]:
-                command["repo"] = "web"
-            b2["compileCommand"]["repo"] = "web"
-            b2_path.write_text(json.dumps(b2), encoding="utf-8")
-            root_path = feature_dir / "plan.json"
-            plan = json.loads(root_path.read_text(encoding="utf-8"))
-            plan["batches"][1].update({"workspaceRef": "web", "deps": []})
-            plan["taskSetDigest"] = task_set_digest(plan, {"B001": b1, "B002": b2})
-            root_path.write_text(json.dumps(plan), encoding="utf-8")
-
-            scheduled = create_run(
-                workspace,
-                "alpha",
-                max_parallel=4,
-                timeout_seconds=60,
-                code_workspaces=[f"default={api}", f"web={web}"],
-            )
-            run_id = scheduled["runId"]
-            leases = {
-                "B001": acquire_lease(workspace, "alpha", run_id, "B001"),
-                "B002": acquire_lease(workspace, "alpha", run_id, "B002"),
-            }
-            api_tree = _create_native_worktree(workspace, "alpha", run_id, "B001", None, leases["B001"]["ownerToken"])
-            web_tree = _create_native_worktree(workspace, "alpha", run_id, "B002", None, leases["B002"]["ownerToken"])
-            self.assertTrue(api_tree["success"])
-            self.assertTrue(web_tree["success"])
-            (Path(api_tree["worktreePath"]) / "api-change.txt").write_text("api\n", encoding="utf-8")
-            (Path(web_tree["worktreePath"]) / "web-change.txt").write_text("web\n", encoding="utf-8")
-            deliveries = {"B001": api_tree, "B002": web_tree}
-            for batch_id in ("B001", "B002"):
-                mark_batch(workspace, "alpha", run_id, batch_id, "ready_to_merge", compileStatus="passed")
-                sealed = _seal_native_worktree(
-                    workspace,
-                    "alpha",
-                    run_id,
-                    batch_id,
-                    Path(deliveries[batch_id]["worktreePath"]),
-                    leases[batch_id]["ownerToken"],
-                )
-                self.assertTrue(sealed["success"])
-                release_lease(workspace, "alpha", run_id, batch_id, leases[batch_id]["ownerToken"], final_status="ready_to_merge")
-            merged = merge_run(workspace, "alpha", run_id)
-            self.assertTrue(merged["success"])
-            self.assertEqual((api / "api-change.txt").read_text(encoding="utf-8"), "api\n")
-            self.assertEqual((web / "web-change.txt").read_text(encoding="utf-8"), "web\n")
-            self.assertEqual(load_manifest(workspace, "alpha", run_id)["status"], "verifying")
-
-    @unittest.skip("direct component merger removed; candidate Merge Train owns promotion")
-    def test_monorepo_components_share_one_git_root_but_merge_independently(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir, repo = _workspace(root)
-            _configure_defer_to_test_stages(feature_dir)
-            _add_second_compile_only_batch(feature_dir)
-            component = repo / "apps" / "web"
-            component.mkdir(parents=True)
-            (repo / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
-            (component / "site.txt").write_text("base\n", encoding="utf-8")
-            task_runner_git(repo, "add", ".")
-            task_runner_git(repo, "commit", "-m", "prepare components")
-
-            b1_path = feature_dir / "plans" / "B001" / "plan.json"
-            b2_path = feature_dir / "plans" / "B002" / "plan.json"
-            b1 = json.loads(b1_path.read_text(encoding="utf-8"))
-            b2 = json.loads(b2_path.read_text(encoding="utf-8"))
-            b1["compileCommand"]["argv"] = [sys.executable, "-c", "print('api compile')"]
-            b2["tasks"][0].update({"workspaceRef": "web", "deps": []})
-            b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "apps/web"}
-            for command in b2["tasks"][0]["validationCommands"]:
-                command["repo"] = "web"
-                command["cwd"] = "apps/web"
-            b2["compileCommand"].update({
-                "repo": "web",
-                "cwd": "apps/web",
-                "argv": [sys.executable, "-c", "print('web compile')"],
-            })
-            b1_path.write_text(json.dumps(b1), encoding="utf-8")
-            b2_path.write_text(json.dumps(b2), encoding="utf-8")
-            root_path = feature_dir / "plan.json"
-            plan = json.loads(root_path.read_text(encoding="utf-8"))
-            plan["batches"][1].update({"workspaceRef": "web", "deps": []})
-            plan["taskSetDigest"] = task_set_digest(plan, {"B001": b1, "B002": b2})
-            root_path.write_text(json.dumps(plan), encoding="utf-8")
-
-            scheduled = create_run(
-                workspace,
-                "alpha",
-                max_parallel=4,
-                timeout_seconds=60,
-                code_workspaces=[f"default={repo}", f"web={component}"],
-            )
-            self.assertEqual(scheduled["scheduledGroups"], [["B001"]])
-            run_id = scheduled["runId"]
-            manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(
-                manifest["repositories"]["default"]["gitRoot"],
-                manifest["repositories"]["web"]["gitRoot"],
-            )
-            leases = {
-                batch_id: acquire_lease(workspace, "alpha", run_id, batch_id)
-                for batch_id in ("B001", "B002")
-            }
-            api_tree = _create_native_worktree(workspace, "alpha", run_id, "B001", None, leases["B001"]["ownerToken"])
-            web_tree = _create_native_worktree(workspace, "alpha", run_id, "B002", None, leases["B002"]["ownerToken"])
-            self.assertTrue(api_tree["success"])
-            self.assertTrue(web_tree["success"])
-            (Path(api_tree["worktreePath"]) / "api-change.txt").write_text("api\n", encoding="utf-8")
-            (Path(web_tree["worktreePath"]) / "apps" / "web" / "web-change.txt").write_text("web\n", encoding="utf-8")
-            for batch_id in ("B001", "B002"):
-                mark_batch(workspace, "alpha", run_id, batch_id, "ready_to_merge", compileStatus="passed")
-                sealed = _seal_native_worktree(workspace, "alpha", run_id, batch_id, None, leases[batch_id]["ownerToken"])
-                self.assertTrue(sealed["success"])
-                release_lease(workspace, "alpha", run_id, batch_id, leases[batch_id]["ownerToken"], final_status="ready_to_merge")
-            merged = merge_run(workspace, "alpha", run_id)
-            self.assertTrue(merged["success"])
-            self.assertEqual((repo / "api-change.txt").read_text(encoding="utf-8"), "api\n")
-            self.assertEqual((component / "web-change.txt").read_text(encoding="utf-8"), "web\n")
-            verified = verify_final(workspace, "alpha", run_id)
-            self.assertTrue(verified["passed"])
-            self.assertEqual({item["workspaceRef"] for item in verified["commands"]}, {"default", "web"})
-
-    @unittest.skip("native rebase conflict flow removed; candidate build preserves deliveries on conflict")
-    def test_same_repository_overlap_is_resolved_then_merged(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir, repo = _workspace(root)
-            _configure_defer_to_test_stages(feature_dir)
-            _add_second_compile_only_batch(feature_dir)
-            (repo / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
-            task_runner_git(repo, "add", ".gitignore")
-            task_runner_git(repo, "commit", "-m", "ignore worktrees")
-
-            b1_path = feature_dir / "plans" / "B001" / "plan.json"
-            b2_path = feature_dir / "plans" / "B002" / "plan.json"
-            b1 = json.loads(b1_path.read_text(encoding="utf-8"))
-            b2 = json.loads(b2_path.read_text(encoding="utf-8"))
-            b2["tasks"][0]["deps"] = []
-            b2_path.write_text(json.dumps(b2), encoding="utf-8")
-            root_path = feature_dir / "plan.json"
-            plan = json.loads(root_path.read_text(encoding="utf-8"))
-            plan["batches"][1]["deps"] = []
-            plan["taskSetDigest"] = task_set_digest(plan, {"B001": b1, "B002": b2})
-            root_path.write_text(json.dumps(plan), encoding="utf-8")
-
-            scheduled = create_run(
-                workspace,
-                "alpha",
-                max_parallel=4,
-                timeout_seconds=60,
-                code_workspaces=[str(repo)],
-            )
-            self.assertEqual(scheduled["scheduledGroups"], [["B001"]])
-            run_id = scheduled["runId"]
-            leases = {
-                batch_id: acquire_lease(workspace, "alpha", run_id, batch_id)
-                for batch_id in ("B001", "B002")
-            }
-            first_tree = _create_native_worktree(workspace, "alpha", run_id, "B001", None, leases["B001"]["ownerToken"])
-            second_tree = _create_native_worktree(workspace, "alpha", run_id, "B002", None, leases["B002"]["ownerToken"])
-            self.assertTrue(first_tree["success"])
-            self.assertTrue(second_tree["success"])
-            (Path(first_tree["worktreePath"]) / "existing.txt").write_text("first\n", encoding="utf-8")
-            (Path(second_tree["worktreePath"]) / "existing.txt").write_text("second\n", encoding="utf-8")
-            for batch_id in ("B001", "B002"):
-                mark_batch(workspace, "alpha", run_id, batch_id, "ready_to_merge", compileStatus="passed")
-                sealed = _seal_native_worktree(workspace, "alpha", run_id, batch_id, None, leases[batch_id]["ownerToken"])
-                self.assertTrue(sealed["success"])
-                release_lease(workspace, "alpha", run_id, batch_id, leases[batch_id]["ownerToken"], final_status="ready_to_merge")
-            merged = merge_run(workspace, "alpha", run_id)
-            self.assertFalse(merged["success"])
-            self.assertTrue(merged["needsResolution"])
-            self.assertEqual([item["batchId"] for item in merged["merged"]], ["B001"])
-            self.assertEqual(merged["failed"][0]["batchId"], "B002")
-            self.assertEqual(merged["failed"][0]["error"], "native_rebase_conflict")
-            self.assertEqual((repo / "existing.txt").read_text(encoding="utf-8"), "first\n")
-            self.assertEqual(merged["failed"][0]["resolution"]["mode"], "native_rebase")
-            self.assertEqual(merged["failed"][0]["resolution"]["worktreePath"], str(second_tree["worktreePath"]))
-            resolution = merged["failed"][0]["resolution"]
-            second_worktree = Path(second_tree["worktreePath"])
-            rebase = subprocess.run(
-                ["git", "rebase", resolution["targetSha"]],
-                cwd=second_worktree,
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(rebase.returncode, 0, rebase.stdout + rebase.stderr)
-            (second_worktree / "existing.txt").write_text("first\nsecond\n", encoding="utf-8")
-            _git(second_worktree, "add", "existing.txt")
-            continued = subprocess.run(
-                ["git", "rebase", "--continue"],
-                cwd=second_worktree,
-                env={**os.environ, "GIT_EDITOR": "true"},
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(continued.returncode, 0, continued.stdout + continued.stderr)
-            resolved = resolve_merge_conflict(workspace, "alpha", run_id, "B002")
-            self.assertTrue(resolved["success"], resolved)
-            completed = merge_run(workspace, "alpha", run_id, batch_ids=["B002"])
-            self.assertTrue(completed["success"], completed)
-            self.assertEqual((repo / "existing.txt").read_text(encoding="utf-8"), "first\nsecond\n")
-            manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(manifest["batches"]["B002"]["status"], "merged")
-            self.assertTrue(manifest["batches"]["B002"]["mergeCommitSha"])
-
-    @unittest.skip("legacy direct merger removed; dependent release is covered by Merge Train promotion")
-    def test_dependent_batch_starts_from_its_repositorys_advanced_head(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir, repo = _workspace(root)
-            _configure_defer_to_test_stages(feature_dir)
-            _add_second_compile_only_batch(feature_dir)
-            scheduled = create_run(
-                workspace,
-                "alpha",
-                max_parallel=4,
-                timeout_seconds=60,
-                code_workspaces=[str(repo)],
-            )
-            run_id = scheduled["runId"]
-            self.assertEqual(scheduled["readyBatches"], ["B001"])
-            self.assertEqual(scheduled["mergeableBatches"], [])
-            first_workspace = scheduled["batchWorkspaces"]["B001"]
-            self.assertIsNone(first_workspace["worktreePath"])
-            self.assertIsNone(first_workspace["branchName"])
-            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
-            first_lease = acquire_lease(workspace, "alpha", run_id, "B001")
-            first_tree = _create_native_worktree(workspace, "alpha", run_id, "B001", None, first_lease["ownerToken"])
-            self.assertTrue(first_tree["success"])
-            (Path(first_tree["worktreePath"]) / "first.txt").write_text("first\n", encoding="utf-8")
-            mark_batch(workspace, "alpha", run_id, "B001", "ready_to_merge", compileStatus="passed")
-            self.assertTrue(_seal_native_worktree(workspace, "alpha", run_id, "B001", None, first_lease["ownerToken"])["success"])
-            release_lease(workspace, "alpha", run_id, "B001", first_lease["ownerToken"], final_status="ready_to_merge")
-            merge_wave = schedule(workspace, "alpha", run_id)
-            self.assertEqual(merge_wave["mergeableBatches"], ["B001"])
-            merged_first = merge_run(workspace, "alpha", run_id)
-            self.assertTrue(merged_first["success"])
-            self.assertEqual(merged_first["nextReadyBatches"], ["B002"])
-            first_merge_head = _git(repo, "rev-parse", "HEAD")
-            self.assertEqual(load_manifest(workspace, "alpha", run_id)["repositories"]["default"]["headSha"], first_merge_head)
-            next_wave = schedule(workspace, "alpha", run_id)
-            self.assertEqual(next_wave["scheduledGroups"], [["B002"]])
-            second_workspace = next_wave["batchWorkspaces"]["B002"]
-            self.assertIsNone(second_workspace["worktreePath"])
-            self.assertIsNone(second_workspace["branchName"])
-            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B002"]["status"], "pending")
-
-            second_lease = acquire_lease(workspace, "alpha", run_id, "B002")
-            second_tree = _create_native_worktree(workspace, "alpha", run_id, "B002", None, second_lease["ownerToken"])
-            self.assertTrue(second_tree["success"])
-            self.assertEqual(_git(Path(second_tree["worktreePath"]), "rev-parse", "HEAD"), first_merge_head)
-            self.assertEqual((Path(second_tree["worktreePath"]) / "first.txt").read_text(encoding="utf-8"), "first\n")
-            (Path(second_tree["worktreePath"]) / "second.txt").write_text("second\n", encoding="utf-8")
-            mark_batch(workspace, "alpha", run_id, "B002", "ready_to_merge", compileStatus="passed")
-            self.assertTrue(_seal_native_worktree(workspace, "alpha", run_id, "B002", None, second_lease["ownerToken"])["success"])
-            release_lease(workspace, "alpha", run_id, "B002", second_lease["ownerToken"], final_status="ready_to_merge")
-            self.assertTrue(merge_run(workspace, "alpha", run_id)["success"])
-            self.assertEqual((repo / "second.txt").read_text(encoding="utf-8"), "second\n")
 
     def test_expired_lease_is_reclaimed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

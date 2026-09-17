@@ -217,7 +217,7 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     validation = record.get("validation")
     if validation is not None and not isinstance(validation, dict):
         errors.append("invalid_validation_object")
-    if record.get("action") in {"validation", "batch_compile", "project_check"}:
+    if record.get("action") == "validation":
         if not isinstance(validation, dict):
             errors.append("validation_missing")
         else:
@@ -299,7 +299,7 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
     detail_version = record.get("detailVersion")
     if detail_version not in SUPPORTED_EVIDENCE_DETAIL_VERSIONS:
         return ["invalid_evidence_detail_version"]
-    if record.get("action") not in {"validation", "batch_compile", "project_check"}:
+    if record.get("action") != "validation":
         return []
 
     errors: list[str] = []
@@ -697,18 +697,10 @@ def _cmd_append(args: argparse.Namespace) -> int:
         record["validation"] = validation
     if not record.get("action") and (args.command or args.exit_code is not None):
         record["action"] = "validation"
-    if record.get("skill") == "autodev-code" and record.get("action") in {
-        "validation",
-        "batch_compile",
-        "project_check",
-    }:
+    if record.get("skill") == "autodev-code" and record.get("action") == "validation":
         print("code_validation_requires_task_runner", file=sys.stderr)
         return 1
-    if record.get("skill") == "autodev-e2e" and record.get("action") in {
-        "validation",
-        "batch_compile",
-        "project_check",
-    }:
+    if record.get("skill") == "autodev-e2e" and record.get("action") == "validation":
         print(
             "e2e_validation_requires_e2e_runner。修复：使用 "
             "`${pluginPath}/hooks/run_e2e_command.py run ... -- playwright test ...` "

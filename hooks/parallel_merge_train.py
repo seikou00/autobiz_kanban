@@ -501,10 +501,9 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
         if isinstance(state, dict) and state.get("status") == "running":
             result = fail_stage(workspace, feature, run_id, "V-E2E", "e2e_test", failure_type="implementation", message=str(metadata.get("message") or "e2e_test_failed"))
         elif isinstance(state, dict) and state.get("status") in {"failed", "needs_triage"}:
-            # `parallel_stage_validation` records a failed command before the
-            # caller can hand the failure to this lifecycle function.  Reuse
-            # that durable failure instead of trying to fail a non-running
-            # stage a second time.
+            # A previous call already recorded this failure.  Reuse that
+            # durable failure instead of trying to fail a non-running stage a
+            # second time.
             result = {
                 "batchId": "V-E2E",
                 "stage": "e2e_test",

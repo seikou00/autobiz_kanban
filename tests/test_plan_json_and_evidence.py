@@ -18,7 +18,6 @@ from hooks.evidence_integrity_gate import (  # noqa: E402
     _check_batch_completion,
     check_code_done,
     check_integrity,
-    check_plan_evidence_refs,
 )
 from hooks.evidence_store import (  # noqa: E402
     EvidenceStoreError,
@@ -52,17 +51,6 @@ def valid_plan(
     bound_evidence = evidence_ids if evidence_ids is not None else ["ev_0001"]
     return {
         "featureId": feature,
-        "projectValidationCommands": [
-            {
-                "id": "PROJECT-VAL-001",
-                "argv": [sys.executable, "-c", "print('project integration')"],
-                "cwd": ".",
-                "kind": "integration_test",
-                "required": True,
-            }
-        ],
-        "projectCheckEvidenceIds": [],
-        "latestProjectCheckEvidenceId": None,
         "tasks": [
             {
                 "id": "T001",
@@ -134,7 +122,6 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 "maxTestStageRepairAttempts": 3,
             },
             "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
-            "qualityGateProfiles": {},
             "batches": [
                 {
                     "id": "B001",
@@ -149,9 +136,6 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                     "status": batch_status,
                 }
             ],
-            "projectValidationCommands": plan["projectValidationCommands"],
-            "projectCheckEvidenceIds": plan.get("projectCheckEvidenceIds", []),
-            "latestProjectCheckEvidenceId": plan.get("latestProjectCheckEvidenceId"),
         },
     )
     write_plan_json(
@@ -171,7 +155,6 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             ],
             "deliveryKind": "atomic_group" if atomic else "single_task",
             **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
-            "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
             "tasks": task_items,
@@ -413,7 +396,7 @@ class PlanJsonTest(unittest.TestCase):
                         item["reason"]
                         for item in validate_plan_task_granularity_item(task, task_id="T001")
                     ],
-                    ["oversized_plan_task_must_split"],
+                    [],
                 )
 
     def test_external_dependency_scenario_matrix_has_a_satisfiable_form(self) -> None:
@@ -562,13 +545,11 @@ class PlanJsonTest(unittest.TestCase):
         self.assertEqual(validate_test_tasks(plan), [])
         self.assertIn("T001.evidenceIds_missing", validate_test_tasks(plan, require_all_done=True))
 
-    def test_plan_requires_completion_and_project_pointers_to_reference_history(self) -> None:
+    def test_plan_requires_completion_pointers_to_reference_history(self) -> None:
         plan = valid_plan(status="done", evidence_ids=["ev_0001"])
         task = plan["tasks"][0]
         task["completionEvidenceIds"] = ["ev_0002"]
         task["latestPassEvidenceId"] = "ev_0002"
-        plan["projectCheckEvidenceIds"] = ["ev_0003", "ev_0004"]
-        plan["latestProjectCheckEvidenceId"] = "ev_0003"
 
         errors = validate_test_tasks(plan, require_all_done=True)
         errors.extend(validate_plan_data({
@@ -583,13 +564,9 @@ class PlanJsonTest(unittest.TestCase):
                 "specRoots": ["specs/capability/spec.md"], "executionLane": "backend",
                 "deps": [], "taskIds": ["T001"], "status": "done",
             }],
-            "projectValidationCommands": plan["projectValidationCommands"],
-            "projectCheckEvidenceIds": plan["projectCheckEvidenceIds"],
-            "latestProjectCheckEvidenceId": plan["latestProjectCheckEvidenceId"],
         }, require_all_done=True))
 
         self.assertIn("T001.completionEvidenceId_not_in_evidenceIds:ev_0002", errors)
-        self.assertIn("latestProjectCheckEvidenceId_not_latest:ev_0003", errors)
 
     def test_detail_v2_allows_command_without_direct_acceptance_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -678,17 +655,17 @@ class PlanJsonTest(unittest.TestCase):
         self.assertIn("T001.uiRefs.visualSourceRefs_missing", errors)
         self.assertIn("T001.uiRefs.frontendRoute_missing", errors)
 
-    def test_every_task_requires_non_goals_in_detail_schema(self) -> None:
+    def test_tasks_may_omit_non_goals_until_code_discovers_adjacent_scope(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         task = plan["tasks"][0]
         task["nonGoals"] = []
 
         errors = validate_test_tasks(plan, require_initial_status=True)
 
-        self.assertIn("T001.nonGoals_missing", errors)
+        self.assertNotIn("T001.nonGoals_missing", errors)
 
     def test_every_task_requires_non_empty_validation_boundary(self) -> None:
-        for boundary in (None, "   ", "too short"):
+        for boundary in (None, "   "):
             plan = valid_plan(status="todo", evidence_ids=[])
             task = plan["tasks"][0]
             if boundary is None:
@@ -698,7 +675,7 @@ class PlanJsonTest(unittest.TestCase):
 
             errors = validate_test_tasks(plan, require_initial_status=True)
 
-            self.assertIn("T001.validationBoundary_missing_or_too_short", errors)
+            self.assertIn("T001.validationBoundary_missing", errors)
 
     def test_every_task_requires_workspace_ref(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -930,19 +907,6 @@ class EvidenceStoreTest(unittest.TestCase):
                 check_record_artifacts(feature_dir, record),
             )
 
-    def test_plan_refs_reject_unknown_project_check_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            plan = valid_plan(status="todo", evidence_ids=[])
-            plan["projectCheckEvidenceIds"] = ["ev_9999"]
-            plan["latestProjectCheckEvidenceId"] = "ev_9999"
-            write_test_plan(feature_dir, plan)
-            append_pass_evidence(feature_dir)
-
-            errors = check_plan_evidence_refs(feature_dir)
-
-            self.assertIn("unknown_project_check_evidence_id:ev_9999", errors)
 
     def test_validation_evidence_requires_structured_result(self) -> None:
         record = {
@@ -1399,18 +1363,6 @@ class EvidenceGateTest(unittest.TestCase):
             feature_dir.mkdir()
             batch = {
                 "tasks": [],
-                "batchCompile": {
-                    "status": "passed",
-                    "commandId": "BATCH-B001-COMPILE",
-                    "implementationEvidenceByTask": {},
-                    "implementationRevisionByTask": {},
-                },
-                "compileCommand": {
-                    "id": "BATCH-B001-COMPILE",
-                    "kind": "compile",
-                    "required": True,
-                },
-                "qualityGateCommands": [],
             }
             plan = {
                 "taskValidationPolicy": {
@@ -1419,8 +1371,8 @@ class EvidenceGateTest(unittest.TestCase):
                     "codeGate": "review_only",
                 },
                 "_bundleBatches": {
-                    "B001": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
-                    "B002": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
+                    "B001": dict(batch),
+                    "B002": dict(batch),
                 },
             }
 

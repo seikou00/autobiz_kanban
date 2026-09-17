@@ -565,7 +565,7 @@
             ],
             "customSubagentFiles": [
               "agents/explore.md",
-              "agents/critic.md"
+              "agents/critic_autodev_plan_zh.md"
             ]
           }
         },
@@ -741,7 +741,7 @@
             "nextAction": {
               "slashSkill": "autoops-cicd",
               "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：CI/CD。批次内 review、test、quality gate、B-INT、B-E2E 与证据汇总已完成，不重复执行。"
+              "dialogTips": "当前阶段：CI/CD。批次内 review、test、B-E2E 与证据汇总已完成，不重复执行。"
             }
           }
         ],
@@ -906,7 +906,7 @@
               "path": "evidence/EVIDENCE.jsonl",
               "required": true,
               "extract": {
-                "degrade": "缺失时回到 Code 的 Batch 流水线补齐 review、test、quality gate、B-INT 与 B-E2E 证据"
+                "degrade": "缺失时回到 Code 的 Batch 流水线补齐 review、test 与 B-E2E 证据"
               }
             },
             {

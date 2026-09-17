@@ -31,20 +31,7 @@ from hooks.plan_json import (
 
 RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
-BASE_DELIVERY_STAGES = ("prepare", "implement", "review", "test")
-
-
-def delivery_stage_names(batch: dict[str, Any]) -> tuple[str, ...]:
-    """Return the concrete stages for one delivery Batch.
-
-    Quality-gate work is optional by contract: no static command means no
-    synthetic pass/evidence node is created for that Batch.
-    """
-    return (
-        (*BASE_DELIVERY_STAGES, "quality_gate")
-        if batch.get("qualityGateRequired") is True
-        else BASE_DELIVERY_STAGES
-    )
+DELIVERY_STAGES = ("prepare", "implement", "review", "test")
 
 _PLAN_MUTABLE_KEYS = {
     "status", "activeBatchId", "nextBatchId", "startedAt", "completedAt",
@@ -53,8 +40,6 @@ _PLAN_MUTABLE_KEYS = {
     "latestPassEvidenceId", "latestPassEvidenceIds", "implementationRevision",
     "taskSetDigest", "completedTaskCount", "mergeCommitSha",
     "deliveryRunId", "mergedAt",
-    "projectCheckEvidenceIds", "latestProjectCheckEvidenceId",
-    "projectValidationDisposition", "projectValidationFailedRunIds",
     "activeRunId", "repairAttempts", "repairTaskId", "repairStartedAt",
 }
 
@@ -365,7 +350,6 @@ def create_manifest(
                 for task in batch.get("tasks", [])
                 if isinstance(task, dict) and isinstance(task.get("id"), str) and task.get("id").strip()
             ]
-        quality_gate_required = bool(batch.get("qualityGateCommands"))
         entry_state = {
             "batchId": batch_id,
             "type": "delivery",
@@ -383,7 +367,6 @@ def create_manifest(
             "gitRoot": repositories[str(batch_workspace_ref(batch))]["gitRoot"],
             "writeSet": list(batch_write_set(batch)),
             "executionStage": entry.get("executionStage", "parallel"),
-            "qualityGateRequired": quality_gate_required,
             "dependencies": sorted(set(entry.get("deps", []))),
             "status": "merged" if batch_status == "done" else "failed" if batch_status == "failed" else "pending",
             "lease": None,
@@ -405,7 +388,7 @@ def create_manifest(
                 "startedAt": None,
                 "completedAt": None,
             }
-            for stage in delivery_stage_names(entry_state)
+            for stage in DELIVERY_STAGES
         }
         entries[batch_id] = entry_state
     pipeline = bundle.root["parallelBatchPipeline"]
@@ -413,7 +396,10 @@ def create_manifest(
     if runtime_config is None:
         runtime_config = {}
     final_runtime_config = {
-        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
+        # Plan v2 deliberately does not predict implementation file lists.
+        # Isolated worktrees can therefore start dependency-ready work in
+        # parallel; the merge train remains the authority for real conflicts.
+        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
         "maxParallel": max_parallel,  # Use the max_parallel parameter as source of truth
         "conflictResolution": runtime_config.get("conflictResolution", {
             "maxAttempts": 2,
@@ -777,7 +763,7 @@ def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
         states = item.get("stageStates") if isinstance(item.get("stageStates"), dict) else {}
         if any(
             not isinstance(states.get(stage), dict) or states[stage].get("status") not in {"passed", "skipped", "deferred"}
-            for stage in delivery_stage_names(item)
+            for stage in DELIVERY_STAGES
         ):
             result.append(str(batch_id))
     return sorted(result)
@@ -791,14 +777,14 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
     immediately receive another dependency-ready, non-conflicting Batch.
 
     Behavior depends on parallelSchedulingMode in runtime config:
-    - optimistic: Ignores write-set conflicts for parallel stage, groups by maxParallel
-    - conservative (default): Serializes batches with write-set conflicts
+    - optimistic (default): starts dependency-ready isolated worktrees up to maxParallel
+    - conservative: serializes batches with declared write-set conflicts
 
-    Worktrees isolate checkouts, not shared delivery risk.  A batch with an
-    unknown write set is therefore serialized with another batch in the same
-    repository (in conservative mode only).  Known paths conflict when they are
-    equal or one is an ancestor of the other.  Special stages (proto/global/integration)
-    are always single-batch waves and are ordered before ordinary implementation.
+    Optimistic mode deliberately accepts unknown Plan-v2 write scope; Merge
+    Train resolves actual conflicts. Conservative mode serializes unknown scope
+    within a repository. Known paths conflict when they are equal or one is an
+    ancestor of the other. Special stages (proto/global/integration) are always
+    single-batch waves and are ordered before ordinary implementation.
     """
     ids = sorted(set(batch_ids or ready_batches(manifest)))
     if not ids:

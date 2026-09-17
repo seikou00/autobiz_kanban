@@ -6,6 +6,30 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hooks.code_task_context import build_context
+from hooks.code_task_context import _extract_spec_snippet
+
+
+def test_mixed_spec_heading_styles_do_not_leak_adjacent_scenarios() -> None:
+    text = "\n".join([
+        "### Requirement REQ-001: read capability",
+        "The capability is visible.",
+        "#### Scenario [SCN-001]: present",
+        "Return the value.",
+        "#### Scenario SCN-002: missing",
+        "Return unavailable.",
+        "## Source References / 外部资料引用",
+        "Unrelated section.",
+    ])
+    assert _extract_spec_snippet(text, "REQ-001") == (
+        "### Requirement REQ-001: read capability\nThe capability is visible.", 1,
+    )
+    assert _extract_spec_snippet(text, "SCN-001") == (
+        "#### Scenario [SCN-001]: present\nReturn the value.", 3,
+    )
+    assert _extract_spec_snippet(text, "SCN-002") == (
+        "#### Scenario SCN-002: missing\nReturn unavailable.", 5,
+    )
+    assert _extract_spec_snippet("#### Scenario [SCN-001: unmatched bracket", "SCN-001") is None
 
 
 def test_deferred_validation_policy_uses_review_owned_state(tmp_path: Path) -> None:

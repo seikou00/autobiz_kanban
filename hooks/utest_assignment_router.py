@@ -42,8 +42,10 @@ def _prompt_task(task):
     """Project only the plan facts the test engineer needs in its prompt."""
     return {
         "id": task["id"],
-        "implementationPoints": list(task["implementationPoints"]),
-        "nonGoals": list(task["nonGoals"]),
+        "outcome": task["goal"],
+        "implementationPoints": task.get("implementationPoints", []),
+        "testPoints": task.get("testPoints", []),
+        "verificationIntent": task.get("verificationIntent", task["validationBoundary"]),
         "validationLocations": list(task["validationLocations"]),
     }
 

@@ -44,6 +44,8 @@ from hooks.e2e_trust_common import (  # noqa: E402
     validate_scan_current,
 )
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
+from hooks.plan_scope import resolve_plan_scope, scope_report  # noqa: E402
+from hooks.spec_contract import SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE  # noqa: E402
 from hooks.candidate_digest import compute as compute_candidate_digest  # noqa: E402
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_marker_value,
@@ -91,14 +93,6 @@ SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
 FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
-SPEC_REQUIREMENT_DEF_RE = re.compile(
-    r"^###\s+Requirement\s+(?=\[?(REQ-\d{3})\]?:\s+.+$)(?:\[REQ-\d{3}\]|REQ-\d{3}):\s+.+$",
-    re.MULTILINE,
-)
-SPEC_SCENARIO_DEF_RE = re.compile(
-    r"^####\s+Scenario\s+(?=\[?(SCN-\d{3})\]?:\s+.+$)(?:\[SCN-\d{3}\]|SCN-\d{3}):\s+.+$",
-    re.MULTILINE,
-)
 SPEC_REQUIREMENT_NUMERIC_RE = re.compile(
     r"^###\s+Requirement\s+(?=\[?(REQ-(?P<digits>\d+))\]?:\s+.+$)(?:\[REQ-\d+\]|REQ-\d+):\s+.+$",
     re.MULTILINE,
@@ -2075,7 +2069,7 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
                 if refs is None:
                     failures += fail_line(ctx, "invalid_plan_ui_refs", f" task={task_id} field={field}")
                     continue
-                if field in {"pageRefs", "interactionRefs"} and not refs:
+                if field == "pageRefs" and not refs:
                     failures += fail_line(ctx, "missing_plan_ui_refs", f" task={task_id} field={field}")
                 for ref in refs:
                     if ref not in known:
@@ -2132,7 +2126,16 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
                         f" task={task_id} visualSource={visual_ref} expected={expected_route} actual={frontend_route}",
                     )
 
-    if feature_ui_required and ui_task_count == 0:
+    implementation_scope, _ = load_scope(ctx.feature_dir)
+    selections, _ = resolve_plan_scope(ctx.feature_dir)
+    scenario_selection = selections["scenario"]
+    in_scope_ui = feature_ui_required and implementation_scope != "backend_only"
+    if scenario_selection.deferred or scenario_selection.unpartitioned:
+        in_scope_ui = in_scope_ui and any(
+            scenario_selection.included.intersection(_string_list_value(capability.get("specRefs")) or [])
+            for capability in capabilities
+        )
+    if in_scope_ui and ui_task_count == 0:
         failures += fail_line(ctx, "plan_ui_required_without_ui_task")
     return failures
 
@@ -2223,7 +2226,13 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
             check_design_artifact=False,
         ):
             failures += _emit_artifact_issue(ctx, issue, task_id)
-    for issue in validate_plan_design_coverage(design_contract, raw_tasks):
+    selections, partition_errors = resolve_plan_scope(ctx.feature_dir)
+    for issue in partition_errors:
+        failures += _emit_artifact_issue(ctx, issue, "IMPLEMENTATION_SCOPE.json")
+    report = scope_report(selections)
+    if report:
+        info(ctx, "plan_scope_report " + json.dumps(report, ensure_ascii=False))
+    for issue in validate_plan_design_coverage(design_contract, raw_tasks, included_ids=selections["design"].included):
         reason = str(issue.get("reason") or "")
         fallback = {
             "missing_design_api_id": "API Decisions",
@@ -2306,7 +2315,10 @@ def validate_plan_scenario_coverage(ctx: HookContext) -> int:
         return 0
 
     refs_by_id = _spec_scenario_refs_by_path(ctx)
-    expected_refs = set().union(*refs_by_id.values()) if refs_by_id else set()
+    selections, partition_errors = resolve_plan_scope(ctx.feature_dir)
+    expected_refs = selections["scenario"].included
+    if partition_errors:
+        return sum(_emit_artifact_issue(ctx, issue, "IMPLEMENTATION_SCOPE.json") for issue in partition_errors)
     if not expected_refs:
         info(ctx, "plan_scenario_coverage_no_specs_degrade")
         return 0
@@ -2345,7 +2357,7 @@ def validate_plan_ref_resolution(ctx: HookContext) -> int:
         info(ctx, "plan_ref_resolution_not_in_contract_degrade")
         return 0
 
-    data, errors = load_and_validate_plan(plan_json, require_task_details=True)
+    data, errors = load_and_validate_plan(plan_json)
     failures = 0
     if errors:
         for error in errors:
@@ -2461,7 +2473,7 @@ def validate_plan_task_detail_schema(ctx: HookContext) -> int:
         info(ctx, "plan_task_detail_schema_not_in_contract_degrade")
         return 0
 
-    data, errors = load_and_validate_plan(plan_json, require_task_details=True)
+    data, errors = load_and_validate_plan(plan_json)
     failures = 0
     for error in errors:
         failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))

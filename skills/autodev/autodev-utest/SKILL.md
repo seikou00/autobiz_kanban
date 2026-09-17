@@ -36,9 +36,9 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
-每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`implementationPoints`、`nonGoals` 和从 `validationCommands` 提取的 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
+每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`outcome`、`implementationPoints`、`testPoints`、`verificationIntent` 和 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
 
-Code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出：`qualityGateCommands[]` 对应 manifest `quality_gate` 状态（仅命令存在时）、TASK `blockers[]`、根 `deferredValidationIssues[]`。`batchCompile` / `compileCommand` 属于已废弃 Plan 字段，出现时停止当前执行并重建 Plan。测试归属的入场缺陷与 UT target 并列进入 UTest 修复队列；任何生产实现缺陷必须形成 `source_fix_request` 回到同一 Batch 的 implement repair，禁止在 UTest 直接改码。
+Code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出 TASK `blockers[]`。测试归属的入场缺陷与 UT target 并列进入 UTest 修复队列；任何生产实现缺陷必须形成 `source_fix_request` 回到同一 Batch 的 implement repair，禁止在 UTest 直接改码。
 
 判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先重跑确认复现，再按失败分类处理。未经重跑不得直接依据字段动生产代码。
 
@@ -144,20 +144,19 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_prog
 
 ### 展开 assignment 的测试计划
 
-每个 TASK 建立一个 UT target，测试重点逐条取该 TASK 的 `implementationPoints`，`nonGoals` 不生成测试；`validationLocations` 只确认 repo/cwd。
+每个 TASK 建立一个 UT target，测试重点逐条取该 TASK 的 `testPoints`，并用 `outcome`、`implementationPoints` 和 `verificationIntent` 理解预期行为；`validationLocations` 只确认 repo/cwd。
 
 ```markdown
 | ID | Task | Test Focus | Priority | Status |
 |----|------|------------|----------|--------|
-| UT-001 | B001/T003 | implementationPoints 原文 | P0 | planned |
+| UT-001 | B001/T003 | testPoints 原文 | P0 | planned |
 ```
 
-- `implementationPoints` 是必须覆盖的测试重点，`nonGoals` 不生成测试。
+- `testPoints` 是必须覆盖的测试重点；`implementationPoints` 用于定位行为边界，不能替代测试重点。
 - 需要真实浏览器、多页面导航或真实网络链路的重点只写入 `e2e_handoff`。
 - 每个 TASK 的 target 为 P0；AC 与 spec 覆盖由 runner 从当前 plan 绑定。
-- `deferredValidationIssues[]`：`scope=task` 且能映射到单元边界的并入对应 TASK 的 UT target；batch/project 项进入扩大验证。
 - plan 之外的补充测试记 P2，并写明补充理由；不得用它替代任何 plan 目标。
-- `promptContent` 缺 Batch plan 绝对路径、`implementationPoints`、`nonGoals` 或有效 `validationLocations` 时记 `contract_gap`。
+- `promptContent` 缺 Batch plan 绝对路径、`outcome`、`implementationPoints`、`testPoints`、`verificationIntent` 或有效 `validationLocations` 时记 `contract_gap`。
 
 完整表输出后才进入生成测试与执行。
 
@@ -168,7 +167,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_prog
 每个 UT target：
 
 1. 读取同仓库最邻近的 2 至 3 个测试，匹配 runner、命名和 setup/teardown。
-2. 断言覆盖 `implementationPoints`，不覆盖 `nonGoals`。
+2. 断言覆盖 `testPoints`，并与 `outcome`、`implementationPoints` 和 `verificationIntent` 一致。
 3. 在公开 seam 上写一个行为目标；按 `${pluginPath}/skills/references/test-quality.md` 选择 mock 边界。
 4. 后实现测试使用 `post_implementation=true`、`tdd_rebuild=false`；首次即通过记 `characterization_pass`，不得删除现有生产实现制造 red。
 5. 测试自身错误由测试工程师修复并重跑同一精确目标。

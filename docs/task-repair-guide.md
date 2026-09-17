@@ -9,7 +9,7 @@
 - ✅ 任务状态为 `implemented` 或 `done`
 - ✅ 发现实现有 bug 或不符合预期
 - ✅ 需要保留修复历史的引用链
-- ✅ 需要由固定 Workflow 重新走 Review、UTest 与可选质量门
+- ✅ 需要由固定 Workflow 重新走 Review 与 UTest
 
 ## 在 Claw 对话中触发修复
 
@@ -98,7 +98,7 @@ python hooks/task_runner.py finish-implementation \
 
 ### 步骤 5：继续固定 Workflow
 
-修复完成后不要运行批次编译或跳过编译命令。固定 Workflow 会从该 Batch 的 Review 继续，并在同一 Worktree 执行 UTest 与可选质量门。
+修复完成后，固定 Workflow 会从该 Batch 的 Review 继续，并在同一 Worktree 执行 UTest。
 
 ## 核心特性
 
@@ -121,7 +121,7 @@ ev-003 (第二次修复)
 
 ### ✅ 固定交付续跑
 
-修复任务后，固定 Workflow 会针对新的 implementation evidence 重新完成 Review、UTest 与可选质量门。
+修复任务后，固定 Workflow 会针对新的 implementation evidence 重新完成 Review 与 UTest。
 
 ## 错误处理
 
@@ -175,7 +175,7 @@ python hooks/task_runner.py finish-implementation \
 
 ### 场景 2：修复后继续 Batch 交付
 
-完成修复后恢复同一固定 Workflow；它会重新完成 Review、UTest 与可选质量门。
+完成修复后恢复同一固定 Workflow；它会重新完成 Review 与 UTest。
 
 ### 场景 3：在 Claw 对话中快速修复
 

@@ -8,6 +8,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any
+from hooks.spec_contract import spec_heading
 
 
 
@@ -178,7 +179,7 @@ def _unknown_design_id_issue(
         "currentValue": value,
         "repairTarget": repair_target,
         "designMutationAllowed": False,
-        "repairSuggestion": f"任务 {task_id} 引用了 design.md 中不存在的{kind_label} ID：{value}。请在 task-groups.json 或任务详情中删除该引用，或先在 design.md 的对应表格中添加该 ID 定义"
+        "repairSuggestion": f"任务 {task_id} 引用了 design.md 中不存在的{kind_label} ID：{value}。请在 Plan v2 输入的 refs 中删除该引用，或先在 design.md 的对应表格中添加该 ID 定义"
     }
 
 
@@ -214,7 +215,7 @@ def validate_task_group_design_contract(
     contract: dict[str, Any],
     groups: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Reject invented API IDs before a Draft can be prepared."""
+    """Reject Design IDs that the confirmed design contract does not define."""
 
     contract = _reference_validation_contract(contract) or {
         "ids": {"API": set(), "DATA": set(), "D": set()},
@@ -483,20 +484,9 @@ def _find_unique_anchor_file(base: Path, anchor: str, *, design: bool) -> Path:
 
 def _extract_spec_snippet(text: str, anchor: str) -> str | None:
     """Extract spec snippet for REQ/SCN anchors."""
-    if anchor.startswith("REQ-"):
-        start_re = re.compile(
-            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
-            re.MULTILINE,
-        )
-    elif anchor.startswith("SCN-"):
-        start_re = re.compile(
-            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
-            re.MULTILINE,
-        )
-    else:
+    if not anchor.startswith(("REQ-", "SCN-")):
         return None
-
-    match = start_re.search(text)
+    match = spec_heading(text, anchor)
     return text[match.start():match.end()] if match else None
 
 

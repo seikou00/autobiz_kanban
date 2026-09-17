@@ -71,10 +71,6 @@ DYNAMIC_REASONS = {
     # hooks/plan_granularity.py
     "invalid_plan_task_scenario_reference",
     "oversized_plan_task_must_split",
-    "missing_plan_task_merged_scenario_refs",
-    "invalid_plan_task_merged_scenario_refs",
-    "missing_plan_task_split_rationale",
-    "invalid_plan_task_split_rationale",
     "invalid_plan_task_matrix_validation",
     # hooks/code_task_context.py resolve_task_refs
     "invalid_artifact_ref",
@@ -260,13 +256,13 @@ class StructuredOutputTest(unittest.TestCase):
     def test_registered_failure_preserves_structured_diagnostics(self) -> None:
         diagnostics = {
             "taskId": "T013",
-            "field": "splitRationale",
-            "violations": [{"code": "split_rationale_missing_related_ids"}],
+            "field": "specRefs",
+            "violations": [{"code": "scenario_count_exceeds_limit"}],
         }
         _, output = run_capture(
             lambda: fail_line(
                 HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp")),
-                "invalid_plan_task_split_rationale",
+                "oversized_plan_task_must_split",
                 " task=T013 detail=scenarios=8",
                 target="T013",
                 fields={"detail": "task=T013 detail=scenarios=8"},
@@ -492,35 +488,13 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
             self.assertEqual(unknown_decision["artifact"], "design.md")
             self.assertEqual(unknown_decision["route"], "fix_current")
 
-    def test_oversized_task_is_actionable(self) -> None:
+    def test_task_size_is_not_a_plan_blocker(self) -> None:
         task = {
             "id": "T001",
             "specRefs": [f"specs/order-export/spec.md#SCN-{index:03d}" for index in range(1, 20)],
         }
         item_errors = validate_plan_task_granularity_item(task, task_id="T001")
-        reasons = {error["reason"] for error in item_errors}
-        self.assertTrue(reasons, "粒度校验没有报错，测试样本失效")
-        ctx = HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp"))
-
-        def emit() -> int:
-            failures = 0
-            for error in item_errors:
-                failures += fail_line(
-                    ctx,
-                    error["reason"],
-                    " " + error.get("detail", ""),
-                    target="T001",
-                    fields={"detail": error.get("detail", "")},
-                    diagnostics=error,
-                )
-            return failures
-
-        _, output = run_capture(emit)
-        for error in parse_postcheck_output(output):
-            for field in ("artifact", "target", "problem", "action", "route"):
-                self.assertTrue(error.get(field), f"{error['reason']} 缺 {field}")
-            self.assertEqual(error["target"], "T001")
-            self.assertTrue(error.get("diagnostics", {}).get("violations"))
+        self.assertEqual(item_errors, [])
 
 
 class SkillWordingTest(unittest.TestCase):

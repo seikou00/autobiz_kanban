@@ -182,7 +182,7 @@ def workflow_workspace_contract(workflow_workspace: Path, workflow_script: str) 
 def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     """Load and validate runtime configuration from .autobiz/runtime_config.json."""
     defaults: dict[str, Any] = {
-        "parallelSchedulingMode": "conservative",
+        "parallelSchedulingMode": "optimistic",
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
         "conflictResolution": {
             "maxAttempts": 2,
@@ -344,7 +344,7 @@ def _batch_execution_plan(
         remaining.difference_update(selected)
 
     notes = [
-        "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后才编译/正式封存，然后执行 UTest。只有声明静态检查命令时才追加 quality gate，随后进入候选合并；成功合并后才释放下游。",
+        "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后执行 UTest 并重新封存，随后进入候选合并；成功合并后才释放下游。",
         "每个 Batch 在自己的 Worktree 完成业务 Review 与 UTest；Merge Train 只合成并推广这些已通过的 candidate SHA，成功后才释放下游 Batch。",
         "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
     ]
@@ -365,12 +365,8 @@ def _batch_execution_plan(
             "batchIds": initial_dispatch,
             "rule": "dependency_ready_and_safe_within_available_parallel_slots",
         },
-        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
+        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
         "deliveryStages": ["prepare", "implement", "review", "test"],
-        "optionalDeliveryStage": {
-            "stage": "quality_gate",
-            "enabledWhen": "qualityGateCommands_present",
-        },
         "mergeBarrier": {
             "type": "merge_train",
             "validationBatch": None,

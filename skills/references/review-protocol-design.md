@@ -9,6 +9,8 @@
 3. 验证思路是否可证伪；
 4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/DEC-xxx 在上游真实存在）。
 
+不要因未提前列出文件、方法、实现步骤、测试类或测试命令拒绝计划；这些在 Code/UTest 阶段才有可靠上下文。
+
 启动时必须在 task prompt 中写全 feature 目录的绝对路径与下面这份清单。回检角色不搜索工作区、不执行任何命令，路径没给它就直接退回。
 
 ### 输入材料清单
@@ -27,6 +29,7 @@
 使用回检角色的原文分节名，不要改写成别的词：
 
 - `Critical Findings` 与 `Major Findings` 下的每一条都必须落入下方分类表的一个分类，不得省略。
+- Critical 和 Major 只报告有证据的覆盖、引用、仓库归属、依赖、交付意图或任务粒度问题；没有证据的内容归入 `Open Questions (unscored)`。
 - `Minor Findings` 与 `Open Questions (unscored)` 不单独触发改产物。其中涉及取舍的按「需用户裁定」处理，其余归「仅列出」。
 
 角色的总评行（critic 的 `VERDICT`）只是总评，不作为动作依据。即使总评是 `ACCEPT`，下方逐条处理仍须完整完成。

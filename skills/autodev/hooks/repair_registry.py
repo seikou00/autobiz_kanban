@@ -31,6 +31,12 @@ PLAN_NO_HAND_EDIT = (
     "禁止直接编辑 plan.json / plans/Bxxx/plan.json / PLAN.md（PLAN.md 是投影视图）。"
 )
 
+# Plan v2 的唯一修正路径：计划只能整份重新发布，不能逐条修补。
+PLAN_REPUBLISH = (
+    "已发布的计划先通过 Plan rollback 回到 plan_in_progress，"
+    "再用 hooks/plan_writer.py publish-plan 重新发布完整 Plan v2。"
+)
+
 
 class Repair(NamedTuple):
     artifact: str
@@ -65,7 +71,7 @@ _ENTRY: Dict[str, Repair] = {
         action=(
             "先把缺失产物生成出来再重跑预检。proposal.md / specs/<capability>/spec.md 由 "
             "/autodev-specs 生成；design.md 由 /autodev-design 生成；plan.json 与 PLAN.md 一律"
-            "通过 hooks/plan_writer.py 生成，" + PLAN_NO_HAND_EDIT
+            "通过 hooks/plan_writer.py publish-plan 生成，" + PLAN_NO_HAND_EDIT
         ),
     ),
     "missing_feature_dir": Repair(
@@ -282,7 +288,7 @@ _PLAN: Dict[str, Repair] = {
     "missing_json_artifact": Repair(
         artifact="{target}",
         problem="必需的 JSON 事实源缺失：{target}",
-        action="按当前阶段 writer 契约生成该 JSON；UI_CONTEXT.json 使用 hooks/ui_context_writer.py，计划使用 hooks/plan_writer.py。",
+        action="按当前阶段 writer 契约生成该 JSON；UI_CONTEXT.json 使用 hooks/ui_context_writer.py，计划使用 hooks/plan_writer.py publish-plan。",
     ),
     "invalid_ui_context_json": Repair(
         artifact="UI_CONTEXT.json",
@@ -292,77 +298,77 @@ _PLAN: Dict[str, Repair] = {
     "plan_ui_task_when_feature_not_ui": Repair(
         artifact="plan.json",
         problem="{target} 标记为 UI 任务，但 UI_CONTEXT.json 声明当前 Feature 不需要 UI",
-        action="以 UI_CONTEXT.json 为事实源：确认需要 UI 时先回上游修正并锁定 UI_CONTEXT；否则移除任务 UI 标记后重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="以 UI_CONTEXT.json 为事实源：确认需要 UI 时先回上游修正并锁定 UI_CONTEXT；否则去掉该任务 Plan v2 输入中的 ui 字段。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_refs_when_feature_not_ui": Repair(
         artifact="plan.json",
         problem="{target} 在非 UI Feature 中携带 uiRefs",
-        action="移除非 UI 任务的 uiRefs 后用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="去掉非 UI 任务 Plan v2 输入中的 ui 字段。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_refs_for_non_ui_task": Repair(
         artifact="plan.json",
         problem="{target} 未标记为 UI 任务却携带 uiRefs",
-        action="根据 UI_CONTEXT.json 决定该任务是否为 UI 任务；统一 uiRequired 与 uiRefs 后重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="根据 UI_CONTEXT.json 决定该任务是否为 UI 任务，据此保留或去掉 Plan v2 输入中的 ui 字段。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_task_missing_uiRefs": Repair(
         artifact="plan.json",
         problem="{target} 是 UI 任务但缺少 uiRefs",
-        action="从 UI_CONTEXT.json 投影 pageRefs、interactionRefs、visualSourceRefs 和 frontendRoute，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="按 UI_CONTEXT.json 为该任务补齐 Plan v2 输入的 ui.pages、ui.interactions 和 ui.route。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_plan_ui_refs": Repair(
         artifact="plan.json",
         problem="{target} 的 UI 引用字段不是字符串数组",
-        action="按 UI_CONTEXT.json 中的稳定 ID 重建 uiRefs；不要手工猜测页面、交互或视觉源 ID。" + PLAN_NO_HAND_EDIT,
+        action="按 UI_CONTEXT.json 中的稳定 ID 修正 Plan v2 输入的 ui 字段；不要手工猜测页面、交互或视觉源 ID。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_ui_refs": Repair(
         artifact="plan.json",
         problem="{target} 缺少必需的页面或交互引用",
-        action="从 UI_CONTEXT.json 补齐对应 PAGE/UIX 引用后重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="从 UI_CONTEXT.json 补齐 Plan v2 输入中对应的 PAGE/UIX 引用。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "unknown_plan_ui_ref": Repair(
         artifact="plan.json",
         problem="{target} 引用了 UI_CONTEXT.json 中不存在的 ID",
-        action="核对 UI_CONTEXT.json 中的 PAGE/UIX/VIS ID，改为现有稳定 ID后重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="核对 UI_CONTEXT.json 中的 PAGE/UIX/VIS ID，在 Plan v2 输入中改为现有稳定 ID。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_plan_ui_frontend_route": Repair(
         artifact="plan.json",
         problem="{target} 的 frontendRoute 非法",
-        action="用 frontend route resolver 基于 UI_CONTEXT.json 解析合法路线后重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="用 frontend route resolver 基于 UI_CONTEXT.json 解析合法路线，写入 Plan v2 输入的 ui.route。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_visual_source_projection_mismatch": Repair(
         artifact="plan.json",
         problem="{target} 的视觉源投影与 UI_CONTEXT.json capability 不一致",
-        action="从 capability.visualSourceRefs 原样投影到任务 uiRefs，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="visualSourceRefs 由 writer 按任务命中的 capability 自动投影：核对 UI_CONTEXT.json 的 capability 与该任务的 ui.pages。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_route_without_visual_source": Repair(
         artifact="plan.json",
         problem="{target} 没有视觉源却选择了 HTML 前端路线",
-        action="没有 VIS 输入时使用 spec-driven-ui；有 HTML/设计输入时先将其登记到 UI_CONTEXT.json，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="没有 VIS 输入时 ui.route 使用 spec-driven-ui；有 HTML/设计输入时先将其登记到 UI_CONTEXT.json。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_frontend_route_mismatch": Repair(
         artifact="plan.json",
         problem="{target} 的 frontendRoute 与视觉源类型不一致",
-        action="使用 frontend route resolver 按 VIS 类型重新解析路线，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="使用 frontend route resolver 按 VIS 类型重新解析路线，写入 Plan v2 输入的 ui.route。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_ui_required_without_ui_task": Repair(
         artifact="plan.json",
         problem="UI_CONTEXT.json 要求 UI，但计划中没有 UI 实现任务",
-        action="为 UI_CONTEXT.json 中的 UI capability 建立至少一个 UI 任务并投影 uiRefs，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="为 UI_CONTEXT.json 中的 UI capability 建立至少一个带 ui 字段的 Plan v2 任务。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_json": Repair(
         artifact="plan.json",
         problem="plan.json 不存在或为空{target}",
-        action="plan.json 是任务 DAG 的机器事实源，用 hooks/plan_writer.py 生成。" + PLAN_NO_HAND_EDIT,
+        action="plan.json 是任务 DAG 的机器事实源，用 hooks/plan_writer.py publish-plan 生成。" + PLAN_NO_HAND_EDIT,
     ),
     "invalid_plan_json": Repair(
         artifact="plan.json",
         problem="plan.json 结构不合法：{target}",
-        action="用 hooks/plan_writer.py 对应子命令重建，不要就地改字段。" + PLAN_NO_HAND_EDIT,
+        action="修正 Plan v2 输入，不要就地改字段。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_task_set_not_finalized": Repair(
         artifact="plan.json",
         problem="任务集尚未定稿（taskSetStatus != finalized）",
-        action="确认任务分组表已定稿后，用 hooks/plan_writer.py finalize-task-set 定稿。" + PLAN_NO_HAND_EDIT,
+        action="plan.json 只能由 hooks/plan_writer.py publish-plan 一次性发布为 finalized。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_implementation_scope_mismatch": Repair(
         artifact="plan.json",
@@ -382,23 +388,23 @@ _PLAN: Dict[str, Repair] = {
     "missing_plan_json_requirement_ref": Repair(
         artifact="plan.json",
         problem="{target} 没有引用任何 Requirement",
-        action="回到任务分组表补上该任务实际实现的 REQ，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="在 Plan v2 输入的 refs.requirements 中补上该任务实际实现的 REQ。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_json_scenario_ref": Repair(
         artifact="plan.json",
         problem="{target} 没有引用任何 Scenario",
-        action="回到任务分组表补上该任务实际实现的 SCN（逐条展开、全限定），再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="在 Plan v2 输入的 refs.scenarios 中补上该任务实际实现的 SCN（逐条展开、全限定）。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_json_decision_ref": Repair(
         artifact="plan.json",
         problem="{target} 没有引用任何设计依据（API/DATA/D）",
-        action="补上该任务对应的 design.md 锚点（API-NNN / DATA-NNN / D-NNN），再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="在 Plan v2 输入的 refs.api / refs.data / refs.decisions 中补上该任务对应的 design.md 锚点。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "unknown_plan_json_requirement_ref": Repair(
         artifact="plan.json",
         problem="{target} 引用的 REQ 在 specs 中不存在",
         action=(
-            "先核对是不是编号写错：写错就用 hooks/plan_writer.py 改成正确的 REQ。"
+            "先核对是不是编号写错：写错就在 Plan v2 输入的 refs.requirements 中改成正确的 REQ 后重新发布。"
             "若 specs 里确实没有这条需求，停止 plan 阶段回 dev.specs 补定义，不要在 plan 里编一个。"
             + PLAN_NO_HAND_EDIT
         ),
@@ -407,7 +413,7 @@ _PLAN: Dict[str, Repair] = {
         artifact="plan.json",
         problem="{target} 引用的 SCN 在 specs 中不存在",
         action=(
-            "先核对是不是编号写错：写错就用 hooks/plan_writer.py 改成正确的 SCN。"
+            "先核对是不是编号写错：写错就在 Plan v2 输入的 refs.scenarios 中改成正确的 SCN 后重新发布。"
             "若 specs 里确实没有这条场景，停止 plan 阶段回 dev.specs 补定义，不要在 plan 里编一个。"
             + PLAN_NO_HAND_EDIT
         ),
@@ -415,119 +421,92 @@ _PLAN: Dict[str, Repair] = {
     "unknown_plan_json_api_ref": Repair(
         artifact="design.md",
         problem="{target} 引用的 API 编号在 design.md 中未定义",
-        action="编号写错就用 hooks/plan_writer.py 改正；design.md 确实还没定义就先在 API Decisions 节补出该 API-NNN，再重建任务引用。",
+        action="编号写错就在 Plan v2 输入的 refs.api 中改正后重新发布；design.md 确实还没定义就先在 API Decisions 节补出该 API-NNN。",
     ),
     "unknown_plan_json_data_ref": Repair(
         artifact="design.md",
         problem="{target} 引用的 DATA 编号在 design.md 中未定义",
-        action="编号写错就用 hooks/plan_writer.py 改正；design.md 确实还没定义就先在 Data Decisions 节补出该 DATA-NNN，再重建任务引用。",
+        action="编号写错就在 Plan v2 输入的 refs.data 中改正后重新发布；design.md 确实还没定义就先在 Data Decisions 节补出该 DATA-NNN。",
     ),
     "unknown_plan_json_decision_ref": Repair(
         artifact="design.md",
         problem="{target} 引用的 D（技术决策）编号在 design.md 中未定义",
-        action="编号写错就用 hooks/plan_writer.py 改正；design.md 确实还没定义就先在 Technical Design 节补出该 D-NNN，再重建任务引用。",
+        action="编号写错就在 Plan v2 输入的 refs.decisions 中改正后重新发布；design.md 确实还没定义就先在 Technical Design 节补出该 D-NNN。",
     ),
     "plan_api_ref_forbidden_by_design_marker": Repair(
         artifact="plan.json",
         problem="{target} 引用了 API，但 design.md 声明 x-auto-no-http-api=true：{detail}",
-        action="Design 是事实源：从任务分组或任务详情中移除该 API 引用，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="Design 是事实源：从 Plan v2 输入的 refs.api 中移除该 API 引用。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_data_ref_forbidden_by_design_marker": Repair(
         artifact="plan.json",
         problem="{target} 引用了 DATA，但 design.md 声明 x-auto-no-sql=true：{detail}",
-        action="Design 是事实源：从任务详情中移除该 DATA 引用，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="Design 是事实源：从 Plan v2 输入的 refs.data 中移除该 DATA 引用。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_json_api_coverage": Repair(
         artifact="plan.json",
         problem="design.md 定义的 API {target} 没有被任何实现任务覆盖",
-        action="回到任务分组表，把该 API 分配给实际实现它的任务后重建 Draft；若本轮不实现，回 design.md 明确标注无需实现。" + PLAN_NO_HAND_EDIT,
+        action="把该 API 写进实际实现它的任务的 refs.api；若本轮不实现，回 design.md 明确标注无需实现。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_json_data_coverage": Repair(
         artifact="plan.json",
         problem="design.md 定义的 DATA {target} 没有被任何实现任务覆盖",
-        action="回到任务分组表，把该 DATA 分配给实际实现它的任务后重建 Draft；若本轮不实现，回 design.md 明确标注无需实现。" + PLAN_NO_HAND_EDIT,
+        action="把该 DATA 写进实际实现它的任务的 refs.data；若本轮不实现，回 design.md 明确标注无需实现。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_json_decision_coverage": Repair(
         artifact="plan.json",
         problem="design.md 定义的技术决策 {target} 没有被任何实现任务覆盖",
-        action="回到任务分组表，把该 D 分配给落实它的任务后重建 Draft；若本轮不落实，回 design.md 明确标注无需实现。" + PLAN_NO_HAND_EDIT,
+        action="把该 D 写进落实它的主交付任务的 refs.decisions；若本轮不落实，回 design.md 明确标注无需实现。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_plan_scenario_coverage": Repair(
         artifact="plan.json",
         problem="specs 中这些 Scenario 没有被任何任务覆盖：{target}",
-        action="回到任务分组表，把报错的每个 SCN 分配给实际实现它的任务，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="把报错的每个 SCN 写进实际实现它的任务的 refs.scenarios。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_plan_task_scenario_reference": Repair(
         artifact="plan.json",
         problem="{target} 的 specRefs 里 Scenario 引用没有逐条展开或没有全限定",
-        action="把 SCN 引用写成逐条展开的全限定形式（一个 SCN 一项，不用区间/通配），再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="把 refs.scenarios 写成逐条展开的全限定形式（一个 SCN 一项，不用区间/通配）。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "oversized_plan_task_must_split": Repair(
         artifact="plan.json",
         problem="{target} 超出单任务上限：{detail}",
-        action="按报错里超限的那个维度拆分该任务（场景/接口/页面/交互），拆成多个仍然是用户可观察 vertical slice 的任务，再重建 Draft。" + PLAN_NO_HAND_EDIT,
-    ),
-    "missing_plan_task_merged_scenario_refs": Repair(
-        artifact="plan.json",
-        problem="{target} 合并了多个场景但没有列出被合并的 Scenario",
-        action="在该任务的合并场景字段里逐条列出被合并的 SCN，再重建 Draft。" + PLAN_NO_HAND_EDIT,
-    ),
-    "invalid_plan_task_merged_scenario_refs": Repair(
-        artifact="plan.json",
-        problem="{target} 列出的合并场景与实际 specRefs 对不上",
-        action="让合并场景列表与该任务 specRefs 中的 SCN 完全一致，再重建 Draft。" + PLAN_NO_HAND_EDIT,
-    ),
-    "missing_plan_task_split_rationale": Repair(
-        artifact="plan.json",
-        problem="{target} 缺少 splitRationale",
-        action=(
-            "写清两件事：这个任务合并了哪些场景（逐个点名相关编号）、以及验证边界为什么仍然成立"
-            "（要出现具体验证手段，不能只写「便于实现」这类空话），再重建 Draft。" + PLAN_NO_HAND_EDIT
-        ),
-    ),
-    "invalid_plan_task_split_rationale": Repair(
-        artifact="plan.json",
-        problem="{target} 的 splitRationale 不满足要求：{detail}",
-        action=(
-            "先读取返回 JSON 的 diagnostics.violations，逐项修复其中列出的字段、编号和验证边界；"
-            "不得根据 Scenario 编号猜测拆分归属。若不满足真实共享验证闭环，应回覆盖矩阵按业务闭环拆分，"
-            "再重建 Draft。" + PLAN_NO_HAND_EDIT
-        ),
+        action="按报错里超限的那个维度拆分该任务（场景/接口/页面/交互），拆成多个仍然是用户可观察 vertical slice 的任务。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_plan_task_matrix_validation": Repair(
         artifact="plan.json",
         problem="{target} 的验证矩阵不合法：{detail}",
-        action="按报错维度补齐该任务的验证方式，确保每个场景都有可自行判读的验证，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="按报错维度补齐该任务的 testPoints 与 verification.intent，确保每个场景都有可自行判读的验证。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_artifact_ref": Repair(
         artifact="plan.json",
         problem="{target} 的引用格式不合法：{detail}",
-        action="引用写成 `<文件路径>#<锚点>` 形式（如 specs/<capability>/spec.md#REQ-001、design.md#API-001），再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="引用写成 `<文件路径>#<锚点>` 形式（如 specs/<capability>/spec.md#REQ-001、design.md#API-001）。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_artifact_ref_format": Repair(
         artifact="plan.json",
         problem="{target} 的引用格式不合法：{detail}",
-        action="引用写成 `<文件路径>#<锚点>` 形式（如 specs/<capability>/spec.md#REQ-001、design.md#API-001），再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="引用写成 `<文件路径>#<锚点>` 形式（如 specs/<capability>/spec.md#REQ-001、design.md#API-001）。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "invalid_artifact_ref_type": Repair(
         artifact="plan.json",
         problem="{target} 的引用类型与字段不匹配：{detail}",
-        action="specRefs 只放 REQ/SCN，designRefs 只放 API/DATA/D；修正任务引用后再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="refs.requirements / refs.scenarios 只放 REQ/SCN，refs.api / refs.design / refs.data / refs.decisions 只放对应 Design ID。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "ambiguous_ref_anchor": Repair(
         artifact="plan.json",
         problem="{target} 的短引用无法唯一定位：{detail}",
-        action="把短引用改成带相对文件路径的完整形式 `<文件路径>#<锚点>`，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="把短引用改成带相对文件路径的完整形式 `<文件路径>#<锚点>`。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_ref_file": Repair(
         artifact="plan.json",
         problem="{target} 引用的文件不存在：{detail}",
-        action="核对路径是否写错；文件确实还没生成时，先补齐上游产物（specs 缺失回 dev.specs，design 缺失就地补写），再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="核对路径是否写错；文件确实还没生成时，先补齐上游产物（specs 缺失回 dev.specs，design 缺失就地补写）。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "missing_ref_anchor": Repair(
         artifact="plan.json",
         problem="{target} 引用的锚点在目标文件中不存在：{detail}",
-        action="核对编号是否写错；目标文件确实没有该定义时，specs 缺失回 dev.specs 补，design 缺失就地在 design.md 补，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+        action="核对编号是否写错；目标文件确实没有该定义时，specs 缺失回 dev.specs 补，design 缺失就地在 design.md 补。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
 }
 
@@ -542,19 +521,17 @@ REPAIRS.update(_PLAN)
 # ``invalid_plan_json`` 的 detail 是 plan_json.py 的扁平码。高频码给精确动作，
 # 其余走 REPAIRS["invalid_plan_json"] 兜底——兜底同样带完整五字段。
 _PLAN_JSON_CODE_ACTIONS = (
-    ("monolithic_plan_requires_rebuild", "根 plan.json 不得内联 tasks：用 hooks/plan_writer.py 重建成「根索引 + plans/Bxxx/plan.json 批次」结构。"),
-    ("legacy_plan_requires_rebuild", "这是旧版 plan.json：用 hooks/plan_writer.py 重建，不要手工补字段。"),
-    ("plan_json_missing_feature_id", "plan.json 缺 featureId：用 hooks/plan_writer.py 重建，featureId 必须与当前 Feature 一致。"),
-    ("plan_json_status_not_initial", "plan 初始状态必须是 todo：用 hooks/plan_writer.py 重建，不要就地改 status。"),
+    ("monolithic_plan_requires_rebuild", "根 plan.json 不得内联 tasks：用 hooks/plan_writer.py publish-plan 重新发布成「根索引 + plans/Bxxx/plan.json 批次」结构。"),
+    ("legacy_plan_requires_rebuild", "这是旧版 plan.json：用 hooks/plan_writer.py publish-plan 重新发布 Plan v2，不要手工补字段。"),
+    ("plan_json_missing_feature_id", "plan.json 缺 featureId：重新发布 Plan v2，featureId 必须与当前 Feature 一致。"),
+    ("plan_json_status_not_initial", "plan 初始状态必须是 todo：重新发布 Plan v2，不要就地改 status。"),
     ("plan_json_status_not_done", "所有任务完成后状态才应为 done：用任务状态机推进，不要就地改 status。"),
-    ("plan_json_status_invalid", "status 取值非法：用 hooks/plan_writer.py 重建。"),
-    ("plan_json_taskSetStatus_invalid", "taskSetStatus 取值非法：用 hooks/plan_writer.py 重建并按流程 finalize。"),
-    ("plan_json_taskSetDigest_invalid", "taskSetDigest 非法：不要手写，由 hooks/plan_writer.py 定稿时生成。"),
+    ("plan_json_status_invalid", "status 取值非法：重新发布 Plan v2。"),
+    ("plan_json_taskSetStatus_invalid", "taskSetStatus 取值非法：重新发布 Plan v2，writer 一次性写入 finalized。"),
     ("plan_json_implementationScope_invalid", "implementationScope 取值非法：用 hooks/implementation_scope.py set 修正后重建 plan。"),
-    ("plan_json_batchPolicy", "批次策略字段必须与约定一致：用 hooks/plan_writer.py 重建，不要手工调整 batchPolicy。"),
-    ("dependency_unknown", "任务依赖指向了不存在的任务号：核对任务号后用 hooks/plan_writer.py 修正依赖。"),
-    ("dependency_cycle", "任务依赖成环：用 hooks/plan_writer.py 调整依赖，使任务 DAG 无环。"),
-    ("verified_existing_create_in_code_forbidden", "verified_existing 任务不得新建文件：改成 create 类执行模式，或去掉新建目标，再重建 Draft。"),
+    ("plan_json_batchPolicy", "批次策略字段必须与约定一致：重新发布 Plan v2，不要手工调整 batchPolicy。"),
+    ("dependency_unknown", "任务依赖指向了不存在的任务号：核对任务号后修正 Plan v2 输入的 dependsOn 并重新发布。"),
+    ("dependency_cycle", "任务依赖成环：调整 Plan v2 输入的 dependsOn 使任务 DAG 无环后重新发布。"),
 )
 
 
