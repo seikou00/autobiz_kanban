@@ -161,18 +161,40 @@ def _generate_ui_context_md(
     *,
     tasks: list[dict[str, Any]] | None = None,
 ) -> str:
-    """生成面向前端人员的UI_CONTEXT.md文档
+    """生成 UI_CONTEXT.json 的人类可读视图。
 
-    文档结构固定为：
-    1. 视觉资源与还原路径
-    2. 页面与能力映射
+    对纯后端 Feature，先明确说明 UI 不适用及其依据，避免把空的
+    前端表格误读为 JSON → MD 同步失败。
     """
     lines = [
         f"# UI Context - {feature}",
         "",
-        "本文档基于 UI_CONTEXT.json 生成，聚焦前端开发关注的内容。",
+        "本文档基于 UI_CONTEXT.json 生成；JSON 是 UI 范围的机器事实源。",
         "",
     ]
+
+    ui_required = data.get("uiRequired")
+    decision_status = data.get("decisionStatus", "未知")
+    decision_source = data.get("decisionSource", "未知")
+    ui_required_display = "是" if ui_required is True else "否" if ui_required is False else "未确定"
+    lines.extend([
+        "## UI 范围决策",
+        "",
+        f"- 是否需要 UI 实现：{ui_required_display}",
+        f"- 决策状态：{decision_status}",
+        f"- 决策来源：{decision_source}",
+    ])
+    if ui_required is False:
+        reason = data.get("notApplicableReason")
+        reason_display = reason.strip() if isinstance(reason, str) and reason.strip() else "未填写"
+        lines.extend([
+            f"- 不适用原因：{reason_display}",
+            "",
+            "本 Feature 不包含前端交付；无需定义页面、交互或视觉资源。",
+            "",
+        ])
+        return "\n".join(lines)
+    lines.append("")
 
     pages = data.get('pages', [])
     visual_sources = data.get('visualSources', [])

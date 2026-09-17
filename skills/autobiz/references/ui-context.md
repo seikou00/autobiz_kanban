@@ -9,7 +9,8 @@ Do not infer UI scope from Markdown after this file exists.
 When `UI_CONTEXT.json` is written or updated, a human-readable `UI_CONTEXT.md`
 is automatically generated in the same directory. This Markdown file:
 
-- Focuses on frontend developer concerns: pages, interactions, visual sources, and restoration paths
+- When `uiRequired=true`, focuses on frontend developer concerns: pages, interactions, visual sources, and restoration paths
+- When `uiRequired=false`, shows the UI decision, decision source/status, and `notApplicableReason`, and omits empty frontend tables
 - Shows the relationship between capabilities, HTML resources, and restoration routes
 - Renders `capabilityId` values directly; it does not invent Chinese translations for capability names
 - Shows a visual source's formal Plan tasks as `T00X: task title` when `uiRefs.visualSourceRefs` binds them; before Plan exists it shows `待Plan阶段关联`

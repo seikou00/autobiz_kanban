@@ -664,6 +664,18 @@ def validate_task_artifact_refs(
                 "repairTarget": "task_group",
             })
 
+    # sourceRefs is writer-owned and records source IDs projected from Specs.
+    # Source availability is deliberately non-blocking: an external document
+    # may legitimately be absent or never have been supplied.
+    source_refs = task.get("sourceRefs", [])
+    if not isinstance(source_refs, list):
+        errors.append({
+            "reason": "plan_source_refs_invalid",
+            "detail": f"task={task_id};sourceRefs_must_be_array",
+            "taskIds": [task_id],
+            "field": "sourceRefs",
+            "repairTarget": "task_group",
+        })
     if contract is not None:
         errors.extend(validate_task_design_contract(contract, task))
 

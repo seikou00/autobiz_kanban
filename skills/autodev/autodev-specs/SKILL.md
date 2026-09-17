@@ -58,7 +58,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 - REQ/SCN 使用三位数字，在同一 feature 内分别全局唯一；新编号使用未占用值，既有编号不重排、不复用。
 - 每条 Requirement 至少一个 Scenario。覆盖需求涉及的角色、主流程及有意义的异常和权限分支；相同行为不为不同角色重复抄写。
 - `ADDED / MODIFIED / REMOVED Requirements` 章节按需使用，无内容省略。修改写完整的新行为；移除描述旧入口触发时的预期响应，必要时说明原因及兼容方式，不要求固定字段。
-- 来源可以用简短说明、链接或按需添加的映射表记录。应消费相关资料中的行为约束，不为凑表重复需求。
+- 外部资料影响实现或验收时，在对应 spec 添加 `## Source References / 外部资料引用` 表，将稳定 `SRC-NNN` 映射到受影响的 `REQ-NNN / SCN-NNN`；Plan 会据此自动把资料快照投影给相关 Task。仅作背景且不约束任何行为的资料可以不映射，不为凑表重复需求。
 
 ## UI 上下文
 

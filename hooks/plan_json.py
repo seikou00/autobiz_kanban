@@ -48,6 +48,7 @@ REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
 VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
+SOURCE_ID_RE = re.compile(r"^SRC-\d{3}$")
 FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
 COMPLETION_POLICIES = {
     "all_required_validations_pass",
@@ -576,6 +577,10 @@ def _validate_tasks_container(
             elif isinstance(latest_pass, str) and latest_pass != completion_evidence_ids[-1]:
                 errors.append(f"{task_id}.latestPassEvidenceId_not_latest:{latest_pass}")
         _validate_string_list(errors, raw_task, task_id, "expectedFiles", required=False)
+        if "sourceRefs" in raw_task:
+            _validate_string_list(
+                errors, raw_task, task_id, "sourceRefs", required=False, item_re=SOURCE_ID_RE,
+            )
         blockers = _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
         if require_all_done and blockers:
             errors.append(f"{task_id}.blockers_unresolved")

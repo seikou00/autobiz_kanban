@@ -39,6 +39,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     unignored_runtime_artifact_paths,
 )
 from hooks.spec_contract import spec_heading  # noqa: E402
+from hooks.source_context import load_source_context, source_index  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -329,6 +330,33 @@ def build_context(
         return fail("task_not_found", task_id, path=plan_path)
 
     resolved_specs, resolved_design, errors = resolve_task_refs(base, task)
+    source_refs = task.get("sourceRefs", [])
+    resolved_sources: list[dict[str, Any]] = []
+    if not isinstance(source_refs, list):
+        errors.append({"reason": "plan_source_refs_invalid", "detail": "sourceRefs_must_be_array"})
+        source_refs = []
+    elif source_refs:
+        source_context, source_errors = load_source_context(base)
+        known_sources = source_index(source_context)
+        for ref in source_refs:
+            source = known_sources.get(ref) if isinstance(ref, str) else None
+            if source is None:
+                resolved_sources.append({
+                    "id": ref,
+                    "resolution": "source_context_unavailable" if source_errors else "not_registered",
+                    "detail": "; ".join(source_errors) if source_errors else "未在 source-context.json 登记",
+                })
+            else:
+                resolved = dict(source)
+                source_path = resolved.get("sourcePath")
+                candidate = (base / source_path).resolve() if isinstance(source_path, str) else None
+                if resolved.get("availability") == "never_provided":
+                    resolved["resolution"] = "never_provided"
+                elif candidate is None or not _inside_base(candidate, base.resolve()) or not candidate.is_file():
+                    resolved["resolution"] = "snapshot_missing"
+                else:
+                    resolved["resolution"] = "available"
+                resolved_sources.append(resolved)
 
     data_out = {
         "feature": feature,
@@ -352,6 +380,7 @@ def build_context(
             "base": "artifactFeatureDir",
             "specRefs": "relative-to-artifactFeatureDir",
             "designRefs": "relative-to-artifactFeatureDir",
+            "sourceRefs": "optional source-context.json metadata; missing sources are returned with resolution state",
             "codeWorkspace": "current working directory / project repository",
         },
         "task": task,
@@ -368,10 +397,12 @@ def build_context(
             "testPoints": task.get("testPoints", []),
             "validationBoundary": task.get("validationBoundary"),
             "verificationIntent": task.get("verificationIntent"),
+            "sourceRefs": source_refs,
             "testIntent": task.get("validationTestPlan", []),
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
+        "resolvedSourceRefs": resolved_sources,
     }
     if code_workspaces:
         try:
