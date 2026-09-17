@@ -98,7 +98,7 @@ python hooks/task_runner.py finish-implementation \
 
 ### 步骤 5：继续固定 Workflow
 
-修复完成后不要运行批次编译或跳过编译命令。固定 Workflow 会从该 Batch 的 Review 继续，并在同一 Worktree 执行 UTest 与可选质量门。
+修复完成后，固定 Workflow 会从该 Batch 的 Review 继续，并在同一 Worktree 执行 UTest 与可选质量门。
 
 ## 核心特性
 

@@ -41,7 +41,7 @@ from hooks.implementation_scope import load_scope  # noqa: E402
 from hooks.spec_contract import SPEC_SCENARIO_DEF_RE  # noqa: E402
 from hooks.plan_scope import resolve_plan_scope, scope_report  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
-    BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+    TEST_STAGE_MAX_REPAIR_ATTEMPTS,
     BATCH_STRATEGY,
     FRONTEND_ROUTES,
     MAX_BATCH_TASKS,
@@ -99,7 +99,7 @@ DEFAULT_TASK_VALIDATION_POLICY = {
     "mode": "defer_to_test_stages",
     "orchestration": "inline",
     "codeGate": "review_only",
-    "maxTestStageRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+    "maxTestStageRepairAttempts": TEST_STAGE_MAX_REPAIR_ATTEMPTS,
 }
 
 
@@ -171,8 +171,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
         raise PlanWriterInputError("monolithic_plan_requires_rebuild")
     if "version" in root or "taskDetailVersion" in root:
         raise PlanWriterInputError("legacy_plan_requires_rebuild")
-    if "compileProfiles" in root:
-        raise PlanWriterInputError("compile_profiles_retired_requires_rebuild")
     policy = root.get("batchPolicy")
     if isinstance(policy, dict) and policy.get("strategy") != BATCH_STRATEGY:
         raise PlanWriterInputError("batch_policy_requires_rebuild", str(policy.get("strategy")))
@@ -991,16 +989,13 @@ def _primary_spec_root(task: dict[str, Any]) -> str:
     return "specs/unspecified/spec.md"
 
 
-def _batch_status(
-    batch_tasks: list[dict[str, Any]],
-    batch_compile: dict[str, Any] | None = None,
-) -> str:
+def _batch_status(batch_tasks: list[dict[str, Any]]) -> str:
     statuses = [normalize_status(task.get("status")) for task in batch_tasks]
     if any(status == "failed" for status in statuses):
         return "failed"
     if statuses and all(status == "done" for status in statuses):
-        legacy_recorded = isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed", "skipped"}
-        return "done" if legacy_recorded else "in_progress"
+        # A Batch becomes done only when Merge Train records its merge.
+        return "in_progress"
     if any(status in {"in_progress", "implemented", "validating", "done"} for status in statuses):
         return "in_progress"
     return "todo"
@@ -1871,51 +1866,6 @@ def record_task_implementation(
         return result
 
 
-def update_batch_compile_status(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    compile_result: dict[str, Any],
-) -> WriterResult:
-    """Reject the retired batch-compile API."""
-    del compile_result
-    return fail("batch_compile_retired", batch_id, path=_path(workspace, feature))
-
-
-def reset_batch_compile_for_revalidation(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-) -> WriterResult:
-    """Reject the retired batch-compile API."""
-    return fail("batch_compile_retired", batch_id, path=_path(workspace, feature))
-
-
-def begin_batch_compile_repair(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    task_id: str,
-    *,
-    parallel: bool = False,
-) -> WriterResult:
-    """Reject the retired batch-compile repair API."""
-    del task_id, parallel
-    return fail("batch_compile_retired", batch_id, path=_path(workspace, feature))
-
-
-def mark_batch_tasks_done_after_compile(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    *,
-    parallel: bool = False,
-) -> WriterResult:
-    """Reject the retired batch-compile completion API."""
-    del parallel
-    return fail("batch_compile_retired", batch_id, path=_path(workspace, feature))
-
-
 def mark_parallel_batch_tasks_merged(
     workspace: Path,
     feature: str,
@@ -1926,9 +1876,8 @@ def mark_parallel_batch_tasks_merged(
 ) -> WriterResult:
     """Complete a parallel Batch only after its sealed delivery is merged.
 
-    A current Plan has no batch-compile state; Review, UTest and Merge Train
-    form the only delivery path that moves parallel Tasks from ``implemented``
-    to ``done``.
+    Review, UTest and Merge Train form the only delivery path that moves
+    parallel Tasks from ``implemented`` to ``done``.
     """
     if not merge_commit_sha:
         return fail("parallel_merge_commit_sha_required", batch_id, path=_path(workspace, feature))
@@ -1942,9 +1891,6 @@ def mark_parallel_batch_tasks_merged(
         batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
         if not isinstance(batch_plan, dict):
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
-        batch_compile = batch_plan.get("batchCompile")
-        if batch_compile is not None or batch_plan.get("compileCommand") is not None:
-            return fail("review_only_batch_compile_unexpected", batch_id, path=_path(workspace, feature))
         existing_commit = batch_plan.get("mergeCommitSha")
         if isinstance(existing_commit, str) and existing_commit and existing_commit != merge_commit_sha:
             return fail("parallel_batch_merge_commit_mismatch", batch_id, path=_path(workspace, feature))

@@ -226,7 +226,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 ### Review 后的 UTest 与模型修复
 
-固定 Workflow 在当前批次全部 TASK 为 `implemented` 后先草稿封存并执行只读 Review。Review 通过后直接在同一 Worktree 生成并执行 UTest（随后重新 `seal`），并仅在声明 `qualityGateCommands` 时执行 `quality_gate`，才进入 `ready_to_candidate`。不得执行或记录任何批次编译、`batch-compile`、`skip-batch-compile` 或 `revalidate-batch-compile`。UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
+固定 Workflow 在当前批次全部 TASK 为 `implemented` 后先草稿封存并执行只读 Review。Review 通过后直接在同一 Worktree 生成并执行 UTest（随后重新 `seal`），并仅在声明 `qualityGateCommands` 时执行 `quality_gate`，才进入 `ready_to_candidate`。UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
 
 `worktree_manager.py seal` 若遇到同一 linked worktree 的 `index.lock`，会先做有限次短暂重试；锁持续存在时，由插件仅清理 Git 为该 linked worktree 解析出的 `index.lock` 并重试原命令，成功则在 `indexLockRecoveries` 中留痕。受控清理后仍不能写入时才返回 `parallel_git_index_lock_busy` 或 `parallel_git_index_lock_recovery_failed`，以 `final-status pending` 释放租约，并由同一 `runId` 的 scheduler `resume` 重试该 Batch。
 

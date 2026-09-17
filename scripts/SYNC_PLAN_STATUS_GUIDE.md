@@ -355,8 +355,7 @@ git commit -m "chore: sync plan status after manual task completion"
 
 当 plan 启用 `defer_to_test_stages` 验证策略时：
 - 任务 `done` 状态不强制要求 `completionEvidenceIds`
-- 当前 `review_only` Plan 不创建 `batchCompile`；实现完成后交由 Review/UTest/Merge Train 形成完成证据
-- 出现 `batch_compile_only`、`compileCommand` 或 `batchCompile` 时必须重建 Plan
+- 实现完成后交由 Review/UTest/Merge Train 形成完成证据
 - 同步脚本仅处理此当前策略，不迁移或补全废弃字段
 
 ## 更新日志

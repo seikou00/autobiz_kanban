@@ -2850,7 +2850,7 @@ def validate_plan_ref_resolution(ctx: HookContext) -> int:
         info(ctx, "plan_ref_resolution_not_in_contract_degrade")
         return 0
 
-    data, errors = load_and_validate_plan(plan_json, require_task_details=True)
+    data, errors = load_and_validate_plan(plan_json)
     failures = 0
     if errors:
         for error in errors:
@@ -2966,7 +2966,7 @@ def validate_plan_task_detail_schema(ctx: HookContext) -> int:
         info(ctx, "plan_task_detail_schema_not_in_contract_degrade")
         return 0
 
-    data, errors = load_and_validate_plan(plan_json, require_task_details=True)
+    data, errors = load_and_validate_plan(plan_json)
     failures = 0
     for error in errors:
         failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))

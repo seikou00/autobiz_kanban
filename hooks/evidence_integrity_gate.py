@@ -100,7 +100,7 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
-    if record.get("action") not in {"validation", "batch_compile", "project_check"}:
+    if record.get("action") not in {"validation", "project_check"}:
         return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
@@ -335,12 +335,6 @@ def _check_batch_completion(
     batch_plans = plan.get("_bundleBatches")
     if not isinstance(batch_plans, dict):
         return ["missing_batch_plan_projection"]
-
-    for batch_id, batch in batch_plans.items():
-        if not isinstance(batch, dict):
-            continue
-        if "compileCommand" in batch or "batchCompile" in batch:
-            errors.append(f"{batch_id}.batch_compile_retired")
 
     # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
     # Only the merger records the delivery and transitions the task from

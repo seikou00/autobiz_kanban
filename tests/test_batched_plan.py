@@ -248,27 +248,10 @@ class BatchedPlanContractTest(unittest.TestCase):
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
         root["projectValidationCommands"][0]["argv"] = ["echo", "integration"]
 
-        errors = validate_plan_data(root, require_backend_compile=True)
+        errors = validate_plan_data(root)
 
-        self.assertNotIn(
-            "compileProfiles.backend.commands[0].validation_command_noop",
-            errors,
-        )
         self.assertIn("projectValidationCommands[0].validation_command_noop", errors)
 
-    def test_backend_batch_does_not_require_a_compile_profile(self) -> None:
-        root = root_plan(batches=[batch_entry("B001", ["T001"])])
-
-        errors = validate_plan_data(root, require_backend_compile=True)
-
-        self.assertEqual(errors, [])
-
-    def test_compile_and_quality_commands_are_bound_to_task_set_digest(self) -> None:
-        root = root_plan(batches=[batch_entry("B001", ["T001"])])
-        batch = batch_plan("B001", [task("T001")])
-        legacy_digest = task_set_digest(root, {"B001": batch})
-
-        self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
 
     def test_task_validation_policy_is_required_and_bound_to_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
@@ -279,20 +262,6 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertNotEqual(task_set_digest(root, {"B001": batch}), policy_digest)
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
-    def test_finalized_plan_rejects_retired_compile_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            write_bundle(feature_dir, [[task("T001")]])
-
-            root_path = feature_dir / "plan.json"
-            root = json.loads(root_path.read_text(encoding="utf-8"))
-            load_plan_bundle(feature_dir)
-
-            root["compileProfiles"] = {"backend": {"commands": []}}
-            write_plan_json(root_path, root)
-            with self.assertRaisesRegex(PlanJsonError, "compileProfiles_retired"):
-                load_plan_bundle(feature_dir)
 
     def test_project_validation_rejects_batch_kinds(self) -> None:
         base = root_plan(batches=[batch_entry("B001", ["T001"])])
@@ -301,18 +270,6 @@ class BatchedPlanContractTest(unittest.TestCase):
 
         self.assertIn("projectValidationCommands[0].kind_invalid", errors)
 
-    def test_bundle_rejects_retired_compile_projection(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            write_bundle(feature_dir, [[task("T001")]])
-            batch_path = batch_plan_path(feature_dir, "B001")
-            batch = json.loads(batch_path.read_text(encoding="utf-8"))
-            batch["compileCommand"] = {"id": "BATCH-B001-COMPILE", "kind": "compile", "required": True}
-            write_plan_json(batch_path, batch)
-
-            with self.assertRaisesRegex(PlanJsonError, "B001.compileCommand_retired"):
-                load_plan_bundle(feature_dir)
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"

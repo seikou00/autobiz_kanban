@@ -642,7 +642,6 @@ def _prepare_code_execution_reset(workspace: Path, feature: str) -> CodeResetPla
     for batch in batch_plans.values() if isinstance(batch_plans, dict) else []:
         if not isinstance(batch, dict):
             continue
-        batch.pop("batchCompile", None)
         batch["startedAt"] = None
         batch["completedAt"] = None
     # Rebuild the batch projection from the preserved task contracts. Keeping

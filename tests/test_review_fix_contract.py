@@ -169,14 +169,13 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
 
 
 class CodeReviewIsReadOnlyTest(unittest.TestCase):
-    """Code 回检在实现和批次编译修复收口后只能上报，不能改码。"""
+    """Code 回检在实现流程收口后只能上报，不能改码。"""
 
     def test_code_review_declares_closed_repair_channels(self) -> None:
         output = protocol("dev.code")
 
         for contract in (
             "已完成 TASK 不得重启",
-            "最多 3 次的模型修复流程",
             "旧逐 TASK 验证和项目检查入口均不可用",
         ):
             self.assertIn(contract, output)
@@ -260,8 +259,8 @@ class ExploreRoleIsResolvableTest(unittest.TestCase):
         self.assertIn("Explore", subagents["disabledBuiltinSubagents"])
 
 
-class BatchCompileRoleIsResolvableTest(unittest.TestCase):
-    """Code 阶段批次编译角色必须可被宿主解析。"""
+class VerificationRoleIsResolvableTest(unittest.TestCase):
+    """Code 阶段的 verification 角色必须可被宿主解析。"""
 
     def test_agent_name_matches_runner_directive(self) -> None:
         self.assertIn("name: verification-autodev", _read(VERIFICATION_AGENT))

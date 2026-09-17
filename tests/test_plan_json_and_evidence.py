@@ -1399,17 +1399,6 @@ class EvidenceGateTest(unittest.TestCase):
             feature_dir.mkdir()
             batch = {
                 "tasks": [],
-                "batchCompile": {
-                    "status": "passed",
-                    "commandId": "BATCH-B001-COMPILE",
-                    "implementationEvidenceByTask": {},
-                    "implementationRevisionByTask": {},
-                },
-                "compileCommand": {
-                    "id": "BATCH-B001-COMPILE",
-                    "kind": "compile",
-                    "required": True,
-                },
                 "qualityGateCommands": [],
             }
             plan = {
@@ -1419,8 +1408,8 @@ class EvidenceGateTest(unittest.TestCase):
                     "codeGate": "review_only",
                 },
                 "_bundleBatches": {
-                    "B001": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
-                    "B002": {key: value for key, value in batch.items() if key not in {"compileCommand", "batchCompile"}},
+                    "B001": dict(batch),
+                    "B002": dict(batch),
                 },
             }
 

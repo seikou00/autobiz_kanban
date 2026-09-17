@@ -9,23 +9,17 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
-from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
-from hooks.plan_json import PlanJsonError, load_plan_bundle, task_contract_sha256, task_set_digest  # noqa: E402
-from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
+from hooks.plan_json import task_contract_sha256, task_set_digest  # noqa: E402
 from hooks import plan_writer as plan_writer_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
 from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
-
 
 
 def _git(root: Path, *args: str) -> None:
@@ -49,6 +43,41 @@ def _read_batch(feature_dir: Path) -> dict:
 
 def _write_batch(feature_dir: Path, batch: dict) -> None:
     _batch_path(feature_dir).write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = False) -> None:
+    """Configure the only supported deferred-validation Plan contract.
+
+    The name is retained solely as a shared test-fixture API.  Batch compile
+    commands and the former ``batch_compile_only`` code gate are retired, so
+    test callers now exercise the review-owned validation flow regardless of
+    their former compiler-repair setup.
+    """
+
+    del always_fail
+    batch = _read_batch(feature_dir)
+    for task in batch["tasks"]:
+        task.update({
+            "implementationEvidenceIds": [],
+            "latestImplementationEvidenceId": None,
+            "validationEvidenceIds": [],
+            "implementationRevision": 0,
+        })
+    batch.pop("compileCommand", None)
+    batch.pop("batchCompile", None)
+    _write_batch(feature_dir, batch)
+
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["taskValidationPolicy"] = {
+        "mode": "defer_to_test_stages",
+        "orchestration": "inline",
+        "codeGate": "review_only",
+        "maxTestStageRepairAttempts": 3,
+    }
+    root.pop("compileProfiles", None)
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _refresh_parallel_pipeline(feature_dir)
 
 
 def _refresh_parallel_pipeline(feature_dir: Path) -> None:
@@ -96,14 +125,6 @@ def _bind_workspace_contract(
         if repo is not None:
             command["repo"] = repo
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _evidence(feature_dir: Path, evidence_id: str) -> dict:
-    for line in (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines():
-        record = json.loads(line)
-        if record.get("evidenceId") == evidence_id:
-            return record
-    raise AssertionError(f"missing evidence {evidence_id}")
 
 
 def _workspace(
@@ -280,16 +301,6 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run_plan_writer(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
 def _start(workspace: Path, code: Path) -> dict:
     result = _run(
         "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -298,39 +309,6 @@ def _start(workspace: Path, code: Path) -> dict:
     if result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
     return json.loads(result.stdout)
-def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = False) -> None:
-    """Configure the only supported deferred-validation Plan contract.
-
-    The name is retained solely as a shared test-fixture API.  Batch compile
-    commands and the former ``batch_compile_only`` code gate are retired, so
-    test callers now exercise the review-owned validation flow regardless of
-    their former compiler-repair setup.
-    """
-
-    del always_fail
-    batch = _read_batch(feature_dir)
-    for task in batch["tasks"]:
-        task.update({
-            "implementationEvidenceIds": [],
-            "latestImplementationEvidenceId": None,
-            "validationEvidenceIds": [],
-            "implementationRevision": 0,
-        })
-    batch.pop("compileCommand", None)
-    batch.pop("batchCompile", None)
-    _write_batch(feature_dir, batch)
-
-    root_path = feature_dir / "plan.json"
-    root = json.loads(root_path.read_text(encoding="utf-8"))
-    root["taskValidationPolicy"] = {
-        "mode": "defer_to_test_stages",
-        "orchestration": "inline",
-        "codeGate": "review_only",
-        "maxTestStageRepairAttempts": 3,
-    }
-    root.pop("compileProfiles", None)
-    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    _refresh_parallel_pipeline(feature_dir)
 
 
 def _configure_review_only(feature_dir: Path) -> None:
@@ -627,66 +605,6 @@ class TaskRunnerTest(unittest.TestCase):
                 [],
             )
 
-    @unittest.skip("batch compile is retired")
-    def test_revalidate_batch_compile_reruns_a_passed_batch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir, code = _workspace(root)
-            _configure_defer_to_test_stages(feature_dir)
-
-            compile_counter = root / "compile-count.txt"
-            compile_script = (
-                "from pathlib import Path; "
-                f"counter = Path({str(compile_counter)!r}); "
-                "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1'); "
-                "print('batch compile')"
-            )
-            batch = _read_batch(feature_dir)
-            batch["compileCommand"]["argv"] = [
-                sys.executable,
-                "-c",
-                compile_script,
-            ]
-            _write_batch(feature_dir, batch)
-            root_plan_path = feature_dir / "plan.json"
-            root_plan = json.loads(root_plan_path.read_text(encoding="utf-8"))
-            root_plan["compileProfiles"]["backend"]["commands"][0]["argv"] = [
-                sys.executable,
-                "-c",
-                compile_script,
-            ]
-            root_plan_path.write_text(
-                json.dumps(root_plan, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            _refresh_parallel_pipeline(feature_dir)
-
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-
-            first_compile = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(first_compile.returncode, 0, first_compile.stdout + first_compile.stderr)
-            self.assertEqual(compile_counter.read_text(encoding="utf-8"), "1")
-
-            revalidated = _run(
-                "revalidate-batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(revalidated.returncode, 0, revalidated.stdout + revalidated.stderr)
-            self.assertTrue(json.loads(revalidated.stdout)["wasRevalidation"])
-            self.assertEqual(compile_counter.read_text(encoding="utf-8"), "2")
-            revalidated_batch = _read_batch(feature_dir)
-            self.assertEqual(revalidated_batch["batchCompile"]["status"], "passed")
-            self.assertEqual(revalidated_batch["batchCompile"]["repairAttempts"], 0)
 
     def test_frontend_batch_without_compile_command_hands_off_to_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -728,143 +646,6 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIsNone(root["activeBatchId"])
             self.assertIsNone(root["nextBatchId"])
 
-    @unittest.skip("batch compile is retired")
-    def test_batch_compile_failure_requires_model_repair_and_new_implementation_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            first_evidence = json.loads(finished.stdout)["implementationEvidenceId"]
-
-            failed = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertNotEqual(failed.returncode, 0)
-            failed_payload = json.loads(failed.stdout)
-            self.assertEqual(failed_payload["requiredAction"], "start_batch_compile_repair")
-            self.assertEqual(failed_payload["nextActor"], "model")
-            self.assertEqual(failed_payload["repairAttempts"], 0)
-            self.assertEqual(failed_payload["maxRepairAttempts"], 3)
-            self.assertEqual(failed_payload["repairOwnerTaskIds"], ["T001"])
-
-            direct_retry = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertNotEqual(direct_retry.returncode, 0)
-            self.assertEqual(
-                json.loads(direct_retry.stdout)["error"],
-                "batch_compile_repair_required:B001",
-            )
-            ordinary_start = _run(
-                "start", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-            )
-            self.assertNotEqual(ordinary_start.returncode, 0)
-            self.assertEqual(
-                json.loads(ordinary_start.stdout)["requiredAction"],
-                "start_batch_compile_repair",
-            )
-
-            # A model may act on the compile diagnostics before it starts the
-            # formal repair run. The runner adopts that exact snapshot diff so
-            # it remains evidence-bound instead of demanding a rollback.
-            (code / "implemented.txt").write_text("implemented and repaired\n", encoding="utf-8")
-            (code / "compile-fixed.txt").write_text("fixed by model\n", encoding="utf-8")
-            repair = _run(
-                "start-batch-compile-repair", "--workspace", str(workspace),
-                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
-                "--code-workspace", str(code),
-            )
-            self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
-            repair_payload = json.loads(repair.stdout)
-            self.assertEqual(repair_payload["repairContext"]["batchCompileRepairAttempt"], 1)
-            self.assertTrue(repair_payload["repairContext"]["adoptedPreStartChanges"])
-            self.assertEqual(
-                repair_payload["batchCompileRepair"]["adoptedChangedFiles"],
-                ["compile-fixed.txt", "implemented.txt"],
-            )
-            repaired = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", repair_payload["runId"],
-            )
-            self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
-            second_evidence = json.loads(repaired.stdout)["implementationEvidenceId"]
-            self.assertNotEqual(second_evidence, first_evidence)
-            pending_batch = _read_batch(feature_dir)
-            self.assertEqual(pending_batch["batchCompile"]["status"], "pending")
-            self.assertEqual(pending_batch["batchCompile"]["repairAttempts"], 1)
-
-            passed = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
-            completed_batch = _read_batch(feature_dir)
-            self.assertEqual(completed_batch["batchCompile"]["status"], "passed")
-            self.assertEqual(completed_batch["tasks"][0]["status"], "done")
-            self.assertEqual(
-                completed_batch["tasks"][0]["implementationEvidenceIds"],
-                [first_evidence, second_evidence],
-            )
-            self.assertIn("plan_json:plan_json_status_not_done", check_code_done(feature_dir))
-
-            completed_batch["batchCompile"]["implementationEvidenceByTask"]["T001"] = first_evidence
-            _write_batch(feature_dir, completed_batch)
-            root_path = feature_dir / "plan.json"
-            root = json.loads(root_path.read_text(encoding="utf-8"))
-            root["taskSetDigest"] = task_set_digest(root, {"B001": completed_batch})
-            root_path.write_text(
-                json.dumps(root, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            self.assertIn("plan_json:plan_json_status_not_done", check_code_done(feature_dir))
-
-    @unittest.skip("batch compile is retired")
-    def test_parallel_compile_pass_waits_for_merge_before_marking_task_done(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            evidence_id = json.loads(finished.stdout)["implementationEvidenceId"]
-            compile_result = {
-                "compileStatus": "passed",
-                "commandId": "BATCH-B001-COMPILE",
-                "requestedCodeWorkspaces": [str(code.resolve())],
-                "workspaceSnapshotSha256": "b" * 64,
-                "implementationEvidenceByTask": {"T001": evidence_id},
-                "implementationRevisionByTask": {"T001": 1},
-            }
-            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
-                result = task_runner_module._integrate_batch_compile_result(
-                    workspace,
-                    "alpha",
-                    "B001",
-                    compile_result,
-                    parallel_run_id="cw-test-001",
-                )
-
-            self.assertEqual(result["requiredAction"], "run_utest")
-            mark_parallel.assert_called_once()
-            compiled_batch = _read_batch(feature_dir)
-            self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
-            self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
 
     def test_parallel_frontend_without_compile_hands_off_to_utest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -883,425 +664,6 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(payload["batchContinuation"]["requiredAction"], "await_review")
             self.assertNotIn("batchCompile", _read_batch(feature_dir))
 
-    @unittest.skip("batch compile is retired")
-    def test_parallel_workflow_compile_opt_out_is_recorded_as_skipped(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, _code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            batch = _read_batch(feature_dir)
-            batch["batchCompile"] = {
-                "status": "pending",
-                "commandId": None,
-                "output": None,
-                "failureCategory": None,
-                "diagnosticPaths": [],
-                "repairOwnerTaskIds": [],
-                "repairTaskId": None,
-                "repairAttempts": 0,
-                "maxRepairAttempts": 3,
-                "requestedCodeWorkspaces": [],
-                "workspaceSnapshotSha256": None,
-                "implementationEvidenceByTask": {},
-                "implementationRevisionByTask": {},
-            }
-            _write_batch(feature_dir, batch)
-            _refresh_parallel_pipeline(feature_dir)
-
-            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
-                result = task_runner_module._integrate_batch_compile_result(
-                    workspace,
-                    "alpha",
-                    "B001",
-                    {
-                        "compileStatus": "skipped",
-                        "skipReason": task_runner_module.WORKFLOW_BATCH_COMPILE_SKIP_REASON,
-                        "commandId": None,
-                    },
-                    parallel_run_id="cw-test-001",
-                )
-
-            self.assertEqual(result["compileStatus"], "skipped")
-            self.assertEqual(result["skipReason"], "workflow_batch_compile_disabled")
-            mark_parallel.assert_called_once_with(
-                workspace, "alpha", "cw-test-001", "B001", "sealed", compileStatus="skipped"
-            )
-            compiled_batch = _read_batch(feature_dir)
-            self.assertEqual(compiled_batch["batchCompile"]["status"], "skipped")
-            self.assertEqual(
-                compiled_batch["batchCompile"]["skipReason"],
-                "workflow_batch_compile_disabled",
-            )
-            load_plan_bundle(feature_dir)
-
-    @unittest.skip("batch compile is retired")
-    def test_parallel_compile_failure_is_recorded_without_blocking_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            evidence_id = json.loads(finished.stdout)["implementationEvidenceId"]
-            compile_result = {
-                "compileStatus": "failed",
-                "commandId": "BATCH-B001-COMPILE",
-                "output": "compile failed",
-                "failureCategory": "implementation",
-                "diagnosticPaths": ["src/example.py"],
-                "repairOwnerTaskIds": ["T001"],
-                "requestedCodeWorkspaces": [str(code.resolve())],
-                "workspaceSnapshotSha256": "c" * 64,
-                "implementationEvidenceByTask": {"T001": evidence_id},
-                "implementationRevisionByTask": {"T001": 1},
-            }
-            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
-                result = task_runner_module._integrate_batch_compile_result(
-                    workspace,
-                    "alpha",
-                    "B001",
-                    compile_result,
-                    parallel_run_id="cw-test-001",
-                )
-
-            self.assertEqual(result["compileStatus"], "failed")
-            self.assertEqual(result["requiredAction"], "recorded_continue")
-            mark_parallel.assert_called_once_with(
-                workspace, "alpha", "cw-test-001", "B001", "sealed",
-                compileStatus="failed", error="implementation",
-            )
-            self.assertEqual(_read_batch(feature_dir)["batchCompile"]["status"], "failed")
-
-            merged = plan_writer_module.mark_parallel_batch_tasks_merged(
-                workspace,
-                "alpha",
-                "B001",
-                merge_commit_sha="a" * 40,
-                delivery_run_id="cw-test-001",
-            )
-            self.assertTrue(merged.ok, merged.errors)
-            completed_batch = _read_batch(feature_dir)
-            self.assertEqual(completed_batch["tasks"][0]["status"], "done")
-            self.assertEqual(completed_batch["mergeCommitSha"], "a" * 40)
-
-    @unittest.skip("batch compile is retired")
-    def test_parallel_compile_environment_timeout_is_recorded_without_blocking_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            timeout = task_runner_module.TaskRunnerError(
-                "validation_environment_unavailable:BATCH-B001-COMPILE:command_timeout",
-                errorCategory="environment_failure",
-                failureCategory="command_timeout",
-                detail="timeoutSeconds=300;output=",
-            )
-            with patch("hooks.task_runner._run_validation", side_effect=timeout):
-                compile_result = task_runner_module._run_batch_compile(
-                    workspace,
-                    "alpha",
-                    "B001",
-                    code,
-                )
-
-            self.assertEqual(compile_result["compileStatus"], "failed")
-            self.assertEqual(compile_result["errorCategory"], "environment_failure")
-            self.assertEqual(compile_result["failureCategory"], "command_timeout")
-            self.assertIn("batch_compile_environment_failure:command_timeout", compile_result["output"])
-            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
-                result = task_runner_module._integrate_batch_compile_result(
-                    workspace,
-                    "alpha",
-                    "B001",
-                    compile_result,
-                    parallel_run_id="cw-test-001",
-                )
-
-            self.assertEqual(result["compileStatus"], "failed")
-            self.assertEqual(result["requiredAction"], "recorded_continue")
-            self.assertEqual(result["errorCategory"], "environment_failure")
-            mark_parallel.assert_called_once_with(
-                workspace,
-                "alpha",
-                "cw-test-001",
-                "B001",
-                "sealed",
-                compileStatus="failed",
-                error="command_timeout",
-            )
-            batch = _read_batch(feature_dir)
-            self.assertEqual(batch["batchCompile"]["status"], "failed")
-            self.assertEqual(batch["batchCompile"]["failureCategory"], "command_timeout")
-            self.assertEqual(batch["tasks"][0]["status"], "implemented")
-
-    def test_parallel_compile_failure_returns_success_after_it_is_recorded(self) -> None:
-        args = SimpleNamespace(
-            workspace="/unused",
-            feature="alpha",
-            batch_id="B001",
-            code_workspace=["/unused-repository"],
-            parallel_run_id="cw-test-001",
-            lease_token="lease-token",
-            workspace_ref="default",
-        )
-        recorded = {"compileStatus": "failed", "requiredAction": "recorded_continue"}
-        with patch("hooks.task_runner._resolve", return_value=(Path("/unused"), "alpha", [Path("/unused-repository")])), patch(
-            "hooks.task_runner.run_batch_compile", return_value=recorded
-        ), patch("hooks.task_runner._emit", return_value=0) as emit:
-            exit_code = task_runner_module._cmd_batch_compile(args)
-
-        self.assertEqual(exit_code, 0)
-        emit.assert_called_once_with(True, **recorded)
-
-    def test_interrupted_parallel_compile_returns_success_after_diagnostic_is_recorded(self) -> None:
-        args = SimpleNamespace(
-            workspace="/unused",
-            feature="alpha",
-            batch_id="B001",
-            code_workspace=["/unused-repository"],
-            parallel_run_id="cw-test-001",
-            lease_token="lease-token",
-            workspace_ref="default",
-            reason="workflow host terminated the compile command",
-        )
-        recorded = {
-            "compileStatus": "failed",
-            "failureCategory": "workflow_interrupted",
-            "requiredAction": "recorded_continue",
-        }
-        with patch("hooks.task_runner._resolve", return_value=(Path("/unused"), "alpha", [Path("/unused-repository")])), patch(
-            "hooks.task_runner.record_interrupted_batch_compile", return_value=recorded
-        ) as record, patch("hooks.task_runner._emit", return_value=0) as emit:
-            exit_code = task_runner_module._cmd_record_interrupted_batch_compile(args)
-
-        self.assertEqual(exit_code, 0)
-        record.assert_called_once_with(
-            Path("/unused"), "alpha", "B001", [Path("/unused-repository")],
-            parallel_run_id="cw-test-001", lease_token="lease-token", workspace_ref="default",
-            reason="workflow host terminated the compile command",
-        )
-        emit.assert_called_once_with(True, **recorded)
-
-    @unittest.skip("batch compile is retired")
-    def test_interrupted_compile_reuses_a_result_written_before_host_timeout(self) -> None:
-        bundle = SimpleNamespace(batches={
-            "B001": {
-                "batchCompile": {
-                    "status": "failed",
-                    "commandId": "BATCH-B001-COMPILE",
-                    "failureCategory": "command_timeout",
-                    "errorCategory": "environment_failure",
-                },
-            },
-        })
-        with patch("hooks.task_runner.load_plan_bundle", return_value=bundle), patch(
-            "hooks.task_runner._require_parallel_workflow_for_multi_batch"
-        ), patch("hooks.task_runner._assert_parallel_context"), patch(
-            "hooks.task_runner._assert_parallel_compile_after_review"
-        ):
-            result = task_runner_module.record_interrupted_batch_compile(
-                Path("/unused"), "alpha", "B001", Path("/unused-repository"),
-                parallel_run_id="cw-test-001", lease_token="lease-token",
-                workspace_ref="default", reason="workflow host timed out after task_runner returned",
-            )
-
-        self.assertEqual(result["compileStatus"], "failed")
-        self.assertEqual(result["failureCategory"], "command_timeout")
-        self.assertTrue(result["reusedRecordedCompile"])
-
-    def test_parallel_revalidate_compile_failure_returns_success_after_it_is_recorded(self) -> None:
-        args = SimpleNamespace(
-            workspace="/unused",
-            feature="alpha",
-            batch_id="B001",
-            code_workspace=["/unused-repository"],
-            parallel_run_id="cw-test-001",
-            lease_token="lease-token",
-            workspace_ref="default",
-        )
-        recorded = {
-            "compileStatus": "failed",
-            "requiredAction": "recorded_continue",
-            "wasRevalidation": True,
-        }
-        with patch("hooks.task_runner._resolve", return_value=(Path("/unused"), "alpha", [Path("/unused-repository")])), patch(
-            "hooks.task_runner.revalidate_batch_compile", return_value=recorded
-        ), patch("hooks.task_runner._emit", return_value=0) as emit:
-            exit_code = task_runner_module._cmd_revalidate_batch_compile(args)
-
-        self.assertEqual(exit_code, 0)
-        emit.assert_called_once_with(True, **recorded)
-
-    def test_parallel_batch_compile_requires_a_passed_review(self) -> None:
-        pending_manifest = {
-            "batches": {
-                "B001": {"stageStates": {"review": {"status": "pending"}}}
-            }
-        }
-        with patch("hooks.task_runner.load_manifest", return_value=pending_manifest):
-            with self.assertRaisesRegex(
-                task_runner_module.TaskRunnerError,
-                "parallel_batch_compile_requires_review_passed:B001:pending",
-            ) as caught:
-                task_runner_module._assert_parallel_compile_after_review(
-                    Path("/workspace"), "alpha", "run-001", "B001"
-                )
-        self.assertEqual(caught.exception.details["requiredAction"], "complete_review_before_compile")
-
-        reviewed_manifest = {
-            "batches": {
-                "B001": {"stageStates": {"review": {"status": "passed"}}}
-            }
-        }
-        with patch("hooks.task_runner.load_manifest", return_value=reviewed_manifest):
-            task_runner_module._assert_parallel_compile_after_review(
-                Path("/workspace"), "alpha", "run-001", "B001"
-            )
-
-    @unittest.skip("batch compile is retired")
-    def test_batch_compile_repair_does_not_adopt_test_changes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            failed = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertNotEqual(failed.returncode, 0)
-
-            test_file = code / "tests" / "generated_test.py"
-            test_file.parent.mkdir(parents=True)
-            test_file.write_text("assert True\n", encoding="utf-8")
-            repair = _run(
-                "start-batch-compile-repair", "--workspace", str(workspace),
-                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
-                "--code-workspace", str(code),
-            )
-
-            self.assertNotEqual(repair.returncode, 0)
-            payload = json.loads(repair.stdout)
-            self.assertEqual(payload["error"], "code_stage_test_changes_forbidden")
-            self.assertEqual(payload["testFiles"], ["tests/generated_test.py"])
-            self.assertEqual(_read_batch(feature_dir)["batchCompile"]["repairAttempts"], 0)
-
-    @unittest.skip("batch compile is retired")
-    def test_batch_compile_repair_adopts_changes_from_legacy_failed_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            failed = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertNotEqual(failed.returncode, 0)
-            snapshot_path = (
-                feature_dir / ".task-runs" / ".batch-compile" / "B001.json"
-            )
-            snapshot_path.unlink()
-
-            (code / "compile-fixed.txt").write_text("fixed before runner upgrade\n", encoding="utf-8")
-            repair = _run(
-                "start-batch-compile-repair", "--workspace", str(workspace),
-                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
-                "--code-workspace", str(code),
-            )
-
-            self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
-            payload = json.loads(repair.stdout)
-            self.assertTrue(payload["repairContext"]["adoptedPreStartChanges"])
-            self.assertEqual(
-                payload["batchCompileRepair"]["adoptedChangedFiles"],
-                ["compile-fixed.txt"],
-            )
-
-    @unittest.skip("batch compile is retired")
-    def test_batch_compile_model_repair_is_blocked_after_three_attempts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_defer_to_test_stages(feature_dir, always_fail=True)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-
-            for attempt in range(1, 4):
-                failed = _run(
-                    "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                    "--batch-id", "B001", "--code-workspace", str(code),
-                )
-                self.assertNotEqual(failed.returncode, 0)
-                repair = _run(
-                    "start-batch-compile-repair", "--workspace", str(workspace),
-                    "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
-                    "--code-workspace", str(code),
-                )
-                self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
-                repair_payload = json.loads(repair.stdout)
-                self.assertEqual(
-                    repair_payload["repairContext"]["batchCompileRepairAttempt"],
-                    attempt,
-                )
-                (code / "repair.txt").write_text(f"model repair {attempt}\n", encoding="utf-8")
-                repaired = _run(
-                    "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                    "--task-id", "T001", "--code-workspace", str(code),
-                    "--run-id", repair_payload["runId"],
-                )
-                self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
-
-            final_failure = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertNotEqual(final_failure.returncode, 0)
-            final_payload = json.loads(final_failure.stdout)
-            self.assertEqual(
-                final_payload["requiredAction"],
-                "escalate_batch_compile_repair_exhausted",
-            )
-            self.assertEqual(final_payload["repairAttempts"], 3)
-            self.assertFalse(final_payload["modelRepairRequired"])
-
-            fourth_repair = _run(
-                "start-batch-compile-repair", "--workspace", str(workspace),
-                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
-                "--code-workspace", str(code),
-            )
-            self.assertNotEqual(fourth_repair.returncode, 0)
-            self.assertEqual(
-                json.loads(fourth_repair.stdout)["error"],
-                "batch_compile_repair_attempts_exhausted:B001",
-            )
 
     def test_first_task_start_does_not_require_code_exploration_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1625,39 +987,6 @@ class TaskRunnerTest(unittest.TestCase):
                 [launch_spec.resolved_executable, "--version"],
             )
 
-    @unittest.skipUnless(os.name == "nt", "Windows batch launch integration")
-    def test_windows_batch_compile_failure_is_captured_before_timeout(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = (Path(tmp) / "含空格仓库").resolve()
-            source = repo / "src" / "main" / "java" / "example" / "App.java"
-            source.parent.mkdir(parents=True)
-            source.write_text("class App {}\n", encoding="utf-8")
-            maven = repo / "mvn.cmd"
-            maven.write_text(
-                "@echo off\r\n"
-                f"echo [ERROR] {source}:[1,1] must be caught or declared to be thrown 1>&2\r\n"
-                "exit /b 1\r\n",
-                encoding="utf-8",
-            )
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [str(maven), "compile"],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 10,
-            }
-            started_at = time.monotonic()
-            exit_code, output = task_runner_module._run_validation(
-                command,
-                {repo.name: repo},
-            )
-            self.assertEqual(exit_code, 1)
-            self.assertLess(time.monotonic() - started_at, 5)
-            self.assertIn("must be caught or declared to be thrown", output)
-            self.assertIn(
-                "validation_process_stopped_after_compile_failure:source_compile_failure",
-                output,
-            )
 
     def test_compile_ignores_fresh_maven_test_failure_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1847,49 +1176,6 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIn("code_workspace_contract_mismatch", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
-    def test_start_rejects_retired_compile_plan_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp))
-            batch = _read_batch(feature_dir)
-            batch["compileCommand"] = {"id": "BATCH-B001-COMPILE", "kind": "compile", "required": True}
-            _write_batch(feature_dir, batch)
-            root_path = feature_dir / "plan.json"
-            root = json.loads(root_path.read_text(encoding="utf-8"))
-            root["compileProfiles"] = {"backend": {"commands": []}}
-            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-            started = _run(
-                "start", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-            )
-
-            self.assertNotEqual(started.returncode, 0)
-            self.assertIn("compileProfiles_retired", started.stdout)
-
-    def test_retired_batch_compile_state_requires_plan_rebuild(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _, feature_dir, _ = _workspace(Path(tmp))
-            batch = _read_batch(feature_dir)
-            batch["batchCompile"] = {
-                "status": "skipped",
-                "commandId": None,
-                "output": None,
-                "failureCategory": None,
-                "diagnosticPaths": [],
-                "repairOwnerTaskIds": [],
-                "repairTaskId": None,
-                "repairAttempts": 0,
-                "maxRepairAttempts": 3,
-                "requestedCodeWorkspaces": [],
-                "workspaceSnapshotSha256": None,
-                "implementationEvidenceByTask": {},
-                "implementationRevisionByTask": {},
-            }
-            _write_batch(feature_dir, batch)
-
-            with self.assertRaises(PlanJsonError) as caught:
-                load_plan_bundle(feature_dir)
-            self.assertIn("B001.batchCompile_retired", str(caught.exception))
 
     def test_start_ignores_task_test_manifest_in_compile_only_code_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
