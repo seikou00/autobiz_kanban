@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -25,6 +26,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.implementation_scope import resolve_feature_dir, scope_path  # noqa: E402
+from hooks.spec_contract import SPEC_SCENARIO_DEF_RE  # noqa: E402
+from hooks.source_context import load_source_context, source_requirement_index  # noqa: E402
 from hooks.json_writer_common import (  # noqa: E402
     WriterError,
     atomic_write_json,
@@ -176,6 +179,33 @@ def scope_report(selections: dict[str, ScopeSelection]) -> dict[str, Any]:
             "unpartitioned": sorted(selection.unpartitioned),
         }
     return report
+
+
+def resolve_plan_scope(feature_dir: Path) -> tuple[dict[str, ScopeSelection], list[dict[str, Any]]]:
+    """Use the same coverage universe in publishing and stage validation."""
+    scope, errors = load_plan_scope(feature_dir)
+    scenarios: set[str] = set()
+    for spec in sorted((feature_dir / "specs").glob("**/*.md")):
+        scenarios.update(
+            f"{spec.relative_to(feature_dir).as_posix()}#{anchor}"
+            for anchor in SPEC_SCENARIO_DEF_RE.findall(spec.read_text(encoding="utf-8"))
+        )
+    design = feature_dir / "design.md"
+    design_ids = set(re.findall(
+        r"^\|\s*((?:API|DATA|D)-\d{3})\s*\|",
+        design.read_text(encoding="utf-8") if design.is_file() else "",
+        re.MULTILINE,
+    ))
+    context, _ = load_source_context(feature_dir)
+    selections: dict[str, ScopeSelection] = {}
+    for kind, universe in (
+        ("scenario", scenarios),
+        ("design", design_ids),
+        ("source", set(source_requirement_index(context))),
+    ):
+        selections[kind], issues = scope.select(kind, universe)
+        errors.extend(issues)
+    return selections, errors
 
 
 def _partition_payload(feature_dir: Path) -> dict[str, Any]:

@@ -973,7 +973,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertIn("unknown_plan_task_scenario_ref", rejected.stdout)
             self.assertEqual(json.loads(source_path.read_text(encoding="utf-8")), core)
 
-    def test_core_preflight_emits_matrix_detail_obligation_before_draft(self) -> None:
+    def test_core_preflight_does_not_create_legacy_matrix_detail_obligations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
@@ -1018,10 +1018,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             obligation = json.loads(result.stdout)["grouping"]["detailObligations"]
-            self.assertEqual(obligation[0]["taskId"], "T001")
-            self.assertEqual(obligation[0]["required"]["commandCount"], 1)
-            self.assertIn("behavior_test", obligation[0]["required"]["allowedKinds"])
-            self.assertIn("omit covers", obligation[0]["required"]["covers"])
+            self.assertEqual(obligation, [])
 
     def test_detail_lint_batches_errors_and_batch_write_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1055,11 +1052,11 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
             self.assertNotEqual(lint.returncode, 0)
             lint_reasons = {item["reason"] for item in json.loads(lint.stdout)["errors"]}
-            self.assertIn("T001.implementation_points_exceeds_limit", lint_reasons)
             self.assertIn("unknown_plan_json_decision_ref", lint_reasons)
 
             invalid_second = _draft_detail_body(second)
             invalid_second["implementationPoints"] = [f"point {index}" for index in range(7)]
+            invalid_second["decisionIds"] = ["D-999"]
             batch = {
                 "details": [
                     {"taskId": "T001", "body": _draft_detail_body(first)},
@@ -1071,7 +1068,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 "--feature", "alpha", "--body-json", json.dumps(batch),
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("T002.implementation_points_exceeds_limit", result.stdout)
+            self.assertIn("unknown_plan_json_decision_ref", result.stdout)
             draft = json.loads((
                 feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
             ).read_text(encoding="utf-8"))

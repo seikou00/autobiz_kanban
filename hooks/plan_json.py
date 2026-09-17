@@ -2177,8 +2177,6 @@ def _bundle_consistency_errors(
                 dep_batch = task_batches.get(dep)
                 if dep_batch is None:
                     continue
-                if task_execution_lane(item) == "backend" and task_execution_lane(task_by_id[dep]) == "frontend":
-                    errors.append(f"{task_id}.backend_dependency_on_frontend:{dep}")
                 if batch_order[dep_batch] > batch_order[batch_id]:
                     errors.append(f"{task_id}.dependency_not_in_earlier_batch:{dep}")
                 elif dep_batch != batch_id:

@@ -906,6 +906,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             feature_dir.mkdir()
             frontend_task = task("T001", ui_required=True)
             backend_task = task("T002")
+            backend_task["deps"] = ["T001"]
             entries = [
                 batch_entry("B001", ["T001"], execution_lane="frontend"),
                 batch_entry("B002", ["T002"], deps=["B001"], execution_lane="backend"),
@@ -917,6 +918,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
         self.assertNotIn("backend_batch_after_frontend:B002", errors)
+        self.assertNotIn("T002.backend_dependency_on_frontend:T001", errors)
 
     def test_plan_writer_does_not_backfill_an_earlier_capability_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

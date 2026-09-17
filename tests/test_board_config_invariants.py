@@ -488,6 +488,9 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "用户或系统可观察的交付结果",
             "真实依赖",
             "不按固定数量阈值拆分",
+            "共享仓库、接口或页面不构成合并理由",
+            "完整的验证叙事",
+            "首次发布前不要预读 writer、门禁或校验器源码",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(

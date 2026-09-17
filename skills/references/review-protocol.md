@@ -57,7 +57,7 @@
 <!-- section: 严重度词表 | stages: dev.plan -->
 ## 严重度词表
 
-Plan 使用 `critic-autodev-plan-zh` 的原文分节名：`Critical Findings`、`Major Findings`、`Minor Findings` 与 `Open Questions (unscored)`。Critical 和 Major 只能报告覆盖、引用、仓库归属或依赖的事实问题；没有证据的内容归入 `Open Questions (unscored)`。
+Plan 使用 `critic-autodev-plan-zh` 的原文分节名：`Critical Findings`、`Major Findings`、`Minor Findings` 与 `Open Questions (unscored)`。Critical 和 Major 报告有证据的覆盖、引用、仓库归属、依赖、交付意图或任务粒度问题；没有证据的内容归入 `Open Questions (unscored)`。
 
 <!-- section: Plan 回检输入 | stages: dev.plan -->
 派发给 reviewer 的 prompt 必须包含 feature 目录的绝对路径和输入材料清单；路径缺失时停止回检，不自行搜索工作区。
@@ -123,9 +123,9 @@ Plan 使用 `critic-autodev-plan-zh` 的原文分节名：`Critical Findings`、
 
 | 分类 | 判定 | 动作 |
 |------|------|------|
-| 产物可修 | DAG、覆盖缺口、仓库归属或交付意图不足 | 重新发布完整 Plan v2，不改写 design.md |
+| 产物可修 | DAG、覆盖缺口、仓库归属、交付意图不足、任务过大或机械碎片化 | 尚未发布则修正输入；已发布且未执行则通过 Plan rollback 回到 plan_in_progress 后重新发布完整 Plan v2，不改写 design.md |
 | 引用与事实不符 | 任务引用的 REQ/SCN/API/DATA/D 不存在或与设计不符 | 修正任务引用；若设计本身需要改变，回 `/autodev-design` |
-| 需用户裁定 | 有真实备选且改变任务边界、执行顺序或验证策略 | 停止并向用户裁定，不自行选择 |
+| 需用户裁定 | 必须改变已确认的业务范围、公开契约或用户取舍 | 仅就该业务决策询问用户；既定范围内的任务拆分、真实依赖排序和内部验证组织由主代理自行修复 |
 | 回流上游 | 行为或技术设计契约缺失、矛盾 | 分别回 `/autodev-specs` 或 `/autodev-design`，不在本阶段补写 |
 | 仅列出 | 成立但不足以改产物 | 不改产物，在结论块中列出 |
 | 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明 |

@@ -88,17 +88,18 @@ class SpecIdConventionTest(unittest.TestCase):
             )
 
     def test_spec_template_matches_indexer_patterns(self) -> None:
-        """模板教的写法必须正好是索引器认的写法，否则覆盖门会重新真空。"""
+        """把模板 ID 槽位替换为实际编号后，标题必须被索引器识别。"""
         text = SPEC_TEMPLATE.read_text(encoding="utf-8")
+        rendered = text.replace("REQ-NNN", "REQ-001").replace("SCN-NNN", "SCN-001")
         self.assertTrue(
-            SPEC_REQUIREMENT_DEF_RE.search(text),
+            SPEC_REQUIREMENT_DEF_RE.search(rendered),
             f"{SPEC_TEMPLATE} 的 Requirement 标题不被 SPEC_REQUIREMENT_DEF_RE 识别，"
-            "修复：模板改用 '### Requirement [REQ-NNN]: <标题>'",
+            "修复：模板改用 '### Requirement REQ-NNN: <标题>'",
         )
         self.assertTrue(
-            SPEC_SCENARIO_DEF_RE.search(text),
+            SPEC_SCENARIO_DEF_RE.search(rendered),
             f"{SPEC_TEMPLATE} 的 Scenario 标题不被 SPEC_SCENARIO_DEF_RE 识别，"
-            "修复：模板改用 '#### Scenario [SCN-NNN]: <标题>'",
+            "修复：模板改用 '#### Scenario SCN-NNN: <标题>'",
         )
 
     def test_legacy_verify_checkpoint_is_rejected_after_pipeline_convergence(self) -> None:
