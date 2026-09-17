@@ -145,7 +145,7 @@ provisioned.
    selection, so no unrelated Batch completion barrier exists.
 2. The selected tasks run concurrently with `parallel()` up to `maxParallel`.
    Every Batch independently runs code → Review → UTest/seal
-   → quality gate → Merge Train promotion. A fast Batch may therefore
+   → Merge Train promotion. A fast Batch may therefore
    review, test, and merge while another Batch in the same frontier is still
    coding. Every Batch records its actual Worktree path and branch in the
    scheduler manifest. In conservative mode, same-repository write-set overlap
@@ -157,19 +157,17 @@ provisioned.
    Review draft. The draft is
    released as `sealed` for the following read-only Review.
 4. `parallelBatchPipeline.validationOwnership` assigns every test intent to
-   its delivery Batch except `e2e_test`, which belongs to final B-E2E.  Root
-   project commands also belong to B-E2E.  The delivery UTest agent generates
-   and runs its own tests in the native Worktree; `parallel_stage_validation.py`
-   executes only declared command owners and records their evidence.
+   its delivery Batch except `e2e_test`, which belongs to final B-E2E.  The
+   delivery UTest agent generates and runs its own tests in the native
+   Worktree.
 5. Each Review draft first performs production-code-only `review`. A Review
    source bug returns to that Batch's implement repair and a new seal. The
    Review is then recorded as resolved. The resulting
    delivery performs UTest in the same Worktree and re-seals the test assets.
    Any final UTest failure is
    retained with its runner Evidence as a non-blocking issue and proceeds to
-   later stages without restarting implementation, Review, or UTest. It
-   performs `quality_gate` only if the Batch declares static-check commands.
-   Only then is it `ready_to_candidate`.
+   later stages without restarting implementation, Review, or UTest. Only
+   then is it `ready_to_candidate`.
    The shared Workflow builds a Merge Train candidate and fast-forwards it
    directly; no candidate test phase is run. A changed main SHA makes the candidate
    stale and requires rebuild rather than rebase.

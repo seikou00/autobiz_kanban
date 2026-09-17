@@ -21,7 +21,6 @@ from typing import Any
 from hooks.validation_policy import (
     BEHAVIOR_TASK_VALIDATION_KINDS,
     FRONTEND_COMPILE_VALIDATION_KINDS,
-    QUALITY_GATE_KINDS,
     TASK_VALIDATION_KINDS,
     command_policy_errors,
     frontend_compile_command_matches_kind,
@@ -45,8 +44,6 @@ TECH_DECISION_ID_RE = re.compile(r"^D-\d{3}$")
 EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
 ACCEPTANCE_ID_RE = re.compile(r"^AC-T\d{3}-\d{2,3}$")
 VALIDATION_ID_RE = re.compile(r"^VAL-T\d{3}-\d{2,3}$")
-PROJECT_VALIDATION_ID_RE = re.compile(r"^PROJECT-VAL-\d{3}$")
-BATCH_QUALITY_GATE_ID_RE = re.compile(r"^BATCH-B\d{3}-QUALITY-\d{3}$")
 REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
@@ -66,11 +63,6 @@ TASK_VALIDATION_ERROR_CATEGORIES = {
     "validation_contract_failure",
     "workspace_changed",
     "runner_integrity_failure",
-}
-PROJECT_VALIDATION_KINDS = {
-    "integration_test",
-    "e2e_test",
-    "static_check",
 }
 # A Batch remains the delivery/recovery boundary.  New Plans default to one
 # Task per Batch; only an explicitly declared, inseparable delivery loop may
@@ -332,7 +324,6 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "batchDeliveryKind": batch.get("deliveryKind") if isinstance(batch, dict) else None,
             "batchAtomicGroupId": batch.get("atomicGroupId") if isinstance(batch, dict) else None,
             "batchRationale": batch.get("batchRationale") if isinstance(batch, dict) else None,
-            "qualityGateCommands": batch.get("qualityGateCommands") if isinstance(batch, dict) else None,
             "tasks": [
                 {"id": task.get("id"), "contractSha256": task_contract_sha256(task)}
                 for task in batch_tasks
@@ -828,7 +819,6 @@ def validate_plan_data(
         and entry.get("workspaceRef")
     }
     _validate_code_workspace_bindings(errors, data, batch_workspace_refs)
-    _validate_quality_gate_profiles(errors, data)
 
     known_batches = set(batch_ids)
     for field in ("activeBatchId", "nextBatchId"):
@@ -838,7 +828,6 @@ def validate_plan_data(
     if require_all_done and (data.get("activeBatchId") is not None or data.get("nextBatchId") is not None):
         errors.append("plan_json_done_with_pending_batch_pointer")
 
-    _validate_project_commands(errors, data, require_all_done=require_all_done)
     return errors
 
 
@@ -888,11 +877,6 @@ def validate_batch_plan_data(
     completed_count = sum(normalize_status(item.get("status")) == "done" for item in batch_tasks)
     if data.get("completedTaskCount") != completed_count:
         errors.append(f"{batch_id}.completedTaskCount_mismatch")
-    _validate_batch_execution_commands(
-        errors,
-        data,
-        str(batch_id),
-    )
     if "taskValidation" in data:
         errors.append(f"{batch_id}.taskValidation_forbidden")
     delivery_kind = data.get("deliveryKind")
@@ -936,14 +920,6 @@ def validate_batch_plan_data(
     }
     if len(frontend_routes) > 1:
         errors.append(f"{batch_id}.mixed_task_frontend_routes")
-    quality_commands = data.get("qualityGateCommands")
-    for index, command in enumerate(quality_commands if isinstance(quality_commands, list) else []):
-        _validate_command_workspace_root(
-            errors,
-            command,
-            context=f"{batch_id}.qualityGateCommands[{index}]",
-            workspace_roots=workspace_roots,
-        )
     _validate_string_list(errors, data, str(batch_id), "completionEvidenceIds", required=False, item_re=EVIDENCE_ID_RE)
     for field in ("startedAt", "completedAt"):
         value = data.get(field)
@@ -1188,85 +1164,6 @@ def _validate_validation_test_plan(
                 errors.append(f"{item_context}.testIntent.acceptanceCriteria_mismatch")
 
 
-def _validate_quality_gate_command(
-    errors: list[str],
-    command: Any,
-    *,
-    context: str,
-    command_id_required: bool,
-) -> None:
-    if not isinstance(command, dict):
-        errors.append(f"{context}_must_be_object")
-        return
-    if command_id_required:
-        command_id = command.get("id")
-        if not isinstance(command_id, str) or not BATCH_QUALITY_GATE_ID_RE.fullmatch(command_id):
-            errors.append(f"{context}.id_invalid")
-    argv = _string_list(command.get("argv"))
-    if argv is None or not argv:
-        errors.append(f"{context}.argv_missing")
-    else:
-        for policy_error in command_policy_errors(command):
-            errors.append(f"{context}.{policy_error}")
-    cwd = command.get("cwd")
-    if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
-        errors.append(f"{context}.cwd_invalid")
-    if command.get("kind") not in QUALITY_GATE_KINDS:
-        errors.append(f"{context}.kind_invalid")
-    if command.get("required") is not True:
-        errors.append(f"{context}.required_must_be_true")
-    repository = command.get("repo")
-    if repository is not None and (
-        not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
-    ):
-        errors.append(f"{context}.repo_invalid")
-
-
-def _validate_quality_gate_profiles(errors: list[str], data: dict[str, Any]) -> None:
-    profiles = data.get("qualityGateProfiles")
-    if not isinstance(profiles, dict):
-        errors.append("quality_gate_contract_requires_rebuild:qualityGateProfiles")
-        return
-    for lane, profile in profiles.items():
-        if lane not in EXECUTION_LANES:
-            errors.append(f"qualityGateProfiles_unknown_lane:{lane}")
-            continue
-        if not isinstance(profile, dict):
-            errors.append(f"qualityGateProfiles.{lane}_must_be_object")
-            continue
-        commands = profile.get("commands")
-        if not isinstance(commands, list):
-            errors.append(f"qualityGateProfiles.{lane}.commands_must_be_array")
-            continue
-        for index, command in enumerate(commands):
-            _validate_quality_gate_command(
-                errors,
-                command,
-                context=f"qualityGateProfiles.{lane}.commands[{index}]",
-                command_id_required=False,
-            )
-
-
-def _validate_batch_execution_commands(
-    errors: list[str],
-    data: dict[str, Any],
-    batch_id: str,
-) -> None:
-    quality_commands = data.get("qualityGateCommands")
-    if not isinstance(quality_commands, list):
-        errors.append(f"quality_gate_contract_requires_rebuild:{batch_id}.qualityGateCommands")
-        return
-    seen: set[str] = set()
-    for index, command in enumerate(quality_commands):
-        context = f"{batch_id}.qualityGateCommands[{index}]"
-        _validate_quality_gate_command(errors, command, context=context, command_id_required=True)
-        command_id = command.get("id") if isinstance(command, dict) else None
-        if isinstance(command_id, str):
-            if command_id in seen:
-                errors.append(f"{batch_id}.qualityGateCommands_duplicate:{command_id}")
-            seen.add(command_id)
-
-
 def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) -> None:
     policy = data.get("taskValidationPolicy")
     if policy is None:
@@ -1336,129 +1233,6 @@ def _validate_validation_deferral(
         errors.append(f"{context}.handoffStages_invalid")
     if not isinstance(issue.get("createdAt"), str) or not issue.get("createdAt", "").strip():
         errors.append(f"{context}.createdAt_invalid")
-
-
-def _validate_project_commands(
-    errors: list[str],
-    data: dict[str, Any],
-    *,
-    require_all_done: bool,
-) -> None:
-    commands = data.get("projectValidationCommands")
-    if not isinstance(commands, list):
-        errors.append("projectValidationCommands_must_be_array")
-        return
-    seen: set[str] = set()
-    profile_signatures: dict[tuple[tuple[str, ...], str, str | None], str] = {}
-    for profile_field in ("qualityGateProfiles",):
-        profiles = data.get(profile_field)
-        if not isinstance(profiles, dict):
-            continue
-        for lane, profile in profiles.items():
-            profile_commands = profile.get("commands") if isinstance(profile, dict) else None
-            for command in profile_commands if isinstance(profile_commands, list) else []:
-                if not isinstance(command, dict):
-                    continue
-                argv = _string_list(command.get("argv"))
-                cwd = command.get("cwd")
-                repo = command.get("repo")
-                if argv and isinstance(cwd, str):
-                    profile_signatures[
-                        (
-                            tuple(argv),
-                            PurePosixPath(cwd).as_posix(),
-                            repo if isinstance(repo, str) else None,
-                        )
-                    ] = str(lane)
-    for index, command in enumerate(commands):
-        context = f"projectValidationCommands[{index}]"
-        if not isinstance(command, dict):
-            errors.append(f"{context}_must_be_object")
-            continue
-        command_id = command.get("id")
-        if not isinstance(command_id, str) or not PROJECT_VALIDATION_ID_RE.fullmatch(command_id):
-            errors.append(f"{context}.id_invalid")
-        elif command_id in seen:
-            errors.append(f"projectValidationCommands_duplicate:{command_id}")
-        else:
-            seen.add(command_id)
-        argv = _string_list(command.get("argv"))
-        if argv is None or not argv:
-            errors.append(f"{context}.argv_missing")
-        else:
-            for policy_error in command_policy_errors(command):
-                errors.append(f"{context}.{policy_error}")
-        cwd = command.get("cwd")
-        if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
-            errors.append(f"{context}.cwd_invalid")
-        if command.get("kind") not in PROJECT_VALIDATION_KINDS:
-            errors.append(f"{context}.kind_invalid")
-        if not isinstance(command.get("required"), bool):
-            errors.append(f"{context}.required_must_be_bool")
-        repository = command.get("repo")
-        if repository is not None and (
-            not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
-        ):
-            errors.append(f"{context}.repo_invalid")
-        if argv and isinstance(cwd, str):
-            signature = (
-                tuple(argv),
-                PurePosixPath(cwd).as_posix(),
-                repository if isinstance(repository, str) else None,
-            )
-            duplicate_lane = profile_signatures.get(signature)
-            if duplicate_lane is not None:
-                errors.append(f"{context}.duplicates_batch_profile:{duplicate_lane}")
-    project_evidence_ids = _validate_string_list(
-        errors,
-        data,
-        "plan",
-        "projectCheckEvidenceIds",
-        required=False,
-        item_re=EVIDENCE_ID_RE,
-    )
-    latest = data.get("latestProjectCheckEvidenceId")
-    if latest is not None and (not isinstance(latest, str) or not EVIDENCE_ID_RE.fullmatch(latest)):
-        errors.append("latestProjectCheckEvidenceId_invalid")
-    elif isinstance(latest, str):
-        if latest not in project_evidence_ids:
-            errors.append(f"latestProjectCheckEvidenceId_not_in_history:{latest}")
-        elif latest != project_evidence_ids[-1]:
-            errors.append(f"latestProjectCheckEvidenceId_not_latest:{latest}")
-    disposition = data.get("projectValidationDisposition")
-    if disposition is not None:
-        _validate_validation_deferral(
-            errors,
-            disposition,
-            context="projectValidationDisposition",
-            expected_scope="project",
-        )
-    if "projectValidationFailedRunIds" in data:
-        failed_run_ids = _validate_string_list(
-            errors,
-            data,
-            "plan",
-            "projectValidationFailedRunIds",
-            required=False,
-        )
-        if len(failed_run_ids) != len(set(failed_run_ids)):
-            errors.append("projectValidationFailedRunIds_duplicate")
-    deferred_issues = data.get("deferredValidationIssues", [])
-    if not isinstance(deferred_issues, list):
-        errors.append("deferredValidationIssues_must_be_array")
-    else:
-        seen_issue_ids: set[str] = set()
-        for index, issue in enumerate(deferred_issues):
-            _validate_validation_deferral(
-                errors,
-                issue,
-                context=f"deferredValidationIssues[{index}]",
-            )
-            issue_id = issue.get("issueId") if isinstance(issue, dict) else None
-            if isinstance(issue_id, str):
-                if issue_id in seen_issue_ids:
-                    errors.append(f"deferredValidationIssues_duplicate:{issue_id}")
-                seen_issue_ids.add(issue_id)
 
 
 def _validate_task_details(
@@ -1661,55 +1435,6 @@ def task_ids(data: dict[str, Any]) -> set[str]:
     return {task["id"] for task in tasks(data) if isinstance(task.get("id"), str)}
 
 
-def _profile_command_matches_batch_workspace(command: dict[str, Any], workspace_ref: str | None) -> bool:
-    """Mirror the writer's projection rule without importing the writer.
-
-    Root profiles are the declarative source; Batch commands are generated
-    projections.  Comparing them here keeps manual Batch edits from silently
-    changing which command a pipeline stage executes.
-    """
-    repository = command.get("repo")
-    if workspace_ref in {None, DEFAULT_WORKSPACE_ROOT}:
-        return repository in {None, DEFAULT_WORKSPACE_ROOT}
-    return repository == workspace_ref
-
-
-def _validate_batch_execution_command_projection(
-    errors: list[str],
-    root: dict[str, Any],
-    entry: dict[str, Any],
-    batch: dict[str, Any],
-) -> None:
-    batch_id = str(entry.get("id", ""))
-    lane = entry.get("executionLane")
-    workspace_refs = {
-        str(task.get("workspaceRef"))
-        for task in tasks(batch)
-        if isinstance(task.get("workspaceRef"), str) and task.get("workspaceRef")
-    }
-    if not isinstance(lane, str) or len(workspace_refs) != 1:
-        return
-    workspace_ref = next(iter(workspace_refs))
-
-    def matching_commands(profile_field: str) -> list[dict[str, Any]]:
-        profiles = root.get(profile_field)
-        profile = profiles.get(lane) if isinstance(profiles, dict) else None
-        commands = profile.get("commands") if isinstance(profile, dict) else []
-        return [
-            command
-            for command in commands
-            if isinstance(command, dict)
-            and _profile_command_matches_batch_workspace(command, workspace_ref)
-        ] if isinstance(commands, list) else []
-
-    expected_quality = [
-        {**command, "id": f"BATCH-{batch_id}-QUALITY-{index:03d}"}
-        for index, command in enumerate(matching_commands("qualityGateProfiles"), start=1)
-    ]
-    if batch.get("qualityGateCommands") != expected_quality:
-        errors.append(f"{batch_id}.qualityGateCommands_profile_projection_mismatch")
-
-
 def unfinished_tasks(data: dict[str, Any]) -> list[str]:
     return [
         str(task.get("id", ""))
@@ -1795,7 +1520,6 @@ def _bundle_consistency_errors(
                 defer_to_test_stages=defer_to_test_stages_enabled(root),
             )
         )
-        _validate_batch_execution_command_projection(errors, root, entry, data)
         if root.get("batchPolicy", {}).get("strategy") == BATCH_STRATEGY:
             for field in ("deliveryKind",):
                 if entry.get(field) != data.get(field):
@@ -1979,6 +1703,22 @@ def find_task(bundle: PlanBundle, task_id: str) -> tuple[str, dict[str, Any]]:
         if item.get("id") == task_id:
             return batch_id, item
     raise PlanJsonError(f"task_not_found:{task_id}")
+
+
+def bundle_unfinished_tasks(bundle: PlanBundle) -> list[str]:
+    return [str(item.get("id")) for item in bundle.tasks if normalize_status(item.get("status")) != "done"]
+
+
+def bundle_failed_tasks(bundle: PlanBundle) -> list[str]:
+    return [str(item.get("id")) for item in bundle.tasks if normalize_status(item.get("status")) == "failed"]
+
+
+def bundle_blocked_tasks(bundle: PlanBundle) -> list[str]:
+    return [
+        str(item.get("id"))
+        for item in bundle.tasks
+        if isinstance(item.get("blockers"), list) and any(str(value).strip() for value in item["blockers"])
+    ]
 
 
 def write_plan_json(path: Path, data: dict[str, Any]) -> None:

@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
-from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -19,10 +17,8 @@ BEHAVIOR_TASK_VALIDATION_KINDS = frozenset({
 })
 FRONTEND_COMPILE_VALIDATION_KINDS = frozenset({"build", "compile", "typecheck"})
 TASK_VALIDATION_KINDS = BEHAVIOR_TASK_VALIDATION_KINDS | FRONTEND_COMPILE_VALIDATION_KINDS
-QUALITY_GATE_KINDS = frozenset({"static_check"})
 MAVEN_EXECUTABLES = frozenset({"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"})
 _MAVEN_PROJECT_LIST_FLAGS = ("-pl", "--projects")
-_TEST_SCRIPT_MARKERS = ("cypress", "e2e", "integration", "jest", "mocha", "playwright", "spec", "test", "vitest")
 PATH_PROBE_EXECUTABLES = frozenset({"dir", "find", "ls", "stat", "test"})
 
 _NOOP_EXECUTABLES = {"echo", "false", "printf", "true"}
@@ -46,10 +42,6 @@ _PLACEHOLDER_MARKERS = (
     "validation placeholder",
     "占位",
     "待替换",
-)
-_NOOP_SCRIPT_RE = re.compile(
-    r"^\s*(?:(?:echo|printf)\b[^;&|]*(?:;\s*exit\s+0)?|true|false|exit\s+0)\s*$",
-    re.IGNORECASE,
 )
 
 
@@ -153,62 +145,6 @@ def maven_project_selector_errors(command: Any) -> list[str]:
     return []
 
 
-def maven_project_selector_workspace_errors(command: Any, command_dir: Path) -> list[str]:
-    """Validate Maven project selectors against the reactor POM in ``command_dir``.
-
-    A task command normally runs from its leaf module and needs no ``-pl``.
-    Path selectors are only meaningful when that directory is a Maven
-    aggregator. Keeping this filesystem-aware check separate lets the generic
-    command policy remain usable before a workspace has been resolved.
-    """
-
-    if not isinstance(command, dict):
-        return []
-    argv = normalized_argv(command)
-    if not argv or command_executable(argv) not in MAVEN_EXECUTABLES:
-        return []
-
-    selectors = [
-        item.strip()
-        for value in _maven_project_list_values(argv)
-        for item in value.split(",")
-        if item.strip() and not item.strip().startswith("!")
-    ]
-    if not selectors:
-        return []
-
-    command_dir = command_dir.resolve()
-    pom_path = command_dir / "pom.xml"
-    if not pom_path.is_file():
-        return []
-    try:
-        root = ET.parse(pom_path).getroot()
-    except (ET.ParseError, OSError):
-        return []
-    has_modules = any(
-        element.tag.rsplit("}", 1)[-1] == "module" and bool((element.text or "").strip())
-        for element in root.iter()
-    )
-    if not has_modules:
-        return ["maven_project_selector_requires_aggregator_cwd"]
-
-    for selector in selectors:
-        # Coordinates such as :artifactId cannot be verified as file paths.
-        if ":" in selector:
-            continue
-        normalized = selector.replace("\\", "/")
-        if "/" not in normalized and not normalized.startswith("."):
-            continue
-        selected_dir = (command_dir / normalized).resolve()
-        try:
-            selected_dir.relative_to(command_dir)
-        except ValueError:
-            return ["maven_project_selector_outside_cwd"]
-        if not (selected_dir / "pom.xml").is_file():
-            return ["maven_project_selector_path_missing"]
-    return []
-
-
 def maven_test_selectors(command: Any) -> list[str]:
     """Return concrete Maven test selectors from -Dtest/-Dit.test properties."""
 
@@ -271,64 +207,6 @@ def task_validation_kinds_for_lane(lane: str) -> frozenset[str]:
     if lane == "frontend":
         return TASK_VALIDATION_KINDS
     return BEHAVIOR_TASK_VALIDATION_KINDS
-
-
-def package_script_name(command: Any) -> str | None:
-    argv = normalized_argv(command)
-    if not argv:
-        return None
-    executable = command_executable(argv)
-    args = argv[1:]
-    if executable not in {
-        "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"
-    } or not args:
-        return None
-    lowered = [item.lower() for item in args]
-    if lowered[0] == "run" and len(args) > 1 and not args[1].startswith("-"):
-        return args[1]
-    if executable in {"pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"} and not args[0].startswith("-"):
-        return args[0]
-    if executable in {"npm", "npm.cmd"} and lowered[0] in {"start", "stop", "test"}:
-        return args[0]
-    return None
-
-
-def package_script_policy_errors(script: Any) -> list[str]:
-    if not isinstance(script, str) or not script.strip():
-        return ["validation_package_script_missing"]
-    lowered = script.lower()
-    errors: list[str] = []
-    if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
-        errors.append("validation_command_placeholder")
-    if _NOOP_SCRIPT_RE.fullmatch(script):
-        errors.append("validation_command_noop")
-    return errors
-
-
-def compile_only_package_script_errors(script: Any) -> list[str]:
-    errors = package_script_policy_errors(script)
-    if errors or not isinstance(script, str):
-        return errors
-    lowered = script.lower()
-    if any(re.search(rf"(^|[\s;&|]){re.escape(marker)}(?:[\s:&|]|$)", lowered) for marker in _TEST_SCRIPT_MARKERS):
-        return ["compile_package_script_executes_tests"]
-    return []
-
-
-def compile_only_package_scripts_errors(scripts: Any, script_name: str) -> list[str]:
-    if not isinstance(scripts, dict):
-        return ["validation_package_script_missing"]
-    main_script = scripts.get(script_name)
-    errors = compile_only_package_script_errors(main_script)
-    if errors:
-        return errors
-    for lifecycle_name in (f"pre{script_name}", f"post{script_name}"):
-        if lifecycle_name not in scripts:
-            continue
-        lifecycle_errors = compile_only_package_script_errors(scripts.get(lifecycle_name))
-        if lifecycle_errors:
-            return lifecycle_errors
-    return []
 
 
 def frontend_compile_command_matches_kind(command: Any) -> bool:

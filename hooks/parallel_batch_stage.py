@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import (
     append_event,
-    delivery_stage_names,
+    DELIVERY_STAGES,
     load_manifest,
     run_dir,
     run_lock,
@@ -48,9 +48,7 @@ def stage_names(batch: dict[str, Any]) -> tuple[str, ...]:
     if batch_type == "validation":
         stage = str(batch.get("validationStage") or VALIDATION_STAGE_BY_BATCH.get(str(batch.get("batchId")), "integration_test"))
         return ("prepare", stage)
-    if batch_type == "repair":
-        return delivery_stage_names(batch)
-    return delivery_stage_names(batch)
+    return DELIVERY_STAGES
 
 
 def stage_template(batch: dict[str, Any]) -> dict[str, dict[str, Any]]:

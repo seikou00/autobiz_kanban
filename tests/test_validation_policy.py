@@ -4,11 +4,7 @@ import unittest
 
 from hooks.validation_policy import (
     command_policy_errors,
-    compile_only_package_script_errors,
-    compile_only_package_scripts_errors,
     frontend_compile_command_matches_kind,
-    package_script_name,
-    package_script_policy_errors,
     maven_test_policy_errors,
     task_validation_kinds_for_lane,
 )
@@ -16,20 +12,6 @@ from hooks.validation_policy import (
 
 class ValidationPolicyTest(unittest.TestCase):
 
-
-    def test_compile_only_policy_rejects_test_chained_from_frontend_build_script(self) -> None:
-        self.assertIn(
-            "compile_package_script_executes_tests",
-            compile_only_package_script_errors("vite build && vitest run"),
-        )
-        self.assertEqual(compile_only_package_script_errors("vite build"), [])
-        self.assertIn(
-            "compile_package_script_executes_tests",
-            compile_only_package_scripts_errors(
-                {"prebuild": "vitest run", "build": "vite build"},
-                "build",
-            ),
-        )
 
     def test_rejects_direct_noop_placeholder_and_inline_shell(self) -> None:
         self.assertEqual(
@@ -66,11 +48,6 @@ class ValidationPolicyTest(unittest.TestCase):
         self.assertNotIn("build", task_validation_kinds_for_lane("backend"))
         self.assertIn("build", task_validation_kinds_for_lane("frontend"))
 
-    def test_package_script_policy_rejects_missing_and_noop_scripts(self) -> None:
-        self.assertEqual(package_script_name({"argv": ["npm", "run", "build"]}), "build")
-        self.assertEqual(package_script_policy_errors(None), ["validation_package_script_missing"])
-        self.assertEqual(package_script_policy_errors("echo build ok"), ["validation_command_noop"])
-        self.assertEqual(package_script_policy_errors("vite build"), [])
 
     def test_maven_target_policy_rejects_skip_and_non_concrete_selectors(self) -> None:
         command = {

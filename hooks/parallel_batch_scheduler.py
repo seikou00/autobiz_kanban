@@ -26,7 +26,7 @@ from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
     create_manifest,
-    delivery_stage_names,
+    DELIVERY_STAGES,
     get_active_run,
     lease_path,
     list_runs,
@@ -744,7 +744,7 @@ def _stage_recovery_failure_context(
 ) -> dict[str, Any] | None:
     """Return the saved review/UTest finding that caused an implement recovery."""
     states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
-    for stage in delivery_stage_names(batch):
+    for stage in DELIVERY_STAGES:
         state = states.get(stage)
         failure = state.get("failure") if isinstance(state, dict) else None
         if not isinstance(failure, dict) or failure.get("nextStage") != "implement":
@@ -871,7 +871,7 @@ def schedule(
                     next(
                         (
                             stage
-                            for stage in delivery_stage_names(batch)
+                            for stage in DELIVERY_STAGES
                             if not isinstance((batch.get("stageStates") or {}).get(stage), dict)
                             or (batch.get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
                         ),
@@ -918,7 +918,6 @@ def schedule(
                     "deliveryKind": item.get("deliveryKind"),
                     "atomicGroupId": item.get("atomicGroupId"),
                     "batchRationale": item.get("batchRationale"),
-                    "qualityGateRequired": item.get("qualityGateRequired") is True,
                     "requestedPath": (manifest.get("repositories", {}).get(str(item.get("repositoryRef")), {}) or {}).get("requestedPath"),
                     "worktreePath": item.get("worktreePath"),
                     "branchName": item.get("branchName"),

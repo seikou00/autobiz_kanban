@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import copy
-import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -46,13 +42,7 @@ def _write_batch(feature_dir: Path, batch: dict) -> None:
 
 
 def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = False) -> None:
-    """Configure the only supported deferred-validation Plan contract.
-
-    The name is retained solely as a shared test-fixture API.  Batch compile
-    commands and the former ``batch_compile_only`` code gate are retired, so
-    test callers now exercise the review-owned validation flow regardless of
-    their former compiler-repair setup.
-    """
+    """Configure the only supported deferred-validation Plan contract."""
 
     del always_fail
     batch = _read_batch(feature_dir)
@@ -63,8 +53,6 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
             "validationEvidenceIds": [],
             "implementationRevision": 0,
         })
-    batch.pop("compileCommand", None)
-    batch.pop("batchCompile", None)
     _write_batch(feature_dir, batch)
 
     root_path = feature_dir / "plan.json"
@@ -75,7 +63,6 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
         "codeGate": "review_only",
         "maxTestStageRepairAttempts": 3,
     }
-    root.pop("compileProfiles", None)
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _refresh_parallel_pipeline(feature_dir)
 
@@ -108,23 +95,6 @@ def _bind_workspace_contract(
             command["cwd"] = cwd
             if repo is not None:
                 command["repo"] = repo
-    compile_command = batch.get("compileCommand")
-    if isinstance(compile_command, dict):
-        compile_command["cwd"] = cwd
-        if repo is not None:
-            compile_command["repo"] = repo
-    for command in batch.get("qualityGateCommands", []):
-        command["cwd"] = cwd
-        if repo is not None:
-            command["repo"] = repo
-    root_path = feature_dir / "plan.json"
-    root = json.loads(root_path.read_text(encoding="utf-8"))
-    lane = str(batch.get("executionLane", "backend"))
-    for command in root.get("compileProfiles", {}).get(lane, {}).get("commands", []):
-        command["cwd"] = cwd
-        if repo is not None:
-            command["repo"] = repo
-    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _workspace(
@@ -235,7 +205,6 @@ def _workspace(
             "maxTestStageRepairAttempts": 3,
         },
         "batchPolicy": {"maxTasks": 3, "strategy": "minimal_closed_delivery_v2"},
-        "qualityGateProfiles": {},
         "batches": [
             {
                 "id": "B001",
@@ -250,17 +219,6 @@ def _workspace(
                 "status": "todo",
             }
         ],
-        "projectValidationCommands": [
-            {
-                "id": "PROJECT-VAL-001",
-                "argv": [sys.executable, "-c", "print('project compile')"],
-                "cwd": ".",
-                "kind": "integration_test",
-                "required": True,
-            }
-        ],
-        "projectCheckEvidenceIds": [],
-        "latestProjectCheckEvidenceId": None,
     }
     (feature_dir / "plan.json").write_text(
         json.dumps(root_plan, ensure_ascii=False, indent=2) + "\n",
@@ -280,7 +238,6 @@ def _workspace(
             "completionEvidenceIds": [],
             "deliveryKind": "atomic_group" if is_atomic else "single_task",
             **({"atomicGroupId": "AG001", "batchRationale": "Test fixture keeps the dependency pair in one inseparable delivery loop."} if is_atomic else {}),
-            "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": None,
             "tasks": tasks,
@@ -341,7 +298,6 @@ def _configure_frontend_without_batch_compile(feature_dir: Path) -> None:
 
     batch = _read_batch(feature_dir)
     batch["executionLane"] = "frontend"
-    batch.pop("compileCommand", None)
     for task in batch["tasks"]:
         task["uiRequired"] = True
         task["scope"]["pages"] = ["PAGE-001"]
@@ -362,7 +318,6 @@ def _configure_frontend_without_batch_compile(feature_dir: Path) -> None:
     root_path = feature_dir / "plan.json"
     root = json.loads(root_path.read_text(encoding="utf-8"))
     root["batches"][0]["executionLane"] = "frontend"
-    root.pop("compileProfiles", None)
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _refresh_parallel_pipeline(feature_dir)
 
@@ -415,8 +370,6 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "tasks": [second_task],
         }
     )
-    second.pop("batchCompile", None)
-    second.pop("compileCommand", None)
     second_path = feature_dir / "plans" / "B002" / "plan.json"
     second_path.parent.mkdir(parents=True)
     second_path.write_text(
@@ -726,412 +679,6 @@ class TaskRunnerTest(unittest.TestCase):
                 ["__mocks__/client.js", "fixtures/response.json", "vitest.config.ts"],
             )
 
-    def test_maven_runner_rejects_project_selector_from_leaf_module(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = (Path(tmp) / "repo").resolve()
-            module = repo / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
-            module.mkdir(parents=True)
-            (module / "pom.xml").write_text("<project/>", encoding="utf-8")
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    "mvn", "test", "-Dtest=AgrCtrlSearchBasicTest",
-                    "-pl", "backend/service/LF39.05_bccompliancemng",
-                ],
-                "cwd": "后台服务/零售客户经营/LF39.05_bccompliancemng",
-            }
-
-            with self.assertRaisesRegex(
-                task_runner_module.TaskRunnerError,
-                "maven_project_selector_requires_aggregator_cwd",
-            ):
-                task_runner_module._assert_validation_command_environment(
-                    command,
-                    {repo.name: repo},
-                    retry_same_run=True,
-                )
-    def test_source_diagnostics_use_one_compile_failure_category(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            command = {"id": "BATCH-B001-COMPILE", "cwd": ".", "kind": "compile"}
-            for relative in (
-                "src/main/java/example/App.java",
-                "src/test/java/example/AppTest.java",
-            ):
-                output = f"[ERROR] {repo / relative}:[1,1] cannot find symbol"
-                with self.subTest(relative=relative):
-                    self.assertEqual(
-                        task_runner_module._definitive_compile_failure_category(
-                            output, command, {repo.name: repo}
-                        ),
-                        "source_compile_failure",
-                    )
-            self.assertIsNone(
-                task_runner_module._definitive_compile_failure_category(
-                    "webpack exited with code 1", command, {repo.name: repo}
-                )
-            )
-
-    def test_validation_timeout_preserves_source_compile_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            source = repo / "src" / "main" / "java" / "example" / "App.java"
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import sys,time; "
-                f"print('[ERROR] {source}:[1,1] cannot find symbol', "
-                "file=sys.stderr, flush=True); time.sleep(5)"
-                    ),
-                ],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 10,
-            }
-            started_at = time.monotonic()
-            with patch.object(
-                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.05
-            ):
-                exit_code, output = task_runner_module._run_validation(
-                    command, {repo.name: repo}
-                )
-            self.assertEqual(exit_code, 1)
-            self.assertLess(time.monotonic() - started_at, 2)
-            self.assertIn("cannot find symbol", output)
-            self.assertIn(
-                "validation_process_stopped_after_compile_failure:source_compile_failure",
-                output,
-            )
-
-    def test_validation_timeout_normalizes_test_source_compile_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import sys,time; "
-                        "print('[ERROR] maven-compiler-plugin:testCompile', "
-                        "file=sys.stderr, flush=True); "
-                        f"print('[ERROR] {source}:[1,1] 未报告的异常错误', "
-                        "file=sys.stderr, flush=True); time.sleep(5)"
-                    ),
-                ],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 10,
-            }
-            with patch.object(
-                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.05
-            ):
-                exit_code, output = task_runner_module._run_validation(
-                    command, {repo.name: repo}
-                )
-            self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "validation_process_stopped_after_compile_failure:source_compile_failure",
-                output,
-            )
-
-    def test_compile_monitor_does_not_treat_incidental_test_text_as_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import time; "
-                        f"print('at example.AppTest.run({source}:12) expected no compilation error', "
-                        "flush=True); time.sleep(0.2)"
-                    ),
-                ],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 3,
-            }
-            with patch.object(
-                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.01
-            ):
-                exit_code, output = task_runner_module._run_validation(
-                    command, {repo.name: repo}
-                )
-            self.assertEqual(exit_code, 0)
-            self.assertNotIn("validation_process_stopped_after_compile_failure", output)
-
-    def test_validation_process_uses_file_output_and_emits_progress(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    "print('validation output captured', flush=True)",
-                ],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 3,
-            }
-            real_popen = subprocess.Popen
-            child_outputs = []
-
-            def tracked_popen(*args, **kwargs):
-                child_outputs.append(kwargs.get("stdout"))
-                return real_popen(*args, **kwargs)
-
-            progress = io.StringIO()
-            with patch.object(
-                task_runner_module.subprocess,
-                "Popen",
-                side_effect=tracked_popen,
-            ):
-                with patch.object(task_runner_module.sys, "stderr", progress):
-                    exit_code, output = task_runner_module._run_validation(
-                        command, {repo.name: repo}
-                    )
-
-            self.assertEqual(exit_code, 0)
-            self.assertIn("validation output captured", output)
-            self.assertEqual(len(child_outputs), 1)
-            self.assertIsNot(child_outputs[0], subprocess.PIPE)
-            self.assertTrue(hasattr(child_outputs[0], "fileno"))
-            self.assertIn('"event":"validation_process_started"', progress.getvalue())
-            self.assertIn('"event":"validation_process_finished"', progress.getvalue())
-
-    def test_windows_batch_compile_uses_comspec_and_command_side_log_redirection(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = (Path(tmp) / "repo with spaces").resolve()
-            tool_dir = (Path(tmp) / "工具 with spaces").resolve()
-            repo.mkdir()
-            tool_dir.mkdir()
-            maven = tool_dir / "mvn.cmd"
-            command_shell = tool_dir / "cmd.exe"
-            maven.write_text("@echo off\r\n", encoding="utf-8")
-            command_shell.write_text("placeholder", encoding="utf-8")
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [str(maven), "compile"],
-                "cwd": ".",
-                "kind": "compile",
-            }
-
-            with patch.dict(
-                task_runner_module.os.environ,
-                {"COMSPEC": str(command_shell)},
-                clear=False,
-            ):
-                launch_spec = task_runner_module._assert_validation_command_environment(
-                    command,
-                    {repo.name: repo},
-                    retry_same_run=True,
-                    platform_name="nt",
-                )
-
-            self.assertEqual(launch_spec.launch_mode, "windows_batch")
-            self.assertEqual(launch_spec.resolved_executable, str(maven))
-            self.assertEqual(launch_spec.command_shell, str(command_shell))
-            log_path = Path(tmp) / "日志 with spaces.log"
-            wrapper_content = task_runner_module._validation_windows_wrapper_content(
-                launch_spec,
-                log_path,
-            )
-            self.assertIn(
-                f'call "{maven}" "compile"',
-                wrapper_content,
-            )
-            self.assertIn(
-                f'>"{log_path}" echo validation_windows_wrapper_started',
-                wrapper_content,
-            )
-            self.assertIn(f'1>>"{log_path}" 2>&1', wrapper_content)
-            wrapper_path = Path(tmp) / "包装 with spaces.cmd"
-            self.assertEqual(
-                task_runner_module._validation_windows_shell_command(
-                    launch_spec,
-                    wrapper_path,
-                ),
-                (
-                    f'"{command_shell}" /D /S /V:OFF '
-                    f'/C ""{wrapper_path}""'
-                ),
-            )
-
-    def test_direct_validation_resolves_executable_without_shell(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [sys.executable, "--version"],
-                "cwd": ".",
-                "kind": "compile",
-            }
-            launch_spec = task_runner_module._assert_validation_command_environment(
-                command,
-                {repo.name: repo},
-                retry_same_run=True,
-            )
-            self.assertEqual(launch_spec.launch_mode, "direct")
-            self.assertIsNone(launch_spec.command_shell)
-            self.assertTrue(Path(launch_spec.resolved_executable).is_absolute())
-            self.assertEqual(
-                task_runner_module._validation_command_argv(launch_spec),
-                [launch_spec.resolved_executable, "--version"],
-            )
-
-
-    def test_compile_ignores_fresh_maven_test_failure_report(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            report = repo / "target" / "surefire-reports" / "TEST-example.AppTest.xml"
-            script = (
-                "import time; from pathlib import Path; "
-                f"p=Path({str(report)!r}); p.parent.mkdir(parents=True, exist_ok=True); "
-                "p.write_text('<testsuite failures=\"1\"/>', encoding='utf-8'); "
-                "time.sleep(1.2)"
-            )
-            command = {
-                "id": "BATCH-B001-COMPILE",
-                "argv": [sys.executable, "-c", script],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 3,
-            }
-            exit_code, output = task_runner_module._run_validation(
-                command,
-                {repo.name: repo},
-            )
-            self.assertEqual(exit_code, 0, output)
-
-    def test_runtime_environment_failure_requires_strong_environment_marker(self) -> None:
-        cases = {
-            "The JAVA_HOME environment variable is not defined correctly":
-                "java_toolchain_unavailable",
-            "Could not transfer artifact a:b:jar:1 from central: Unknown host repo.example":
-                "dependency_network_unavailable",
-            "Failed to read artifact descriptor for a:b:jar:1: PKIX path building failed":
-                "dependency_credentials_or_certificate_failure",
-            "[ERROR] /repo/src/test/AppTest.java:[1,1] cannot find symbol": None,
-            "Tests run: 1, Failures: 1": None,
-        }
-        for output, expected in cases.items():
-            with self.subTest(output=output):
-                self.assertEqual(
-                    task_runner_module._runtime_environment_failure_category(output),
-                    expected,
-                )
-
-    def test_nonzero_compile_failure_remains_code_validation_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    "print('compile failed'); raise SystemExit(1)",
-                ],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 3,
-            }
-            exit_code, output = task_runner_module._run_validation(
-                command,
-                {repo.name: repo},
-            )
-            self.assertEqual(exit_code, 1)
-            self.assertIn("compile failed", output)
-
-    def test_nonzero_toolchain_failure_is_returned_as_environment_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    (
-                        "print('The JAVA_HOME environment variable is not defined correctly'); "
-                        "raise SystemExit(1)"
-                    ),
-                ],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 3,
-            }
-            with self.assertRaises(task_runner_module.TaskRunnerError) as raised:
-                task_runner_module._run_validation(
-                    command,
-                    {repo.name: repo},
-                )
-            self.assertEqual(
-                raised.exception.details["errorCategory"],
-                "environment_failure",
-            )
-            self.assertEqual(
-                raised.exception.details["failureCategory"],
-                "java_toolchain_unavailable",
-            )
-
-    def test_validation_compile_stop_terminates_descendant_processes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            source = repo / "src" / "main" / "java" / "example" / "App.java"
-            descendant_marker = repo / "descendant-survived.txt"
-            descendant_script = (
-                "import time; from pathlib import Path; time.sleep(0.8); "
-                f"Path({str(descendant_marker)!r}).write_text('alive', encoding='utf-8')"
-            )
-            parent_script = (
-                "import subprocess,sys,time; "
-                f"subprocess.Popen([sys.executable, '-c', {descendant_script!r}]); "
-                f"print('[ERROR] {source}:[1,1] cannot find symbol', flush=True); "
-                "time.sleep(5)"
-            )
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [sys.executable, "-c", parent_script],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 10,
-            }
-            with patch.object(
-                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.05
-            ):
-                exit_code, output = task_runner_module._run_validation(
-                    command, {repo.name: repo}
-                )
-            self.assertEqual(exit_code, 1)
-            self.assertIn("processTreeTerminated=true", output)
-            time.sleep(1)
-            self.assertFalse(descendant_marker.exists())
-
-    def test_validation_timeout_without_compile_diagnostic_remains_environment_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp).resolve()
-            command = {
-                "id": "VAL-T001-01",
-                "argv": [sys.executable, "-c", "import time; time.sleep(2)"],
-                "cwd": ".",
-                "kind": "compile",
-                "timeoutSeconds": 1,
-            }
-            with self.assertRaises(task_runner_module.TaskRunnerError) as raised:
-                task_runner_module._run_validation(command, {repo.name: repo})
-            self.assertEqual(raised.exception.details["errorCategory"], "environment_failure")
-            self.assertEqual(raised.exception.details["failureCategory"], "command_timeout")
-            self.assertEqual(
-                raised.exception.details["requiredAction"],
-                "fix_compile_environment_and_retry_batch_compile",
-            )
 
     def test_new_staged_test_is_transient_validation_file(self) -> None:
         state = {
@@ -1627,7 +1174,6 @@ class TaskRunnerTest(unittest.TestCase):
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
             batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
-            plan["projectValidationCommands"][0]["repo"] = code.name
             _write_batch(feature_dir, plan)
             _write_batch(feature_dir, batch)
 

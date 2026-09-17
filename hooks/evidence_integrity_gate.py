@@ -71,12 +71,7 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
             if evidence_id != _expected_evidence_id(line_no):
                 errors.append(f"non_sequential_evidence_id:line={line_no}:id={evidence_id}")
         task_id = record.get("taskId")
-        if (
-            isinstance(task_id, str)
-            and task_id
-            and task_id != "__project__"
-            and not task_id.startswith("T")
-        ):
+        if isinstance(task_id, str) and task_id and not task_id.startswith("T"):
             errors.append(f"line={line_no}:invalid_task_id:{task_id}")
         errors.extend(check_record_artifacts(target_feature_dir, record))
 
@@ -100,7 +95,7 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
-    if record.get("action") not in {"validation", "project_check"}:
+    if record.get("action") != "validation":
         return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
@@ -110,10 +105,6 @@ def _validation_passed(record: dict[str, Any]) -> bool:
         return result.strip() in PASS_RESULTS and validation.get("exitCode") == 0
     exit_code = validation.get("exitCode")
     return exit_code == 0
-
-
-
-
 
 
 def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
@@ -133,13 +124,7 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     known_tasks = task_ids(plan)
     for record in records:
         task_id = record.get("taskId")
-        is_project_check = record.get("action") == "project_check" and task_id == "__project__"
-        if (
-            isinstance(task_id, str)
-            and task_id
-            and task_id not in known_tasks
-            and not is_project_check
-        ):
+        if isinstance(task_id, str) and task_id and task_id not in known_tasks:
             errors.append(f"unknown_evidence_task_id:{task_id}")
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
@@ -151,19 +136,6 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
                 errors.append(f"{task_id}.invalid_evidence_id:{evidence_id}")
             elif evidence_id not in known_evidence_ids:
                 errors.append(f"{task_id}.unknown_evidence_id:{evidence_id}")
-    project_evidence_ids = plan.get("projectCheckEvidenceIds")
-    if isinstance(project_evidence_ids, list):
-        records_by_id = {
-            str(record.get("evidenceId")): record
-            for record in records
-            if isinstance(record.get("evidenceId"), str)
-        }
-        for evidence_id in project_evidence_ids:
-            record = records_by_id.get(str(evidence_id))
-            if record is None:
-                errors.append(f"unknown_project_check_evidence_id:{evidence_id}")
-            elif record.get("action") != "project_check" or record.get("taskId") != "__project__":
-                errors.append(f"invalid_project_check_evidence_id:{evidence_id}")
     return errors
 
 
@@ -316,12 +288,6 @@ def _check_completion(
     return errors
 
 
-
-
-
-
-
-
 def _check_batch_completion(
     plan: dict[str, Any],
     by_id: dict[str, dict[str, Any]],
@@ -368,14 +334,6 @@ def _check_batch_completion(
                 if manifest.get("status") != "succeeded" or not isinstance(verification, dict) or verification.get("passed") is not True:
                     errors.append(f"parallel_delivery_not_verified:{run_id}")
     return errors
-
-
-
-
-
-
-
-
 
 
 def _cmd_check(args: argparse.Namespace) -> int:

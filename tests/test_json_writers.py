@@ -201,18 +201,6 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                     "specRoots": ["specs/cap/spec.md"], "executionLane": "backend",
                     "deps": [], "taskIds": ["T001"], "deliveryKind": "single_task", "status": "todo",
                 }],
-                "qualityGateProfiles": {},
-                "projectValidationCommands": [
-                    {
-                        "id": "PROJECT-VAL-001",
-                        "argv": [sys.executable, "-c", "print('project validation')"],
-                        "cwd": ".",
-                        "kind": "integration_test",
-                        "required": True,
-                    }
-                ],
-                "projectCheckEvidenceIds": [],
-                "latestProjectCheckEvidenceId": None,
             }
     batch = {
         "featureId": "alpha",
@@ -224,7 +212,6 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
         "deliveryKind": "single_task",
-        "qualityGateCommands": [],
         "startedAt": None,
         "completedAt": None,
         "tasks": [task],

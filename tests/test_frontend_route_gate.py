@@ -103,9 +103,6 @@ def write_plan_route(
                     "status": "todo",
                 }
             ],
-            "projectValidationCommands": [],
-            "projectCheckEvidenceIds": [],
-            "latestProjectCheckEvidenceId": None,
         },
     )
     write_json(

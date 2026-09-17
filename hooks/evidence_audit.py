@@ -143,10 +143,9 @@ def reset_invalid_tasks(feature_dir: Path, invalid_tasks: set[str]) -> bool:
                 root["activeBatchId"] = unfinished[0]
                 root["nextBatchId"] = unfinished[1] if len(unfinished) > 1 else None
             else:
-                root["status"] = "done" if root.get("latestProjectCheckEvidenceId") else "in_progress"
+                root["status"] = "done"
                 root["activeBatchId"] = None
                 root["nextBatchId"] = None
-            root["latestProjectCheckEvidenceId"] = None
             atomic_write_json(plan_path, root)
         return changed
 

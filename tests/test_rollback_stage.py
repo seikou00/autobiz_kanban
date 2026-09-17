@@ -67,8 +67,6 @@ class RollbackStageTest(unittest.TestCase):
         root = root_plan(batches=[batch_entry("B001", ["T001", "T002"])])
         root["featureId"] = self.feature
         root["status"] = "in_progress"
-        root["projectCheckEvidenceIds"] = ["EV-PROJECT"]
-        root["latestProjectCheckEvidenceId"] = "EV-PROJECT"
         root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
         write_plan_json(self.feature_dir / "plans" / "B001" / "plan.json", batch)
         write_plan_json(self.feature_dir / "plan.json", root)
@@ -522,7 +520,6 @@ class RollbackStageTest(unittest.TestCase):
             for entry in root["batches"]
         ]
         self.assertEqual(root["status"], "todo")
-        self.assertEqual(root["projectCheckEvidenceIds"], [])
         self.assertTrue(all("batchCompile" not in batch for batch in batches))
         reset_tasks = [item for batch in batches for item in batch["tasks"]]
         self.assertEqual([item["status"] for item in reset_tasks], ["todo", "todo"])

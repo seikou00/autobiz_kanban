@@ -147,13 +147,6 @@ def _initial(feature: str) -> dict[str, Any]:
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
         "taskValidationPolicy": copy.deepcopy(DEFAULT_TASK_VALIDATION_POLICY),
         "batches": [],
-        "qualityGateProfiles": {},
-        "projectValidationCommands": [],
-        "projectCheckEvidenceIds": [],
-        "latestProjectCheckEvidenceId": None,
-        "projectValidationDisposition": None,
-        "projectValidationFailedRunIds": [],
-        "deferredValidationIssues": [],
         "tasks": [],  # in-memory working view; never written to root plan.json
         "_batchAssignments": {},
         "_batchPlans": {},
@@ -175,8 +168,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     if isinstance(policy, dict) and policy.get("strategy") != BATCH_STRATEGY:
         raise PlanWriterInputError("batch_policy_requires_rebuild", str(policy.get("strategy")))
     finalized = root.get("taskSetStatus") == "finalized"
-    if finalized and "qualityGateProfiles" not in root:
-        raise PlanWriterInputError("quality_gate_contract_requires_rebuild", "qualityGateProfiles")
     data = dict(root)
     data.setdefault("featureId", feature)
     data.setdefault("status", "todo")
@@ -184,13 +175,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("nextBatchId", None)
     data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
     data.setdefault("batches", [])
-    data.setdefault("qualityGateProfiles", {})
-    data.setdefault("projectValidationCommands", [])
-    data.setdefault("projectCheckEvidenceIds", [])
-    data.setdefault("latestProjectCheckEvidenceId", None)
-    data.setdefault("projectValidationDisposition", None)
-    data.setdefault("projectValidationFailedRunIds", [])
-    data.setdefault("deferredValidationIssues", [])
     task_items: list[dict[str, Any]] = []
     assignments: dict[str, str] = {}
     batch_plans: dict[str, dict[str, Any]] = {}
@@ -202,11 +186,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
         plan = load_json(batch_plan_path(feature_dir, batch_id))
         if not isinstance(plan, dict):
             raise PlanWriterInputError("missing_batch_plan", batch_id)
-        if finalized and "qualityGateCommands" not in plan:
-            raise PlanWriterInputError(
-                "quality_gate_contract_requires_rebuild",
-                f"{batch_id}.qualityGateCommands",
-            )
         batch_plans[batch_id] = plan
         for task in plan.get("tasks", []):
             if isinstance(task, dict):
@@ -1017,19 +996,6 @@ def _batch_frontend_route(task: dict[str, Any]) -> str:
     return str(route) if route in FRONTEND_ROUTES else "spec-driven-ui"
 
 
-def _batch_profile_command_matches_workspace(
-    command: dict[str, Any],
-    workspace_contract: tuple[tuple[str, str], ...],
-) -> bool:
-    if len(workspace_contract) != 1:
-        return False
-    repository = workspace_contract[0][0]
-    command_repository = command.get("repo")
-    if repository == "default":
-        return command_repository in {None, "default"}
-    return command_repository == repository
-
-
 def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     tasks_view = _tasks(data)
     assignments = dict(data.get("_batchAssignments") or {})
@@ -1120,26 +1086,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         spec_root = spec_roots[batch_id]
         execution_lane = execution_lanes[batch_id]
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
-        quality_profiles = root.get("qualityGateProfiles")
-        quality_profile = (
-            quality_profiles.get(execution_lane) if isinstance(quality_profiles, dict) else None
-        )
-        quality_profile_commands = (
-            quality_profile.get("commands") if isinstance(quality_profile, dict) else []
-        )
-        if not isinstance(quality_profile_commands, list):
-            quality_profile_commands = []
         workspace_contract = workspace_contracts[batch_id]
-        quality_matches = [
-            command
-            for command in quality_profile_commands
-            if isinstance(command, dict)
-            and _batch_profile_command_matches_workspace(command, workspace_contract)
-        ]
-        quality_commands = [
-            {**command, "id": f"BATCH-{batch_id}-QUALITY-{command_index:03d}"}
-            for command_index, command in enumerate(quality_matches, start=1)
-        ]
         status = _batch_status(batch_tasks)
         execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
@@ -1161,7 +1108,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             "taskIds": task_ids_list,
             "deliveryKind": delivery_kind,
             **({"atomicGroupId": atomic_group_id, "batchRationale": batch_rationale} if is_atomic_group else {}),
-            "qualityGateCommands": quality_commands,
             **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
             **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
             **({"mergedAt": previous.get("mergedAt")} if "mergedAt" in previous else {}),
@@ -1200,33 +1146,12 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     # and E2E validation for runtime validation Batches, so Board-level stages
     # cannot execute the same command a second time after merge.
     root["parallelBatchPipeline"] = build_pipeline_contract(root, projected)
-    deferred_issues: list[dict[str, Any]] = []
-    seen_issue_ids: set[str] = set()
-    project_disposition = root.get("projectValidationDisposition")
-    project_issue_id = (
-        project_disposition.get("issueId") if isinstance(project_disposition, dict) else None
-    )
-    if isinstance(project_issue_id, str) and project_issue_id not in seen_issue_ids:
-        deferred_issues.append(copy.deepcopy(project_disposition))
-    root["deferredValidationIssues"] = deferred_issues
     root["taskSetDigest"] = task_set_digest(root, projected)
     unfinished = [entry["id"] for entry in root_entries if entry["status"] != "done"]
     if not root_entries:
         root.update({"status": "todo", "activeBatchId": None, "nextBatchId": None})
     elif not unfinished:
-        if data.get("status") == "failed":
-            root["status"] = "failed"
-        else:
-            project_commands = root.get("projectValidationCommands")
-            project_ready = (
-                isinstance(project_commands, list)
-                and (
-                    not project_commands
-                    or isinstance(root.get("latestProjectCheckEvidenceId"), str)
-                    or isinstance(root.get("projectValidationDisposition"), dict)
-                )
-            )
-            root["status"] = "done" if project_ready else "in_progress"
+        root["status"] = "failed" if data.get("status") == "failed" else "done"
         root["activeBatchId"] = None
         root["nextBatchId"] = None
     elif len(unfinished) > 1:
@@ -2023,18 +1948,6 @@ def _render_plan_md(data: dict[str, Any]) -> str:
         lines.extend(["## 本期范围之外", ""])
         for kind, selection in sorted(report.items()):
             lines.append(f"- {kind}: 后续={_fmt(selection.get('deferred'))}; 未分配={_fmt(selection.get('unpartitioned'))}")
-        lines.append("")
-    deferred_issues = data.get("deferredValidationIssues")
-    if isinstance(deferred_issues, list) and deferred_issues:
-        lines.extend(["## Code 验证延期交接", ""])
-        for issue in deferred_issues:
-            if not isinstance(issue, dict):
-                continue
-            lines.append(
-                f"- {issue.get('issueId', '')}: scope={issue.get('scope', '')}; "
-                f"reason={issue.get('reason', '')}; command={issue.get('commandId', '')}; "
-                f"handoff={_fmt(issue.get('handoffStages'))}"
-            )
         lines.append("")
     return "\n".join(lines)
 

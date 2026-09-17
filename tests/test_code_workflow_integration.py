@@ -388,7 +388,6 @@ const schedulerAccepted = context.requireSchedulerResult({
       workspaceRef: "frontend",
       componentRoots: ["."],
       executionStage: "parallel",
-      qualityGateRequired: false,
       requestedPath: "C:/repo/frontend",
       worktreePath: null,
       branchName: null,

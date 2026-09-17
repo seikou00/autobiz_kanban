@@ -15,7 +15,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.code_task_context import build_context  # noqa: E402
-from hooks.design_contract_lock import sync_design_contract_lock  # noqa: E402
 from hooks.evidence_store import append_evidence, main as evidence_store_main  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
@@ -109,18 +108,6 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         },
         "batchPolicy": {"maxTasks": 3, "strategy": BATCH_STRATEGY},
         "batches": batches,
-        "qualityGateProfiles": {},
-        "projectValidationCommands": [
-            {
-                "id": "PROJECT-VAL-001",
-                "argv": [sys.executable, "-c", "print('project integration')"],
-                "cwd": ".",
-                "kind": "integration_test",
-                "required": True,
-            }
-        ],
-        "projectCheckEvidenceIds": [],
-        "latestProjectCheckEvidenceId": None,
     }
 
 
@@ -159,7 +146,6 @@ def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = 
         "completionEvidenceIds": [],
         "deliveryKind": "atomic_group" if atomic else "single_task",
         **({"atomicGroupId": "AG001", "batchRationale": "test-only inseparable delivery loop"} if atomic else {}),
-        "qualityGateCommands": [],
         "startedAt": None,
         "completedAt": None,
         "tasks": batch_tasks,
@@ -180,27 +166,6 @@ def write_bundle(feature_dir: Path, batches: list[list[dict]]) -> None:
             active="B001" if entries else None,
             next_batch="B002" if len(entries) > 1 else None,
         ),
-    )
-
-
-def write_plan_state(workspace: Path) -> None:
-    state_path = workspace / ".autobizdevops" / "state.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": "autobizdevops.state.v3",
-                "features": {
-                    "alpha": {
-                        "feature": "alpha",
-                        "checkpoint": "plan_in_progress",
-                        "stage": "Plan",
-                        "iteration": "1",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
     )
 
 
@@ -244,14 +209,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             ):
                 load_plan_bundle(feature_dir)
 
-    def test_batch_and_project_commands_reject_noop_validation(self) -> None:
-        root = root_plan(batches=[batch_entry("B001", ["T001"])])
-        root["projectValidationCommands"][0]["argv"] = ["echo", "integration"]
-
-        errors = validate_plan_data(root)
-
-        self.assertIn("projectValidationCommands[0].validation_command_noop", errors)
-
 
     def test_task_validation_policy_is_required_and_bound_to_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
@@ -262,13 +219,6 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertNotEqual(task_set_digest(root, {"B001": batch}), policy_digest)
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
-
-    def test_project_validation_rejects_batch_kinds(self) -> None:
-        base = root_plan(batches=[batch_entry("B001", ["T001"])])
-        base["projectValidationCommands"][0]["kind"] = "compile"
-        errors = validate_plan_data(base)
-
-        self.assertIn("projectValidationCommands[0].kind_invalid", errors)
 
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,24 +269,6 @@ class BatchedPlanContractTest(unittest.TestCase):
                 bypass_errors,
             )
 
-    def test_bundle_does_not_require_compile_command_cwd(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            item = task("T001")
-            item["scope"].update({
-                "workspaceRoots": {"default": "backend/service"},
-                "paths": ["src/main/java/example"],
-            })
-            item["validationCommands"][0]["cwd"] = "backend/service"
-            write_bundle(feature_dir, [[item]])
-
-            _, errors = load_and_validate_plan(feature_dir / "plan.json")
-
-            self.assertNotIn(
-                "B001.compileCommand.cwd_outside_workspace_root:backend/service",
-                errors,
-            )
 
     def test_initial_bundle_allows_missing_compile_profile_for_used_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

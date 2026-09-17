@@ -652,11 +652,6 @@ def _prepare_code_execution_reset(workspace: Path, feature: str) -> CodeResetPla
     data["status"] = "todo"
     data["activeBatchId"] = None
     data["nextBatchId"] = None
-    data["projectCheckEvidenceIds"] = []
-    data["latestProjectCheckEvidenceId"] = None
-    data["projectValidationDisposition"] = None
-    data["projectValidationFailedRunIds"] = []
-    data["deferredValidationIssues"] = []
     return CodeResetPlan(present=True, data=data, task_ids=tuple(task_ids))
 
 
