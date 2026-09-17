@@ -1,13 +1,13 @@
 ---
 name: autobizdevops
 description: 完成项目研发的全流程，按 biz / dev / ops 三个可独立起步的阶段组织
-version: v1.1.08311
+version: v1.1.0917
 ---
 
 # 核心工作原则
 
-- 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。用户请求完整链路时，`biz -> dev -> ops` 按状态自动续跑，不因内部阶段切换反复确认；仅在存在关键歧义、真实方案取舍、外部授权或不可逆操作时暂停。用户明确只请求某个阶段时，完成该阶段后直接汇报，不追问是否继续。
-- Dev 阶段除 `/autodev-reviewer` 可启动独立只读 reviewer 外，其余阶段均由当前会话内联执行，不得委派给下级 agent。
+- 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。按状态确定下一阶段，阶段完成后遵循 `${pluginPath}/skills/references/ui-continuation-guide.md` 衔接；关键歧义、真实方案取舍、外部授权或不可逆操作按各阶段要求处理。用户明确只请求某个阶段时，完成该阶段后直接汇报，不追问是否继续。
+- Dev 主流程由当前会话执行；仅 Specs 的只读探索、Design 的独立回检和 `/autodev-reviewer` 可按对应技能使用当前阶段已注册的只读角色。
 
 ## 目录结构与路径约定
 

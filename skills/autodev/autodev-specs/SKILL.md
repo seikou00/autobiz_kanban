@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: 将需求转为 proposal 与按能力拆分的行为规格，供后续设计、计划和验收使用。
-version: v1.18.0917
+version: v1.18.09171
 ---
 
 # /autodev-specs — Proposal + Behavior Specs
@@ -13,7 +13,7 @@ version: v1.18.0917
 ## 读取与澄清
 
 - 读取 `PRD.md`和相关代码、接口、测试。没有 PRD 时以用户需求为输入。
-- 存在 `source-context.json` 时，读取其中登记的资料及对应 `sources/SRC-NNN/` 快照；已保存的资料即认为用户已经提供。
+- 存在 `source-context.json` 时，读取全部来源索引，并读取约束本轮行为或验收的资料正文及对应快照；相关性不明时先查看目录或摘要。已保存的资料视为用户已经提供。
 - 读取 `IMPLEMENTATION_SCOPE.json`：`backend_only` 只描述后端可实现、可验证的行为；`frontend_only` 只描述前端行为，后端作为外部依赖；缺失时兼容为 `full_stack`。
 - 仅澄清影响行为、范围或验收结果的缺口与矛盾，按 `${pluginPath}/skills/references/ask-user-question.md` 提问。复用用户已确认的信息，不重复确认；不能把未确认的关键行为写成定论。
 - 对齐后的领域术语按 `${pluginPath}/skills/references/domain-context.md` 回写会话工作区 `CONTEXT.md`。
@@ -27,12 +27,12 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
-使用 task 工具，指定 Explore-autodev-spec 角色进行探索。子代理按下面的要求生成子代理提示语。
+使用 task 工具，指定 Explore-autodev 角色进行只读代码探索；主代理负责需求与资料分析、用户澄清及产物写入。
 
-探索时必须：
+主代理组织完成以下探索：
 
 - 从PRD.md提取目标、用户角色、主流程、验收标准、非目标。
-- 从 `source-context.json` 提取全部 `SRC-NNN`。`snapshot_only` 使用已保存快照，不重新索取；只有 `never_provided` 且影响行为时才列入信息缺口。
+- 复用已读取的全部 `SRC-NNN` 索引与资料结论，仅补读证据不足的部分。`snapshot_only` 使用已保存快照，不重新索取；只有 `never_provided` 且影响行为时才列入信息缺口。
 - 阅读现有代码，识别与需求相关的已有接口、数据模型。
 - 将PRD.md改写为外部可观察行为，不要把实现猜测写成需求。
 - 识别 capabilities：一组可以独立命名、独立验收的能力边界，例如 `order-export`、`approval-reminder`。
@@ -40,8 +40,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 接口/数据决策讨论触发：
 
-- 如果新增或修改 HTTP/API、函数入口、请求响应、错误码，但接口形态在你看来从PRD.md中还不准确形成，生成待讨论项目返回主代理。
-- 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据语义还不准确，生成待讨论项目返回主代理。
+- 如果新增或修改 HTTP/API、函数入口、请求响应、错误码，但接口形态在你看来从PRD.md中还不准确形成，列入待确认问题清单。
+- 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据语义还不准确，列入待确认问题清单。
 - 生成待讨论问题时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 
 探索结束时先生成待确认问题清单。PRD.md中的「待补充」「待提供」「后续给出」如影响行为契约，逐项列入；无待确认项时写「无」并继续生成产物。

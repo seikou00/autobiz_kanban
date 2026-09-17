@@ -1,7 +1,7 @@
 ---
 name: autodev
 description: Autodev Dev 阶段根路由器。基于 checkpoint 路由到对应子技能；各子技能独立负责准入检查与产物自检。
-version: v1.1.08311
+version: v1.1.0917
 ---
 
 ## autodev
@@ -60,7 +60,7 @@ prd_done → resolve_next_skill.py --json
 - `requiresProfileChoice: true`：先完成 workflow profile 选择并写入 checkpoint。
 - `requiresWorkflowChoice: true`：先完成 dynamic stage 选择，使用 `--workflow-decision {stageId}=enabled|skipped` 写入 state.json 后再路由。
 - `recommendedNextSkill` 非空：调用对应子技能。
-- `recommendedNextSkill` 为空且当前 checkpoint 为 `verify_done`：Dev 阶段结束，进入 Ops。
+- `recommendedNextSkill` 为空且当前 checkpoint 为 `verify_done`：Dev 阶段结束，按统一衔接协议处理下一阶段。
 - `checkpoint` 为 `needs_fix`：停止，读取最近阶段报告中的建议回流阶段并提示用户。
 - `ok: false`：展示 `errors` 并停止。
 
@@ -73,7 +73,7 @@ prd_done → resolve_next_skill.py --json
 1. 子技能返回后重新运行 `read_state_json.py` 读取当前 checkpoint。
 2. 重新调用 `resolve_next_skill.py --json`，若返回 `ok: false` 或 checkpoint 不在 board_config 当前 profile 的合法矩阵中，保持原状态并告警。
 3. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
-4. 当前请求覆盖完整 Dev 流程时，合法出口立即按 `recommendedNextSkill` 继续，不为内部阶段切换追问用户。用户明确只请求当前阶段时，完成后汇报并停止，也不额外追问“是否继续”。
+4. 当前阶段完成后按 `${pluginPath}/skills/references/ui-continuation-guide.md` 衔接。用户明确只请求当前阶段时，完成后汇报并停止，不追问“是否继续”。
 
 
 
@@ -87,7 +87,7 @@ prd_done → resolve_next_skill.py --json
 2. 不需要转换时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
 3. 需要转换时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend` 这个工作流节点。
 4. 工作流节点内按输入形态分流：高保真/绝对定位/Figma 导出的 HTML 走 `/autodev-frontend` 的 `route/with-absolute-html/SKILL.md`；普通静态 HTML、复制的 DOM 片段、小型静态站点或用户明确说 HTML 转 React 时，走 `route/with-standard-html/SKILL.md`；主线完成且用户明确确认后，才走 `route/review/SKILL.md`。
-5. 任一入口完成后都推进到 `frontend_done`，根路由器再次刷新状态并进入 `/autodev-specs`。
+5. 任一入口完成后都推进到 `frontend_done`，按统一衔接协议处理。
 
 ### 约束
 
@@ -110,7 +110,7 @@ Dev 阶段的可选步骤由 `${pluginPath}/board_core/board_config.json` 的 `w
    `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
 3. 需要时，推进到 `detail_design_in_progress`：
    `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
-4. `/autodev-detail-design` 生成 `DETAIL_DESIGN.md` 后推进到 `detail_design_done`，根路由器再次刷新状态并进入 `/autodev-code`。
+4. `/autodev-detail-design` 生成 `DETAIL_DESIGN.md` 后推进到 `detail_design_done`，按统一衔接协议处理。
 
 ### 约束
 

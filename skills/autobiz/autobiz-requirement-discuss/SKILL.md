@@ -1,7 +1,7 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清与正式 PRD 生成技能。
-version: v1.4.0917
+version: v1.4.09171
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清与 PRD 生成
@@ -26,9 +26,9 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
 ```
-### 缓存检测与清理
+### 已有 PRD 处理
 
-用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在时，先删除该文件再走完整流程。
+用户要求重新讨论、分析或梳理需求时，先读取已有 PRD.md，按本次范围更新；用户明确要求废弃现稿并重新生成时再重建。
 
 ### 实现范围选择
 
@@ -56,7 +56,7 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 > 执行开始时用 `write_todos` 建立 todo 列表，每完成一步立即标记完成。以下环节不得跳过，可按实际情况增补条目：
 > - 建立需求上下文
-> - 加载领域知识文档
+> - 按需加载领域知识文档
 > - 保存原始材料快照
 > - 需求内容格式改造
 > - 需求分析
@@ -64,7 +64,7 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 > - 对话式引导与需求内容调整
 > - 迭代回检直到收敛
 > - 待确认裁定与正式稿收敛
-> - 更新状态与校验
+> - 校验与更新状态
 
 
 ### 建立需求上下文
@@ -72,9 +72,9 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 - 读取需求材料：优先 Word 文档（`.docx` / `.doc`）；Markdown、需求说明、会议纪要、飞书导出内容也可作为输入
 - 按原始文档的实际目录结构逐章逐节提取，不预设固定的信息类别；记录完整章节树与术语、文风特点，每节内容提取完整
 
-### 加载领域知识文档（必读）
+### 加载领域知识文档
 
-根据 `<UNIT>` 阅读规则，需求澄清阶段按照 `deployUnit` 必须读取相应领域知识文档，并将其作为需求分析的背景知识；未读取到时不影响需求澄清流程。
+按 `<UNIT>` 的必读要求读取领域文档，其余按本次需求选择相关章节；资料不可用时记录缺口。
 
 ### 保存原始材料快照
 将原始需求文档复制到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/prd_original/`（目录不存在则创建）保留快照
@@ -127,7 +127,6 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 #### 领域依据
 - 「领域依据」填该条问题所依据的系统提示词 `<SYSTEM>`、`<UNIT>` 段落点名文档的文件名与原文约束（如 `core-entities.md — 用户关联实体: 角色/部门/岗位`），与既有实体、流程、约束无关的纯规范类问题填「通用」。
-- 整张表的「领域依据」全为「通用」时，说明未结合本系统既有实体、流程与约束检查，重做需求分析。
 
 #### 处理问题清单
 
@@ -204,16 +203,10 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 ### 迭代直到收敛
 
-将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
+对照 analysis-guide.md 复核原问题及受修改影响的内容。仍需业务裁定或补充关键信息的事项继续询问用户；P0/P1 已处理且无新增实质问题时，进入正式稿收敛。
 
-#### 迭代终止条件
+#### 正式稿收敛：待确认裁定
 
-满足以下任一条件可视为需求已收敛：
-
-- 用户明确表示"无问题""可以了""通过""开始整理正式 PRD"
-- 用户表示"不需要""不考虑"等问题暂存的相似语句
-- 所有 P0 / P1 已处理完毕，只剩可接受的 P2 建议
-- 连续两次检查没有新增实质问题
 - 范围：`PRD.md` 的 `待确认事项` / `待确认项` 章节中每个实质条目，以及每一处 `【待确认】`；同一决策去重后逐条询问用户。章节正文仅为「无」时直接移除该空章节。
 - 展示：向用户确认前展示 `待确认内容 / 所在上下文 / 当前建议 / 备选 / 影响`。
 - 协议：先读取 `${pluginPath}/skills/references/ask-user-question.md`，再用 `request_user_input` 逐项提问，每轮最多 3 项；`id` 用条目内容的简短 snake_case 概括。不设置 `autoResolutionMs`。
@@ -227,22 +220,29 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 全部条目裁定并回写前，禁止更新 `prd_done` 或运行完成校验。
 
 
-### 更新状态
+### 校验与更新状态
+
+核对已确认需求的完整性、P0/P1 裁定及外部依赖后，运行产物校验：
+
+```bash
+python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}" --draft
+```
+
+校验通过后更新状态：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
 ```
 
+更新成功后核对终态：
+
+```bash
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
+```
 
 ## 输出清单
 
-Skill 完成后，必须运行脚本校验：
-
-```bash
-python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
-```
-
-脚本通过即视为以下清单已完成：
+完成时逐项核对以下清单：
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` — 已存在并满足正式稿结构
 - PRD 存在 `SRC-NNN` 时，对应快照与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/source-context.json` 已通过校验

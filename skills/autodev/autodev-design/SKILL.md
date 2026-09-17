@@ -1,7 +1,7 @@
 ---
 name: autodev-design
 description: Dev 阶段技术设计生成与定稿。
-version: v1.1.0905
+version: v1.1.0917
 ---
 
 # /autodev-design - Technical Design
@@ -22,12 +22,11 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 - 探索只用于澄清和调查，不得修改业务代码、测试、配置或迁移脚本。
 - 将需求目标、范围、非目标、现有代码约束、集成点、接口、数据模型、验证边界与用户讨论。未确认且影响实现路径的事项不得自行假设。
 - 稳定 ID：Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 是本阶段输出的技术决策；规格决策 `DEC-001` 仅来自 proposal 中可选的 `## Decision Log`，本阶段只引用、不新增 `DEC-NNN`。没有规格决策时追踪表的 Decision 写「无」。
-- 如果新增或改变可观察行为，写进 `design.md`。
-- 回检发现缺失或矛盾的 REQ/SCN（例如某能力没有行为契约）时，立即停止并向用户询问；按照用户回答更新对应产物。
+- 需要新增、改变可观察行为，或发现 REQ/SCN 缺失、矛盾时，先由用户裁定并更新对应 specs，再在 design.md 中描述实现方案。
 
-探索足以支持设计时，先给出目标、影响范围、已确认事实、待确认事项和代码证据的简短结论，再使用 `request_user_input` 询问是否进入设计生成。按 `${pluginPath}/skills/references/ask-user-question.md` 执行：未拿到明确答复前，不得写入 `design_in_progress` 或生成 `design.md`。用户直接补充实质信息时吸收后继续探索，不机械重复同一选择。
+探索足以支持设计时，简要汇报目标、影响范围、已确认事实、待确认事项和代码证据。用户已请求生成设计，或已授权包含本阶段的流程时，直接进入生成；原请求仅为探索时，按 `${pluginPath}/skills/references/ask-user-question.md` 确认是否生成设计。
 
-用户确认后进入本节点：
+已取得生成授权后进入本节点：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_in_progress --stage "技术设计（来源: Specs）"
