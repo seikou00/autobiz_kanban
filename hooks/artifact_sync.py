@@ -1018,9 +1018,11 @@ def current_feature_record(workspace: Path, feature: str) -> dict[str, Any]:
     result = load_state_json_records_result(workspace)
     if not result.exists:
         raise ValueError(f"state.json 不存在: {workspace / '.autobizdevops' / 'state.json'}")
-    if result.errors:
-        raise ValueError("\n".join(result.errors))
+    if result.fatal_errors:
+        raise ValueError("\n".join(result.fatal_errors))
     record = result.records.get(feature)
+    if record is None and result.record_errors.get(feature):
+        raise ValueError("\n".join(result.record_errors[feature]))
     if not isinstance(record, dict):
         raise ValueError(f"Feature 状态记录不存在: {feature}")
     return dict(record)

@@ -961,6 +961,23 @@ class FrontendRouteGateValidatorTests(unittest.TestCase):
 
 
 class FrontendRouteReadHookTests(unittest.TestCase):
+    def test_checkpoint_readers_ignore_invalid_other_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            state_path = workspace / ".autobizdevops" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["features"]["broken-other"] = {
+                "feature": "broken-other",
+                "checkpoint": "missing_checkpoint",
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            read_checkpoint = check_plugin_read.current_checkpoint(workspace, "alpha")
+            write_checkpoint = frontend_route_write_guard.current_checkpoint(workspace, "alpha")
+
+        self.assertEqual(read_checkpoint, "code_in_progress")
+        self.assertEqual(write_checkpoint, "code_in_progress")
+
     def test_parser_read_is_blocked_until_route_todos_created(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))

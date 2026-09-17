@@ -132,7 +132,7 @@ def current_feature() -> str:
 
 def current_checkpoint(workspace: Path, feature: str) -> str:
     result = load_state_json_records_result(workspace)
-    if not result.exists or result.errors:
+    if not result.exists or result.fatal_errors:
         return ""
     record = result.records.get(feature)
     if not isinstance(record, dict):

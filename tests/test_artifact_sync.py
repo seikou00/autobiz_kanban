@@ -53,6 +53,31 @@ def _sample_path(path: str) -> str:
 
 
 class ArtifactCatalogContractTest(unittest.TestCase):
+    def test_current_feature_record_ignores_invalid_other_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            state_dir = workspace / ".autobizdevops"
+            state_dir.mkdir(parents=True)
+            state_dir.joinpath("state.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "autobizdevops.state.v3",
+                        "features": {
+                            "alpha": {"feature": "alpha", "checkpoint": "code_in_progress"},
+                            "broken-other": {
+                                "feature": "broken-other",
+                                "checkpoint": "missing_checkpoint",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            record = artifact_sync.current_feature_record(workspace, "alpha")
+
+        self.assertEqual(record["checkpoint"], "code_in_progress")
+
     def test_current_biz_dev_outputs_have_expected_catalog_metadata(self) -> None:
         actual_paths = set()
         for node in _workflow_nodes():

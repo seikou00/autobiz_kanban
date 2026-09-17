@@ -58,9 +58,22 @@ def validate_stage(*, workspace: Path, feature: str, stage: str, phase: str = "f
     state = load_state_json_records_result(workspace)
     if not state.exists:
         return fail("missing_state_json", str(workspace / ".autobizdevops" / "state.json"))
-    if state.errors:
-        return WriterResult(ok=False, errors=[{"reason": "invalid_state_json", "detail": "; ".join(state.errors)}])
+    if state.fatal_errors:
+        return WriterResult(
+            ok=False,
+            errors=[{"reason": "invalid_state_json", "detail": "; ".join(state.fatal_errors)}],
+        )
     record = state.records.get(feature)
+    if record is None and state.record_errors.get(feature):
+        return WriterResult(
+            ok=False,
+            errors=[
+                {
+                    "reason": "invalid_state_json",
+                    "detail": "; ".join(state.record_errors[feature]),
+                }
+            ],
+        )
     if record is None:
         return fail("feature_not_found", feature)
     try:

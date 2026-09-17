@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,6 +314,41 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual([error["reason"] for error in result.errors or []], [])
             self.assertEqual(output.getvalue().strip(), "")
             self.assertFalse((feature_dir / "SMOKE_TEST_PLAN.json").exists())
+
+    def test_stage_gate_ignores_invalid_checkpoint_from_other_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _ = _workspace(Path(tmp))
+            state_path = workspace / ".autobizdevops" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["features"]["broken-other"] = {
+                "feature": "broken-other",
+                "checkpoint": "missing_checkpoint",
+                "workflowTemplate": "standard",
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            with mock.patch("hooks.stage_gate.run_postcheck", return_value=(0, "ok")) as postcheck:
+                result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
+
+            self.assertTrue(result.ok, result.errors)
+            self.assertEqual(result.errors, [])
+            postcheck.assert_called_once()
+
+    def test_stage_gate_rejects_invalid_checkpoint_from_current_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _ = _workspace(Path(tmp))
+            state_path = workspace / ".autobizdevops" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["features"]["alpha"]["checkpoint"] = "missing_checkpoint"
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            with mock.patch("hooks.stage_gate.run_postcheck") as postcheck:
+                result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.errors[0]["reason"], "invalid_state_json")
+            self.assertIn("Feature 'alpha'", result.errors[0]["detail"])
+            postcheck.assert_not_called()
 
     def test_postcheck_rejects_unknown_design_ref_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
