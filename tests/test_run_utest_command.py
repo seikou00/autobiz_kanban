@@ -74,7 +74,6 @@ class RunUTestCommandTest(unittest.TestCase):
         )
         self._write_plan()
     def _task(self, task_id="T001", argv=None, behavior="fixed amount discount"):
-        command_id = "VAL-{}-01".format(task_id)
         criterion_id = "AC-{}-01".format(task_id)
         acceptance = [
             {
@@ -96,28 +95,6 @@ class RunUTestCommandTest(unittest.TestCase):
                 "specs/cap/spec.md#SCN-001",
             ],
             "acceptanceCriteria": acceptance,
-            "validationCommands": [
-                {
-                    "id": command_id,
-                    "argv": argv or ["mvn", "test-compile"],
-                    "cwd": ".",
-                    "kind": "behavior_test",
-                    "required": True,
-                    "covers": [criterion_id],
-                }
-            ],
-            "validationTestPlan": [
-                {
-                    "commandId": command_id,
-                    "assetType": "unit_test",
-                    "executionStage": "post_batch",
-                    "covers": [criterion_id],
-                    "testIntent": {
-                        "behavior": behavior,
-                        "acceptanceCriteria": acceptance,
-                    },
-                }
-            ],
         }
 
     def _write_plan(self, task=None):
@@ -322,9 +299,6 @@ class RunUTestCommandTest(unittest.TestCase):
             behavior="限时时间段、商品范围与次数限制",
         )
         correct["acceptanceCriteria"][0]["text"] = "限时时间段、商品范围与次数限制"
-        correct["validationTestPlan"][0]["testIntent"]["acceptanceCriteria"] = correct[
-            "acceptanceCriteria"
-        ]
         self._write_plan(correct)
         old_digest = canonical_task_digest(
             self._task(task_id="T008", behavior="阶梯折扣")
@@ -483,15 +457,15 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertFalse((self.feature_dir / "evidence" / "EVIDENCE.jsonl").exists())
         self.assertFalse((self.feature_dir / "UNIT_TEST_RESULT.json").exists())
 
-    def test_plan_cwd_escape_is_rejected_before_execution(self):
+    def test_plan_module_escape_is_rejected_before_execution(self):
         broken = self._task()
-        broken["validationCommands"][0]["cwd"] = "../outside"
+        broken["scope"] = {"modules": ["../outside"]}
         self._write_plan(broken)
 
         with self.assertRaises(UTestCommandError) as caught:
             self._execute()
 
-        self.assertIn("cwd", str(caught.exception))
+        self.assertIn("scope.modules", str(caught.exception))
         self.assertIn("修复：", str(caught.exception))
         self.assertFalse((self.feature_dir / "test-output.log").exists())
 

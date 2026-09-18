@@ -398,7 +398,10 @@ def build_context(
             "validationBoundary": task.get("validationBoundary"),
             "verificationIntent": task.get("verificationIntent"),
             "sourceRefs": source_refs,
-            "testIntent": task.get("validationTestPlan", []),
+            "testIntent": {
+                "verificationIntent": task.get("verificationIntent"),
+                "testPoints": task.get("testPoints", []),
+            },
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,

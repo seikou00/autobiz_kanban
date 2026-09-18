@@ -140,7 +140,6 @@ def write_plan_route(
                     "apiIds": [],
                     "dataIds": [],
                     "decisionIds": ["D-001"],
-                    "validationCommands": [{"command": "echo ok"}],
                     "expectedFiles": [],
                     "evidenceIds": [],
                     "blockers": [],

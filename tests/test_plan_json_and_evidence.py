@@ -68,7 +68,7 @@ def valid_plan(
                         "scenarioRefs": ["specs/capability/spec.md#SCN-001"],
                     }
                 ],
-                "validationBoundary": "public behavior seam validated by the task command",
+                "validationBoundary": "public behavior seam",
                 "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                 "designRefs": ["design.md#D-001"],
@@ -76,16 +76,6 @@ def valid_plan(
                 "dataIds": [],
                 "decisionIds": ["D-001"],
                 "completionPolicy": "all_required_validations_pass",
-                "validationCommands": [
-                    {
-                        "id": "VAL-T001-01",
-                        "argv": [sys.executable, "-c", "print('task validation')"],
-                        "cwd": ".",
-                        "kind": "behavior_test",
-                        "required": True,
-                        "covers": ["AC-T001-01"],
-                    }
-                ],
                 "expectedFiles": [],
                 "evidenceIds": bound_evidence,
                 "completionEvidenceIds": bound_evidence,
@@ -246,22 +236,15 @@ class PlanJsonTest(unittest.TestCase):
 
         self.assertIn("legacy_plan_requires_rebuild", validate_plan_data(plan))
 
-    def test_plan_rejects_unknown_acceptance_coverage(self) -> None:
+    def test_plan_v2_requires_no_task_command_coverage(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
-        task = plan["tasks"][0]
-        task["validationCommands"][0]["covers"] = ["AC-T001-99"]
+        self.assertEqual(validate_test_tasks(plan), [])
 
-        self.assertIn("T001.validationCommands[0].covers_unknown:AC-T001-99", validate_test_tasks(plan))
-
-    def test_plan_rejects_compile_as_acceptance_coverage(self) -> None:
+    def test_plan_v2_ignores_legacy_task_validation_fields_when_reading_existing_runs(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
-        task = plan["tasks"][0]
-        task["validationCommands"][0]["kind"] = "compile"
+        plan["tasks"][0]["validationCommands"] = []
 
-        self.assertIn(
-            "T001.validationCommands[0].kind_invalid_for_lane:backend",
-            validate_test_tasks(plan),
-        )
+        self.assertEqual(validate_test_tasks(plan), [])
 
     def test_frontend_plan_accepts_build_as_acceptance_coverage(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -275,14 +258,9 @@ class PlanJsonTest(unittest.TestCase):
             "frontendRoute": "spec-driven-ui",
         }
         task["expectedFiles"] = ["src/views/promotion/activity/index.vue"]
-        task["validationCommands"][0].update({
-            "argv": ["npm", "run", "build"],
-            "kind": "build",
-        })
-
         self.assertEqual(validate_test_tasks(plan), [])
 
-    def test_frontend_compile_kind_must_match_command(self) -> None:
+    def test_frontend_plan_has_no_task_compile_command_contract(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         task = plan["tasks"][0]
         task["uiRequired"] = True
@@ -293,42 +271,9 @@ class PlanJsonTest(unittest.TestCase):
             "visualSourceRefs": [],
             "frontendRoute": "spec-driven-ui",
         }
-        task["validationCommands"][0].update({
-            "argv": ["npm", "run", "typecheck"],
-            "kind": "build",
-        })
+        self.assertEqual(validate_test_tasks(plan), [])
 
-        self.assertIn(
-            "T001.validationCommands[0].frontend_compile_command_mismatch:build",
-            validate_test_tasks(plan),
-        )
-
-    def test_plan_rejects_noop_placeholder_and_inline_shell_commands(self) -> None:
-        plan = valid_plan(status="todo", evidence_ids=[])
-        command = plan["tasks"][0]["validationCommands"][0]
-        command["argv"] = ["bash", "-c", "echo validation placeholder"]
-
-        errors = validate_test_tasks(plan)
-
-        self.assertIn("T001.validationCommands[0].validation_command_placeholder", errors)
-        self.assertIn("T001.validationCommands[0].validation_command_inline_shell_forbidden", errors)
-
-        command["argv"] = ["echo", "ok"]
-        self.assertIn(
-            "T001.validationCommands[0].validation_command_noop",
-            validate_test_tasks(plan),
-        )
-
-    def test_plan_requires_required_commands_to_cover_every_acceptance_criterion(self) -> None:
-        plan = valid_plan(status="todo", evidence_ids=[])
-        plan["tasks"][0]["validationCommands"][0]["required"] = False
-
-        self.assertIn(
-            "T001.acceptanceCriteria_uncovered:AC-T001-01",
-            validate_test_tasks(plan),
-        )
-
-    def test_external_dependency_nonempty_validation_plan_reports_only_mode_error(self) -> None:
+    def test_external_dependency_has_no_task_command_contract(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         task = plan["tasks"][0]
         task.update({
@@ -339,17 +284,9 @@ class PlanJsonTest(unittest.TestCase):
                 "trackingRefs": ["design.md#D-001"],
             },
             "completionPolicy": "external_dependency_recorded",
-            "validationCommands": [],
-            "validationTestPlan": [{"malformed": True}],
         })
 
-        errors = validate_test_tasks(plan)
-
-        self.assertIn("T001.external_dependency_validationTestPlan_forbidden", errors)
-        self.assertFalse(
-            any(error.startswith("T001.validationTestPlan") for error in errors),
-            errors,
-        )
+        self.assertEqual(validate_test_tasks(plan), [])
 
     def test_hard_caps_have_no_downstream_contract_behind_them(self) -> None:
         """Evidence for the rule registry: over-cap tasks are downstream-valid.
@@ -380,9 +317,6 @@ class PlanJsonTest(unittest.TestCase):
                     ]
                     task["specRefs"] = ["specs/capability/spec.md#REQ-001", *refs]
                     task["acceptanceCriteria"] = criteria
-                    task["validationCommands"][0]["covers"] = [
-                        item["id"] for item in criteria
-                    ]
                 else:
                     task["apiIds"] = [f"API-{index:03d}" for index in range(1, over_cap + 1)]
 
@@ -412,7 +346,6 @@ class PlanJsonTest(unittest.TestCase):
                 "trackingRefs": ["design.md#D-001"],
             },
             "completionPolicy": "external_dependency_recorded",
-            "validationCommands": [],
             "specRefs": ["specs/capability/spec.md#REQ-001", *scenario_refs],
             "mergedScenarioRefs": scenario_refs,
             "splitRationale": (
@@ -432,65 +365,6 @@ class PlanJsonTest(unittest.TestCase):
         self.assertEqual(validate_test_tasks(plan, require_initial_status=True), [])
         self.assertEqual(validate_plan_task_granularity_item(task, task_id="T001"), [])
 
-    def test_external_dependency_local_validation_commands_still_forbidden(self) -> None:
-        plan = valid_plan(status="todo", evidence_ids=[])
-        task = plan["tasks"][0]
-        task.update({
-            "executionMode": "external_dependency",
-            "externalDependency": {
-                "system": "external-system",
-                "owner": "external-team",
-                "trackingRefs": ["design.md#D-001"],
-            },
-            "completionPolicy": "external_dependency_recorded",
-            "validationTestPlan": [],
-        })
-
-        self.assertIn(
-            "T001.external_dependency_validationCommands_forbidden",
-            validate_test_tasks(plan),
-        )
-
-    def test_defer_to_test_stages_validation_test_plan_schema_is_strict(self) -> None:
-        plan = valid_plan(status="todo", evidence_ids=[])
-        task = plan["tasks"][0]
-        task["validationTestPlan"] = [
-            {
-                "commandId": "VAL-T001-01",
-                "assetType": "unit_test",
-                "executionStage": "with_code",
-                "covers": ["AC-T001-01"],
-                "testIntent": {
-                    "behavior": "the behavior is observable",
-                    "acceptanceCriteria": task["acceptanceCriteria"],
-                },
-            }
-        ]
-
-        self.assertEqual(
-            validate_test_tasks(plan, defer_to_test_stages=True),
-            [],
-        )
-
-        task["validationTestPlan"][0]["covers"] = ["T001"]
-        task["validationTestPlan"][0]["testIntent"]["acceptanceCriteria"] = []
-        errors = validate_test_tasks(plan, defer_to_test_stages=True)
-        self.assertIn(
-            "T001.validationTestPlan[0].covers_unknown:T001",
-            errors,
-        )
-        self.assertIn(
-            "T001.validationTestPlan[0].testIntent.acceptanceCriteria_mismatch",
-            errors,
-        )
-
-        task["validationTestPlan"][0]["targets"] = [
-            {"selector": "MissingTest", "mode": "create_in_code"}
-        ]
-        errors = validate_test_tasks(plan, defer_to_test_stages=True)
-        self.assertIn("T001.validationTestPlan[0].targets_forbidden", errors)
-        self.assertIn("T001.validationTestPlan[0].create_in_code_forbidden", errors)
-
     def test_plan_requires_workspace_roots_for_nonempty_scope_paths(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         plan["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
@@ -504,24 +378,8 @@ class PlanJsonTest(unittest.TestCase):
             "workspaceRoots": {"default": "backend/service"},
             "paths": ["backend/service/src/main/java/example"],
         })
-        task["validationCommands"][0]["cwd"] = "backend/service"
-
         self.assertIn(
             "T001.scope.path_repeats_workspace_root:backend/service/src/main/java/example",
-            validate_test_tasks(plan),
-        )
-
-    def test_plan_rejects_task_validation_cwd_outside_workspace_root(self) -> None:
-        plan = valid_plan(status="todo", evidence_ids=[])
-        task = plan["tasks"][0]
-        task["scope"].update({
-            "workspaceRoots": {"default": "backend/service"},
-            "paths": ["src/main/java/example"],
-        })
-        task["validationCommands"][0]["cwd"] = "."
-
-        self.assertIn(
-            "T001.validationCommands[0].cwd_outside_workspace_root:backend/service",
             validate_test_tasks(plan),
         )
 
@@ -588,14 +446,13 @@ class PlanJsonTest(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update the behavior", "cover the boundary"],
                 "acceptanceCriteria": ["the behavior is observable"],
-                "validationBoundary": "public behavior seam validated by the task command",
+                "validationBoundary": "public behavior seam",
                 "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
                 "dataIds": [],
                 "decisionIds": ["D-001"],
-                "validationCommands": [{"command": "echo ok"}],
                 "expectedFiles": [],
                 "evidenceIds": ["ev_0002"],
                 "blockers": [],
@@ -701,8 +558,6 @@ class PlanJsonTest(unittest.TestCase):
             "backend-repo": ".",
             "frontend-repo": ".",
         }
-        task["validationCommands"][0]["repo"] = "backend-repo"
-
         errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.scope.workspaceRoots_multiple_forbidden", errors)

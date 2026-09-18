@@ -55,11 +55,12 @@ def _pipeline_revision(root: dict[str, Any], batches: dict[str, dict[str, Any]])
                     if isinstance(task, dict)
                     for path in (task.get("scope", {}).get("paths", []) if isinstance(task.get("scope"), dict) else [])
                 ],
-                "taskValidation": [
+                "taskVerification": [
                     {
                         "id": task.get("id"),
-                        "validationCommands": task.get("validationCommands", []),
-                        "validationTestPlan": task.get("validationTestPlan", []),
+                        "testPoints": task.get("testPoints", []),
+                        "verificationIntent": task.get("verificationIntent"),
+                        "acceptanceCriteria": task.get("acceptanceCriteria", []),
                     }
                     for task in batches.get(str(entry.get("id")), {}).get("tasks", [])
                     if isinstance(task, dict)
@@ -88,26 +89,16 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
         for task in batch.get("tasks", []) if isinstance(batch, dict) else []:
             if not isinstance(task, dict) or not isinstance(task.get("id"), str):
                 continue
-            for index, intent in enumerate(task.get("validationTestPlan", []), start=1):
-                if not isinstance(intent, dict):
-                    continue
-                command_id = str(intent.get("id") or intent.get("commandId") or f"TEST-{task['id']}-{index:02d}")
-                asset_type = str(intent.get("assetType") or "unit_test")
-                # A Batch owns every test intent that can be authored and
-                # exercised in its native worktree.  ``e2e_test`` remains the
-                # sole post-merge validation surface because it requires the
-                # complete promoted system.
-                if asset_type == "e2e_test":
-                    owner_batch_id, stage = "V-E2E", "e2e_test"
-                else:
-                    owner_batch_id, stage = batch_id, "test"
-                ownership[command_id] = {
-                    "ownerBatchId": owner_batch_id,
-                    "stage": stage,
-                    "kind": "test_intent",
-                    "taskId": task["id"],
-                    "sourceBatchId": batch_id,
-                }
+            if task.get("executionMode") == "external_dependency":
+                continue
+            target_id = f"UTEST-{task['id']}"
+            ownership[target_id] = {
+                "ownerBatchId": batch_id,
+                "stage": "test",
+                "kind": "utest_target",
+                "taskId": task["id"],
+                "sourceBatchId": batch_id,
+            }
 
     return {
         "schemaVersion": PIPELINE_SCHEMA_VERSION,
@@ -153,9 +144,8 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
         for task in batch.get("tasks", []) if isinstance(batch, dict) else []:
             if not isinstance(task, dict) or not isinstance(task.get("id"), str):
                 continue
-            for index, intent in enumerate(task.get("validationTestPlan", []), start=1):
-                if isinstance(intent, dict):
-                    source_ids.append(str(intent.get("id") or intent.get("commandId") or f"TEST-{task['id']}-{index:02d}"))
+            if task.get("executionMode") != "external_dependency":
+                source_ids.append(f"UTEST-{task['id']}")
     duplicate_ids = sorted({item for item in source_ids if source_ids.count(item) > 1})
     errors.extend(f"validation_ownership_duplicate:{command_id}" for command_id in duplicate_ids)
     for command_id, owner in expected.items():

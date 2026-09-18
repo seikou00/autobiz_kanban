@@ -102,24 +102,11 @@ def _batch_path(feature_dir, raw_path):
 
 
 def validation_locations(task):
-    """Project validationCommands to repository locations only."""
+    """Return the Plan V2 workspace boundary for UTest-generated commands."""
     if not isinstance(task, dict):
         return []
     workspace_ref = task.get("workspaceRef")
-    raw_commands = task.get("validationCommands")
-    if not isinstance(raw_commands, list) or not raw_commands:
-        return [{"repo": workspace_ref, "cwd": "."}]
-    result = []
-    for command in raw_commands:
-        if not isinstance(command, dict):
-            continue
-        location = {
-            "repo": command.get("repo") or workspace_ref,
-            "cwd": command.get("cwd") or ".",
-        }
-        if location not in result:
-            result.append(location)
-    return result
+    return [{"repo": workspace_ref, "cwd": "."}]
 
 
 def canonical_task_contract(task):
@@ -228,28 +215,7 @@ def _validate_task(task, batch_id):
             _error("{} acceptanceCriteria[{}].text 缺失".format(context, index))
         acceptance_ids.append(criterion_id)
 
-    raw_commands = task.get("validationCommands")
-    if not isinstance(raw_commands, list):
-        _error("{} validationCommands 必须是数组".format(context))
-    locations = []
-    for index, command in enumerate(raw_commands):
-        command_context = "{} validationCommands[{}]".format(context, index)
-        if not isinstance(command, dict):
-            _error("{} 不是 object".format(command_context))
-        cwd = command.get("cwd")
-        if not isinstance(cwd, str) or not cwd.strip():
-            _error("{}.cwd 缺失".format(command_context))
-        cwd_path = Path(cwd)
-        if cwd_path.is_absolute() or ".." in cwd_path.parts:
-            _error("{}.cwd 必须是仓库根内相对路径".format(command_context))
-        repository = command.get("repo") or workspace_ref
-        if not isinstance(repository, str) or not repository.strip():
-            _error("{}.repo 无效".format(command_context))
-        location = {"repo": repository, "cwd": cwd}
-        if location not in locations:
-            locations.append(location)
-    if not locations:
-        locations = [{"repo": workspace_ref, "cwd": "."}]
+    locations = validation_locations(task)
 
     return {
         "id": task_id,

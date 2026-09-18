@@ -58,7 +58,7 @@ def task(
                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
             }
         ],
-        "validationBoundary": "public behavior seam validated by the task command",
+        "validationBoundary": "public behavior seam",
         "nonGoals": ["do not change unrelated behavior"],
         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
         "designRefs": ["design.md#D-001"],
@@ -66,16 +66,6 @@ def task(
         "dataIds": [],
         "decisionIds": ["D-001"],
         "completionPolicy": "all_required_validations_pass",
-        "validationCommands": [
-            {
-                "id": f"VAL-{task_id}-01",
-                "argv": [sys.executable, "-c", "print('task validation')"],
-                "cwd": ".",
-                "kind": "behavior_test",
-                "required": True,
-                "covers": [f"AC-{task_id}-01"],
-            }
-        ],
         "expectedFiles": [],
         "evidenceIds": [],
         "completionEvidenceIds": [],
@@ -220,54 +210,16 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
 
-    def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
+    def test_bundle_allows_plan_v2_without_task_validation_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
             item = task("T001")
-            item["validationCommands"].append(
-                {
-                    "id": "VAL-T001-02",
-                    "argv": ["mvn", "compile", "-q"],
-                    "cwd": ".",
-                    "kind": "compile",
-                    "required": True,
-                    "covers": [],
-                }
-            )
             write_bundle(feature_dir, [[item]])
 
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
-            self.assertIn("T001.validationCommands[1].kind_invalid_for_lane:backend", errors)
-
-    def test_bundle_rejects_disguised_compile_and_unscoped_maven_test(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            item = task("T001")
-            item["validationCommands"][0].update({
-                "argv": ["mvn.cmd", "compile", "-q"],
-                "kind": "integration_test",
-            })
-            write_bundle(feature_dir, [[item]])
-            _, compile_errors = load_and_validate_plan(feature_dir / "plan.json")
-            self.assertIn("T001.validationCommands[0].batch_owned_command", compile_errors)
-
-            item["validationCommands"][0]["argv"] = ["mvn.cmd", "test", "-q"]
-            write_bundle(feature_dir, [[item]])
-            _, test_errors = load_and_validate_plan(feature_dir / "plan.json")
-            self.assertIn("T001.validationCommands[0].maven_test_selector_missing", test_errors)
-
-            item["validationCommands"][0]["argv"] = [
-                "mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-DskipTests=true"
-            ]
-            write_bundle(feature_dir, [[item]])
-            _, bypass_errors = load_and_validate_plan(feature_dir / "plan.json")
-            self.assertIn(
-                "T001.validationCommands[0].maven_test_execution_skipped",
-                bypass_errors,
-            )
+            self.assertEqual(errors, [])
 
 
     def test_initial_bundle_allows_missing_compile_profile_for_used_lane(self) -> None:

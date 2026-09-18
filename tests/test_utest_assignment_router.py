@@ -22,7 +22,6 @@ SKILL_PATH = ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md"
 
 def task(task_id, workspace_ref="default", behavior="observable behavior"):
     criterion_id = "AC-{}-01".format(task_id)
-    command_id = "VAL-{}-01".format(task_id)
     return {
         "id": task_id,
         "title": "Task {}".format(task_id),
@@ -46,34 +45,6 @@ def task(task_id, workspace_ref="default", behavior="observable behavior"):
                 "id": criterion_id,
                 "text": behavior,
                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
-            }
-        ],
-        "validationCommands": [
-            {
-                "id": command_id,
-                "argv": ["mvn", "test-compile"],
-                "cwd": ".",
-                "kind": "behavior_test",
-                "required": True,
-                "covers": [criterion_id],
-            }
-        ],
-        "validationTestPlan": [
-            {
-                "commandId": command_id,
-                "assetType": "unit_test",
-                "executionStage": "post_batch",
-                "covers": [criterion_id],
-                "testIntent": {
-                    "behavior": behavior,
-                    "acceptanceCriteria": [
-                        {
-                            "id": criterion_id,
-                            "text": behavior,
-                            "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
-                        }
-                    ],
-                },
             }
         ],
     }
@@ -197,22 +168,17 @@ class UTestAssignmentRouterTest(unittest.TestCase):
         self.assertIn("workspaceRef", str(caught.exception))
         self.assertIn("修复：", str(caught.exception))
 
-    def test_validation_command_argv_is_ignored_even_when_it_is_maven_validate(self):
+    def test_plan_v2_assignment_contains_no_test_command_hints(self):
         source = task("T008", behavior="限时时间段、商品范围与次数限制")
-        source["validationCommands"][0]["argv"] = ["mvn", "validate"]
-        source["validationTestPlan"][0]["testIntent"]["behavior"] = "阶梯折扣"
         feature_dir = self._feature([("B008", "backend", [source])])
 
         assignment = build_assignments(feature_dir)[0]
 
         self.assertIn("限时时间段、商品范围与次数限制", assignment["promptContent"])
         self.assertNotIn("mvn", assignment["promptContent"])
-        self.assertNotIn("阶梯折扣", assignment["promptContent"])
 
-    def test_empty_validation_commands_defaults_to_workspace_root(self):
+    def test_plan_v2_assignment_defaults_to_workspace_root(self):
         source = task("T001", workspace_ref="ruoyi-vue-pro")
-        source["validationCommands"] = []
-        source["validationTestPlan"] = []
         feature_dir = self._feature([("B001", "backend", [source])])
 
         assignment = build_assignments(feature_dir)[0]

@@ -52,7 +52,6 @@ class InspectTestEnvironmentTest(unittest.TestCase):
             "scope": {"modules": list(modules or []), "workspaceRoots": {workspace_ref: "."}},
             "specRefs": ["specs/cap/spec.md#REQ-001"],
             "acceptanceCriteria": [{"id": "AC-T001-01", "text": "module works"}],
-            "validationCommands": [{"repo": workspace_ref, "cwd": "."}],
         }
         batch_path.write_text(
             json.dumps({"batchId": "B001", "executionLane": "backend", "tasks": [task]}),
@@ -331,7 +330,7 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertIn("T001", payload["errors"][0])
         self.assertIn("scope.modules", payload["errors"][0])
 
-    def test_invalid_plan_location_is_contract_gap_not_environment_failure(self):
+    def test_invalid_plan_module_is_contract_gap_not_environment_failure(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
@@ -341,7 +340,7 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         feature_dir = self._feature(workspace, repo)
         batch_path = feature_dir / "plans" / "B001" / "plan.json"
         batch = json.loads(batch_path.read_text(encoding="utf-8"))
-        batch["tasks"][0]["validationCommands"][0]["cwd"] = "../outside"
+        batch["tasks"][0]["scope"]["modules"] = ["../outside"]
         batch_path.write_text(json.dumps(batch), encoding="utf-8")
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):

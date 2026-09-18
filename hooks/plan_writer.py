@@ -30,7 +30,6 @@ from hooks.json_writer_common import (  # noqa: E402
     render_result,
     resolve_feature,
     resolve_workspace,
-    shell_join,
     with_result_data,
     write_text,
     WriterError,
@@ -1266,7 +1265,6 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "apiIds": copy.deepcopy(group.get("apiIds", [])),
         "dataIds": [],
         "decisionIds": [],
-        "validationCommands": [],
         "expectedFiles": [],
         "evidenceIds": [],
         "implementationEvidenceIds": [],
@@ -1320,22 +1318,7 @@ def _plan_v2_runtime_task(group: dict[str, Any], workspace_roots: dict[str, str]
     task["designRefs"] = copy.deepcopy(group.get("designRefs", []))
     task["dataIds"] = copy.deepcopy(group.get("dataIds", []))
     task["decisionIds"] = copy.deepcopy(group.get("decisionIds", []))
-    task["validationCommands"] = []
     task["verificationIntent"] = str(group.get("verificationIntent") or outcome).strip()
-    if task_execution_mode(task) == "external_dependency":
-        task["validationTestPlan"] = []
-    else:
-        task["validationTestPlan"] = [{
-            "id": f"TEST-{task_id}-01",
-            "assetType": "e2e_test" if task.get("uiRequired") is True else "unit_test",
-            "executionStage": "post_batch" if task.get("uiRequired") is True else "with_code",
-            "covers": [f"AC-{task_id}-01"],
-            "testIntent": {
-                "behavior": task["verificationIntent"],
-                "acceptanceCriteria": copy.deepcopy(task["acceptanceCriteria"]),
-                "testPoints": copy.deepcopy(task["testPoints"]),
-            },
-        }]
     return task
 
 
@@ -1874,17 +1857,11 @@ def _render_plan_md(data: dict[str, Any]) -> str:
             )
         if task.get("splitRationale"):
             lines.append(f"- 合并理由: {task.get('splitRationale')}")
-        commands = task.get("validationCommands", [])
-        lines.append("- 验证命令:")
-        if isinstance(commands, list) and commands:
-            for command in commands:
-                if isinstance(command, dict):
-                    argv = command.get("argv")
-                    rendered = shell_join(argv) if isinstance(argv, list) and all(isinstance(item, str) for item in argv) else command.get("command", "")
-                    command_id = command.get("id")
-                    lines.append(f"  - {command_id}: {rendered}" if command_id else f"  - {rendered}")
-        else:
-            lines.append("  - 由 UTest/E2E 根据实际实现生成")
+        lines.append("- 验证点:")
+        for point in task.get("testPoints", []):
+            lines.append(f"  - {point}")
+        lines.append(f"- 验证意图: {task.get('verificationIntent', '')}")
+        lines.append("- 测试命令: 由 UTest/E2E 在测试资产落地后根据真实 runner 生成")
         lines.append(f"- 状态: {task.get('status', '')}")
         disposition = task.get("validationDisposition")
         if isinstance(disposition, dict):

@@ -41,18 +41,6 @@ BLOCKERS: Dict[str, Blocker] = {
             "::test_range_reference_creates_false_scenario_coverage"
         ),
     ),
-    "invalid_plan_task_matrix_validation": Blocker(
-        module="hooks/plan_granularity.py",
-        downstream_failure=(
-            "任务契约要求每条 acceptanceCriteria 都被某条 required 命令覆盖，"
-            "漏覆盖时下游报 acceptanceCriteria_uncovered。"
-            "注：本规则另一半「恰好一条命令」尚无下游依据，见 UNPROVEN 说明。"
-        ),
-        regression_test=(
-            "tests/test_plan_json_and_evidence.py::PlanJsonTest"
-            "::test_plan_requires_required_commands_to_cover_every_acceptance_criterion"
-        ),
-    ),
 }
 
 

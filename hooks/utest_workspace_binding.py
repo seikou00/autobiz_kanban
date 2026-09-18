@@ -274,31 +274,12 @@ def _workspace_prefix(task):
 
 
 def _location_roots(task, repository_root):
-    task_id = task["id"]
-    workspace_ref = task["workspaceRef"]
-    result = []
-    for location in task["validationLocations"]:
-        repository = location.get("repo")
-        if repository not in (workspace_ref, "default"):
-            raise UTestWorkspaceBindingError(
-                "contract_gap",
-                "{} validationCommands.repo={} 与 workspaceRef={} 不一致。修复：在 /autodev-plan 统一仓库声明。".format(
-                    task_id, repository, workspace_ref
-                ),
-                "repair_plan_task_location",
-            )
-        relative = _safe_relative(location.get("cwd"), "validationCommands.cwd", task_id)
-        resolved = (repository_root / relative).resolve()
-        if not resolved.is_dir() or not path_within(resolved, repository_root):
-            raise UTestWorkspaceBindingError(
-                "contract_gap",
-                "{} validationCommands.cwd={} 在绑定仓库中不存在。修复：在 /autodev-plan 修正该 TASK 的验证目录。".format(
-                    task_id, location.get("cwd")
-                ),
-                "repair_plan_task_location",
-            )
-        result.append({"repo": repository, "cwd": location["cwd"], "root": resolved})
-    return result
+    """Use the task's Plan-bound repository as UTest's only location authority."""
+    return [{
+        "repo": task["workspaceRef"],
+        "cwd": ".",
+        "root": Path(repository_root).resolve(),
+    }]
 
 
 def _module_root(repository_root, workspace_root, locations, module, task_id):
@@ -375,7 +356,7 @@ def resolve_task_workspace(
         if not allowed:
             raise UTestWorkspaceBindingError(
                 "contract_gap",
-                "{} 的模块 {} 不属于 validationCommands.repo/cwd 确认的目录。修复：在 /autodev-plan 统一模块与验证目录。".format(
+                "{} 的模块 {} 不属于当前 workspaceRef 的绑定仓库。修复：在 /autodev-plan 统一模块与仓库声明。".format(
                     task_id, module or execution_root.name
                 ),
                 "repair_plan_task_location",

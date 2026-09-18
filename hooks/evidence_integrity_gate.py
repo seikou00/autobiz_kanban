@@ -253,11 +253,6 @@ def _check_completion(
 
         completion_ids = task.get("completionEvidenceIds")
         completion_ids = completion_ids if isinstance(completion_ids, list) else []
-        planned_commands = {
-            str(command.get("id")): command
-            for command in task.get("validationCommands", [])
-            if isinstance(command, dict) and isinstance(command.get("id"), str)
-        }
         for evidence_id in completion_ids:
             record = by_id.get(str(evidence_id))
             if record is None:
@@ -273,17 +268,6 @@ def _check_completion(
             if record.get("detailVersion") != 2:
                 errors.append(f"{task_id}.completion_evidence_requires_detail_v2:{evidence_id}")
                 continue
-            validation = record.get("validation")
-            if not isinstance(validation, dict):
-                continue
-            command_id = validation.get("commandId")
-            if not isinstance(command_id, str) or command_id not in planned_commands:
-                errors.append(f"{task_id}.unplanned_validation_command:{command_id}")
-                continue
-            planned = planned_commands[command_id]
-            for field in ("argv", "cwd", "kind", "required", "repo"):
-                if validation.get(field) != planned.get(field):
-                    errors.append(f"{task_id}.validation_command_mismatch:{command_id}:{field}")
     errors.extend(_check_batch_completion(plan, by_id, feature_dir=feature_dir))
     return errors
 

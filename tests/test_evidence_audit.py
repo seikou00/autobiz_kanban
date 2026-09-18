@@ -70,8 +70,6 @@ class EvidenceAuditTest(unittest.TestCase):
             second["status"] = "todo"
             second["deps"] = ["T001"]
             second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
-            second["validationCommands"][0]["id"] = "VAL-T002-01"
-            second["validationCommands"][0]["covers"] = ["AC-T002-01"]
 
             (feature_dir / "plan.json").write_text(
                 json.dumps(

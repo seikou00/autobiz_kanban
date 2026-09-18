@@ -1327,8 +1327,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             b2 = json.loads(b2_path.read_text(encoding="utf-8"))
             b2["tasks"][0].update({"workspaceRef": "web", "deps": []})
             b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "."}
-            for command in b2["tasks"][0]["validationCommands"]:
-                command["repo"] = "web"
             b2_path.write_text(json.dumps(b2), encoding="utf-8")
             root_path = feature_dir / "plan.json"
             plan = json.loads(root_path.read_text(encoding="utf-8"))
@@ -1725,9 +1723,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                         }
                     ],
                 }
-            )
-            third_task["validationCommands"][0].update(
-                {"id": "VAL-T003-01", "covers": ["AC-T003-01"]}
             )
             third_path = feature_dir / "plans" / "B003" / "plan.json"
             third_path.parent.mkdir(parents=True)

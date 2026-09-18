@@ -126,7 +126,7 @@ def _inspect_spring(root, framework):
         return result
     if not pom.is_file() and not present_gradle:
         result["errors"].append(
-            "validationCommands.cwd 对应目录未发现 pom.xml 或 build.gradle(.kts)。修复：修正验证目录或补齐项目真实使用的构建清单。"
+            "当前 UTest 执行目录未发现 pom.xml 或 build.gradle(.kts)。修复：修正模块声明或补齐项目真实使用的构建清单。"
         )
         return result
 
@@ -260,7 +260,7 @@ def _inspect_frontend(root, framework):
     package_path = root / "package.json"
     if not package_path.is_file():
         result["errors"].append(
-            "validationCommands.cwd 对应目录未发现 package.json。修复：修正验证目录或补齐项目真实使用的构建清单。"
+            "当前 UTest 执行目录未发现 package.json。修复：修正模块声明或补齐项目真实使用的构建清单。"
         )
         return result
 
@@ -372,7 +372,7 @@ def inspect_environment(workspace, framework):
     normalized = str(framework or "").strip().lower()
     if not root.is_dir():
         raise TestEnvironmentError(
-            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 validationCommands.cwd。".format(
+            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 scope.modules。".format(
                 root
             )
         )
@@ -484,7 +484,7 @@ def inspect_feature_environments(workspace, feature, task_ids=None, *, code_work
             if framework is None:
                 inspection = _base_result("unknown")
                 inspection["errors"].append(
-                    "{} 的 validationCommands.cwd 未发现受支持的测试工程清单。修复：修正验证目录，或补齐项目真实使用的构建清单。".format(
+                    "{} 的 UTest 执行目录未发现受支持的测试工程清单。修复：修正模块声明，或补齐项目真实使用的构建清单。".format(
                         task_id
                     )
                 )

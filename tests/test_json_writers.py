@@ -151,7 +151,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "scope": {"modules": ["src"], "entrypoints": ["API-001"], "pages": [], "dataObjects": ["DATA-001"]},
         "implementationPoints": ["update behavior", "cover boundary"],
         "acceptanceCriteria": [{"id": "AC-T001-01", "text": "behavior is observable", "scenarioRefs": ["specs/cap/spec.md#SCN-001"]}],
-        "validationBoundary": "public behavior seam validated by the task command",
+        "validationBoundary": "public behavior seam",
         "nonGoals": ["do not change unrelated behavior"],
         "specRefs": spec_refs,
         "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
@@ -159,25 +159,6 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "dataIds": ["DATA-001"],
         "decisionIds": ["D-001"],
         "completionPolicy": "all_required_validations_pass",
-        "validationCommands": [{"id": "VAL-T001-01", "argv": [sys.executable, "-m", "unittest", "test_task_behavior"], "cwd": ".", "kind": "behavior_test", "required": True, "covers": ["AC-T001-01"]}],
-        "validationTestPlan": [
-            {
-                "commandId": "VAL-T001-01",
-                "assetType": "unit_test",
-                "executionStage": "post_batch",
-                "covers": ["AC-T001-01"],
-                "testIntent": {
-                    "behavior": "behavior is observable",
-                    "acceptanceCriteria": [
-                        {
-                            "id": "AC-T001-01",
-                            "text": "behavior is observable",
-                            "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
-                        }
-                    ],
-                },
-            }
-        ],
         "expectedFiles": [],
         "evidenceIds": [],
         "completionEvidenceIds": [],

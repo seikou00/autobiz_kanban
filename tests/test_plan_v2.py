@@ -131,8 +131,8 @@ class PlanV2Test(unittest.TestCase):
             self.assertEqual(task["scope"]["paths"], [])
             self.assertEqual(task["implementationPoints"], payload["tasks"][0]["implementationPoints"])
             self.assertEqual(task["testPoints"], payload["tasks"][0]["testPoints"])
-            self.assertEqual(task["validationCommands"], [])
-            self.assertEqual(task["validationTestPlan"][0]["id"], "TEST-T001-01")
+            self.assertNotIn("validationCommands", task)
+            self.assertNotIn("validationTestPlan", task)
             self.assertTrue((feature / "PLAN.md").is_file())
             self.assertEqual(validation_ownership_errors(bundle.root, bundle.batches), [])
             test_plan = load_utest_plan(feature)
@@ -342,6 +342,7 @@ class PlanV2Test(unittest.TestCase):
             (lambda p: p["tasks"][0]["dependsOn"].append("T404"), "plan_v2_dependency_unknown"),
             (lambda p: p["tasks"][0]["dependsOn"].append("T001"), "plan_v2_dependency_cycle"),
             (lambda p: p["tasks"].append(copy.deepcopy(p["tasks"][0])), "plan_v2_task_id_duplicate"),
+            (lambda p: p["tasks"][0].update({"validationCommands": []}), "plan_v2_task_field_unknown"),
             (lambda p: p["tasks"][0]["refs"].update({"scenario": []}), "plan_v2_task_refs_field_unknown"),
             (lambda p: p["tasks"][0]["verification"].update({"command": "pytest"}), "plan_v2_task_verification_field_unknown"),
             (lambda p: p["tasks"][0]["verification"].clear(), "plan_v2_task_verification_intent_invalid"),

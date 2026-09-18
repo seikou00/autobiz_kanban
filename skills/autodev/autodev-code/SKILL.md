@@ -129,7 +129,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 ### 唯一 Code 策略
 
-根 `plan.json.taskValidationPolicy` 必须同时满足 `mode=defer_to_test_stages`、`orchestration=inline`、`codeGate=review_only`。Code 只实现生产代码；`validationTestPlan` 只作为后续 UTest/E2E 阶段的只读 `testIntent`，不得创建或修改测试文件，不得生成/消费 `create_in_code`，不得执行 TASK `validationCommands`。当前批次所有 TASK 成为 `implemented` 后，固定 Workflow 进入 Review，再进入 UTest。
+根 `plan.json.taskValidationPolicy` 必须同时满足 `mode=defer_to_test_stages`、`orchestration=inline`、`codeGate=review_only`。Code 只实现生产代码；Plan V2 的 `testPoints` 与 `verificationIntent` 只作为后续 UTest/E2E 阶段的只读测试意图，不得创建或修改测试文件，也不得生成或执行测试命令。当前批次所有 TASK 成为 `implemented` 后，固定 Workflow 进入 Review，再进入 UTest。
 
 策略字段缺失、组合不完整或值不匹配时立即停止并回流 `/autodev-plan` 重建；不得根据测试文件是否存在自行猜测策略，也不得调用已移除的逐 TASK 验证或 batch-check 接口。
 
@@ -188,7 +188,7 @@ python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `resume` / `abort` 处理原 run。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。业务源码写入前，写入闸门会严格校验完整 v2 run、路径身份和 `executionMode=code`；`verified_existing` / `external_dependency` 不允许写业务源码。
 `--code-workspace` 同时是 Git 仓库定位入口和 task workspace 基准，run 中固化 `scopePathBase=requested_code_workspace`；必须选择 task `workspaceRef` 指向的实际仓库，请求路径必须与 task `scope.workspaceRoots` 声明的位置完全一致。即使传模块子目录，runner 也会解析并快照整个 Git 根；`scope.paths` 仍是相对该模块的提示性范围，不是实现文件白名单。start 前只能保留已经由前序 TASK Evidence 认领的改动，未归属改动会返回 `prestart_unattributed_changes_detected`；start 成功到 finish 成功之间的全部有效业务变更都归属当前 TASK。start 不检查或执行 TASK 测试命令的 cwd、manifest、依赖或可执行文件；这些由后续 UTest/E2E 阶段负责。TASK finish 会记录该 workspace 内全部有效生产代码和生产配置变更；测试文件变更会被拒绝，跨 workspace 变更必须先修复工作区。`finish-implementation` / `abort` / `resume` 必须继续传相同请求路径并保持同一个 run；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。TASK 的实现 Evidence 使用该 TASK 从首次 start 到最终实现收口之间所有 run 的累计 `fileChanges/changedFiles`；abort 只结束一次 run，不清除已记录的变更。
-`start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。每个 TASK 的 context 复核同样应在对应 `start` 前完成。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修复 Plan contract 时按下方协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch；普通新增 DTO/XML/生产资源文件不需要修 scope 或重建 digest。
+`start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。每个 TASK 的 context 复核同样应在对应 `start` 前完成。run 活动期间不得修改该 task 的 goal/scope/AC/testPoints/verificationIntent 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修复 Plan contract 时按下方协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch；普通新增 DTO/XML/生产资源文件不需要修 scope 或重建 digest。
 
 每个 TASK 必须且只能绑定一个 `workspaceRef`；只向 runner 的 start/finish/repair 命令传该 TASK 的 workspace，前端 TASK 不得传后端仓库、后端 TASK 也不得传前端仓库。若一个需求闭环需要修改多个业务仓库，Plan 必须拆成多个 TASK 并用 deps 串联；跨仓库集成检查留给后续 UTest/E2E 阶段。Plan 中具名 workspace 的 command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论涉及多少仓库，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
 
@@ -197,10 +197,10 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 5. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：交付 `goal` 与 `acceptanceCriteria` 指向的业务范围；`implementationPoints` 是方向指导，可按真实仓库调整内部结构、算法和局部步骤，保持已确认行为/公开契约并记录有意义的偏差；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。`testPoints` 用于检查实现是否覆盖测试关注的边界，不等于在 Code 阶段写测试。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
-   - 读取 `testPoints`、`verificationIntent` 和 `validationTestPlan[].testIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
+   - 读取 `testPoints` 与 `verificationIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 7. **实现差异协议**：固定 Code Workflow 内不得为以下差异发起用户确认或创建阻断。`EVD` / design 与代码现实不符，或必须偏离 `API` / `DATA` / `D` 形态时，始终采用不违反 `REQ` / `SCN` 的最小兼容实现并在非阻断 Evidence 中记录差异。行为契约存在歧义时，按明确的 `REQ` / `SCN`、再按 Plan、最后按现有工程模式确定实现；TASK 状态由 runner 负责流转，不得手工置「失败」。
-8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
+8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不生成或执行测试命令，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -352,7 +352,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 ## 完成条件
 
-- 队列所有任务「完成」，且都有 `action=implementation` evidence；任务级 evidence 继续记录真实生产文件变更，测试意图保留在 `validationTestPlan[].testIntent` 供 UTest/E2E 阶段消费。
+- 队列所有任务「完成」，且都有 `action=implementation` evidence；任务级 evidence 继续记录真实生产文件变更，测试意图保留在 `testPoints` 与 `verificationIntent` 供 UTest/E2E 阶段消费。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与任务 implementation evidence 完整性和哈希校验通过；Batch 之间只通过 scheduler manifest 的依赖状态推进。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

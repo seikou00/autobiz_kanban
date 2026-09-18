@@ -42,7 +42,6 @@ SOURCE_TASK = {
     "acceptanceCriteria": [
         {"id": "AC-T001-01", "text": "正确用户名密码可以登录", "scenarioRefs": ["SCN-001"]}
     ],
-    "validationCommands": [],
 }
 class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
     def setUp(self):

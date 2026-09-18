@@ -27,7 +27,6 @@ from hooks.plan_json import (  # noqa: E402
     load_plan_bundle,
     normalize_status,
     task_contract_sha256,
-    task_execution_lane,
     task_execution_mode,
     task_workspace_roots,
 )
@@ -55,11 +54,6 @@ from hooks.task_run_integrity import (  # noqa: E402
     task_run_integrity_error,
     task_run_integrity_sha256,
 )
-from hooks.validation_policy import (  # noqa: E402
-    task_validation_kinds_for_lane,
-)
-
-
 class TaskRunnerError(ValueError):
     def __init__(self, message: str, **details: Any) -> None:
         super().__init__(message)
@@ -942,41 +936,6 @@ def _validate_supporting_files(repositories: RepositoryMap, supporting_files: li
     return normalized
 
 
-def _criteria_ids(task: dict[str, Any]) -> set[str]:
-    return {
-        str(item.get("id"))
-        for item in task.get("acceptanceCriteria", [])
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-
-
-def _check_required_coverage(task: dict[str, Any]) -> None:
-    required = [
-        command
-        for command in task.get("validationCommands", [])
-        if isinstance(command, dict) and command.get("required") is True
-    ]
-    covered = {
-        criterion
-        for command in required
-        for criterion in command.get("covers", [])
-        if isinstance(criterion, str)
-    }
-    missing = sorted(_criteria_ids(task) - covered)
-    if missing:
-        raise TaskRunnerError("acceptance_criteria_not_covered:" + ",".join(missing))
-
-
-def _has_required_task_validation(task: dict[str, Any]) -> bool:
-    allowed_kinds = task_validation_kinds_for_lane(task_execution_lane(task))
-    return any(
-        isinstance(command, dict)
-        and command.get("required") is True
-        and command.get("kind") in allowed_kinds
-        for command in task.get("validationCommands", [])
-    )
-
-
 def _implementation_record(
     *,
     feature: str,
@@ -1219,11 +1178,7 @@ def _finish_implementation_unlocked(
                 + ",".join(prior_changed_files),
                 requiredAction="resume_original_run_or_rebuild_baseline",
             )
-        if execution_mode != "external_dependency" and not _has_required_task_validation(task):
-            raise TaskRunnerError("verified_existing_requires_task_validation")
         completion_mode = "verified_existing"
-    if execution_mode != "external_dependency":
-        _check_required_coverage(task)
 
     state.update({
         "status": "implementation_recording",

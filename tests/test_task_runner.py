@@ -91,10 +91,6 @@ def _bind_workspace_contract(
 ) -> None:
     for task in batch.get("tasks", []):
         task.setdefault("scope", {})["workspaceRoots"] = dict(workspace_roots)
-        for command in task.get("validationCommands", []):
-            command["cwd"] = cwd
-            if repo is not None:
-                command["repo"] = repo
 
 
 def _workspace(
@@ -137,7 +133,7 @@ def _workspace(
                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
             }
         ],
-        "validationBoundary": "public behavior seam validated by the task command",
+        "validationBoundary": "public behavior seam",
         "nonGoals": ["do not change unrelated behavior"],
         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
         "designRefs": [],
@@ -145,16 +141,6 @@ def _workspace(
         "dataIds": [],
         "decisionIds": ["D-001"],
         "completionPolicy": "all_required_validations_pass",
-        "validationCommands": [
-            {
-                "id": "VAL-T001-01",
-                "argv": [sys.executable, "-c", f"print('validation'); raise SystemExit({command_exit})"],
-                "cwd": ".",
-                "kind": "behavior_test",
-                "required": True,
-                "covers": ["AC-T001-01"],
-            }
-        ],
         "expectedFiles": [],
         "evidenceIds": [],
         "completionEvidenceIds": [],
@@ -178,16 +164,6 @@ def _workspace(
                 "deps": [],
                 "acceptanceCriteria": [
                     {"id": "AC-T000-01", "text": "dependency", "scenarioRefs": ["#SCN-001"]}
-                ],
-                "validationCommands": [
-                    {
-                        "id": "VAL-T000-01",
-                        "argv": [sys.executable, "-c", "raise SystemExit(0)"],
-                        "cwd": ".",
-                        "kind": "behavior_test",
-                        "required": True,
-                        "covers": ["AC-T000-01"],
-                    }
                 ],
             },
         )
@@ -348,12 +324,6 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "implementationRevision": 0,
         }
     )
-    second_task["validationCommands"][0].update(
-        {
-            "id": "VAL-T002-01",
-            "covers": ["AC-T002-01"],
-        }
-    )
     second = copy.deepcopy(first)
     second.update(
         {
@@ -407,6 +377,9 @@ class TaskRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             _configure_review_only(feature_dir)
+            batch = _read_batch(feature_dir)
+            _write_batch(feature_dir, batch)
+            _refresh_parallel_pipeline(feature_dir)
 
             started = _start(workspace, code)
             (code / "implemented.txt").write_text("review-only implementation\n", encoding="utf-8")
@@ -737,9 +710,6 @@ class TaskRunnerTest(unittest.TestCase):
                 cwd="backend/LF39.05_bccompliancemng",
             )
             batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
-            batch["tasks"][0]["validationCommands"][0]["argv"] = [
-                "mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"
-            ]
             _write_batch(feature_dir, batch)
             _refresh_parallel_pipeline(feature_dir)
 
@@ -885,7 +855,6 @@ class TaskRunnerTest(unittest.TestCase):
                 f"{code.name}:src/main/java/example",
                 f"{second.name}:src/main/java/example",
             ]
-            batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
             _write_batch(feature_dir, batch)
             started = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -946,7 +915,6 @@ class TaskRunnerTest(unittest.TestCase):
                 f"{code.name}:src/main/java/example",
                 f"{second.name}:src/main/java/example",
             ]
-            batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
             _write_batch(feature_dir, batch)
 
             started = _run(
@@ -1173,7 +1141,6 @@ class TaskRunnerTest(unittest.TestCase):
             plan_path = feature_dir / "plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
-            batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
             _write_batch(feature_dir, plan)
             _write_batch(feature_dir, batch)
 
@@ -1198,8 +1165,6 @@ class TaskRunnerTest(unittest.TestCase):
             second["id"] = "T002"
             second["status"] = "todo"
             second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
-            second["validationCommands"][0]["id"] = "VAL-T002-01"
-            second["validationCommands"][0]["covers"] = ["AC-T002-01"]
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             plan["batches"][0]["taskIds"].append("T002")
@@ -1237,8 +1202,6 @@ class TaskRunnerTest(unittest.TestCase):
             second["id"] = "T002"
             second["status"] = "todo"
             second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
-            second["validationCommands"][0]["id"] = "VAL-T002-01"
-            second["validationCommands"][0]["covers"] = ["AC-T002-01"]
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             plan["batches"][0]["taskIds"].append("T002")

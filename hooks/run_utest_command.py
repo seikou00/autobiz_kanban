@@ -249,7 +249,7 @@ def execute_utest_command(
         if not command_executes_tests({"argv": command_argv}):
             raise UTestCommandError(
                 "test 模式 argv 不会执行测试用例。修复：先生成测试，再传入真实的精确测试命令；"
-                "不要使用 plan.validationCommands 的编译或 test-compile argv。"
+                "Plan V2 不提供测试 argv。"
             )
         authority = dict(authority)
         authority["argv"] = list(command_argv)

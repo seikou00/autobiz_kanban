@@ -3,7 +3,7 @@
 """Machine-readable plan helpers for Autodev.
 
 ``PLAN.md`` remains the human-readable view. ``plan.json`` is the machine
-fact source for task ids, dependencies, status, validation commands, and
+fact source for task ids, dependencies, status, verification intent, and
 evidence links.
 """
 
@@ -18,15 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from hooks.validation_policy import (
-    BEHAVIOR_TASK_VALIDATION_KINDS,
-    FRONTEND_COMPILE_VALIDATION_KINDS,
-    TASK_VALIDATION_KINDS,
-    command_policy_errors,
-    frontend_compile_command_matches_kind,
-    maven_test_selectors,
-    task_validation_kinds_for_lane,
-)
 from hooks.plan_write_ownership import write_ownership_error_codes
 
 
@@ -43,7 +34,6 @@ DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
 TECH_DECISION_ID_RE = re.compile(r"^D-\d{3}$")
 EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
 ACCEPTANCE_ID_RE = re.compile(r"^AC-T\d{3}-\d{2,3}$")
-VALIDATION_ID_RE = re.compile(r"^VAL-T\d{3}-\d{2,3}$")
 REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
@@ -265,36 +255,6 @@ def repository_path_within_workspace(path: str, workspace_root: str) -> bool:
     return normalized_path == normalized_root or normalized_path.startswith(f"{normalized_root}/")
 
 
-def _workspace_root_for_command(
-    command: dict[str, Any],
-    workspace_roots: dict[str, str],
-) -> tuple[str | None, str | None]:
-    if DEFAULT_WORKSPACE_ROOT in workspace_roots:
-        return DEFAULT_WORKSPACE_ROOT, workspace_roots[DEFAULT_WORKSPACE_ROOT]
-    repository = command.get("repo")
-    if not isinstance(repository, str):
-        return None, None
-    return repository, workspace_roots.get(repository)
-
-
-def _validate_command_workspace_root(
-    errors: list[str],
-    command: Any,
-    *,
-    context: str,
-    workspace_roots: dict[str, str],
-) -> None:
-    if not isinstance(command, dict) or not workspace_roots:
-        return
-    key, workspace_root = _workspace_root_for_command(command, workspace_roots)
-    if workspace_root is None:
-        errors.append(f"{context}.workspace_root_missing:{key or 'repo'}")
-        return
-    cwd = command.get("cwd")
-    if isinstance(cwd, str) and not repository_path_within_workspace(cwd, workspace_root):
-        errors.append(f"{context}.cwd_outside_workspace_root:{workspace_root}")
-
-
 def task_contract_sha256(task: dict[str, Any]) -> str:
     payload = {key: value for key, value in task.items() if key not in TASK_RUNTIME_FIELDS}
     content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -366,18 +326,6 @@ def _string_list(value: Any) -> list[str] | None:
         if stripped:
             result.append(stripped)
     return result
-
-
-def _command_executable(argv: list[str]) -> str:
-    return PurePosixPath(argv[0].replace("\\", "/")).name.lower() if argv else ""
-
-
-def _maven_goals(argv: list[str]) -> set[str]:
-    return {
-        item.lower().rsplit(":", 1)[-1]
-        for item in argv[1:]
-        if item and not item.startswith("-")
-    }
 
 
 def _validate_string_list(
@@ -612,47 +560,6 @@ def _validate_tasks_container(
                 not isinstance(frontend_route, str) or frontend_route not in FRONTEND_ROUTES
             ):
                 errors.append(f"{task_id}.uiRefs.frontendRoute_invalid")
-
-        execution_mode = task_execution_mode(raw_task)
-        commands = raw_task.get("validationCommands")
-        if not isinstance(commands, list):
-            errors.append(f"{task_id}.validationCommands_must_be_array")
-        elif execution_mode == "external_dependency" and commands:
-            errors.append(f"{task_id}.external_dependency_validationCommands_forbidden")
-        else:
-            required_coverage: set[str] = set()
-            for command_index, command in enumerate(commands):
-                if not isinstance(command, dict):
-                    errors.append(f"{task_id}.validationCommands[{command_index}]_must_be_object")
-                    continue
-                _validate_validation_command(
-                    errors,
-                    command,
-                    task_id=task_id,
-                    command_index=command_index,
-                    acceptance_ids=_acceptance_ids(raw_task),
-                    execution_lane=task_execution_lane(raw_task),
-                )
-                if command.get("required") is True:
-                    required_coverage.update(
-                        item for item in (command.get("covers") or []) if isinstance(item, str)
-                    )
-            if commands and execution_mode != "external_dependency":
-                for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
-                    errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
-        raw_validation_test_plan = raw_task.get("validationTestPlan")
-        if execution_mode == "external_dependency":
-            if raw_validation_test_plan not in (None, []):
-                errors.append(f"{task_id}.external_dependency_validationTestPlan_forbidden")
-        else:
-            _validate_validation_test_plan(
-                errors,
-                raw_task,
-                task_id,
-                defer_to_test_stages=defer_to_test_stages,
-            )
-        validation_test_plan = raw_validation_test_plan
-        validation_test_plan = validation_test_plan if isinstance(validation_test_plan, list) else []
 
     known_ids = known_task_ids or {task_id for task_id in task_ids if TASK_ID_RE.match(task_id)}
     for task_id, deps in deps_by_task.items():
@@ -1023,152 +930,6 @@ def _validate_acceptance_criteria(errors: list[str], task: dict[str, Any], task_
                 errors.append(f"{context}.scenario_not_in_task_specRefs:{scenario_id}")
 
 
-def _validate_validation_command(
-    errors: list[str],
-    command: dict[str, Any],
-    *,
-    task_id: str,
-    command_index: int,
-    acceptance_ids: set[str],
-    execution_lane: str,
-) -> None:
-    context = f"{task_id}.validationCommands[{command_index}]"
-    command_id = command.get("id")
-    if not isinstance(command_id, str) or not VALIDATION_ID_RE.fullmatch(command_id):
-        errors.append(f"{context}.id_invalid")
-    elif not command_id.startswith(f"VAL-{task_id}-"):
-        errors.append(f"{context}.id_task_mismatch:{command_id}")
-    argv = _string_list(command.get("argv"))
-    if argv is None or not argv:
-        errors.append(f"{context}.argv_missing")
-    cwd = command.get("cwd")
-    if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
-        errors.append(f"{context}.cwd_invalid")
-    kind = command.get("kind")
-    if kind not in TASK_VALIDATION_KINDS:
-        errors.append(f"{context}.kind_invalid")
-    elif kind not in task_validation_kinds_for_lane(execution_lane):
-        errors.append(f"{context}.kind_invalid_for_lane:{execution_lane}")
-    if argv:
-        for policy_error in command_policy_errors(command):
-            errors.append(f"{context}.{policy_error}")
-        executable = _command_executable(argv)
-        goals = _maven_goals(argv) if executable in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"} else set()
-        if kind in FRONTEND_COMPILE_VALIDATION_KINDS:
-            if execution_lane == "frontend" and not frontend_compile_command_matches_kind(command):
-                errors.append(f"{context}.frontend_compile_command_mismatch:{kind}")
-        elif "compile" in goals and not goals.intersection(
-            {"test", "integration-test", "verify", "package", "install"}
-        ):
-            errors.append(f"{context}.batch_owned_command")
-        if "test" in goals and not maven_test_selectors(command):
-            errors.append(f"{context}.maven_test_selector_missing")
-        if kind in BEHAVIOR_TASK_VALIDATION_KINDS and executable in {
-            "npm",
-            "npm.cmd",
-            "pnpm",
-            "pnpm.cmd",
-            "yarn",
-            "yarn.cmd",
-        } and any(
-            item.lower() in {"build", "typecheck", "lint"} for item in argv[1:]
-        ):
-            errors.append(f"{context}.batch_owned_command")
-    if not isinstance(command.get("required"), bool):
-        errors.append(f"{context}.required_must_be_bool")
-    repository = command.get("repo")
-    if repository is not None and (
-        not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
-    ):
-        errors.append(f"{context}.repo_invalid")
-    covers = _string_list(command.get("covers"))
-    if covers is None:
-        errors.append(f"{context}.covers_must_be_string_array")
-    else:
-        for criterion_id in covers:
-            if criterion_id not in acceptance_ids:
-                errors.append(f"{context}.covers_unknown:{criterion_id}")
-
-
-def _validate_validation_test_plan(
-    errors: list[str],
-    task: dict[str, Any],
-    task_id: str,
-    *,
-    defer_to_test_stages: bool = False,
-) -> None:
-    del defer_to_test_stages
-    raw_plan = task.get("validationTestPlan")
-    if raw_plan is None:
-        return
-    context = f"{task_id}.validationTestPlan"
-
-    if not isinstance(raw_plan, list):
-        errors.append(f"{context}_must_be_array")
-        return
-
-    for index, item in enumerate(raw_plan):
-        item_context = f"{context}[{index}]"
-        if not isinstance(item, dict):
-            errors.append(f"{item_context}_must_be_object")
-            continue
-        allowed_fields = {
-            "id",
-            "commandId",
-            "assetType",
-            "executionStage",
-            "covers",
-            "testIntent",
-            "targets",
-        }
-        for field in sorted(set(item) - allowed_fields):
-            errors.append(f"{item_context}.{field}_forbidden")
-        intent_id = item.get("id") or item.get("commandId")
-        if not isinstance(intent_id, str) or not intent_id.strip():
-            errors.append(f"{item_context}.id_missing")
-        targets = item.get("targets")
-        if targets is not None:
-            errors.append(f"{item_context}.targets_forbidden")
-        if isinstance(targets, list) and any(
-            isinstance(target, dict) and target.get("mode") == "create_in_code"
-            for target in targets
-        ):
-            errors.append(f"{item_context}.create_in_code_forbidden")
-        if item.get("assetType") not in {"unit_test", "integration_test", "e2e_test"}:
-            errors.append(f"{item_context}.assetType_invalid")
-        if item.get("executionStage") not in {"with_code", "post_batch"}:
-            errors.append(f"{item_context}.executionStage_invalid")
-        covers = item.get("covers")
-        acceptance_ids = {
-            str(criterion.get("id"))
-            for criterion in task.get("acceptanceCriteria", [])
-            if isinstance(criterion, dict) and isinstance(criterion.get("id"), str)
-        }
-        if (
-            not isinstance(covers, list)
-            or not covers
-            or any(not isinstance(value, str) or not value.strip() for value in covers)
-        ):
-            errors.append(f"{item_context}.covers_missing")
-        else:
-            for criterion_id in covers:
-                if criterion_id not in acceptance_ids:
-                    errors.append(f"{item_context}.covers_unknown:{criterion_id}")
-        test_intent = item.get("testIntent")
-        if not isinstance(test_intent, dict):
-            errors.append(f"{item_context}.testIntent_missing")
-        elif not isinstance(test_intent.get("behavior"), str) or not test_intent.get("behavior", "").strip():
-            errors.append(f"{item_context}.testIntent.behavior_missing")
-        else:
-            intent_criteria = test_intent.get("acceptanceCriteria")
-            if not isinstance(intent_criteria, list) or {
-                str(criterion.get("id"))
-                for criterion in intent_criteria
-                if isinstance(criterion, dict) and isinstance(criterion.get("id"), str)
-            } != acceptance_ids:
-                errors.append(f"{item_context}.testIntent.acceptanceCriteria_mismatch")
-
-
 def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) -> None:
     policy = data.get("taskValidationPolicy")
     if policy is None:
@@ -1352,14 +1113,6 @@ def _validate_task_details(
                 and repository_path_within_workspace(normalized_relative, workspace_root)
             ):
                 errors.append(f"{task_id}.scope.path_repeats_workspace_root:{value}")
-
-        for index, command in enumerate(task.get("validationCommands", [])):
-            _validate_command_workspace_root(
-                errors,
-                command,
-                context=f"{task_id}.validationCommands[{index}]",
-                workspace_roots=workspace_roots,
-            )
 
     workspace_ref = task.get("workspaceRef")
     if not isinstance(workspace_ref, str) or not REPOSITORY_ID_RE.fullmatch(workspace_ref):
