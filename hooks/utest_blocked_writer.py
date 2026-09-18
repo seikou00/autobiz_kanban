@@ -38,7 +38,7 @@ def _utc_now():
 
 def _write_text(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
+    temporary = path.with_name(".autobiz-" + path.name + ".tmp")
     temporary.write_text(content, encoding="utf-8")
     temporary.replace(path)
 

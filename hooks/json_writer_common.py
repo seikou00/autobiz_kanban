@@ -172,7 +172,9 @@ def atomic_write_json(path: Path, data: Any) -> bool:
     old = path.read_text(encoding="utf-8") if path.is_file() else None
     if old == content:
         return False
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=".autobiz-", suffix=".tmp", delete=False
+    ) as handle:
         tmp_path = Path(handle.name)
         handle.write(content)
     tmp_path.replace(path)
@@ -187,7 +189,9 @@ def write_text(path: Path, content: str) -> bool:
     old = path.read_text(encoding="utf-8") if path.is_file() else None
     if old == content:
         return False
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=".autobiz-", suffix=".tmp", delete=False
+    ) as handle:
         tmp_path = Path(handle.name)
         handle.write(content)
     tmp_path.replace(path)

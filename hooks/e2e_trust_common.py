@@ -29,7 +29,7 @@ def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=str(path.parent), delete=False
+        "w", encoding="utf-8", dir=str(path.parent), prefix=".autobiz-e2e-", suffix=".tmp", delete=False
     ) as handle:
         temporary = Path(handle.name)
         handle.write(content)

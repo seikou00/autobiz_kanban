@@ -328,6 +328,97 @@ class RollbackStageTest(unittest.TestCase):
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "prd_in_progress")
 
+    def test_rollback_preserves_ui_context_source_of_truth(self) -> None:
+        self._set_checkpoint("specs_in_progress")
+        ui_context = self.feature_dir / "UI_CONTEXT.json"
+        ui_context.write_text('{"version": 1, "uiRequired": true}\n', encoding="utf-8")
+        ui_context_md = self.feature_dir / "UI_CONTEXT.md"
+        ui_context_md.write_text("# UI Context\n", encoding="utf-8")
+        proposal = self.feature_dir / "proposal.md"
+        proposal.write_text("remove with specs rollback\n", encoding="utf-8")
+
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.specs",
+        )
+
+        self.assertTrue(plan.ok, plan.errors)
+        self.assertNotIn(ui_context, plan.artifact_paths)
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertTrue(ui_context.is_file())
+        self.assertEqual(ui_context.read_text(encoding="utf-8"), '{"version": 1, "uiRequired": true}\n')
+        self.assertTrue(ui_context_md.is_file())
+        self.assertFalse(proposal.exists())
+
+    def test_code_rollback_cleans_feature_runtime_and_planner_residue(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        leftovers = {
+            ".tmp/plan_writer/draft/plans/B001/plan.json": "draft\n",
+            ".autobiz-stale.tmp": "interrupted atomic write\n",
+            ".plan.lock": "0",
+            ".plan-write-transaction.json": "{}\n",
+            "UNIT_TEST_REPORT.md.tmp": "legacy interrupted report\n",
+            ".ARTIFACT_CATALOG.json.stale.tmp": "interrupted catalog write\n",
+            ".sync-status.json.stale.tmp": "interrupted sync write\n",
+            "frontend-html/.VIS-001-deadbeef.tmp/original.html": "<html/>\n",
+            ".runtime/RUN_CONTEXT.json": "{}\n",
+            "SMOKE_TEST_PLAN.json": "{}\n",
+            "SMOKE_RESULT.json": "{}\n",
+            "completion-proposal.json": "{}\n",
+            "REQUIREMENTS_EVAL.md": "review\n",
+            "UNIT_TEST_REPORT.md": "report\n",
+            "UNIT_TEST_RESULT.json": "{}\n",
+            "test-output.log": "log\n",
+            "E2E_TEST_CASES.yaml": "cases: []\n",
+            "E2E_REPORT.md": "report\n",
+            "E2E_RESULT.json": "{}\n",
+            "E2E_QUALITY_SCAN.json": "{}\n",
+            "e2e-run.log": "log\n",
+            "e2e-diagnostics/e2e-run.lock": "0",
+            "VERIFY_REPORT.md": "report\n",
+            "VERIFY_DECISION.json": "{}\n",
+            "FIX_REQUEST.json": "{}\n",
+            "FEATURE_API_DETAIL.md": "detail\n",
+            "ARTIFACT_CATALOG.json": "{}\n",
+            "sync-status.json": "{}\n",
+            "artifact-sync/outbox.ndjson": "{}\n",
+            "hooks.ndjson": "old audit\n",
+        }
+        for relative, content in leftovers.items():
+            path = self.feature_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.code",
+        )
+
+        self.assertTrue(plan.ok, plan.errors)
+        self.assertIn(self.feature_dir / ".tmp", plan.artifact_paths)
+        self.assertIn(self.feature_dir / ".plan.lock", plan.artifact_paths)
+        self.assertIn(self.feature_dir / ".runtime", plan.artifact_paths)
+        self.assertIn(self.feature_dir / "e2e-diagnostics", plan.artifact_paths)
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        for relative in leftovers:
+            if relative == "hooks.ndjson":
+                continue
+            self.assertFalse((self.feature_dir / relative).exists(), relative)
+        self.assertFalse((self.feature_dir / ".plan.lock").exists())
+        history = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id
+        self.assertTrue((history / "artifacts" / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json").is_file())
+        self.assertTrue((history / "artifacts" / ".runtime" / "RUN_CONTEXT.json").is_file())
+        self.assertTrue((history / "artifacts" / "e2e-diagnostics" / "e2e-run.lock").is_file())
+        self.assertEqual((history / "artifacts" / "hooks.ndjson").read_text(encoding="utf-8"), "old audit\n")
+        self.assertNotIn("old audit", (self.feature_dir / "hooks.ndjson").read_text(encoding="utf-8"))
+
     def test_archived_feature_is_restored_to_active_directory(self) -> None:
         self._set_checkpoint("archived", iteration="1")
         archive_dir = self.project / ".autobizdevops" / "archive" / f"{self.feature}-iter1"

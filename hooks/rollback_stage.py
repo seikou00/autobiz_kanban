@@ -81,6 +81,25 @@ _PLATFORM_RUNTIME_PREFIX = ".cmbdevclaw/"
 _WORKFLOW_ARTIFACT_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
 _GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
 CODE_SESSION_BASELINE_VERSION = 2
+# ``UI_CONTEXT.json`` is a user-confirmed, feature-wide source of truth.  It
+# is listed as an early-stage output for historical workflow compatibility,
+# but later stages consume it as an input as well.  A rollback must never make
+# a confirmed UI boundary disappear merely because it rolls back the stage
+# that first wrote it.
+ROLLBACK_PRESERVED_ARTIFACTS = frozenset({"UI_CONTEXT.json"})
+# These paths are implementation-owned scratch state rather than workflow
+# deliverables.  Keep the list narrow: a Feature may contain user-provided
+# files, so rollback must not use a broad ``*.tmp`` or ``*.lock`` sweep.
+FEATURE_TRANSIENT_ROLLBACK_PATHS = (
+    ".tmp",
+    ".autobiz-*.tmp",
+    ".plan.lock",
+    ".plan-write-transaction.json",
+    "UNIT_TEST_REPORT.md.tmp",
+    ".ARTIFACT_CATALOG.json.*.tmp",
+    ".sync-status.json.*.tmp",
+    "frontend-html/.*.tmp",
+)
 
 
 @dataclass(frozen=True)
@@ -927,6 +946,31 @@ def _artifact_candidates(
                 elif safe_match is not None:
                     candidates.add(safe_match)
 
+    # A planner crash can leave these Feature-owned files even when no
+    # workflow node declares them as outputs.  They are included in every
+    # rollback so returning to an earlier stage cannot inherit stale draft or
+    # transaction state.
+    for runtime_path in FEATURE_TRANSIENT_ROLLBACK_PATHS:
+        if has_glob(runtime_path):
+            matches = sorted(feature_dir.glob(runtime_path))
+        else:
+            exact = resolve_exact_relative_path(feature_dir, runtime_path)
+            matches = [exact] if exact is not None else []
+        for match in matches:
+            if match is None or not (match.exists() or match.is_symlink()):
+                continue
+            safe_match, candidate_error = _safe_existing_candidate(feature_dir, match)
+            if candidate_error:
+                errors.append(candidate_error)
+            elif safe_match is not None:
+                candidates.add(safe_match)
+
+    candidates = {
+        candidate
+        for candidate in candidates
+        if candidate.relative_to(feature_dir).as_posix() not in ROLLBACK_PRESERVED_ARTIFACTS
+    }
+
     ordered = sorted(
         candidates,
         key=lambda path: (len(path.relative_to(feature_dir).parts), path.as_posix()),
@@ -1665,6 +1709,11 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         if plan.code_in_scope:
             reset = _prepare_code_execution_reset(plan.workspace, plan.feature)
             _execute_code_execution_reset(plan.workspace, plan.feature, reset)
+            # ``_execute_code_execution_reset`` needs the plan lock and may
+            # recreate it after the pre-reset artifact archive.  A lock file
+            # is never workflow state, so remove that fresh handle only after
+            # the reset has released it.
+            _remove_path(get_feature_active_dir(plan.workspace, plan.feature) / ".plan.lock")
             if plan.code_source == "restore":
                 restored_source_files = _execute_source_restore(plan.workspace, plan.feature, source_plan)
 

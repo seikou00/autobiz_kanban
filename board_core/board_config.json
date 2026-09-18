@@ -852,8 +852,30 @@
           "archive": [
             ".parallel-runs",
             ".task-runs",
+            ".runtime",
             "evidence",
-            "FRONTEND_ROUTE.json"
+            "FRONTEND_ROUTE.json",
+            "SMOKE_TEST_PLAN.json",
+            "SMOKE_RESULT.json",
+            "completion-proposal.json",
+            "REQUIREMENTS_EVAL.md",
+            "UNIT_TEST_REPORT.md",
+            "UNIT_TEST_RESULT.json",
+            "test-output.log",
+            "E2E_TEST_CASES.yaml",
+            "E2E_REPORT.md",
+            "E2E_RESULT.json",
+            "E2E_QUALITY_SCAN.json",
+            "e2e-run.log",
+            "e2e-diagnostics",
+            "VERIFY_REPORT.md",
+            "VERIFY_DECISION.json",
+            "FIX_REQUEST.json",
+            "FEATURE_API_DETAIL.md",
+            "ARTIFACT_CATALOG.json",
+            "sync-status.json",
+            "artifact-sync",
+            "hooks.ndjson"
           ]
         }
       },
