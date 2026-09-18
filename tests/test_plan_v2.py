@@ -1,4 +1,4 @@
-"""End-to-end coverage for the one-shot Plan v2 publishing path."""
+"""End-to-end coverage for Plan v2 review preparation and publication."""
 
 from __future__ import annotations
 
@@ -43,12 +43,22 @@ class PlanV2Test(unittest.TestCase):
             }],
         }
 
-    def _publish(self, workspace: Path, payload: dict) -> subprocess.CompletedProcess:
+    def _prepare(self, workspace: Path, payload: dict) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, str(ROOT / "hooks/plan_writer.py"), "publish-plan",
+            [sys.executable, str(ROOT / "hooks/plan_writer.py"), "prepare-plan",
              "--workspace", str(workspace), "--feature", "alpha",
              "--code-workspace", str(ROOT), "--body-stdin"],
             input=json.dumps(payload), text=True, capture_output=True, check=False,
+        )
+
+    def _publish(self, workspace: Path, payload: dict) -> subprocess.CompletedProcess:
+        prepared = self._prepare(workspace, payload)
+        if prepared.returncode != 0:
+            return prepared
+        return subprocess.run(
+            [sys.executable, str(ROOT / "hooks/plan_writer.py"), "publish-plan",
+             "--workspace", str(workspace), "--feature", "alpha"],
+            text=True, capture_output=True, check=False,
         )
 
     def _feature(self, root: Path) -> tuple[Path, Path]:
@@ -116,14 +126,7 @@ class PlanV2Test(unittest.TestCase):
                     "verification": {"intent": "The response exposes the expected capability state"},
                 }],
             }
-            result = subprocess.run(
-                [
-                    sys.executable, str(ROOT / "hooks" / "plan_writer.py"), "publish-plan",
-                    "--workspace", str(workspace), "--feature", "alpha",
-                    "--code-workspace", str(ROOT), "--body-stdin",
-                ],
-                input=json.dumps(payload), text=True, capture_output=True, check=False,
-            )
+            result = self._publish(workspace, payload)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             bundle = load_plan_bundle(feature)
             task = bundle.batches["B001"]["tasks"][0]
@@ -138,6 +141,41 @@ class PlanV2Test(unittest.TestCase):
             test_plan = load_utest_plan(feature)
             self.assertEqual(test_plan["batches"][0]["tasks"][0]["verificationIntent"], payload["tasks"][0]["verification"]["intent"])
             self.assertEqual(test_plan["batches"][0]["tasks"][0]["testPoints"], payload["tasks"][0]["testPoints"])
+
+    def test_prepare_plan_is_revisable_before_critic_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            prepared = self._prepare(workspace, payload)
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            self.assertTrue((feature / "plan.json").is_file())
+            self.assertFalse((feature / "PLAN.md").exists())
+            self.assertEqual(json.loads((feature / "plan.json").read_text())["taskSetStatus"], "reviewing")
+
+            revised = copy.deepcopy(payload)
+            revised["tasks"][0]["outcome"] = "Users retrieve the corrected capability state"
+            revised["tasks"][0]["verification"]["intent"] = "The corrected capability state is observable"
+            repaired = self._prepare(workspace, revised)
+            self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+            task = load_plan_bundle(feature).batches["B001"]["tasks"][0]
+            self.assertEqual(task["goal"], revised["tasks"][0]["outcome"])
+            self.assertFalse((feature / "PLAN.md").exists())
+
+            published = subprocess.run(
+                [sys.executable, str(ROOT / "hooks/plan_writer.py"), "publish-plan",
+                 "--workspace", str(workspace), "--feature", "alpha"],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            self.assertEqual(json.loads((feature / "plan.json").read_text())["taskSetStatus"], "finalized")
+            self.assertIn(revised["tasks"][0]["outcome"], (feature / "PLAN.md").read_text())
+
+            # PLAN.md is a projection, not the publication marker.  Losing
+            # the human view must not make finalized machine state revisable.
+            (feature / "PLAN.md").unlink()
+            rejected = self._prepare(workspace, revised)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("formal_plan_already_exists", rejected.stdout)
 
     def test_publish_plan_v2_derives_visual_sources_from_all_matching_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -175,14 +213,7 @@ class PlanV2Test(unittest.TestCase):
                     "ui": {"pages": ["PAGE-001"], "interactions": ["UIX-001"], "route": "spec-driven-ui"},
                 }],
             }
-            result = subprocess.run(
-                [
-                    sys.executable, str(ROOT / "hooks" / "plan_writer.py"), "publish-plan",
-                    "--workspace", str(workspace), "--feature", "alpha",
-                    "--code-workspace", str(ROOT), "--body-stdin",
-                ],
-                input=json.dumps(payload), text=True, capture_output=True, check=False,
-            )
+            result = self._publish(workspace, payload)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             task = load_plan_bundle(feature).batches["B001"]["tasks"][0]
             self.assertEqual(task["uiRefs"]["visualSourceRefs"], ["VIS-001", "VIS-002"])
@@ -214,14 +245,7 @@ class PlanV2Test(unittest.TestCase):
                     "verification": {"intent": "The capability state is observable within its boundary"},
                 }],
             }
-            result = subprocess.run(
-                [
-                    sys.executable, str(ROOT / "hooks" / "plan_writer.py"), "publish-plan",
-                    "--workspace", str(workspace), "--feature", "alpha",
-                    "--code-workspace", str(ROOT), "--body-stdin",
-                ],
-                input=json.dumps(payload), text=True, capture_output=True, check=False,
-            )
+            result = self._publish(workspace, payload)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             task = load_plan_bundle(feature).batches["B001"]["tasks"][0]
             specs, design, errors = resolve_task_refs(feature, task)

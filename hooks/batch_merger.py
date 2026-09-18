@@ -70,7 +70,8 @@ def _worktree_records(repo: Path) -> list[dict[str, str]]:
                 records.append(current)
             current = {"path": line[9:]}
         elif line.startswith("branch "):
-            current["branch"] = line[7:].removeprefix("refs/heads/")
+            branch = line[7:]
+            current["branch"] = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
         elif line == "" and current:
             records.append(current)
             current = {}

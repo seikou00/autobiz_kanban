@@ -31,10 +31,10 @@ PLAN_NO_HAND_EDIT = (
     "禁止直接编辑 plan.json / plans/Bxxx/plan.json / PLAN.md（PLAN.md 是投影视图）。"
 )
 
-# Plan v2 的唯一修正路径：计划只能整份重新发布，不能逐条修补。
+# Plan v2 的唯一修正路径：review plan 只能整份重建，不能逐条修补。
 PLAN_REPUBLISH = (
-    "已发布的计划先通过 Plan rollback 回到 plan_in_progress，"
-    "再用 hooks/plan_writer.py publish-plan 重新发布完整 Plan v2。"
+    "Critic 前的 review plan：修正 Plan v2 输入后用 hooks/plan_writer.py prepare-plan 整份覆盖并重新回检；"
+    "plan.json 已定稿后才通过 Plan rollback 回到 plan_in_progress，再重走生成与回检。"
 )
 
 
@@ -70,8 +70,8 @@ _ENTRY: Dict[str, Repair] = {
         problem="本阶段的必备产物缺失或为空：{target}",
         action=(
             "先把缺失产物生成出来再重跑预检。proposal.md / specs/<capability>/spec.md 由 "
-            "/autodev-specs 生成；design.md 由 /autodev-design 生成；plan.json 与 PLAN.md 一律"
-            "通过 hooks/plan_writer.py publish-plan 生成，" + PLAN_NO_HAND_EDIT
+            "/autodev-specs 生成；design.md 由 /autodev-design 生成；plan.json 通过"
+            "hooks/plan_writer.py prepare-plan 生成，PLAN.md 通过 publish-plan 投影，" + PLAN_NO_HAND_EDIT
         ),
     ),
     "missing_feature_dir": Repair(
@@ -288,7 +288,7 @@ _PLAN: Dict[str, Repair] = {
     "missing_json_artifact": Repair(
         artifact="{target}",
         problem="必需的 JSON 事实源缺失：{target}",
-        action="按当前阶段 writer 契约生成该 JSON；UI_CONTEXT.json 使用 hooks/ui_context_writer.py，计划使用 hooks/plan_writer.py publish-plan。",
+        action="按当前阶段 writer 契约生成该 JSON；UI_CONTEXT.json 使用 hooks/ui_context_writer.py，计划使用 hooks/plan_writer.py prepare-plan。",
     ),
     "invalid_ui_context_json": Repair(
         artifact="UI_CONTEXT.json",
@@ -358,7 +358,7 @@ _PLAN: Dict[str, Repair] = {
     "missing_plan_json": Repair(
         artifact="plan.json",
         problem="plan.json 不存在或为空{target}",
-        action="plan.json 是任务 DAG 的机器事实源，用 hooks/plan_writer.py publish-plan 生成。" + PLAN_NO_HAND_EDIT,
+        action="plan.json 是任务 DAG 的机器事实源，用 hooks/plan_writer.py prepare-plan 生成。" + PLAN_NO_HAND_EDIT,
     ),
     "invalid_plan_json": Repair(
         artifact="plan.json",
@@ -368,7 +368,7 @@ _PLAN: Dict[str, Repair] = {
     "plan_task_set_not_finalized": Repair(
         artifact="plan.json",
         problem="任务集尚未定稿（taskSetStatus != finalized）",
-        action="plan.json 只能由 hooks/plan_writer.py publish-plan 一次性发布为 finalized。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
+        action="Plan Critic 收敛后，用 hooks/plan_writer.py publish-plan 将 review plan 定稿为 finalized 并投影 PLAN.md。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_implementation_scope_mismatch": Repair(
         artifact="plan.json",
@@ -521,8 +521,8 @@ REPAIRS.update(_PLAN)
 # ``invalid_plan_json`` 的 detail 是 plan_json.py 的扁平码。高频码给精确动作，
 # 其余走 REPAIRS["invalid_plan_json"] 兜底——兜底同样带完整五字段。
 _PLAN_JSON_CODE_ACTIONS = (
-    ("monolithic_plan_requires_rebuild", "根 plan.json 不得内联 tasks：用 hooks/plan_writer.py publish-plan 重新发布成「根索引 + plans/Bxxx/plan.json 批次」结构。"),
-    ("legacy_plan_requires_rebuild", "这是旧版 plan.json：用 hooks/plan_writer.py publish-plan 重新发布 Plan v2，不要手工补字段。"),
+    ("monolithic_plan_requires_rebuild", "根 plan.json 不得内联 tasks：用 hooks/plan_writer.py prepare-plan 重建成「根索引 + plans/Bxxx/plan.json 批次」结构。"),
+    ("legacy_plan_requires_rebuild", "这是旧版 plan.json：用 hooks/plan_writer.py prepare-plan 重建 Plan v2，不要手工补字段。"),
     ("plan_json_missing_feature_id", "plan.json 缺 featureId：重新发布 Plan v2，featureId 必须与当前 Feature 一致。"),
     ("plan_json_status_not_initial", "plan 初始状态必须是 todo：重新发布 Plan v2，不要就地改 status。"),
     ("plan_json_status_not_done", "所有任务完成后状态才应为 done：用任务状态机推进，不要就地改 status。"),

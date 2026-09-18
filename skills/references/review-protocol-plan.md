@@ -20,7 +20,7 @@
 | `specs/**/*.md` | 行为契约基线，逐 REQ/SCN 核对覆盖 | 缺失即阻断，回 `/autodev-specs` |
 | `proposal.md` | Capabilities 分组与 `DEC-NNN` 取舍 | 缺失即阻断 |
 | `design.md` | 本阶段主产物，含 Code Evidence 表 | 缺失即阻断 |
-| `plan.json` 与 `PLAN.md` | 本阶段主产物，逐 TASK 核对 | 缺失即阻断 |
+| `plan.json` 与其 `plans/*/plan.json` Batch | Critic 的主审查对象，逐 TASK 核对 | 缺失即阻断 |
 | `IMPLEMENTATION_SCOPE.json` | 本轮范围与 included/deferred 分区 | 按 `full_stack` 视为全部本期实现，在结论中注明 |
 
 读码入口只有 design.md 的 Code Evidence 表，逐条 EVD 核对；不要在 prompt 里另外要求它评估代码质量或探索现状。
@@ -41,7 +41,7 @@
 
 | 分类 | 判定 | 动作                                                |
 |------|------|---------------------------------------------------|
-| 产物可修 | 技术方案、接口/数据形态、DAG、覆盖缺口、仓库归属、交付意图不足、任务过大或机械碎片化 | 技术结论改 design.md；执行结论尚未发布则修正输入，已发布且未执行则通过 Plan rollback 回到 `plan_in_progress` 后重新发布完整 Plan v2，不就地编辑已发布的 plan.json / PLAN.md |
+| 产物可修 | 技术方案、接口/数据形态、DAG、覆盖缺口、仓库归属、交付意图不足、任务过大或机械碎片化 | 技术结论改 design.md；执行结论修正 Plan v2 输入后重新运行 `prepare-plan` 覆盖 review plan，再回检；不得手工编辑 `plan.json` 或 Batch |
 | 引用与事实不符 | Code Evidence 与代码不一致，或引用的 REQ/SCN/D-xxx 不存在 | 更新 EVD-xxx 与引用；与 spec/D-xxx 冲突记 R-xxx（Type=读码差异）走裁定门 |
 | 需用户裁定 | 必须改变已确认的业务范围、公开契约或用户取舍，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xxx（Type=待确认），仅就该决策按「design.md 确认规则」第一步逐条裁定；既定范围内的任务拆分、真实依赖排序和内部验证组织由主代理自行修复 |
 | 回流上游 | 行为契约本身缺失或矛盾 | 停止并建议回 `/autodev-specs`，不在本阶段补写行为契约               |
@@ -79,4 +79,4 @@
 
 ## 收口
 
-改完重跑「产物契约预检（机器校验）」并逐项复核「完成条件」；仍有未裁定的「需用户裁定」或存在「回流上游」条目时不推进 `plan_done`。
+改完重新运行 `prepare-plan` 并再次回检。回检收敛后运行 `publish-plan` 投影 `PLAN.md`，再跑「产物契约预检（机器校验）」并逐项复核「完成条件」；仍有未裁定的「需用户裁定」或存在「回流上游」条目时不推进 `plan_done`。

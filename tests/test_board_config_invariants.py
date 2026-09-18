@@ -425,9 +425,10 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         required = [
             "templates/task-groups.json",
             "autodev.plan.v2",
+            "prepare-plan",
             "publish-plan",
             "--code-workspace",
-            "一次输入即可原子生成",
+            "Critic",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -460,8 +461,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         # 钉机制不钉字面：同一条要求给若干可接受写法，命中任一即算满足。
         # 措辞由人把关，测试只保证「PLAN.md 由 plan.json 投影产生」这条主线还在。
         required = [
-            ("PLAN.md 投影", ("`PLAN.md` 是 `plan.json` 的人类视图",)),
-            ("PLAN.md 落盘", ("同一次发布落盘",)),
+            ("PLAN.md 投影", ("`PLAN.md` 只是已定稿 `plan.json` 的人类视图",)),
+            ("回检后落盘", ("回检收敛且没有阻断项后",)),
         ]
         missing = [
             name for name, variants in required if not any(v in content for v in variants)

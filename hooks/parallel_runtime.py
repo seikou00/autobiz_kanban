@@ -633,7 +633,8 @@ def reclaim_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, 
     if not stale:
         return False
     with FileLock(path.with_suffix(".lock")):
-        path.unlink(missing_ok=True)
+        if path.exists():
+            path.unlink()
     manifest = load_manifest(workspace, feature, run_id)
     item = manifest.get("batches", {}).get(batch_id)
     if isinstance(item, dict):
@@ -686,7 +687,8 @@ def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, own
                 commit_sha = batch.get("commitSha")
                 if not isinstance(commit_sha, str) or not commit_sha.strip():
                     raise ValueError(f"parallel_batch_not_sealed:{batch_id}")
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink()
             batch["lease"] = None
             batch["status"] = final_status
             save_manifest(workspace, feature, run_id, manifest)

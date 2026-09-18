@@ -74,12 +74,12 @@ def task_write_paths(task: dict[str, Any]) -> set[str]:
         raw_paths.extend(scope["paths"])
     if isinstance(task.get("expectedFiles"), list):
         raw_paths.extend(task["expectedFiles"])
-    return {
-        path
-        for value in raw_paths
-        if (path := normalize_owned_path(value, workspace_ref)) is not None
-        and not is_test_asset_path(path)
-    }
+    paths: set[str] = set()
+    for value in raw_paths:
+        path = normalize_owned_path(value, workspace_ref)
+        if path is not None and not is_test_asset_path(path):
+            paths.add(path)
+    return paths
 
 
 def task_write_targets(task: dict[str, Any]) -> dict[str, set[str] | None]:

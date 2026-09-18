@@ -48,24 +48,31 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 `implementationPoints` 是实现指导，不是固定算法或步骤。Code 可以依据真实仓库调整内部实现、必要文件和局部步骤；保持已确认行为、公开契约、仓库归属与依赖，记录有意义的偏差即可。
 
-## 发布
+## 生成、回检与发布
 
-提交一次输入即可原子生成 `plan.json`、Batch 计划和 `PLAN.md`：
+先提交完整输入，原子生成供 Critic 审查的 `plan.json` 与 Batch 计划；此时不得生成 `PLAN.md`：
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" publish-plan \
+python "${pluginPath}/hooks/plan_writer.py" prepare-plan \
   --feature "${feature}" \
   --code-workspace "<ACTUAL_CODE_WORKSPACE>" \
   --body-stdin
 ```
 
-writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，保留输入 Task ID，并生成 Batch 身份、运行时 workspace roots、验收记录、测试意图、外部资料投影、Batch 与投影视图。发布失败时按结构化错误修正对应 Plan v2 字段；来源映射或上游契约有误时修对应上游；不要补造实现文件清单来通过校验。
+writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，保留输入 Task ID，并生成 Batch 身份、运行时 workspace roots、验收记录、测试意图、外部资料投影与 Batch。生成失败时按结构化错误修正对应 Plan v2 字段；来源映射或上游契约有误时修对应上游；不要补造实现文件清单来通过校验。
 
-发布前把决策归属、UI 页面/交互与测试要点放在同一次检查里统一收口，再提交发布；失败时修正后重试。正式计划不能就地编辑：回检发现计划错误或需求/设计确有变化且尚未执行时，通过平台的 Plan rollback 回到 `plan_in_progress`，再提交一份完整 Plan v2；不要逐条修改已发布的 JSON 或 `PLAN.md`。
+对 `plan.json` 与它引用的 Batch 计划运行 Plan Critic。回检发现可修问题时，修正 Plan v2 输入后再次执行 `prepare-plan` 覆盖这份 review plan，再回检；不要直接编辑 writer 产物。此时 `plan.json.taskSetStatus=reviewing`，尚未定稿，因此不得触发 Plan rollback。
 
-`PLAN.md` 是 `plan.json` 的人类视图，由 writer 同一次发布落盘，不能独立维护。依赖就绪的隔离工作树可乐观并行；真实文件冲突由 Merge Train 处理。
+回检收敛且没有阻断项后，才将机器事实源 `plan.json` 原子定稿为 `finalized`，并投影其人类视图 `PLAN.md`：
 
-未出错且输入未变时不重复提交。已发布但尚未执行的计划需要修正时，通过 Plan rollback 后重新发布一份完整 Plan v2；已经执行的计划由 Code workflow 的受控恢复处理。
+```bash
+python "${pluginPath}/hooks/plan_writer.py" publish-plan \
+  --feature "${feature}"
+```
+
+`PLAN.md` 只是已定稿 `plan.json` 的人类视图，不能独立维护，也不承载计划状态。定稿后的 `plan.json` 若需求或计划需要变化，才通过 Plan rollback 回到 `plan_in_progress`，重新走“生成 JSON → Critic → 投影 Markdown”流程。依赖就绪的隔离工作树可乐观并行；真实文件冲突由 Merge Train 处理。
+
+未出错且输入未变时不重复生成。已经执行的计划由 Code workflow 的受控恢复处理。
 
 ## 完成
 

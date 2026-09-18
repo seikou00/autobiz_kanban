@@ -96,17 +96,20 @@ def _lease_staleness_reason_locked(
         try:
             lease = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink()
             return "lease_invalid"
         if not isinstance(lease, dict):
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink()
             return "lease_invalid"
         try:
             expires_epoch = float(lease.get("expiresEpoch", 0))
         except (TypeError, ValueError):
             expires_epoch = 0
         if expires_epoch <= now:
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink()
             return "lease_expired"
 
         # A lease that survives beyond the configured Batch deadline is
@@ -117,7 +120,8 @@ def _lease_staleness_reason_locked(
         if started_epoch is None:
             started_epoch = _parse_timestamp_epoch(lease.get("startedAt"))
         if started_epoch is not None and now - started_epoch >= max(1, timeout_seconds):
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink()
             return "batch_timeout"
     return None
 
@@ -273,7 +277,8 @@ def _clear_retry_lease_locked(
     path = lease_path(workspace, feature, run_id, batch_id)
     had_lease = path.is_file() or batch.get("lease") is not None
     with FileLock(path.with_suffix(".lock")):
-        path.unlink(missing_ok=True)
+        if path.exists():
+            path.unlink()
     batch["lease"] = None
     return had_lease
 
@@ -543,7 +548,7 @@ def assert_batch_worktree_isolated(
 
     listed = _git(source_root, "worktree", "list", "--porcelain")
     registered = {
-        Path(line.removeprefix("worktree ")).resolve()
+        Path(line[len("worktree "):]).resolve()
         for line in listed.stdout.splitlines()
         if line.startswith("worktree ")
     }

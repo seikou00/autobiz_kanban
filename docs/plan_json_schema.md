@@ -1,6 +1,6 @@
 # Plan v2 data contract
 
-The planner submits one `autodev.plan.v2` document through `plan_writer.py publish-plan`. It is the only model-authored plan artifact.
+The planner submits one `autodev.plan.v2` document through `plan_writer.py prepare-plan`. It is the only model-authored plan artifact.
 
 ```json
 {
@@ -25,7 +25,7 @@ The planner submits one `autodev.plan.v2` document through `plan_writer.py publi
 
 `D-NNN` belongs in `refs.decisions`, which names its primary behavior-delivery task. `refs.design` supplies API/Data context and does not accept decisions. For a UI task, `ui` contains only `pages`, `interactions` and `route`; the writer derives `visualSourceRefs` from every UI capability matched by the task's scenario references.
 
-The writer generates the runtime Bundle: root `plan.json`, Batch plans, `PLAN.md`, Task acceptance records, test intentions, workspace bindings and the parallel pipeline projection. Batch identifiers, command identifiers, execution state and the rendered Markdown are writer-owned.
+`prepare-plan` generates the critic-ready machine bundle: root `plan.json`, Batch plans, Task acceptance records, test intentions, workspace bindings and the parallel pipeline projection. After Critic accepts the bundle, `publish-plan` finalizes `plan.json` and renders its human-readable `PLAN.md` projection. Batch identifiers, command identifiers, execution state and the rendered Markdown are writer-owned.
 
 Keep normal, boundary, permission and failure cases of one behavior together; independently failing assertions do not justify separate tasks. Split broad subsystem goals into small reviewable behavior slices, with no automatic scenario or API count threshold. See `skills/autodev/autodev-plan/references/task-planning.md` for examples.
 
@@ -39,4 +39,4 @@ Required task input is `id`, `outcome`, `workspace`, nonempty `implementationPoi
 
 Optional specialized task fields are `mode` (`code` by default, `verified_existing` for already delivered behavior, or `external_dependency` with `external.system`, `external.owner`, `external.trackingRefs`), `stage` (default `parallel`; runtime supports `proto`, `global`, `integration`), and `atomic` (`id: AGNNN`, shared `rationale`). Normal plans omit them. An atomic group is only for a genuinely inseparable delivery of two or three tasks in the same repository and execution lane; never use it to merge unrelated work. Writer still owns Batch IDs and execution records.
 
-Existing `IMPLEMENTATION_SCOPE.json` partitions apply identically to writer and stage gate for scenarios, design IDs and source requirements. With no partition, all known items are in scope. With a partition, only included items are mandatory, and deferred/unpartitioned IDs are reported in `scopeReport` and `PLAN.md`; invalid or overlapping partition IDs fail validation. Do not silently narrow confirmed scope to pass a gate. Published plans cannot be edited in place: before execution, use Plan rollback then publish the corrected complete v2; after execution, use controlled Code recovery.
+Existing `IMPLEMENTATION_SCOPE.json` partitions apply identically to writer and stage gate for scenarios, design IDs and source requirements. With no partition, all known items are in scope. With a partition, only included items are mandatory, and deferred/unpartitioned IDs are reported in `scopeReport` and `PLAN.md`; invalid or overlapping partition IDs fail validation. Do not silently narrow confirmed scope to pass a gate. A review-ready machine plan may only be replaced by resubmitting a complete Plan v2 through `prepare-plan`; once its `plan.json.taskSetStatus` is `finalized`, corrections before execution use Plan rollback, and corrections after execution use controlled Code recovery.

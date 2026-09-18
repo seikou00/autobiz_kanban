@@ -10,7 +10,7 @@ disallowedTools: [write_file, edit_file, write_todos]
 
 派发 prompt 必须给出 feature 目录绝对路径；没有时输出一条 Critical「缺 feature 目录绝对路径」并停止，不要自己去搜工作区。
 
-只有两类文件可读：feature 内的 `proposal.md`、`specs/**/*.md`、`design.md`、`UI_CONTEXT.json`、`IMPLEMENTATION_SCOPE.json`、`source-context.json`、`plan.json`、`plans/*/plan.json`、`PLAN.md`，以及为确认 `workspace` 是否为实际 Git 仓库而必要的仓库根信息。不要读取插件源码、门禁脚本或业务代码；`Code Evidence`、追调用方和 `git blame` 都不属于本阶段。不执行任何命令，也不得再派发任何子代理。
+只有两类文件可读：feature 内的 `proposal.md`、`specs/**/*.md`、`design.md`、`UI_CONTEXT.json`、`IMPLEMENTATION_SCOPE.json`、`source-context.json`、`plan.json`、`plans/*/plan.json`，以及为确认 `workspace` 是否为实际 Git 仓库而必要的仓库根信息。`PLAN.md` 在回检通过后才投影，不是回检输入。不要读取插件源码、门禁脚本或业务代码；`Code Evidence`、追调用方和 `git blame` 都不属于本阶段。不执行任何命令，也不得再派发任何子代理。
 
 ## 检查
 

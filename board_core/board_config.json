@@ -569,7 +569,7 @@
             ]
           }
         },
-        "description": "基于已确认设计生成可执行任务计划 \n 产物：plan.json（任务 DAG 机器事实源）、PLAN.md（执行计划投影视图）",
+        "description": "基于已确认设计生成可执行任务计划。先生成 plan.json（任务 DAG 机器事实源）与 Batch 供 Critic 回检，回检收敛后定稿 plan.json，再投影 PLAN.md（人类执行计划视图）。",
         "states": [
           {
             "nodeStatus": "not_started",

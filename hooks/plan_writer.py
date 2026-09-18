@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Publish a Plan v2 as plan.json, Batch plans and PLAN.md."""
+"""Prepare a machine Plan v2 for review, then emit its Markdown projection."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any
 
@@ -344,10 +343,19 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         unknown = sorted(set(group["deps"]) - set(by_id))
         if unknown:
             raise PlanWriterInputError("plan_v2_dependency_unknown", f"task={group['id']};ids={','.join(unknown)}")
-    try:
-        order = list(TopologicalSorter({group["id"]: group["deps"] for group in groups}).static_order())
-    except CycleError as exc:
-        raise PlanWriterInputError("plan_v2_dependency_cycle", str(exc)) from exc
+    # ``graphlib.TopologicalSorter`` is only available from Python 3.9.  Keep
+    # ordering deterministic while supporting the project's Python 3.7 floor.
+    pending = {group["id"]: set(group["deps"]) for group in groups}
+    order: list[str] = []
+    while pending:
+        ready = [group["id"] for group in groups if group["id"] in pending and not pending[group["id"]]]
+        if not ready:
+            raise PlanWriterInputError("plan_v2_dependency_cycle", "dependency cycle detected")
+        for task_id in ready:
+            del pending[task_id]
+        for dependencies in pending.values():
+            dependencies.difference_update(ready)
+        order.extend(ready)
     # Legacy runtime projection expects dependency order; it must not impose
     # that serialization rule on model input or renumber task identities.
     return {"featureId": feature_id, "groups": [by_id[task_id] for task_id in order]}
@@ -872,11 +880,12 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         and bool(item["scope"]["paths"])
     ):
         raw = item.get("touches") if isinstance(item.get("touches"), list) else item["scope"].get("paths", [])
-        result["touches"] = sorted({
-            normalized
-            for path in raw
-            if (normalized := normalize_owned_path(path, item.get("workspaceRef"))) is not None
-        })
+        normalized_touches: set[str] = set()
+        for path in raw:
+            normalized = normalize_owned_path(path, item.get("workspaceRef"))
+            if normalized is not None:
+                normalized_touches.add(normalized)
+        result["touches"] = sorted(normalized_touches)
     if isinstance(item.get("writeTargets"), list):
         result["writeTargets"] = copy.deepcopy(item["writeTargets"])
     return result
@@ -1553,15 +1562,25 @@ def _task_set_summary(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _cmd_publish_plan(args: argparse.Namespace) -> int:
-    """Publish a complete Plan v2 in one atomic operation.
+def _cmd_prepare_plan(args: argparse.Namespace) -> int:
+    """Write a complete, critic-ready Plan v2 bundle without ``PLAN.md``.
 
-    Planner input is converted directly into a finalized, runtime-valid Bundle
-    only after every structural and coverage check succeeds.
+    A review-ready machine bundle may be replaced by another complete Plan v2
+    input while the Plan stage is still open.  Once ``plan.json`` is
+    finalized, subsequent corrections must use the normal rollback flow;
+    ``PLAN.md`` is only its human-readable projection.
     """
     workspace, feature = _resolve(args)
-    if _path(workspace, feature).is_file():
-        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    plan_path = _path(workspace, feature)
+    if plan_path.is_file():
+        try:
+            existing = _load(workspace, feature)
+        except (PlanWriterInputError, ValueError) as exc:
+            return render_result(fail("review_plan_not_revisable", str(exc)))
+        if existing.get("taskSetStatus") != "reviewing":
+            return render_result(fail("formal_plan_already_exists", path=plan_path))
+    elif _md_path(workspace, feature).is_file():
+        return render_result(fail("orphan_plan_markdown", path=_md_path(workspace, feature)))
     body = _plan_writer_stdin_body() if args.body_stdin else read_object_file(Path(args.body_file))
     if not isinstance(body, dict):
         return render_result(fail("plan_v2_body_must_be_object"))
@@ -1603,7 +1622,7 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
             for group in _task_groups(group_data)
         ]
         data["scopeReport"] = _feature_scope_report(feature_dir, _tasks(data))
-        data["taskSetStatus"] = "finalized"
+        data["taskSetStatus"] = "reviewing"
         plan_errors = _task_set_preflight_errors(
             feature_dir,
             data,
@@ -1613,10 +1632,11 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
         blocking_plan_errors = [item for item in plan_errors if item.get("severity") != "warning"]
         if blocking_plan_errors:
             return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=blocking_plan_errors))
-        result = _write(workspace, feature, data, plan_markdown=_render_plan_md(data))
+        result = _write(workspace, feature, data)
         return render_result(with_result_data(
             result,
             planSchema=PLAN_SCHEMA,
+            publicationStatus="reviewing",
             warnings=[item for item in [*group_errors, *plan_errors] if item.get("severity") == "warning"],
             materialized=_task_set_summary(data),
             scopeReport=_feature_scope_report(feature_dir, _tasks(data)),
@@ -1624,6 +1644,36 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
     except (PlanWriterInputError, ValueError) as exc:
         if isinstance(exc, PlanWriterInputError):
             return render_result(fail(exc.reason, exc.detail))
+        return render_result(fail("plan_v2_prepare_failed", str(exc)))
+
+
+def _cmd_publish_plan(args: argparse.Namespace) -> int:
+    """Finalize reviewed ``plan.json`` and emit its ``PLAN.md`` projection."""
+    workspace, feature = _resolve(args)
+    if not _path(workspace, feature).is_file():
+        return render_result(fail("review_plan_missing", path=_path(workspace, feature)))
+    if _md_path(workspace, feature).is_file():
+        return render_result(fail("plan_markdown_already_exists", path=_md_path(workspace, feature)))
+    try:
+        data = _load(workspace, feature)
+        if data.get("taskSetStatus") != "reviewing":
+            return render_result(fail("review_plan_not_ready", "taskSetStatus must be reviewing"))
+        data["taskSetStatus"] = "finalized"
+        root, batches = _project_batches(copy.deepcopy(data))
+        errors = validate_plan_bundle_data(root, batches, require_initial_status=True)
+        if errors:
+            return render_result(WriterResult(
+                ok=False,
+                path=_path(workspace, feature),
+                errors=[{"reason": error} for error in errors],
+            ))
+        result = _write(workspace, feature, data, plan_markdown=_render_plan_md(data))
+        return render_result(with_result_data(
+            result,
+            publicationStatus="finalized",
+            materialized=_task_set_summary(data),
+        ))
+    except (PlanWriterInputError, ValueError) as exc:
         return render_result(fail("plan_v2_publish_failed", str(exc)))
 
 
@@ -1892,15 +1942,19 @@ def _common(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Publish a Plan v2 as plan.json and PLAN.md")
+    parser = argparse.ArgumentParser(description="Prepare a machine Plan v2 for review, then emit PLAN.md")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    publish = sub.add_parser("publish-plan", help="atomically publish one Plan v2 input")
+    prepare = sub.add_parser("prepare-plan", help="write one critic-ready Plan v2 bundle without PLAN.md")
+    _common(prepare)
+    prepare.add_argument("--code-workspace", required=True, action="append")
+    prepare_input = prepare.add_mutually_exclusive_group(required=True)
+    prepare_input.add_argument("--body-stdin", action="store_true")
+    prepare_input.add_argument("--body-file")
+    prepare.set_defaults(func=_cmd_prepare_plan)
+
+    publish = sub.add_parser("publish-plan", help="finalize reviewed plan.json and emit its PLAN.md projection")
     _common(publish)
-    publish.add_argument("--code-workspace", required=True, action="append")
-    publish_input = publish.add_mutually_exclusive_group(required=True)
-    publish_input.add_argument("--body-stdin", action="store_true")
-    publish_input.add_argument("--body-file")
     publish.set_defaults(func=_cmd_publish_plan)
 
     args = parser.parse_args(argv)

@@ -62,7 +62,10 @@ MAX_BATCH_TASKS = 3
 BATCH_STRATEGY = "minimal_closed_delivery_v2"
 EXECUTION_LANES = {"backend", "frontend"}
 IMPLEMENTATION_SCOPES = {"full_stack", "backend_only", "frontend_only"}
-TASK_SET_STATUSES = {"collecting", "finalized"}
+# ``reviewing`` is a complete, writer-generated Plan bundle which has not yet
+# passed the Plan critic.  It is intentionally valid enough for the critic to
+# inspect, but cannot pass the dev.plan completion gate or start Code.
+TASK_SET_STATUSES = {"collecting", "reviewing", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
 TEST_STAGE_MAX_REPAIR_ATTEMPTS = 3
