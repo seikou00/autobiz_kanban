@@ -375,7 +375,14 @@ def promote_candidate(
     repository_ref: str,
     allow_unverified: bool = False,
 ) -> dict[str, Any]:
-    """Fast-forward main to exactly the verified, or explicitly UTest-gated, candidate SHA."""
+    """Promote a candidate through a recoverable Git/Plan saga.
+
+    Git and the Plan live in independent durable stores, so this operation
+    cannot be a single filesystem transaction.  Persist an intent before the
+    fast-forward and a Plan-recovery checkpoint immediately afterwards.  A
+    later resume can then safely distinguish "not promoted" from "promoted
+    but Plan not written" without guessing from a stale repository binding.
+    """
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         record = _record(manifest, repository_ref, wave)
@@ -389,62 +396,228 @@ def promote_candidate(
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
         repo = Path(binding["gitRoot"]).resolve()
-        _clean(repo)
-        current_head = _head(repo)
-        if current_head != record.get("baseSha"):
-            record.update({"status": "stale", "staleAt": utc_now(), "actualMainSha": current_head})
-            save_manifest(workspace, feature, run_id, manifest)
-            append_event(workspace, feature, run_id, "merge_train_stale", repositoryRef=repository_ref, wave=wave, candidateBaseSha=record.get("baseSha"), actualMainSha=current_head)
-            return {"success": False, "stale": True, "action": "rebuild_candidate", "candidateSha": record.get("candidateSha"), "baseSha": record.get("baseSha"), "actualMainSha": current_head}
-        promoted = _git(repo, "merge", "--ff-only", str(record.get("branchName") or ""))
-        if promoted.returncode != 0:
-            raise ValueError("parallel_merge_train_promote_failed:" + (promoted.stderr.strip() or promoted.stdout.strip()))
-        promoted_sha = _head(repo)
-        if promoted_sha != record.get("candidateSha"):
-            raise ValueError("parallel_merge_train_promote_sha_mismatch")
+        record.update({
+            "status": "promoting",
+            "promotionReadyStatus": "built" if utest_gated_promotion else "verified",
+            "promotionIntentAt": utc_now(),
+        })
+        save_manifest(workspace, feature, run_id, manifest)
 
-    plan_errors: list[str] = []
-    for batch_id in record["batchIds"]:
-        result = mark_parallel_batch_tasks_merged(workspace, feature, batch_id, merge_commit_sha=promoted_sha, delivery_run_id=run_id)
-        if not result.ok:
-            plan_errors.extend(str(item.get("reason") or item) for item in (result.errors or []))
-    with run_lock(workspace, feature, run_id):
-        manifest = load_manifest(workspace, feature, run_id)
-        current = _record(manifest, repository_ref, wave)
-        if plan_errors:
+    _clean(repo)
+    current_head = _head(repo)
+    if current_head != record.get("baseSha"):
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            current = _record(manifest, repository_ref, wave)
             if current:
-                current.update({"status": "needs_resolution", "planWriterErrors": plan_errors, "promotedSha": promoted_sha})
-            manifest["status"] = "needs_resolution"
+                current.update({"status": "stale", "staleAt": utc_now(), "actualMainSha": current_head})
             save_manifest(workspace, feature, run_id, manifest)
-            return {"success": False, "needsPlanRecovery": True, "errors": plan_errors, "candidateSha": promoted_sha}
-        for batch_id in record["batchIds"]:
-            batch = manifest["batches"][batch_id]
-            batch.update({"status": "merged", "mergeCommitSha": promoted_sha, "mergedAt": utc_now()})
-        binding = manifest["repositories"][repository_ref]
-        binding["headSha"] = promoted_sha
-        if current:
-            current.update({"status": "promoted", "promotedSha": promoted_sha, "promotedAt": utc_now()})
-            if utest_gated_promotion:
+        append_event(workspace, feature, run_id, "merge_train_stale", repositoryRef=repository_ref, wave=wave, candidateBaseSha=record.get("baseSha"), actualMainSha=current_head)
+        return {"success": False, "stale": True, "action": "rebuild_candidate", "candidateSha": record.get("candidateSha"), "baseSha": record.get("baseSha"), "actualMainSha": current_head}
+    promoted = _git(repo, "merge", "--ff-only", str(record.get("branchName") or ""))
+    if promoted.returncode != 0:
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            current = _record(manifest, repository_ref, wave)
+            if current:
+                current.update({"status": record.get("promotionReadyStatus", "verified"), "promotionError": promoted.stderr.strip() or promoted.stdout.strip()})
+            save_manifest(workspace, feature, run_id, manifest)
+        raise ValueError("parallel_merge_train_promote_failed:" + (promoted.stderr.strip() or promoted.stdout.strip()))
+    promoted_sha = _head(repo)
+    if promoted_sha != record.get("candidateSha"):
+        raise ValueError("parallel_merge_train_promote_sha_mismatch")
+
+    _checkpoint_promoted_plan_recovery(
+        workspace,
+        feature,
+        run_id,
+        repository_ref=repository_ref,
+        wave=wave,
+        promoted_sha=promoted_sha,
+    )
+    recovered = recover_promoted_plan(workspace, feature, run_id, repository_ref=repository_ref, wave=wave)
+    if utest_gated_promotion and recovered.get("success"):
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            current = _record(manifest, repository_ref, wave)
+            if current:
                 current["validation"] = {
                     "skipped": True,
                     "reason": "batch_utest_gated_e2e_only",
                     "commands": [],
                 }
+                save_manifest(workspace, feature, run_id, manifest)
+    return recovered
+
+
+_PROMOTED_PLAN_RESOLUTION = "promoted_plan_state_update"
+
+
+def _checkpoint_promoted_plan_recovery(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    *,
+    repository_ref: str,
+    wave: int,
+    promoted_sha: str,
+) -> None:
+    """Persist the durable checkpoint immediately after Git promotion."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        current = _record(manifest, repository_ref, wave)
+        binding = manifest.get("repositories", {}).get(repository_ref)
+        if not current or not isinstance(binding, dict):
+            raise ValueError(f"parallel_merge_train_recovery_record_missing:{repository_ref}:{wave}")
+        if current.get("candidateSha") != promoted_sha:
+            raise ValueError("parallel_merge_train_recovery_candidate_mismatch")
+        resolution = {
+            "kind": _PROMOTED_PLAN_RESOLUTION,
+            "repositoryRef": repository_ref,
+            "baseSha": current.get("baseSha"),
+            "candidateSha": current.get("candidateSha"),
+            "promotedSha": promoted_sha,
+            "batchIds": list(current.get("batchIds") or []),
+            "deliveryRunId": run_id,
+            "planWriterErrors": [],
+            "checkpointedAt": utc_now(),
+        }
+        # The repository's actual HEAD is now a durable fact even though Plan
+        # metadata may still need replay.  Never leave it pointing at base.
+        binding["headSha"] = promoted_sha
+        current.update({
+            "status": "needs_resolution",
+            "promotedSha": promoted_sha,
+            "resolution": resolution,
+        })
+        manifest["status"] = "needs_resolution"
+        save_manifest(workspace, feature, run_id, manifest)
+
+
+def recover_promoted_plan(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    *,
+    repository_ref: str,
+    wave: int,
+) -> dict[str, Any]:
+    """Idempotently finish Plan state after an already-promoted candidate."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        record = _record(manifest, repository_ref, wave)
+        binding = manifest.get("repositories", {}).get(repository_ref)
+        if not isinstance(record, dict) or not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
+            return {"success": False, "error": f"parallel_merge_train_recovery_record_missing:{repository_ref}:{wave}"}
+        candidate_sha = str(record.get("candidateSha") or "")
+        base_sha = str(record.get("baseSha") or "")
+        promoted_sha = str(record.get("promotedSha") or candidate_sha)
+        resolution = record.get("resolution")
+        is_legacy = record.get("status") == "needs_resolution" and (record.get("promotedSha") or record.get("planWriterErrors"))
+        if record.get("status") not in {"promoting", "needs_resolution"} or (
+            record.get("status") == "needs_resolution"
+            and not (isinstance(resolution, dict) and resolution.get("kind") == _PROMOTED_PLAN_RESOLUTION)
+            and not is_legacy
+        ):
+            return {"success": False, "error": "parallel_merge_train_not_waiting_for_plan_recovery"}
+        repo = Path(binding["gitRoot"]).resolve()
+
+    try:
+        _clean(repo)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    current_head = _head(repo)
+    if not candidate_sha or current_head not in {base_sha, candidate_sha, promoted_sha}:
+        return {
+            "success": False,
+            "error": "parallel_train_recovery_head_changed",
+            "expected": promoted_sha or candidate_sha,
+            "actual": current_head,
+        }
+    if current_head == base_sha and record.get("status") == "promoting":
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            current = _record(manifest, repository_ref, wave)
+            if current:
+                current.update({"status": current.get("promotionReadyStatus", "verified"), "promotionRecoveredAt": utc_now()})
+                current.pop("promotionIntentAt", None)
+            manifest["status"] = "running"
+            save_manifest(workspace, feature, run_id, manifest)
+        return {"success": True, "retryPromotion": True, "candidateSha": candidate_sha}
+    if current_head != candidate_sha or promoted_sha != candidate_sha:
+        return {
+            "success": False,
+            "error": "parallel_train_recovery_candidate_mismatch",
+            "candidateSha": candidate_sha,
+            "promotedSha": promoted_sha,
+            "actual": current_head,
+        }
+
+    # Repair pre-checkpoint crashes and historical records which only carried
+    # promotedSha/planWriterErrors.  The exact HEAD equality above is the
+    # authority for this migration.
+    _checkpoint_promoted_plan_recovery(
+        workspace,
+        feature,
+        run_id,
+        repository_ref=repository_ref,
+        wave=wave,
+        promoted_sha=promoted_sha,
+    )
+    with run_lock(workspace, feature, run_id):
+        record = _record(load_manifest(workspace, feature, run_id), repository_ref, wave)
+        assert isinstance(record, dict)
+        batch_ids = [str(batch_id) for batch_id in record.get("batchIds") or []]
+
+    plan_errors: list[str] = []
+    for batch_id in batch_ids:
+        result = mark_parallel_batch_tasks_merged(
+            workspace,
+            feature,
+            batch_id,
+            merge_commit_sha=promoted_sha,
+            delivery_run_id=run_id,
+        )
+        if not result.ok:
+            plan_errors.extend(str(item.get("reason") or item) for item in (result.errors or []))
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        current = _record(manifest, repository_ref, wave)
+        binding = manifest.get("repositories", {}).get(repository_ref)
+        if not isinstance(current, dict) or not isinstance(binding, dict):
+            return {"success": False, "error": f"parallel_merge_train_recovery_record_missing:{repository_ref}:{wave}"}
+        binding["headSha"] = promoted_sha
+        resolution = current.get("resolution") if isinstance(current.get("resolution"), dict) else {}
+        if plan_errors:
+            resolution.update({"kind": _PROMOTED_PLAN_RESOLUTION, "planWriterErrors": plan_errors, "lastAttemptAt": utc_now()})
+            current.update({"status": "needs_resolution", "promotedSha": promoted_sha, "planWriterErrors": plan_errors, "resolution": resolution})
+            manifest["status"] = "needs_resolution"
+            save_manifest(workspace, feature, run_id, manifest)
+            return {"success": False, "needsPlanRecovery": True, "errors": plan_errors, "candidateSha": promoted_sha}
+        for batch_id in batch_ids:
+            batch = manifest["batches"].get(batch_id)
+            if isinstance(batch, dict):
+                batch.update({"status": "merged", "mergeCommitSha": promoted_sha, "mergedAt": utc_now()})
+        current.update({"status": "promoted", "promotedSha": promoted_sha, "promotedAt": utc_now()})
+        current.pop("resolution", None)
+        current.pop("planWriterErrors", None)
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
 
-    path = Path(str(record["worktreePath"]))
-    cleanup_errors = _remove_candidate(repo, path, str(record["branchName"]))
+    worktree_path = record.get("worktreePath")
+    cleanup_errors = (
+        _remove_candidate(repo, Path(worktree_path), str(record.get("branchName") or ""))
+        if isinstance(worktree_path, str) and worktree_path.strip()
+        else ["candidate_worktree_missing"]
+    )
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         current = _record(manifest, repository_ref, wave)
         if current:
             current["cleanup"] = {"at": utc_now(), "errors": cleanup_errors}
         save_manifest(workspace, feature, run_id, manifest)
-    append_event(workspace, feature, run_id, "merge_train_promoted", repositoryRef=repository_ref, wave=wave, candidateSha=promoted_sha, batchIds=record["batchIds"], cleanupErrors=cleanup_errors)
-    # Promotion is durable even if temporary-resource cleanup needs a later
-    # retry; report it as a successful promotion and expose cleanup separately.
-    return {"success": True, "promoted": True, "candidateSha": promoted_sha, "batchIds": record["batchIds"], "cleanupErrors": cleanup_errors}
+    append_event(workspace, feature, run_id, "merge_train_promoted", repositoryRef=repository_ref, wave=wave, candidateSha=promoted_sha, batchIds=batch_ids, cleanupErrors=cleanup_errors)
+    return {"success": True, "promoted": True, "candidateSha": promoted_sha, "batchIds": batch_ids, "cleanupErrors": cleanup_errors}
 
 
 def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
@@ -804,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate staged parallel Batch Merge Trains")
     sub = parser.add_subparsers(dest="command", required=True)
     promote_parser: argparse.ArgumentParser | None = None
-    for name in ("build-candidate", "verify-candidate", "promote-candidate", "resolve-candidate", "resume-candidate", "discard-candidate"):
+    for name in ("build-candidate", "verify-candidate", "promote-candidate", "recover-promoted-plan", "resolve-candidate", "resume-candidate", "discard-candidate"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -843,6 +1016,14 @@ def main(argv: list[str] | None = None) -> int:
                 wave=args.wave,
                 repository_ref=args.repository_ref,
                 allow_unverified=args.allow_unverified,
+            )
+        elif args.command == "recover-promoted-plan":
+            result = recover_promoted_plan(
+                workspace,
+                feature,
+                args.run_id,
+                wave=args.wave,
+                repository_ref=args.repository_ref,
             )
         elif args.command == "resolve-candidate":
             result = resolve_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)

@@ -21,7 +21,7 @@ from hooks.parallel_batch_stage import (
     validate_review_result,
 )
 from hooks.parallel_evidence_aggregate import aggregate_evidence
-from hooks.parallel_merge_train import _remove_candidate, begin_e2e, build_candidate, finish_e2e, promote_candidate
+from hooks.parallel_merge_train import _remove_candidate, begin_e2e, build_candidate, finish_e2e, promote_candidate, recover_promoted_plan
 from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease
 from hooks.parallel_validation_ownership import build_pipeline_contract, validation_ownership_errors
 from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
@@ -155,6 +155,56 @@ class ParallelStagedPipelineTest(unittest.TestCase):
         self.assertTrue(aggregate["hasDeferredIssues"])
         self.assertFalse(aggregate["hasBlockingDeferredIssues"])
         self.assertEqual(manifest["status"], "succeeded_with_issues")
+
+    def test_promoted_candidate_plan_failure_checkpoints_and_recovers(self) -> None:
+        """A Plan failure after ff must not leave binding.headSha at base."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "delivery.txt").write_text("delivery\n", encoding="utf-8")
+            _git(worktree, "add", "delivery.txt")
+            _git(worktree, "commit", "-m", "delivery")
+            commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=provisioned["worktreePath"],
+                branchName=provisioned["branchName"],
+                commitSha=commit,
+                compileStatus="passed",
+            )
+            for stage in ("prepare", "implement", "review", "test"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
+            candidate = build_candidate(workspace, "alpha", run_id, wave=1, batch_ids=["B001"])
+            self.assertTrue(candidate["success"], candidate)
+
+            failed_writer = WriterResult(ok=False, errors=[{"reason": "parallel_batch_task_not_implemented"}])
+            with patch("hooks.parallel_merge_train.mark_parallel_batch_tasks_merged", return_value=failed_writer):
+                promoted = promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default", allow_unverified=True)
+            self.assertFalse(promoted["success"])
+            persisted = load_manifest(workspace, "alpha", run_id)
+            train = persisted["mergeTrains"]["default:wave-001"]
+            self.assertEqual(_git_output(repo, "rev-parse", "HEAD"), candidate["candidateSha"])
+            self.assertEqual(persisted["repositories"]["default"]["headSha"], candidate["candidateSha"])
+            self.assertEqual(train["resolution"]["kind"], "promoted_plan_state_update")
+            self.assertEqual(train["status"], "needs_resolution")
+
+            with patch("hooks.parallel_merge_train.mark_parallel_batch_tasks_merged", return_value=WriterResult(ok=True, errors=[])):
+                recovered = recover_promoted_plan(workspace, "alpha", run_id, repository_ref="default", wave=1)
+            self.assertTrue(recovered["success"], recovered)
+            persisted = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(persisted["batches"]["B001"]["status"], "merged")
+            self.assertEqual(persisted["mergeTrains"]["default:wave-001"]["status"], "promoted")
+            self.assertNotIn("resolution", persisted["mergeTrains"]["default:wave-001"])
 
     def test_unresolved_review_deferred_finding_blocks_batch_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

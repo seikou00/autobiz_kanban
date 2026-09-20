@@ -1025,6 +1025,113 @@ def resume_run(
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
     initial = load_manifest(workspace, feature, run_id)
+    promoted_train_batch_ids = {
+        str(batch_id)
+        for train in (initial.get("mergeTrains") or {}).values()
+        if isinstance(train, dict)
+        and (
+            train.get("status") == "promoting"
+            or (
+                train.get("status") == "needs_resolution"
+                and (
+                    bool(train.get("promotedSha"))
+                    or bool(train.get("planWriterErrors"))
+                    or (isinstance(train.get("resolution"), dict) and train["resolution"].get("kind") == "promoted_plan_state_update")
+                )
+            )
+        )
+        for batch_id in (train.get("batchIds") or [])
+        if isinstance(batch_id, str)
+    }
+    interrupted_recovery_errors: list[str] = []
+    try:
+        from hooks.task_runner import recover_interrupted_parallel_runs
+
+        for batch_id, batch in (initial.get("batches") or {}).items():
+            if not isinstance(batch, dict):
+                continue
+            # A sealed/candidate delivery cannot still have a legitimate
+            # implementation worker.  Include train-recovery batches so an
+            # old started run cannot make Plan recovery fail again.
+            if str(batch_id) not in promoted_train_batch_ids and batch.get("status") not in {
+                "retry_pending", "sealed", "ready_to_candidate", "needs_resolution"
+            }:
+                continue
+            worktree_path = batch.get("worktreePath")
+            if not isinstance(worktree_path, str) or not worktree_path.strip():
+                continue
+            recovered = recover_interrupted_parallel_runs(
+                workspace,
+                feature,
+                run_id,
+                str(batch_id),
+                Path(worktree_path),
+                workspace_ref=str(batch.get("workspaceRef") or batch.get("repositoryRef") or "") or None,
+            )
+            for item in recovered["recovered"]:
+                append_event(
+                    workspace,
+                    feature,
+                    run_id,
+                    "interrupted_task_run_recovered",
+                    batchId=str(batch_id),
+                    **item,
+                )
+    except (OSError, ValueError) as exc:
+        interrupted_recovery_errors.append(f"parallel_interrupted_task_run_recovery_failed:{exc}")
+    if interrupted_recovery_errors:
+        return {
+            "runId": run_id,
+            "status": "needs_resolution",
+            "scheduledGroups": [],
+            "mergeableBatches": mergeable_batches(load_manifest(workspace, feature, run_id)),
+            "recoveryRequired": True,
+            "errors": interrupted_recovery_errors,
+        }
+    recovery_trains = [
+        (str(train.get("repositoryRef") or ""), int(train.get("wave")))
+        for train in (initial.get("mergeTrains") or {}).values()
+        if isinstance(train, dict)
+        and isinstance(train.get("wave"), int)
+        and isinstance(train.get("repositoryRef"), str)
+        and (
+            train.get("status") == "promoting"
+            or (
+                train.get("status") == "needs_resolution"
+                and (
+                    (isinstance(train.get("resolution"), dict) and train["resolution"].get("kind") == "promoted_plan_state_update")
+                    # Compatibility for the historical record written before
+                    # train-level Plan recovery had a structured resolution.
+                    or bool(train.get("promotedSha"))
+                    or bool(train.get("planWriterErrors"))
+                )
+            )
+        )
+    ]
+    if recovery_trains:
+        from hooks.parallel_merge_train import recover_promoted_plan
+
+        recovery_errors: list[str] = []
+        for repository_ref, wave in recovery_trains:
+            recovered = recover_promoted_plan(
+                workspace,
+                feature,
+                run_id,
+                repository_ref=repository_ref,
+                wave=wave,
+            )
+            if not recovered.get("success"):
+                recovery_errors.append(str(recovered.get("error") or f"parallel_merge_train_plan_recovery_failed:{repository_ref}:{wave}"))
+        if recovery_errors:
+            return {
+                "runId": run_id,
+                "status": "needs_resolution",
+                "scheduledGroups": [],
+                "mergeableBatches": mergeable_batches(load_manifest(workspace, feature, run_id)),
+                "recoveryRequired": True,
+                "errors": recovery_errors,
+            }
+        initial = load_manifest(workspace, feature, run_id)
     recovery_batches = [
         str(batch_id)
         for batch_id, batch in initial.get("batches", {}).items()

@@ -820,7 +820,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(delivery["success"], delivery)
             delivery_path = Path(delivery["worktreePath"])
 
-            rollback = rollback_run(workspace, "alpha", scheduled["runId"], mode="partial")
+            rollback = rollback_run(workspace, "alpha", scheduled["runId"], mode="partial", confirm=True)
             cleanup = cleanup_run(workspace, "alpha", scheduled["runId"])
 
             self.assertEqual(rollback["status"], "rolled_back")

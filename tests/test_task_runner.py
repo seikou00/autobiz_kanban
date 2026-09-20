@@ -1058,6 +1058,33 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(run["changedFilesAtAbort"], ["implemented.txt"])
             self.assertEqual(run["fileChangesAtAbort"][0]["operation"], "created")
 
+    def test_native_recovery_aborts_only_the_interrupted_parallel_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            run_path = feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+            state["parallelRunId"] = "cw-empty-response"
+            state["integritySha256"] = task_runner_module.task_run_integrity_sha256(state)
+            run_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            (code / "interrupted.txt").write_text("preserve me\n", encoding="utf-8")
+
+            recovered = task_runner_module.recover_interrupted_parallel_runs(
+                workspace,
+                "alpha",
+                "cw-empty-response",
+                "B001",
+                code,
+            )
+
+            self.assertEqual(recovered["count"], 1)
+            self.assertEqual(recovered["recovered"][0]["runId"], started["runId"])
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "aborted")
+            self.assertEqual(state["abortWhy"], "workflow_agent_empty_response_exhausted")
+            self.assertTrue((code / "interrupted.txt").is_file())
+            self.assertEqual(_read_batch(feature_dir)["tasks"][0]["status"], "todo")
+
     def test_abort_does_not_adopt_source_drift_added_after_the_abort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))

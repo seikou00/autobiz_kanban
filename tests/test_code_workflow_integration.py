@@ -78,7 +78,6 @@ def test_fixed_workflow_entrypoint():
         "await parallel",
         "worktree_manager.py",
         "parallel_merge_train.py",
-        "parallel_stage_validation.py",
         "utest_assignment_router.py",
         "run_utest_command.py",
         "inspect_test_environment.py",

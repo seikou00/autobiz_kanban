@@ -149,6 +149,91 @@ def _active_parallel_batch_runs(feature_dir: Path, parallel_run_id: str, batch_i
     return sorted(active)
 
 
+def recover_interrupted_parallel_runs(
+    workspace: Path,
+    feature: str,
+    parallel_run_id: str,
+    batch_id: str,
+    code_workspace: Path,
+    *,
+    workspace_ref: str | None = None,
+    abort_why: str = "workflow_agent_empty_response_exhausted",
+) -> dict[str, Any]:
+    """Close abandoned task runs before a scheduler-owned Batch retry.
+
+    A workflow child can disappear after ``start`` has durably made the Plan
+    task in-progress.  This native recovery path deliberately operates only
+    on runs attributable to the same parallel run and Batch; it preserves
+    source changes by force-aborting and restores ``implemented`` only when a
+    previously recorded implementation evidence item still proves that state.
+    """
+    feature_dir = _feature_dir(workspace, feature)
+    recovered: list[dict[str, Any]] = []
+    with _task_run_lock(feature_dir):
+        candidates: list[tuple[str, str, dict[str, Any]]] = []
+        for path in sorted((feature_dir / ".task-runs").glob("*/*.json")):
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(state, dict):
+                continue
+            if (
+                state.get("parallelRunId") != parallel_run_id
+                or state.get("batchId") != batch_id
+                or state.get("status") not in {"started", "implementation_recording"}
+            ):
+                continue
+            task_id = state.get("taskId")
+            run_id = state.get("runId")
+            if isinstance(task_id, str) and task_id and isinstance(run_id, str) and run_id:
+                candidates.append((task_id, run_id, state))
+        for task_id, run_id, prior_state in candidates:
+            state = _abort_task_unlocked(
+                workspace,
+                feature,
+                task_id,
+                code_workspace,
+                run_id,
+                force_with_changes=True,
+                abort_why=abort_why,
+                workspace_ref=workspace_ref,
+            )
+            restored_implemented = False
+            try:
+                bundle = load_plan_bundle(feature_dir)
+                _, task = find_task(bundle, task_id)
+                evidence_id = task.get("latestImplementationEvidenceId")
+                evidence_exists = isinstance(evidence_id, str) and any(
+                    record.get("action") == "implementation"
+                    and record.get("taskId") == task_id
+                    and record.get("evidenceId") == evidence_id
+                    for record in read_records(stream_path(feature_dir))
+                )
+                if evidence_exists:
+                    result = set_task_execution_status(
+                        workspace,
+                        feature,
+                        task_id,
+                        "implemented",
+                        expected_task_contract_sha256=task_contract_sha256(task),
+                        parallel=True,
+                    )
+                    restored_implemented = bool(result.ok)
+            except (PlanWriterInputError, ValueError):
+                # The forced abort remains durable and auditable.  A malformed
+                # plan must not be masked by inventing an implementation state.
+                restored_implemented = False
+            recovered.append({
+                "taskId": task_id,
+                "runId": run_id,
+                "priorStatus": prior_state.get("status"),
+                "status": state.get("status"),
+                "restoredImplemented": restored_implemented,
+            })
+    return {"recovered": recovered, "count": len(recovered)}
+
+
 def _load_plan_and_task(
     feature_dir: Path,
     task_id: str,
@@ -1428,7 +1513,6 @@ def _abort_task_unlocked(
     feature_dir = _feature_dir(workspace, feature)
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("status") in {
-        "implementation_recording",
         "implemented",
         "evidence_written",
         "done",

@@ -358,10 +358,29 @@ def cleanup_feature_runs_for_code_rollback(workspace: Path, feature: str) -> lis
 def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "partial", confirm: bool = False) -> dict[str, Any]:
     if mode not in {"full", "partial"}:
         raise ValueError("rollback_mode_invalid")
-    if mode == "full" and not confirm:
-        raise ValueError("full_rollback_requires_confirm")
+    # Rollback is never a recovery mechanism for a promoted candidate whose
+    # Plan write failed.  It can erase the very manifest evidence needed to
+    # reconcile Git's already-durable HEAD, so require an explicit operator
+    # acknowledgement for every rollback and reject that recovery state.
+    if not confirm:
+        raise ValueError("rollback_requires_confirm")
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        promoted_plan_recovery = any(
+            isinstance(train, dict)
+            and train.get("status") in {"promoting", "needs_resolution"}
+            and (
+                bool(train.get("promotedSha"))
+                or bool(train.get("planWriterErrors"))
+                or (
+                    isinstance(train.get("resolution"), dict)
+                    and train["resolution"].get("kind") == "promoted_plan_state_update"
+                )
+            )
+            for train in (manifest.get("mergeTrains") or {}).values()
+        )
+        if promoted_plan_recovery:
+            raise ValueError("rollback_promoted_plan_recovery_required")
         reverted: list[str] = []
         if mode == "full":
             task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
