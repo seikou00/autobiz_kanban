@@ -1017,6 +1017,95 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001")
                 self.assertTrue(removed["success"], removed)
 
+    def test_plugin_worktree_manager_rebuilds_interrupted_checkout_before_reconcile(self) -> None:
+        """An empty index plus Git's initializing locks is not a reusable Worktree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+                workflow_workspace=root / "artifact-host",
+            )
+            run_id = scheduled["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                # Simulate a host timeout after Git registered the linked
+                # worktree but before checkout finished.  Git then reports
+                # every HEAD file as a staged deletion unless provision
+                # discards and recreates this plugin-owned remnant.
+                git_dir_raw = _git(worktree, "rev-parse", "--git-dir")
+                git_dir = Path(git_dir_raw)
+                if not git_dir.is_absolute():
+                    git_dir = (worktree / git_dir).resolve()
+                (git_dir / "index").unlink()
+                (git_dir / "index.lock").touch()
+                (git_dir / "locked").write_text("initializing\n", encoding="utf-8")
+
+                manifest = load_manifest(workspace, "alpha", run_id)
+                batch = manifest["batches"]["B001"]
+                batch["worktreePath"] = None
+                batch["branchName"] = None
+                batch.pop("worktreeOwner", None)
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                rebuilt = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(rebuilt["success"], rebuilt)
+                self.assertFalse(rebuilt["reused"])
+                self.assertTrue(rebuilt["recoveredIncomplete"])
+                self.assertEqual(
+                    _git(worktree, "rev-parse", "HEAD"),
+                    load_manifest(workspace, "alpha", run_id)["repositories"]["default"]["headSha"],
+                )
+                self.assertTrue(_git(worktree, "ls-files"))
+                self.assertFalse((git_dir / "index.lock").exists())
+                self.assertFalse((git_dir / "locked").exists())
+            finally:
+                removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+                self.assertTrue(removed["success"], removed)
+
+    def test_plugin_worktree_manager_rebuilds_corrupt_reused_worktree_without_lease(self) -> None:
+        """A retry must not loop by reusing a bound but incomplete checkout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+                workflow_workspace=root / "artifact-host",
+            )
+            run_id = scheduled["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                git_dir_raw = _git(worktree, "rev-parse", "--git-dir")
+                git_dir = Path(git_dir_raw)
+                if not git_dir.is_absolute():
+                    git_dir = (worktree / git_dir).resolve()
+                (git_dir / "index").unlink()
+                (git_dir / "index.lock").touch()
+                (git_dir / "locked").write_text("initializing\n", encoding="utf-8")
+
+                rebuilt = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(rebuilt["success"], rebuilt)
+                self.assertFalse(rebuilt["reused"])
+                self.assertTrue(rebuilt["recoveredIncomplete"])
+                self.assertTrue(_git(worktree, "ls-files"))
+            finally:
+                removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+                self.assertTrue(removed["success"], removed)
+
     def test_plugin_worktree_manager_reclaims_unbound_branch_left_by_interrupted_provision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -165,6 +165,7 @@ const WORKTREE_SCHEMA = {
     worktreePath: { type: "string" },
     branchName: { type: "string" },
     reused: { type: "boolean" },
+    recoveredIncomplete: { type: "boolean" },
     error: { type: "string" }
   },
   required: ["success", "batchId", "repositoryRef"],
@@ -1513,7 +1514,7 @@ async function runInitialBatchLifecycle(batchId) {
       throw new Error(`scheduler did not provide a code workspace for ${batchId}`);
     }
     const provisioned = requireSuccess(await workflowAgent(
-      `为 Batch ${batchId} 创建或复用插件托管的原生 Git Worktree。执行 python "${worktreeManagerPath}" --json provision --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。只返回 JSON；不得使用平台 isolation，不得修改业务源码。`,
+      `为 Batch ${batchId} 创建或复用插件托管的原生 Git Worktree。只允许执行一次 python "${worktreeManagerPath}" --json provision --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。只返回该命令的 JSON；不得使用平台 isolation，不得修改业务源码。若 execute 报告 timeout、中断或无结果，立即返回 failed，禁止检查插件目录、读取 Git 状态、重试该命令，或使用 run_in_background、&、nohup、setsid、Start-Process 等后台方式。后续 Workflow 重试会由插件受控识别并重建未完成 Worktree。`,
       { label: `provision-worktree-${batchId}`, phase: "Batch 阶段", schema: WORKTREE_SCHEMA }
     ), `provision worktree ${batchId}`);
     batchWorktree = provisioned.worktreePath;

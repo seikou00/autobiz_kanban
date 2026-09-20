@@ -32,6 +32,7 @@ from hooks.repository_snapshot import (
     RepositorySnapshotError,
     current_git_branch,
     resolve_git_root,
+    working_tree_changed_files,
 )
 
 
@@ -208,6 +209,143 @@ def _can_reclaim_orphaned_branch(
     return f"branch refs/heads/{branch_name}" not in listed.stdout.splitlines()
 
 
+def _worktree_git_dir(worktree: Path) -> Path | None:
+    """Return the linked worktree metadata directory without changing Git state."""
+
+    result = _git(worktree, "rev-parse", "--git-dir")
+    raw = result.stdout.strip()
+    if result.returncode != 0 or not raw:
+        return None
+    path = Path(raw)
+    return path.resolve() if path.is_absolute() else (worktree / path).resolve()
+
+
+def _worktree_readiness(worktree: Path, expected_head: str) -> dict[str, Any]:
+    """Validate that a linked worktree finished checkout and matches its base.
+
+    ``git worktree add`` first registers metadata and creates a branch, then
+    populates the per-worktree index and checkout.  A host timeout can leave
+    the first two steps durable while the latter steps never complete.  Those
+    remnants must never be adopted as a usable Batch worktree.
+    """
+
+    issues: list[str] = []
+    details: dict[str, Any] = {"expectedHead": expected_head}
+    head = _git(worktree, "rev-parse", "--verify", "HEAD")
+    actual_head = head.stdout.strip() if head.returncode == 0 else None
+    details["actualHead"] = actual_head
+    if actual_head is None:
+        issues.append("head_unavailable")
+    elif actual_head != expected_head:
+        issues.append("head_mismatch")
+
+    git_dir = _worktree_git_dir(worktree)
+    details["gitDir"] = str(git_dir) if git_dir is not None else None
+    if git_dir is None:
+        issues.append("git_dir_unavailable")
+    else:
+        index = git_dir / "index"
+        index_lock = git_dir / "index.lock"
+        initializing_lock = git_dir / "locked"
+        lock_reason = None
+        if initializing_lock.is_file():
+            try:
+                lock_reason = initializing_lock.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                lock_reason = "unreadable"
+        details.update({
+            "indexPath": str(index),
+            "indexPresent": index.is_file() and index.stat().st_size > 0,
+            "indexLockPresent": index_lock.exists(),
+            "initializingLockPresent": initializing_lock.exists(),
+            "worktreeLockReason": lock_reason,
+        })
+        if not details["indexPresent"]:
+            issues.append("index_missing")
+        if details["indexLockPresent"]:
+            issues.append("index_lock_present")
+        if details["initializingLockPresent"]:
+            issues.append(
+                "worktree_initializing_locked"
+                if lock_reason == "initializing"
+                else "worktree_locked"
+            )
+
+    try:
+        changed = working_tree_changed_files(worktree)
+    except RepositorySnapshotError:
+        issues.append("working_tree_unavailable")
+        changed = []
+    details["changedFileCount"] = len(changed)
+    details["changedFileSample"] = changed[:20]
+    if changed:
+        issues.append("working_tree_dirty")
+    details["issues"] = issues
+    details["ready"] = not issues
+    return details
+
+
+def _is_recoverable_incomplete_worktree(readiness: dict[str, Any]) -> bool:
+    """Return whether a failed readiness check is a pre-checkout remnant.
+
+    A regular dirty worktree can contain an agent's in-flight source changes
+    and is intentionally *not* recoverable by deleting it.  Missing index or
+    Git's own initialization locks only occur before a worker can safely own
+    the checkout, so they can be removed under the plugin's run lock.
+    """
+
+    issues = readiness.get("issues")
+    if not isinstance(issues, list):
+        return False
+    return bool({"index_missing", "worktree_initializing_locked"} & set(issues))
+
+
+def _discard_incomplete_worktree(
+    git_root: Path,
+    worktree: Path,
+    branch_name: str,
+) -> dict[str, Any]:
+    """Remove an exact plugin-owned incomplete worktree through Git.
+
+    ``locked=initializing`` is Git's interrupted-creation marker.  Unlock it
+    through Git rather than deleting metadata by hand, then force-remove only
+    this already verified Batch checkout and its temporary branch.
+    """
+
+    unlock = _git(git_root, "worktree", "unlock", str(worktree))
+    # ``unlock`` returns non-zero when no lock exists, which is harmless.
+    removed = _git(git_root, "worktree", "remove", "--force", str(worktree))
+    if removed.returncode != 0:
+        return {
+            "success": False,
+            "error": "parallel_worktree_incomplete_remove_failed:" + (removed.stderr.strip() or removed.stdout.strip()),
+            "unlockError": unlock.stderr.strip() or unlock.stdout.strip() or None,
+        }
+    pruned = _git(git_root, "worktree", "prune")
+    if pruned.returncode != 0:
+        return {
+            "success": False,
+            "error": "parallel_worktree_incomplete_prune_failed:" + (pruned.stderr.strip() or pruned.stdout.strip()),
+        }
+    branch_removed = False
+    if branch_name:
+        exists = _git(git_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}")
+        if exists.returncode == 0:
+            deleted = _git(git_root, "branch", "-D", branch_name)
+            if deleted.returncode != 0:
+                return {
+                    "success": False,
+                    "error": "parallel_worktree_incomplete_branch_remove_failed:" + (deleted.stderr.strip() or deleted.stdout.strip()),
+                }
+            branch_removed = True
+    return {
+        "success": True,
+        "worktreePath": str(worktree),
+        "branchName": branch_name,
+        "branchRemoved": branch_removed,
+    }
+
+
 def provision_parallel_worktree(
     artifact_workspace: Path,
     feature: str,
@@ -233,27 +371,6 @@ def provision_parallel_worktree(
         if status in {"merged", "succeeded", "cancelled"}:
             return {"success": False, "error": f"parallel_batch_not_provisionable:{batch_id}:{status}"}
 
-        raw_path = batch.get("worktreePath")
-        if isinstance(raw_path, str) and raw_path.strip():
-            existing = Path(raw_path).expanduser().resolve()
-            try:
-                from hooks.parallel_batch_scheduler import assert_batch_worktree_isolated
-
-                assert_batch_worktree_isolated(manifest, batch_id, existing)
-                expected = str(batch.get("branchName") or "")
-                if current_git_branch(existing) == expected:
-                    return {
-                        "success": True,
-                        "batchId": batch_id,
-                        "repositoryRef": repository_ref,
-                        "worktreePath": str(existing),
-                        "branchName": expected,
-                        "reused": True,
-                    }
-            except (ValueError, OSError):
-                pass
-            return {"success": False, "error": f"parallel_worktree_stale:{batch_id}"}
-
         head = str(
             (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("headSha")
             or (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("baseSha")
@@ -264,6 +381,48 @@ def provision_parallel_worktree(
         branch_name = "autodev/{}/{}/{}".format(
             _branch_component(feature), _branch_component(run_id), _branch_component(batch_id)
         )
+        recovered_incomplete = False
+
+        raw_path = batch.get("worktreePath")
+        if isinstance(raw_path, str) and raw_path.strip():
+            existing = Path(raw_path).expanduser().resolve()
+            try:
+                from hooks.parallel_batch_scheduler import assert_batch_worktree_isolated
+
+                assert_batch_worktree_isolated(manifest, batch_id, existing)
+                expected = str(batch.get("branchName") or "")
+                if current_git_branch(existing) == expected:
+                    readiness = _worktree_readiness(existing, head)
+                    if readiness["ready"]:
+                        return {
+                            "success": True,
+                            "batchId": batch_id,
+                            "repositoryRef": repository_ref,
+                            "worktreePath": str(existing),
+                            "branchName": expected,
+                            "reused": True,
+                        }
+                    if batch.get("lease") is not None or not _is_recoverable_incomplete_worktree(readiness):
+                        return {
+                            "success": False,
+                            "error": f"parallel_worktree_incomplete:{batch_id}",
+                            "readiness": readiness,
+                        }
+                    discarded = _discard_incomplete_worktree(git_root, existing, expected)
+                    if not discarded["success"]:
+                        return {
+                            "success": False,
+                            "error": discarded["error"],
+                            "readiness": readiness,
+                        }
+                    batch["worktreePath"] = None
+                    batch["branchName"] = None
+                    batch.pop("worktreeOwner", None)
+                    recovered_incomplete = True
+                else:
+                    return {"success": False, "error": f"parallel_worktree_stale:{batch_id}"}
+            except (ValueError, OSError):
+                pass
         target = _native_worktree_path(artifact_workspace, feature, run_id, repository_ref, batch_id)
         if target.exists():
             candidate = target
@@ -282,13 +441,31 @@ def provision_parallel_worktree(
                     raise ValueError("unexpected_branch")
             except (ValueError, OSError):
                 return {"success": False, "error": f"parallel_worktree_path_occupied:{candidate}"}
-            batch.update({
-                "worktreePath": str(candidate),
-                "branchName": branch_name,
-                "worktreeOwner": "plugin",
-            })
-            save_manifest(artifact_workspace, feature, run_id, manifest)
-            reconciled = True
+            readiness = _worktree_readiness(candidate, head)
+            if readiness["ready"]:
+                batch.update({
+                    "worktreePath": str(candidate),
+                    "branchName": branch_name,
+                    "worktreeOwner": "plugin",
+                })
+                save_manifest(artifact_workspace, feature, run_id, manifest)
+                reconciled = True
+            elif _is_recoverable_incomplete_worktree(readiness):
+                discarded = _discard_incomplete_worktree(git_root, candidate, branch_name)
+                if not discarded["success"]:
+                    return {
+                        "success": False,
+                        "error": discarded["error"],
+                        "readiness": readiness,
+                    }
+                recovered_incomplete = True
+                reconciled = False
+            else:
+                return {
+                    "success": False,
+                    "error": f"parallel_worktree_incomplete:{batch_id}",
+                    "readiness": readiness,
+                }
         else:
             reconciled = False
         reclaimed_orphaned_branch = False
@@ -304,6 +481,18 @@ def provision_parallel_worktree(
             created = _git(git_root, "worktree", "add", "-b", branch_name, str(target), head)
             if created.returncode != 0:
                 return {"success": False, "error": f"parallel_worktree_create_failed:{created.stderr.strip()}"}
+            readiness = _worktree_readiness(target, head)
+            if not readiness["ready"]:
+                discarded = _discard_incomplete_worktree(git_root, target, branch_name)
+                return {
+                    "success": False,
+                    "error": (
+                        f"parallel_worktree_create_incomplete:{batch_id}"
+                        if discarded["success"]
+                        else discarded["error"]
+                    ),
+                    "readiness": readiness,
+                }
             batch.update({
                 "worktreePath": str(target),
                 "branchName": branch_name,
@@ -321,6 +510,7 @@ def provision_parallel_worktree(
         branch=branch_name,
         owner="plugin",
         reclaimedOrphanedBranch=reclaimed_orphaned_branch,
+        recoveredIncomplete=recovered_incomplete,
     )
     return {
         "success": True,
@@ -329,6 +519,7 @@ def provision_parallel_worktree(
         "worktreePath": str(candidate) if reconciled else str(target),
         "branchName": branch_name,
         "reused": reconciled,
+        "recoveredIncomplete": recovered_incomplete,
     }
 
 
