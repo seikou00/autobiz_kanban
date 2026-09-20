@@ -90,6 +90,17 @@
       "hooks": [
         {
           "type": "command",
+          "command": "python hooks/code_execution_guard.py",
+          "timeout": 30,
+          "onBlock": {
+            "reason": "Code 阶段不允许运行构建或验证",
+            "systemMessage": "活动 Code task run 只能实现和由 task_runner 收口；构建、编译、测试、typecheck、lint、E2E 仅由 Review 后的 UTest 协议运行。",
+            "additionalContext": "不要为验证实现执行 mvn、Gradle、npm/pnpm/yarn build/test/lint/typecheck 或后台命令；完成实现后执行 finish-implementation。"
+          },
+          "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
           "command": "python hooks/runtime_artifact_guard.py",
           "timeout": 30,
           "onBlock": {

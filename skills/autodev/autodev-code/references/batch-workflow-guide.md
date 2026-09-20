@@ -175,8 +175,9 @@ provisioned.
    calculate newly unlocked work. A dependent Batch never starts from an
    unmerged upstream result, but unrelated Batches do not wait for a failed peer.
 7. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
-   `done`. A compile-passed delivery remains `implemented` / `sealed`
-   until this source-branch integration succeeds.
+   `done`. A Review-and-UTest-processed delivery remains `implemented` /
+   `sealed` until this source-branch integration succeeds; Code itself has no
+   independent compile result.
    If promotion succeeds but the Plan writer fails, the run is retained in
    `needs_resolution` until its Plan state is recovered.
 8. Once all Batches are `merged`, B-E2E runs in a temporary validation
