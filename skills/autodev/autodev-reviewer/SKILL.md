@@ -1,6 +1,6 @@
 ---
 name: autodev-reviewer
-description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
+description: 固定 Code Workflow 的内部 Review 协议。主 agent 写 completion-proposal.json，reviewer-autodev 核验真实仓库状态并落盘 REQUIREMENTS_EVAL.md；不是独立 Board 节点或 checkpoint。
 version: v1.7.0917
 ---
 
@@ -36,11 +36,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 读取 Feature 状态；每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 
 
-开始审查前写入进行中状态：
-
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_in_progress
-```
+只能在固定 Code Workflow 已启动当前 Batch 的 `review` 子阶段后开始审查。全局 checkpoint 保持 `code_in_progress`；不得创建 `requirements_eval_in_progress` 或 `requirements_eval_done`。
 
 ### 2. 写 completion proposal
 
@@ -86,13 +82,9 @@ FAIL 修复规则：
 - 每轮修复后必须更新 `completion-proposal.json`，使 files_changed、behavior_changed、verification、known_limitations 与真实状态一致。
 - 如果修复需要超出当前任务范围、缺少信息、工具不可用或存在人工决策点，停止并报告 blocker，不要伪造 PASS。
 
-### 5. 落盘完成 checkpoint
+### 5. 收口 Review 子阶段
 
-verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后写入：
-
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
-```
+verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后，由固定 Code Workflow 收口当前 Batch 的 `review` 子阶段并继续 UTest；不得由本技能更新全局 checkpoint。
 
 ### 6. 最终回复
 

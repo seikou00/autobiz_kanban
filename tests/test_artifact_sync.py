@@ -99,7 +99,7 @@ class ArtifactCatalogContractTest(unittest.TestCase):
     def test_optional_verify_and_original_requirement_artifacts_match_document(self) -> None:
         api_entry = artifact_sync.catalog_entry(
             path="FEATURE_API_DETAIL.md",
-            stage="dev.verify",
+            stage="dev.code",
             upload_status="uploaded",
             size=12,
             sha256="abc",
@@ -188,7 +188,7 @@ class ArtifactCatalogContractTest(unittest.TestCase):
                     "sha256": "abc",
                 }
             ],
-            stage="dev.e2e",
+            stage="dev.code",
         )
         self.assertEqual(uploadable, [])
         self.assertEqual(skipped[0]["upload_status"], "skipped")
@@ -413,8 +413,8 @@ class ArtifactSyncExecuteHookTest(unittest.TestCase):
     def test_checkpoint_command_detection_handles_direct_and_shell_wrapped_commands(self) -> None:
         accepted = (
             "python hooks/update_checkpoint.py --checkpoint plan_done",
-            "python3 hooks/update_checkpoint.py -c verify_done",
-            "/bin/zsh -lc 'python hooks/update_checkpoint.py --skip-node dev.e2e'",
+            "python3 hooks/update_checkpoint.py -c code_done",
+            "/bin/zsh -lc 'python hooks/update_checkpoint.py --skip-node dev.code'",
         )
         for command in accepted:
             with self.subTest(command=command):
@@ -434,7 +434,7 @@ class ArtifactSyncExecuteHookTest(unittest.TestCase):
             "hook_event_name": "PostToolUse",
             "tool_name": "execute",
             "tool_input": {
-                "command": "python hooks/update_checkpoint.py --checkpoint verify_done",
+                "command": "python hooks/update_checkpoint.py --checkpoint code_done",
             },
             "tool_response": {"exitCode": 0},
         }
@@ -460,7 +460,7 @@ class ArtifactSyncExecuteHookTest(unittest.TestCase):
             "hook_event_name": "PostToolUse",
             "tool_name": "execute",
             "tool_input": {
-                "command": "python hooks/update_checkpoint.py --checkpoint verify_done",
+                "command": "python hooks/update_checkpoint.py --checkpoint code_done",
             },
             "tool_response": {"exitCode": 0},
         }

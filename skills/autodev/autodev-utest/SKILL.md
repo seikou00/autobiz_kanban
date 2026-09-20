@@ -1,7 +1,7 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试协调、生成、执行与单测驱动最小修复技能。"
-version: v1.2.08143
+version: v1.2.08311
 ---
 
 ## 插件脚本执行
@@ -136,11 +136,9 @@ python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|
 
 ## 工作流程
 
-### 写入开始 checkpoint
+### Code Workflow 的 UTest 子阶段
 
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
-```
+固定 Workflow 已经启动当前 Batch 的 `test` 子阶段后才可执行本技能的测试协议。全局 checkpoint 始终保持 `code_in_progress`；不得调用 `update_checkpoint.py` 创建 `unit_test_in_progress` 或 `unit_test_done`。
 
 ### 展开 assignment 的测试计划
 
@@ -215,7 +213,7 @@ python "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginW
 
 主协调器收到 `source_fix_request` 后，在同一 Batch 原生 Worktree 的 implement repair 中做最小生产修复，重新编译和封存；随后必须重新执行生产代码 Review 和原 Batch/lane/workspace UTest，复用 UT target 并追加新 Evidence。
 
-同一个生产根因最多修复 3 次；仍失败时保留 `unit_test_in_progress` 并记录阻断。
+同一个生产根因最多修复 3 次；仍失败时保留该 Batch 的测试证据与阻断记录，不改变全局 Code checkpoint。
 
 ### 扩大验证
 
@@ -255,7 +253,7 @@ python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${
 
 ## 分支决策
 
-推进 `unit_test_done`：
+固定 Workflow 收口当前 Batch 的 `test` 子阶段，前提是：
 
 - 全部 P0 UT target PASS。
 - 入场缺陷已全部清零，每项都有重跑通过的 Evidence。
@@ -263,11 +261,7 @@ python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${
 - 源码修复均有失败测试锚点，并在实现阶段回修后重新经过 Review 与 UTest 的通过 Evidence。
 - 扩大验证已执行并记录。
 
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
-```
-
-存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保持 `unit_test_in_progress`。
+存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保留该 Batch 的测试证据；全局 checkpoint 不变。
 
 测试归属的 `test_bug`、fixture/mock 与测试环境配置必须在本阶段修完并重跑。`source_bug` 是例外：只能携带 attestation 回到同一 Batch 的 implement repair，之后重新进入 Review 与 UTest；不得以 deferred finding 进入合并。`environment` 记录环境与复现命令后阻断，`contract_gap` 回流 `/autodev-plan`。
 
@@ -284,7 +278,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 ## 输出清单
 
 - [ ] 已读取 SCOPE/SYSTEM/UNIT、router 最小 `promptContent` 和工程事实。
-- [ ] 已写入 `unit_test_in_progress`。
+- [ ] 固定 Workflow 已启动当前 Batch 的 `test` 子阶段；全局 checkpoint 仍为 `code_in_progress`。
 - [ ] 已声明执行主体分支。
 - [ ] 已列出 code 阶段遗留的入场缺陷，并全部重跑清零。
 - [ ] 已输出完整 UT target 表，覆盖全部 TASK 测试重点；浏览器目标已转 `e2e_handoff`。
@@ -294,6 +288,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 - [ ] 失败已分类，修复与 `source_fix_request` 已闭环。
 - [ ] 已执行扩大验证并生成 `UNIT_TEST_REPORT.md`。
 - [ ] 已派生 coverage、设置 verdict、校验 `UNIT_TEST_RESULT.json`。
-- [ ] 成功时已推进 `unit_test_done`。
+- [ ] 成功时已由固定 Workflow 收口当前 Batch 的 `test` 子阶段。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

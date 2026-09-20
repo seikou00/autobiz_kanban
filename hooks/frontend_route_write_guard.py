@@ -29,6 +29,7 @@ from resolve_frontend_html_route import (  # noqa: E402
     resolve_frontend_route,
 )
 from hooks.task_run_integrity import strict_task_run_integrity_error  # noqa: E402
+from hooks.plan_write_ownership import is_test_asset_path  # noqa: E402
 from ui_context import UIContextError, load_ui_context  # noqa: E402
 
 
@@ -293,6 +294,86 @@ def _active_runs_for_write_target(
     return [(run_path, run) for run_path, run, root in matches if len(root.parts) == deepest]
 
 
+def _test_stage_worktrees(manifest: dict) -> list[tuple[str, Path, dict, str]]:
+    """Return test-authorized worktrees declared by one runtime manifest.
+
+    Delivery Batches own UTest in ``test``.  The one post-merge validation
+    Batch owns E2E in ``e2e_test`` and can have one worktree per repository.
+    Neither is a global workflow checkpoint.
+    """
+
+    candidates: list[tuple[str, Path, dict, str]] = []
+    for batch_id, batch in (manifest.get("batches") or {}).items():
+        if not isinstance(batch_id, str) or not isinstance(batch, dict):
+            continue
+        worktree = batch.get("worktreePath")
+        if isinstance(worktree, str) and worktree.strip():
+            candidates.append((batch_id, Path(worktree).expanduser().resolve(strict=False), batch, "test"))
+    for batch_id, batch in (manifest.get("validationBatches") or {}).items():
+        if not isinstance(batch_id, str) or not isinstance(batch, dict):
+            continue
+        worktrees = batch.get("worktrees")
+        if not isinstance(worktrees, dict):
+            continue
+        for worktree in worktrees.values():
+            if isinstance(worktree, str) and worktree.strip():
+                candidates.append((batch_id, Path(worktree).expanduser().resolve(strict=False), batch, "e2e_test"))
+    return candidates
+
+
+def _test_write_owner(
+    workspace: Path,
+    feature: str,
+    target_path: Path,
+) -> tuple[str, Path, dict, str] | None:
+    """Find the deepest runtime Worktree that owns a test-asset write."""
+
+    manifests = (feature_dir(workspace, feature) / ".parallel-runs").glob("*/manifest.json")
+    matches: list[tuple[str, Path, dict, str]] = []
+    for manifest_path in manifests:
+        manifest = read_json(manifest_path)
+        for batch_id, worktree, batch, stage in _test_stage_worktrees(manifest):
+            if not _path_within(target_path, worktree):
+                continue
+            relative = target_path.resolve(strict=False).relative_to(worktree)
+            if is_test_asset_path(relative.as_posix()):
+                matches.append((batch_id, worktree, batch, stage))
+    if not matches:
+        return None
+    depth = max(len(worktree.parts) for _, worktree, _, _ in matches)
+    deepest = [item for item in matches if len(item[1].parts) == depth]
+    return deepest[0] if len(deepest) == 1 else None
+
+
+def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Path) -> int:
+    """Authorize test writes only during their owning Batch test substage."""
+
+    owner = _test_write_owner(workspace, feature, target_path)
+    if owner is None:
+        return block(
+            f"test asset write is outside an active Batch Worktree: {target_path}",
+            system_message="测试资产只能在当前 Batch 的原生 Worktree 且 test 子阶段运行时写入。",
+        )
+    batch_id, worktree, batch, stage = owner
+    states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+    stage_state = states.get(stage)
+    if not isinstance(stage_state, dict) or stage_state.get("status") != "running":
+        actual = stage_state.get("status") if isinstance(stage_state, dict) else None
+        return block(
+            f"test asset write requires {stage} stage=running for Batch {batch_id}: found={actual}",
+            system_message="测试资产写入必须由固定 Code Workflow 启动对应 Batch 的测试子阶段授权。",
+        )
+    if stage == "test":
+        review = states.get("review")
+        if not isinstance(review, dict) or review.get("status") != "passed":
+            return block(
+                f"test asset write requires review=passed for Batch {batch_id}",
+                system_message="UTest 只能在当前 Batch 的生产代码 Review 通过后执行。",
+            )
+    del worktree
+    return 0
+
+
 def validate_code_task_run_write(
     workspace: Path,
     feature: str,
@@ -366,6 +447,14 @@ def main() -> int:
         return 0
 
     for target_path in candidate_paths:
+        # A unified Code checkpoint spans implementation, review, UTest and
+        # final E2E.  Test assets therefore need their own runtime-stage
+        # authorization before extension-based production-code checks.
+        if is_test_asset_path(target_path.as_posix()):
+            result = validate_test_asset_write(workspace, feature, target_path=target_path)
+            if result:
+                return result
+            continue
         if is_frontend_code_path(target_path):
             result = validate_frontend_write(workspace, feature)
             if result:

@@ -131,9 +131,9 @@ def _derive_verdict(rows: list[dict[str, Any]]) -> str:
 
 def _next_checkpoint(verdict: str) -> str:
     if verdict == "pass":
-        return "verify_done"
+        return "code_done"
     if verdict == "manual":
-        return "verify_in_progress"
+        return "needs_fix"
     return "needs_fix"
 
 

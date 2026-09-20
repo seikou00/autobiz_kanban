@@ -1,6 +1,6 @@
 ---
 name: reviewer-autodev
-description: Independent completion reviewer for the dev.review stage. Verifies the executor's completion-proposal.json against live repository state, proposal.md, specs, design.md, PLAN.md and the feature PRD source index across one or more git repositories using read/search/shell tools, then writes REQUIREMENTS_EVAL.md with a PASS / PASS_WITH_WARNINGS / FAIL / DEGRADED verdict. Use only after the executor has written the completion proposal. Cannot edit source, tests, config or dependencies.
+description: Fixed Code Workflow 内部 Review 子阶段的独立审查员。验证 executor 的 completion-proposal 与真实仓库状态，并写入 REQUIREMENTS_EVAL.md；不是独立 Board 节点或 checkpoint。不能编辑源码、测试、配置或依赖。
 disallowedTools: [edit_file, write_todos]
 workload: full
 
@@ -163,7 +163,7 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 - REQUIREMENTS_EVAL.md path
 - Blockers count
 - Warnings count
-- Required next action: PASS/PASS_WITH_WARNINGS 时由主 agent 写入完成 checkpoint 并收敛 review；FAIL 时由主 agent 修复 blockers 后重新 review；DEGRADED 时由主 agent 停止并说明独立审查未成立
+- Required next action: PASS/PASS_WITH_WARNINGS 时由固定 Code Workflow 收口 `review` 子阶段；FAIL 时由同一 Workflow 修复 blockers 后重新 review；DEGRADED 时由主 agent 停止并说明独立审查未成立
 
 返回行为按 `Review execution mode` 分支：
 

@@ -997,8 +997,8 @@ class EvidenceStoreTest(unittest.TestCase):
                 feature_dir,
                 {
                     "featureId": "alpha",
-                    "checkpoint": "unit_test_in_progress",
-                    "nodeId": "dev.utest",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
                     "skill": "autodev-utest",
                     "taskId": "T001",
                     "action": "validation",
@@ -1021,8 +1021,8 @@ class EvidenceStoreTest(unittest.TestCase):
                 feature_dir,
                 {
                     "featureId": "alpha",
-                    "checkpoint": "unit_test_in_progress",
-                    "nodeId": "dev.utest",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
                     "skill": "autodev-utest",
                     "taskId": "T001",
                     "action": "validation",
@@ -1042,7 +1042,7 @@ class EvidenceStoreTest(unittest.TestCase):
             feature_dir = Path(tmp) / "alpha"
             append_pass_evidence(feature_dir)
             record = json.loads(stream_path(feature_dir).read_text(encoding="utf-8"))
-            record["checkpoint"] = "unit_test_in_progress"
+            record["checkpoint"] = "code_done"
             stream_path(feature_dir).write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
 
             with self.assertRaisesRegex(EvidenceStoreError, "evidence_stream_rewritten_or_truncated"):
@@ -1072,8 +1072,8 @@ class EvidenceStoreTest(unittest.TestCase):
                     feature_dir,
                     {
                         "featureId": "alpha",
-                        "checkpoint": "unit_test_in_progress",
-                        "nodeId": "dev.utest",
+                        "checkpoint": "code_in_progress",
+                        "nodeId": "dev.code",
                         "skill": "autodev-utest",
                         "taskId": "T001",
                         "action": "validation",

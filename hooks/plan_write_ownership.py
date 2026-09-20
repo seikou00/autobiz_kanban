@@ -13,6 +13,29 @@ from collections import defaultdict
 from typing import Any, Iterable, Mapping
 
 
+# Keep test ownership classification in one shared module.  Both the Code
+# write guard and the staged worktree sealer depend on this definition: a
+# path must never be considered a production write by one of them and a test
+# write by the other.
+TEST_ASSET_ROOT_CONFIGS = frozenset({
+    "pytest.ini",
+    "tox.ini",
+    ".coveragerc",
+    "jest.config.js",
+    "jest.config.cjs",
+    "jest.config.mjs",
+    "jest.config.ts",
+    "vitest.config.js",
+    "vitest.config.mjs",
+    "vitest.config.ts",
+    "karma.conf.js",
+    "playwright.config.js",
+    "playwright.config.ts",
+    "cypress.config.js",
+    "cypress.config.ts",
+})
+
+
 def normalize_owned_path(value: Any, workspace_ref: Any) -> str | None:
     """Normalize the writer's ``Repo:path`` and ``Repo/path`` spellings.
 
@@ -39,23 +62,13 @@ def is_test_asset_path(path: str) -> bool:
 
     parts = tuple(part for part in path.replace("\\", "/").split("/") if part)
     basename = parts[-1] if parts else ""
-    root_test_configs = {
-        "pytest.ini",
-        "tox.ini",
-        ".coveragerc",
-        "jest.config.js",
-        "jest.config.cjs",
-        "jest.config.mjs",
-        "jest.config.ts",
-        "vitest.config.js",
-        "vitest.config.mjs",
-        "vitest.config.ts",
-        "karma.conf.js",
-    }
     return (
-        (parts and parts[0] in {"test", "tests"})
+        (parts and parts[0] in {"test", "tests", "__tests__", "e2e", "playwright", "cypress"})
         or any(parts[index:index + 2] == ("src", "test") for index in range(len(parts) - 1))
-        or (len(parts) == 1 and basename in root_test_configs)
+        or basename in TEST_ASSET_ROOT_CONFIGS
+        or basename.startswith("test_")
+        or ".test." in basename
+        or ".spec." in basename
     )
 
 

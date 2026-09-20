@@ -81,4 +81,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
 
 校验失败时按返回的产物与问题修复后重试且只重试一次；需要行为裁定的先问用户，不通过补空表或改状态词绕过问题。连续出现相同失败时报告具体阻塞，不重复尝试。
 
-完成后简要汇报本轮工作与产物位置，并按 `${pluginPath}/skills/references/ui-continuation-guide.md` 衔接下一阶段。
+完成后简要汇报本轮工作与产物位置。
+
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

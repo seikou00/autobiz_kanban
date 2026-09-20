@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         required=True,
-        help="要跳过的工作流节点 id（如 dev.utest）；可重复",
+        help="要跳过的工作流节点 id（如 dev.code）；可重复",
     )
     parser.add_argument("--dry-run", action="store_true", help="只校验不写入")
     parser.add_argument(

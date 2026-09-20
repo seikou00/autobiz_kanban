@@ -319,8 +319,11 @@ def execute_utest_command(
     ) or "(command produced no output)"
     record = {
         "featureId": resolved_feature,
-        "checkpoint": "unit_test_in_progress",
-        "nodeId": "dev.utest",
+        # UTest is a Batch substage of the unified Code workflow, not a
+        # separate Board checkpoint or node.
+        "checkpoint": "code_in_progress",
+        "nodeId": "dev.code",
+        "batchStage": "test",
         "skill": "autodev-utest",
         "taskId": task_id,
         "taskDigest": authority["taskDigest"],

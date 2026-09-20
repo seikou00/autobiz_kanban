@@ -64,6 +64,71 @@ def make_workspace(root: Path) -> Path:
     return workspace
 
 
+def write_test_stage_manifest(
+    workspace: Path,
+    worktree: Path,
+    *,
+    test_status: str = "running",
+    review_status: str = "passed",
+) -> None:
+    """Create the smallest runtime manifest needed by the write guard."""
+
+    worktree.mkdir(parents=True, exist_ok=True)
+    manifest_path = (
+        workspace
+        / ".autobizdevops"
+        / "features"
+        / "alpha"
+        / ".parallel-runs"
+        / "cw-test"
+        / "manifest.json"
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "batches": {
+                    "B001": {
+                        "worktreePath": str(worktree),
+                        "stageStates": {
+                            "review": {"status": review_status},
+                            "test": {"status": test_status},
+                        },
+                    }
+                },
+                "validationBatches": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_e2e_stage_manifest(workspace: Path, worktree: Path, *, stage_status: str = "running") -> None:
+    worktree.mkdir(parents=True, exist_ok=True)
+    manifest_path = (
+        workspace
+        / ".autobizdevops"
+        / "features"
+        / "alpha"
+        / ".parallel-runs"
+        / "cw-e2e"
+        / "manifest.json"
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "batches": {},
+                "validationBatches": {
+                    "V-E2E": {
+                        "worktrees": {"app": str(worktree)},
+                        "stageStates": {"e2e_test": {"status": stage_status}},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 def write_feature_file(workspace: Path, name: str, content: str) -> Path:
     path = workspace / ".autobizdevops" / "features" / "alpha" / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1144,6 +1209,77 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
 
         self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
         self.assertIn("business code write requires exactly one active", error.getvalue())
+
+    def test_main_allows_java_test_write_only_during_owning_batch_test_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            worktree = root / "worktrees" / "B001"
+            write_test_stage_manifest(workspace, worktree)
+            payload = json.dumps(
+                {"tool_input": {"file_path": str(worktree / "src" / "test" / "java" / "ExampleTest.java")}}
+            )
+
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    with mock.patch.object(frontend_route_write_guard, "workspace_from_payload", return_value=workspace):
+                        result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, 0)
+
+    def test_main_allows_frontend_test_without_route_or_task_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            worktree = root / "worktrees" / "B001"
+            write_test_stage_manifest(workspace, worktree)
+            payload = json.dumps(
+                {"tool_input": {"file_path": str(worktree / "src" / "test" / "tsx" / "Example.test.tsx")}}
+            )
+
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    with mock.patch.object(frontend_route_write_guard, "workspace_from_payload", return_value=workspace):
+                        result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, 0)
+
+    def test_main_blocks_test_write_before_batch_test_stage_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            worktree = root / "worktrees" / "B001"
+            write_test_stage_manifest(workspace, worktree, test_status="pending")
+            payload = json.dumps(
+                {"tool_input": {"file_path": str(worktree / "src" / "test" / "java" / "ExampleTest.java")}}
+            )
+            error = io.StringIO()
+
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    with mock.patch.object(frontend_route_write_guard, "workspace_from_payload", return_value=workspace):
+                        with contextlib.redirect_stderr(error):
+                            result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("test stage=running", error.getvalue())
+
+    def test_main_allows_e2e_test_asset_only_during_v_e2e_substage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            worktree = root / "worktrees" / "V-E2E" / "app"
+            write_e2e_stage_manifest(workspace, worktree)
+            payload = json.dumps(
+                {"tool_input": {"file_path": str(worktree / "e2e" / "checkout.spec.ts")}}
+            )
+
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    with mock.patch.object(frontend_route_write_guard, "workspace_from_payload", return_value=workspace):
+                        result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, 0)
 
     def test_frontend_write_allows_spec_driven_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

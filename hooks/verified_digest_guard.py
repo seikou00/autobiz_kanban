@@ -19,7 +19,9 @@ from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa
 from hooks.rollback_stage import execute_stage_rollback, prepare_stage_rollback  # noqa: E402
 
 
-VERIFIED_CHECKPOINTS = {"verify_done", "cicd_in_progress", "cicd_done", "finish"}
+# Final evidence is now sealed when Code completes.  ``verify_done`` and
+# ``finish`` belonged to the retired standalone Verify workflow.
+VERIFIED_CHECKPOINTS = {"code_done", "cicd_in_progress", "cicd_done"}
 
 
 def invalidate_if_stale(workspace, feature):

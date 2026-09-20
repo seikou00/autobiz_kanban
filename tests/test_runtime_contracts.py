@@ -441,7 +441,7 @@ class RuntimeContractsTest(unittest.TestCase):
         )
         (self.module / "src.js").write_text("export const changed = true;\n", encoding="utf-8")
         state = SimpleNamespace(
-            fatal_errors=[], records={"alpha": {"checkpoint": "verify_done"}}
+            fatal_errors=[], records={"alpha": {"checkpoint": "code_done"}}
         )
         rollback_plan = SimpleNamespace(ok=True, errors=(), new_checkpoint="code_in_progress")
         rollback_result = SimpleNamespace(ok=True, errors=())

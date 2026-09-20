@@ -626,7 +626,7 @@ def collect_optional_verify_artifacts(
                 side_entries.append(
                     catalog_entry(
                         path=relative_path,
-                        stage="dev.verify",
+                        stage="dev.code",
                         upload_status="skipped",
                         size=size,
                         status_reason="file_size_exceeds_5mb",
@@ -647,7 +647,7 @@ def collect_optional_verify_artifacts(
             side_entries.append(
                 catalog_entry(
                     path=relative_path,
-                    stage="dev.verify",
+                    stage="dev.code",
                     upload_status="missing",
                     status_reason="file_not_found",
                 )
@@ -671,7 +671,7 @@ def collect_sidecar_artifacts(
             feature=feature,
             status=status,
         )
-    if stage_id == "dev.verify":
+    if stage_id == "dev.code":
         return collect_optional_verify_artifacts(
             feature_dir,
             project_code=project_code,
@@ -1319,7 +1319,7 @@ def prepare_checkpoint_sync_events(
             include_unpublished_missing=(
                 direct_contract is not None
                 and contract.node_id == direct_contract.node_id
-                and contract.node_id == "dev.verify"
+                and contract.node_id == "dev.code"
             ),
         )
         if not artifacts and not missing and not side_entries:
@@ -1336,7 +1336,7 @@ def prepare_checkpoint_sync_events(
             include_unpublished_missing=(
                 direct_contract is not None
                 and contract.node_id == direct_contract.node_id
-                and contract.node_id == "dev.verify"
+                and contract.node_id == "dev.code"
             ),
         )
         if not artifacts:

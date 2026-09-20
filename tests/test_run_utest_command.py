@@ -146,6 +146,9 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual(canonical_task_digest(self.task), result["taskDigest"])
         record = self._records()[0]
         target = self._unit_result()["targets"][0]
+        self.assertEqual("code_in_progress", record["checkpoint"])
+        self.assertEqual("dev.code", record["nodeId"])
+        self.assertEqual("test", record["batchStage"])
         self.assertEqual(record["taskDigest"], target["taskDigest"])
         self.assertEqual("UTEST-T001", target["commandId"])
         self.assertEqual(record["validation"]["commandId"], target["commandId"])

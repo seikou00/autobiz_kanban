@@ -69,7 +69,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 - `currentNodeId` 所属 group 为 `Biz` 时，进入 `/autobiz`。
 - `currentNodeId` 所属 group 为 `Dev`，或 `checkpoint` 为 `prd_done` 且脚本返回 Dev profile 选择时，进入 `/autodev`。
-- `currentNodeId` 所属 group 为 `Ops`，或 `checkpoint` 为 `verify_done` / `cicd_done` 时，进入 `/autoops`。
+- `currentNodeId` 所属 group 为 `Ops`，或 `checkpoint` 为 `code_done` / `cicd_done` 时，进入 `/autoops`。
 - `ok: false`、checkpoint 为空/未知，或无法唯一确定当前 Feature 时，必须停止并提示用户选择或修复状态。
 
 ### Checkpoint 更新命令

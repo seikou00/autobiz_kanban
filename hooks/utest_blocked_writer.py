@@ -95,15 +95,18 @@ def record_utest_block(workspace, feature, payload):
         root_cause = "evidence_integrity_issue"
     else:
         root_cause = "plan_contract_gap" if plan_gap else "environment_issue"
-    suggested_checkpoint = "plan_in_progress" if plan_gap else "unit_test_in_progress"
+    # UTest runs inside the Code workflow.  A test/environment retry remains
+    # in Code; only a malformed Plan returns to Plan.
+    suggested_checkpoint = "plan_in_progress" if plan_gap else "code_in_progress"
     repair_strategy = "rollback_plan_keep_source" if plan_gap else "resolve_environment_then_retry_utest"
     reason = _blocking_reason(payload)
     created_at = _utc_now()
     fix_request = {
         "version": 1,
         "featureId": feature,
-        "sourceCheckpoint": "unit_test_in_progress",
-        "sourceNodeId": "dev.utest",
+        "sourceCheckpoint": "code_in_progress",
+        "sourceNodeId": "dev.code",
+        "batchStage": "test",
         "suggestedCheckpoint": suggested_checkpoint,
         "rootCause": root_cause,
         "blockingReason": reason,

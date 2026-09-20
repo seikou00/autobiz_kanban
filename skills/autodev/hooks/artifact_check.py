@@ -1778,15 +1778,15 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
     if not isinstance(verdict, str) or verdict.lower() not in {"pass", "fail", "manual"}:
         failures += fail_line(ctx, "invalid_verify_decision_verdict")
     next_checkpoint = data.get("nextCheckpoint")
-    if not isinstance(next_checkpoint, str) or next_checkpoint not in {"verify_done", "needs_fix", "verify_in_progress"}:
+    if not isinstance(next_checkpoint, str) or next_checkpoint not in {"code_done", "needs_fix"}:
         failures += fail_line(ctx, "invalid_verify_next_checkpoint")
     elif isinstance(verdict, str):
         normalized_verdict = verdict.lower()
-        if normalized_verdict == "pass" and next_checkpoint != "verify_done":
+        if normalized_verdict == "pass" and next_checkpoint != "code_done":
             failures += fail_line(ctx, "invalid_verify_decision_transition")
         if normalized_verdict == "fail" and next_checkpoint != "needs_fix":
             failures += fail_line(ctx, "invalid_verify_decision_transition")
-        if normalized_verdict == "manual" and next_checkpoint not in {"verify_in_progress", "needs_fix"}:
+        if normalized_verdict == "manual" and next_checkpoint != "needs_fix":
             failures += fail_line(ctx, "invalid_verify_decision_transition")
 
     spec_ids, spec_failures = collect_spec_definition_index(ctx)

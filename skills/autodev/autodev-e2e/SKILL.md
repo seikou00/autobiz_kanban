@@ -1,6 +1,6 @@
 ---
 name: autodev-e2e
-description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；以 Playwright Test 可信执行、质量扫描、Evidence 和结构化结果裁定 e2e_done 或 needs_fix。
+description: 固定 Code Workflow 的 B-E2E 内部执行协议。以 Playwright Test、质量扫描和 Evidence 支持 V-E2E 子阶段；不创建独立 E2E checkpoint。
 version: v1.3.0917
 ---
 
@@ -27,8 +27,9 @@ version: v1.3.0917
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
 ```
+
+只能在固定 Code Workflow 已创建并启动 V-E2E 的 `e2e_test` 子阶段后执行。全局 checkpoint 保持 `code_in_progress`；不得写入 `e2e_in_progress` 或 `e2e_done`。
 
 读取 `PRD.md`、`source-context.json`、`sources/` 快照、`specs/**/*.md`、`design.md`、`plan.json`、batch plan、`REQUIREMENTS_EVAL.md`、单测结果和项目 Playwright 配置。逐项读取其中登记的资料及对应快照；同时读取 reviewer 的 `External Interface Coverage` 与 `E2E Focus`。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
 
@@ -169,17 +170,7 @@ python "${pluginPath}/hooks/e2e_result_writer.py" validate \
 
 `finalize` 只在质量门禁、本轮 execution、新鲜 Evidence、coverage、三方字段与哈希链全部成立时派生 case/root PASS。不存在写 PASS 的人工参数。
 
-PASS 时：
-
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done
-```
-
-FAIL/BLOCKED 时写明分类、诊断与映射；需要回流时生成合法 `FIX_REQUEST.json` 后：
-
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
-```
+PASS 时由固定 Workflow 完成 V-E2E 的 `e2e_test` 子阶段并聚合证据。FAIL/BLOCKED 时保留分类、诊断和失败元数据，由固定 Workflow 创建受控修复入口；不得在本技能中更新全局 checkpoint。
 
 ## 完成交接
 

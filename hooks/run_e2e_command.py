@@ -1069,8 +1069,12 @@ def execute_e2e_command(
     e2e_run["caseId"] = case_id
     evidence_record = {
         "featureId": resolved_feature,
-        "checkpoint": "e2e_in_progress",
-        "nodeId": "dev.e2e",
+        # Final E2E is the V-E2E validation substage owned by Code.  Keep the
+        # producer skill for trust validation, but never create a phantom
+        # global e2e checkpoint.
+        "checkpoint": "code_in_progress",
+        "nodeId": "dev.code",
+        "batchStage": "e2e_test",
         "skill": "autodev-e2e",
         "taskId": task_id,
         "action": "validation",

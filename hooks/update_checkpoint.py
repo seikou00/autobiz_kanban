@@ -787,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-node",
         action="append",
         default=[],
-        help="skip a workflow node mid-flight (node id, e.g. dev.utest); may be repeated",
+        help="skip a workflow node mid-flight (node id, e.g. dev.code); may be repeated",
     )
     parser.add_argument("--stage", help="stage column override")
     parser.add_argument(

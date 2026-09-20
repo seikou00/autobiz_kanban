@@ -429,6 +429,9 @@ class E2ERunnerIntegrationTest(unittest.TestCase):
         execution = data["cases"][0]["executions"][0]
         self.assertEqual(records[0]["evidenceId"], execution["evidenceId"])
         self.assertEqual(execution["evidenceId"], log[0]["evidenceId"])
+        self.assertEqual("code_in_progress", records[0]["checkpoint"])
+        self.assertEqual("dev.code", records[0]["nodeId"])
+        self.assertEqual("e2e_test", records[0]["batchStage"])
         self.assertEqual(0, records[0]["validation"]["exitCode"])
         self.assertEqual(0, records[0]["e2eRun"]["processExitCode"])
         self.assertEqual("chromium", execution["projects"][0]["projectName"])
@@ -638,8 +641,8 @@ class E2ERunnerIntegrationTest(unittest.TestCase):
         record_path.write_text(
             json.dumps(
                 {
-                    "checkpoint": "e2e_in_progress",
-                    "nodeId": "dev.e2e",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
                     "skill": "autodev-e2e",
                     "taskId": "T001",
                     "action": "validation",
