@@ -471,11 +471,19 @@ def analyze_batches(
             if active_run_id is not None
             else None
         )
-        # There are two materially different recovery paths.  A retryable
-        # Batch must be explicitly re-admitted by an operator, while a sealed
-        # delivery with an unfinished Review/UTest stage only needs the fixed
-        # workflow to resume its already-owned worktree.  Do not let the Plan
-        # projection hide either case: the manifest is the durable authority.
+        # Recovery is not one generic retry: an unsealed but verified dirty
+        # implementation Worktree and a sealed Review/UTest checkpoint both
+        # resume in place, while a clean failed dispatch needs operator
+        # re-admission. Do not let the Plan projection hide any of them: the
+        # manifest is the durable authority.
+        implementation_recovery_batch_ids = {
+            str(batch_id)
+            for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
+            if isinstance(batch, dict)
+            and isinstance(batch.get("recovery"), dict)
+            and batch["recovery"].get("kind") == "implementation_resume"
+            and batch.get("status") in {"retry_pending", "pending"}
+        }
         retry_recovery_batch_ids = {
             str(batch_id)
             for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
@@ -488,9 +496,13 @@ def analyze_batches(
                     and batch["recovery"].get("status") == "retry_exhausted"
                 )
             )
-        }
+        } - implementation_recovery_batch_ids
         stage_recovery_batch_ids = set(stage_recovery_batches(active_manifest or {}))
-        recovery_batch_ids = retry_recovery_batch_ids | stage_recovery_batch_ids
+        recovery_batch_ids = (
+            retry_recovery_batch_ids
+            | implementation_recovery_batch_ids
+            | stage_recovery_batch_ids
+        )
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
         manual_resume = bool(active_run_id and retry_recovery_batch_ids)
         has_durable_recovery = bool(active_run_id and recovery_batch_ids)
@@ -603,6 +615,7 @@ def analyze_batches(
             "canStartWorkflow": True,
             "validation": validation,
             "retryRecoveryBatchIds": sorted(retry_recovery_batch_ids),
+            "implementationRecoveryBatchIds": sorted(implementation_recovery_batch_ids),
             "stageRecoveryBatchIds": sorted(stage_recovery_batch_ids),
         }
         runtime_config = _load_runtime_config(artifact_workspace)
@@ -632,6 +645,8 @@ def analyze_batches(
                 if manual_resume
                 else f"fixed_workflow_for_stage_recovery:{active_run_id}:{','.join(sorted(stage_recovery_batch_ids))}"
                 if stage_recovery_batch_ids
+                else f"fixed_workflow_for_implementation_recovery:{active_run_id}:{','.join(sorted(implementation_recovery_batch_ids))}"
+                if implementation_recovery_batch_ids
                 else f"fixed_workflow_for_pending_batches:{len(launch_batches)}"
             ),
             "requiredAction": "resume_fixed_workflow" if has_durable_recovery else "start_fixed_workflow",

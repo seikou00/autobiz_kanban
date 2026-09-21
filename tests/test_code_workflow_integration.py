@@ -505,6 +505,7 @@ const executed = [];
 let refreshes = 0;
 context.runnableScheduledBatchIds = () => scheduled;
 context.runnableSchedulerFallbackBatchIds = () => [];
+context.runnableImplementationRecoveries = () => [];
 context.runnableStageRecoveries = () => [];
 context.runnableMergeableBatchIds = () => [];
 context.runInitialBatchLifecycle = async batchId => ({
@@ -556,12 +557,16 @@ const context = {
   quarantinedBatchIds: new Set(),
   runnableScheduledBatchIds: () => ["B003", "B009"],
   runnableSchedulerFallbackBatchIds: () => [],
+  runnableImplementationRecoveries: () => [
+    { batchId: "B008", worktreePath: "/tmp/B008", branchName: "batch-b008", recoveryKind: "implementation_resume", preserveWorktree: true, reprovision: false },
+  ],
   runnableStageRecoveries: () => [
     { batchId: "B006", nextStage: "test", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
     { batchId: "B007", nextStage: "test", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
   ],
   runnableMergeableBatchIds: () => [],
   runInitialBatchLifecycle: async () => ({}),
+  runImplementationRecoveryLifecycle: async () => ({}),
   runRecoveredBatchLifecycle: async () => ({}),
   runMergeableBatchLifecycle: async () => ({}),
 };
@@ -577,13 +582,13 @@ for (;;) {
   if (!job) break;
   jobs.push(`${job.source}:${job.batchId}`);
 }
-if (jobs.join(",") !== "stage_recovery:B006,stage_recovery:B007,initial:B003,initial:B009") process.exit(3);
+if (jobs.join(",") !== "stage_recovery:B006,stage_recovery:B007,implementation_recovery:B008,initial:B003,initial:B009") process.exit(3);
 '''
     result = run_command(["node", "-e", script, str(workflow_script)])
     if result["returncode"] != 0:
         print(f"✗ sealed Batch 未优先进入阶段恢复队列: {result['stderr'] or result['stdout']}")
         return False
-    print("✓ sealed UTest 恢复会先于新 provision Batch 派发")
+    print("✓ sealed UTest 与未提交实现都会先于新 provision Batch 派发")
     print()
     return True
 

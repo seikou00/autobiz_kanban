@@ -332,6 +332,7 @@ function requireSchedulerResult(value, label) {
   const referencedBatchIds = new Set([
     ...Object.keys(result.batchTaskIds),
     ...normalizeScheduledGroups(result.scheduledGroups).flat(),
+    ...(Array.isArray(result.implementationRecoveryBatches) ? result.implementationRecoveryBatches.map(item => item && item.batchId) : []),
     ...(Array.isArray(result.stageRecoveryBatches) ? result.stageRecoveryBatches.map(item => item && item.batchId) : []),
     ...(Array.isArray(result.mergeableBatches) ? result.mergeableBatches : []),
   ].filter(usableString));
@@ -592,6 +593,7 @@ try {
 }
 let scheduledGroups = normalizeScheduledGroups(prepared.scheduledGroups || []);
 let mergeableBatches = (prepared.mergeableBatches || []).filter(usableString);
+let implementationRecoveryBatches = (prepared.implementationRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let retryPendingBatches = retryPendingBatchesOf(prepared);
 let batchTaskIds = prepared.batchTaskIds || {};
@@ -813,6 +815,7 @@ function applySchedulerState(scheduler) {
   cacheSchedulerFallbackGroups(scheduler);
   scheduledGroups = normalizeScheduledGroups(scheduler.scheduledGroups || []);
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
+  implementationRecoveryBatches = (scheduler.implementationRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   retryPendingBatches = retryPendingBatchesOf(scheduler);
   // Bindings are immutable within a run. Merge a validated snapshot so a
@@ -1547,6 +1550,46 @@ async function runInitialBatchLifecycle(batchId) {
   }
 }
 
+async function runImplementationRecoveryLifecycle(recovery) {
+  const batchId = recovery.batchId;
+  const batchWorktree = recovery.worktreePath;
+  const batchBranch = recovery.branchName;
+  try {
+    const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
+    const batchWorkspace = batchWorkspaces[batchId] || {};
+    const batchWorkspaceRef = batchWorkspace.workspaceRef;
+    if (!usableString(batchWorktree) || !usableString(batchBranch) || !taskIds.length) {
+      throw new Error(`implementation_recovery_context_missing:${batchId}`);
+    }
+    if (!usableString(batchWorkspaceRef) || !codeWorkspaces[batchWorkspaceRef]) {
+      throw new Error(`scheduler did not provide a code workspace for ${batchId}`);
+    }
+    // The scheduler has already proven this is a plugin-owned worktree whose
+    // dirty changes still sit on the frozen Batch base.  Do not provision,
+    // reset, or discard it: implementationPrompt first reconciles stale Task
+    // Runner state with --force-with-changes, then continues the same TASK.
+    const taskWorkspace = batchTaskWorkspace(batchId, batchWorktree);
+    const implemented = unwrap(await workflowAgent(
+      implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef, taskWorkspace),
+      { label: `resume-implementation-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
+    ));
+    batchResults.push(implemented);
+    if (!implemented || implemented.status !== "success") {
+      return safelyDeferBatchForRetry(
+        batchId,
+        batchWorktree,
+        batchBranch,
+        implemented && (implemented.errorMessage || implemented.raw || implemented.status)
+      );
+    }
+    const delivery = await runDeliveryWithImplementationRepair(implemented);
+    if (delivery.status === "ready_to_candidate") return promoteReadyBatch(batchId);
+    return delivery;
+  } catch (error) {
+    return safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, String(error));
+  }
+}
+
 async function runRecoveredBatchLifecycle(recovery) {
   const batchId = recovery.batchId;
   try {
@@ -1603,6 +1646,18 @@ function runnableSchedulerFallbackBatchIds() {
   );
 }
 
+function runnableImplementationRecoveries() {
+  return implementationRecoveryBatches
+    .filter(recovery => (
+      recovery
+      && recovery.recoveryKind === "implementation_resume"
+      && recovery.preserveWorktree === true
+      && recovery.reprovision === false
+      && !quarantinedBatchIds.has(recovery.batchId)
+      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(recovery.batchId))
+    ));
+}
+
 function runnableStageRecoveries() {
   return stageRecoveryBatches
     .filter(recovery => (
@@ -1623,9 +1678,13 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
   const claimed = claimedBatchIds || new Set();
   const scheduledBatchIds = runnableScheduledBatchIds();
   const fallbackBatchIds = runnableSchedulerFallbackBatchIds();
+  const implementationRecoveries = runnableImplementationRecoveries();
   const recoveries = runnableStageRecoveries();
   const mergeable = runnableMergeableBatchIds();
-  const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
+  const recoveredBatchIds = new Set([
+    ...implementationRecoveries.map(item => item.batchId),
+    ...recoveries.map(item => item.batchId),
+  ]);
   const mergeableBatchIds = new Set(mergeable);
   const claim = job => {
     if (!job || claimed.has(job.batchId)) return null;
@@ -1633,15 +1692,26 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
     return job;
   };
 
-  // A sealed delivery is an owned checkpoint, not a fresh implementation
-  // candidate.  Resume it before dispatching newly-ready work so a continuing
-  // DAG wave cannot repeatedly starve an interrupted Review/UTest.
+  // A sealed delivery or verified dirty implementation worktree is an owned
+  // checkpoint, not a fresh implementation candidate. Resume it before
+  // dispatching newly-ready work so a continuing DAG wave cannot repeatedly
+  // starve interrupted Review/UTest or unsealed implementation recovery.
   for (const recovery of recoveries) {
     if (mergeableBatchIds.has(recovery.batchId)) continue;
     const job = claim({
       batchId: recovery.batchId,
       source: "stage_recovery",
       execute: () => runRecoveredBatchLifecycle(recovery),
+      fallback: recovery,
+    });
+    if (job) return job;
+  }
+  for (const recovery of implementationRecoveries) {
+    if (mergeableBatchIds.has(recovery.batchId)) continue;
+    const job = claim({
+      batchId: recovery.batchId,
+      source: "implementation_recovery",
+      execute: () => runImplementationRecoveryLifecycle(recovery),
       fallback: recovery,
     });
     if (job) return job;
@@ -2109,6 +2179,7 @@ async function runFinalRepairAndReport() {
           ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
           ...normalizeScheduledGroups(repairState.scheduledGroups || []).flat(),
           ...(repairState.mergeableBatches || []),
+          ...(repairState.implementationRecoveryBatches || []).map(item => item && item.batchId),
           ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
         ].filter(isValidBatchId));
         for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);

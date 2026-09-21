@@ -486,6 +486,74 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
             self.assertEqual(resumed["scheduledGroups"], [["B001"]])
 
+    def test_dirty_unsealed_worktree_resumes_implementation_without_provision(self) -> None:
+        """Interrupted implementation is recovered in its owned worktree, not discarded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "interrupted-implementation.txt").write_text("preserve this implementation\n", encoding="utf-8")
+
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "retry_pending",
+                error="worker_interrupted",
+            )
+            marked = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(marked["recovery"]["kind"], "implementation_resume")
+            self.assertTrue(marked["recovery"]["preserveWorktree"])
+            self.assertFalse(marked["recovery"]["reprovision"])
+
+            # Existing runs were written before implementation_resume existed.
+            # Resume must upgrade their retry_dispatch marker from the live
+            # worktree facts, rather than provisioning over the dirty files.
+            legacy_manifest = load_manifest(workspace, "alpha", run_id)
+            legacy_manifest["batches"]["B001"]["recovery"].update({
+                "kind": "retry_dispatch",
+                "preserveWorktree": False,
+                "reprovision": True,
+            })
+            save_manifest(workspace, "alpha", run_id, legacy_manifest)
+
+            resumed = resume_run(workspace, "alpha", run_id)
+            batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            preserved = (worktree / "interrupted-implementation.txt").is_file()
+
+            # A later mismatch must remain protected as an implementation
+            # recovery problem; it may not fall through to a new provision.
+            invalid_manifest = load_manifest(workspace, "alpha", run_id)
+            repository_ref = invalid_manifest["batches"]["B001"]["repositoryRef"]
+            invalid_manifest["repositories"][repository_ref]["headSha"] = "0" * 40
+            save_manifest(workspace, "alpha", run_id, invalid_manifest)
+            guarded = schedule(workspace, "alpha", run_id)
+
+        self.assertEqual(batch["status"], "pending")
+        self.assertEqual(batch["recovery"]["kind"], "implementation_resume")
+        self.assertTrue(batch["recovery"]["preserveWorktree"])
+        self.assertEqual(resumed["scheduledGroups"], [])
+        self.assertEqual(resumed["implementationRecoveryBatches"][0]["batchId"], "B001")
+        self.assertEqual(resumed["implementationRecoveryBatches"][0]["worktreePath"], provisioned["worktreePath"])
+        self.assertEqual(resumed["implementationRecoveryBatches"][0]["recoveryKind"], "implementation_resume")
+        self.assertFalse(resumed["implementationRecoveryBatches"][0]["reprovision"])
+        self.assertTrue(preserved)
+        self.assertEqual(guarded["scheduledGroups"], [])
+        self.assertEqual(guarded["implementationRecoveryBatches"], [])
+        self.assertEqual(guarded["excludedImplementationRecoveryBatches"], [
+            {"batchId": "B001", "reason": "worktree_verification_failed"},
+        ])
+
     def test_manual_resume_resets_retry_exhausted_batch(self) -> None:
         """An explicit user retry is a fresh admission, not a third automatic retry."""
         with tempfile.TemporaryDirectory() as tmp:
