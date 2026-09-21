@@ -1,17 +1,4 @@
 {
-  "UserPromptSubmit": [
-    {
-      "matcher": "*",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python hooks/run_context.py inject",
-          "timeout": 30,
-          "persistAfterInterrupt": true
-        }
-      ]
-    }
-  ],
   "PreToolUse": [
     {
       "matcher": "task|Task",

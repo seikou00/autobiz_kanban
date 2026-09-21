@@ -1765,14 +1765,13 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
         return failures
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_verify_decision_version")
-    run_context_path = ctx.feature_dir / ".runtime" / "RUN_CONTEXT.json"
-    if run_context_path.is_file():
+    if isinstance(data.get("diffDigest"), str) and data["diffDigest"]:
         try:
             current_diff_digest = compute_candidate_digest(ctx.root, ctx.slug)
         except ValueError as exc:
             failures += fail_line(ctx, "verify_diff_digest_unresolved", f" detail={exc}")
         else:
-            if data.get("diffDigest") != current_diff_digest:
+            if data["diffDigest"] != current_diff_digest:
                 failures += fail_line(ctx, "verify_diff_digest_stale")
     verdict = data.get("verdict")
     if not isinstance(verdict, str) or verdict.lower() not in {"pass", "fail", "manual"}:

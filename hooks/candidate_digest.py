@@ -5,10 +5,9 @@
 from __future__ import print_function
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
-
-from hooks.run_context import load as load_run_context
 
 
 def _git_bytes(root, args):
@@ -37,20 +36,54 @@ def _git_bytes_optional(root, args):
     return process.stdout if process.returncode == 0 else None
 
 
+def _git_root(path):
+    result = _git_bytes_optional(path, ["rev-parse", "--show-toplevel"])
+    if result is None:
+        return None
+    value = result.decode("utf-8", errors="replace").strip()
+    return Path(value).resolve() if value else None
+
+
+def _plan_repositories(workspace, feature):
+    plan_path = Path(workspace) / ".autobizdevops" / "features" / feature / "plan.json"
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            "CANDIDATE_DIGEST_UNRESOLVED: 无法读取 Plan {}: {}".format(plan_path, exc)
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "CANDIDATE_DIGEST_UNRESOLVED: Plan 不是合法 JSON {}: {}".format(plan_path, exc)
+        )
+    bindings = plan.get("codeWorkspaces") if isinstance(plan, dict) else None
+    if not isinstance(bindings, dict) or not bindings:
+        raise ValueError(
+            "CANDIDATE_DIGEST_UNRESOLVED: Plan 缺少非空 codeWorkspaces: {}".format(plan_path)
+        )
+
+    repositories = {}
+    for workspace_ref, raw_path in sorted(bindings.items()):
+        if not isinstance(workspace_ref, str) or not workspace_ref.strip() or not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError(
+                "CANDIDATE_DIGEST_UNRESOLVED: Plan codeWorkspaces 包含无效绑定 {}".format(workspace_ref)
+            )
+        root = _git_root(Path(raw_path).expanduser().resolve())
+        if root is None:
+            raise ValueError(
+                "CANDIDATE_DIGEST_UNRESOLVED: Plan workspaceRef={} 不是有效 Git 仓库: {}".format(
+                    workspace_ref, raw_path
+                )
+            )
+        repositories.setdefault(root, []).append(workspace_ref)
+    return [(root, sorted(refs)) for root, refs in sorted(repositories.items(), key=lambda item: str(item[0]))]
+
+
 def compute(workspace, feature):
-    context = load_run_context(workspace, feature)
     digest = hashlib.sha256()
-    digest.update(str(context.get("contextDigest", "")).encode("utf-8"))
-    repositories = sorted(
-        (
-            item for item in context.get("repositories", [])
-            if isinstance(item, dict) and isinstance(item.get("root"), str)
-        ),
-        key=lambda item: str(item.get("repositoryId", "")),
-    )
-    for repository in repositories:
-        root = Path(repository["root"]).resolve()
-        digest.update(str(repository.get("repositoryId", "")).encode("utf-8"))
+    for root, workspace_refs in _plan_repositories(workspace, feature):
+        digest.update("\0".join(workspace_refs).encode("utf-8"))
+        digest.update(str(root).encode("utf-8"))
         head = _git_bytes_optional(root, ["rev-parse", "--verify", "HEAD"])
         if head is None:
             digest.update(b"UNBORN\n")

@@ -365,7 +365,6 @@ class RollbackStageTest(unittest.TestCase):
             ".ARTIFACT_CATALOG.json.stale.tmp": "interrupted catalog write\n",
             ".sync-status.json.stale.tmp": "interrupted sync write\n",
             "frontend-html/.VIS-001-deadbeef.tmp/original.html": "<html/>\n",
-            ".runtime/RUN_CONTEXT.json": "{}\n",
             "SMOKE_TEST_PLAN.json": "{}\n",
             "SMOKE_RESULT.json": "{}\n",
             "completion-proposal.json": "{}\n",
@@ -402,7 +401,6 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(plan.ok, plan.errors)
         self.assertIn(self.feature_dir / ".tmp", plan.artifact_paths)
         self.assertIn(self.feature_dir / ".plan.lock", plan.artifact_paths)
-        self.assertIn(self.feature_dir / ".runtime", plan.artifact_paths)
         self.assertIn(self.feature_dir / "e2e-diagnostics", plan.artifact_paths)
         result = execute_stage_rollback(plan)
 
@@ -414,7 +412,6 @@ class RollbackStageTest(unittest.TestCase):
         self.assertFalse((self.feature_dir / ".plan.lock").exists())
         history = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id
         self.assertTrue((history / "artifacts" / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json").is_file())
-        self.assertTrue((history / "artifacts" / ".runtime" / "RUN_CONTEXT.json").is_file())
         self.assertTrue((history / "artifacts" / "e2e-diagnostics" / "e2e-run.lock").is_file())
         self.assertEqual((history / "artifacts" / "hooks.ndjson").read_text(encoding="utf-8"), "old audit\n")
         self.assertNotIn("old audit", (self.feature_dir / "hooks.ndjson").read_text(encoding="utf-8"))
