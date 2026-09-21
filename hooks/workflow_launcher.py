@@ -32,6 +32,7 @@ from hooks.parallel_runtime import (  # noqa: E402
     plan_digest,
     resource_groups,
     select_runnable_batches,
+    stage_recovery_batches,
 )
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
@@ -470,7 +471,12 @@ def analyze_batches(
             if active_run_id is not None
             else None
         )
-        recovery_batch_ids = {
+        # There are two materially different recovery paths.  A retryable
+        # Batch must be explicitly re-admitted by an operator, while a sealed
+        # delivery with an unfinished Review/UTest stage only needs the fixed
+        # workflow to resume its already-owned worktree.  Do not let the Plan
+        # projection hide either case: the manifest is the durable authority.
+        retry_recovery_batch_ids = {
             str(batch_id)
             for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
             if isinstance(batch, dict)
@@ -483,8 +489,11 @@ def analyze_batches(
                 )
             )
         }
+        stage_recovery_batch_ids = set(stage_recovery_batches(active_manifest or {}))
+        recovery_batch_ids = retry_recovery_batch_ids | stage_recovery_batch_ids
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
-        manual_resume = bool(active_run_id and recovery_batches)
+        manual_resume = bool(active_run_id and retry_recovery_batch_ids)
+        has_durable_recovery = bool(active_run_id and recovery_batch_ids)
         visible_batch_ids = {batch["id"] for batch in valid_batches}
         launch_batches = [
             *valid_batches,
@@ -505,7 +514,7 @@ def analyze_batches(
             }
 
         validation = validate_plan_for_parallel(artifact_workspace, feature)
-        recovery_plan_is_valid = manual_resume and validation.get("reason") == "no_pending_batches" and not validation.get("errors")
+        recovery_plan_is_valid = has_durable_recovery and validation.get("reason") == "no_pending_batches" and not validation.get("errors")
         if not validation.get("canParallel") and not recovery_plan_is_valid:
             return {
                 "useWorkflow": False,
@@ -593,6 +602,8 @@ def analyze_batches(
             ),
             "canStartWorkflow": True,
             "validation": validation,
+            "retryRecoveryBatchIds": sorted(retry_recovery_batch_ids),
+            "stageRecoveryBatchIds": sorted(stage_recovery_batch_ids),
         }
         runtime_config = _load_runtime_config(artifact_workspace)
         max_parallel = runtime_config["maxParallel"]
@@ -619,9 +630,11 @@ def analyze_batches(
             "reason": (
                 f"fixed_workflow_for_manual_recovery:{active_run_id}:{','.join(sorted(recovery_batch_ids))}"
                 if manual_resume
+                else f"fixed_workflow_for_stage_recovery:{active_run_id}:{','.join(sorted(stage_recovery_batch_ids))}"
+                if stage_recovery_batch_ids
                 else f"fixed_workflow_for_pending_batches:{len(launch_batches)}"
             ),
-            "requiredAction": "resume_fixed_workflow" if manual_resume else "start_fixed_workflow",
+            "requiredAction": "resume_fixed_workflow" if has_durable_recovery else "start_fixed_workflow",
         }
     except Exception as exc:
         return {

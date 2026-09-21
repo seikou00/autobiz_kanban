@@ -1633,6 +1633,19 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
     return job;
   };
 
+  // A sealed delivery is an owned checkpoint, not a fresh implementation
+  // candidate.  Resume it before dispatching newly-ready work so a continuing
+  // DAG wave cannot repeatedly starve an interrupted Review/UTest.
+  for (const recovery of recoveries) {
+    if (mergeableBatchIds.has(recovery.batchId)) continue;
+    const job = claim({
+      batchId: recovery.batchId,
+      source: "stage_recovery",
+      execute: () => runRecoveredBatchLifecycle(recovery),
+      fallback: recovery,
+    });
+    if (job) return job;
+  }
   for (const batchId of scheduledBatchIds) {
     const job = claim({
       batchId,
@@ -1646,16 +1659,6 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
       batchId,
       source: "scheduler_snapshot_fallback",
       execute: () => runInitialBatchLifecycle(batchId),
-    });
-    if (job) return job;
-  }
-  for (const recovery of recoveries) {
-    if (mergeableBatchIds.has(recovery.batchId)) continue;
-    const job = claim({
-      batchId: recovery.batchId,
-      source: "stage_recovery",
-      execute: () => runRecoveredBatchLifecycle(recovery),
-      fallback: recovery,
     });
     if (job) return job;
   }

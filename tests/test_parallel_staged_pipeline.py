@@ -50,6 +50,46 @@ def _enable_pipeline(feature_dir: Path) -> None:
 
 
 class ParallelStagedPipelineTest(unittest.TestCase):
+    def test_sealed_interrupted_utest_is_explicit_stage_resume(self) -> None:
+        """A sealed delivery resumes UTest; it is never reclassified as pending work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=provisioned["worktreePath"],
+                branchName=provisioned["branchName"],
+                commitSha=commit,
+            )
+            for stage in ("prepare", "implement", "review"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            start_stage(workspace, "alpha", run_id, "B001", "test")
+
+            snapshot = schedule(workspace, "alpha", run_id)
+
+        self.assertEqual(snapshot["scheduledGroups"], [])
+        self.assertEqual(snapshot["excludedStageRecoveryBatches"], [])
+        self.assertEqual(snapshot["stageRecoveryBatches"], [{
+            "batchId": "B001",
+            "worktreePath": provisioned["worktreePath"],
+            "branchName": provisioned["branchName"],
+            "commitSha": commit,
+            "recoveryKind": "stage_resume",
+            "preserveWorktree": True,
+            "reprovision": False,
+            "nextStage": "test",
+        }])
+
     def test_candidate_cleanup_recovers_interrupted_initializing_worktree(self) -> None:
         """A timed-out candidate build may leave Git's initializing lock behind."""
         with tempfile.TemporaryDirectory() as tmp:

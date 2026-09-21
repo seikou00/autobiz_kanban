@@ -70,6 +70,20 @@ def _parse_timestamp_epoch(value: object) -> float | None:
     return parsed.timestamp()
 
 
+def _next_open_delivery_stage(batch: dict[str, Any]) -> str | None:
+    """Return the first delivery stage that has not reached a durable end state."""
+    states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+    return next(
+        (
+            stage
+            for stage in DELIVERY_STAGES
+            if not isinstance(states.get(stage), dict)
+            or states[stage].get("status") not in {"passed", "skipped", "deferred"}
+        ),
+        None,
+    )
+
+
 def _lease_staleness_reason_locked(
     workspace: Path,
     feature: str,
@@ -152,6 +166,13 @@ def _mark_retry_pending_locked(
         if batch.get("commitSha")
         else "pending"
     )
+    recovery_kind = (
+        "integration_resume"
+        if resume_status == "ready_to_candidate"
+        else "stage_resume"
+        if resume_status == "sealed"
+        else "retry_dispatch"
+    )
     batch.update(
         {
             "status": "retry_pending",
@@ -165,6 +186,12 @@ def _mark_retry_pending_locked(
                 "lastFailureAt": manifest.get("updatedAt"),
                 "lastError": error,
                 "resumeStatus": resume_status,
+                "kind": recovery_kind,
+                "resumeFromStage": _next_open_delivery_stage(batch) if recovery_kind == "stage_resume" else None,
+                # Only a sealed delivery commit is safe to recover in place.
+                # An unsealed retry must re-enter through provision.
+                "preserveWorktree": recovery_kind == "stage_resume",
+                "reprovision": recovery_kind == "retry_dispatch",
                 "status": "pending_retry",
             },
         }
@@ -807,14 +834,44 @@ def schedule(
         ]
         scoped_groups = [group for group in scoped_groups if group]
         mergeable = [batch_id for batch_id in mergeable_batches(manifest) if batch_id not in withheld_batches]
-        stage_recovery = [
+        all_stage_recovery = [
             batch_id
             for batch_id in stage_recovery_batches(manifest)
             if batch_id not in withheld_batches
-            and (manifest.get("batches", {}).get(batch_id, {}) or {}).get("lease") is None
         ]
+        scoped_all_stage_recovery = set(_scoped_batch_ids(manifest, all_stage_recovery, workspace_refs))
+        stage_recovery: list[str] = []
+        excluded_stage_recovery: list[dict[str, str]] = []
+        batches = manifest.get("batches", {})
+        for batch_id in all_stage_recovery:
+            batch = batches.get(batch_id, {})
+            if batch.get("lease") is not None:
+                excluded_stage_recovery.append({"batchId": batch_id, "reason": "lease_held"})
+                continue
+            dependency = next(
+                (
+                    str(dependency_id)
+                    for dependency_id in batch.get("dependencies", [])
+                    if not isinstance(batches.get(dependency_id), dict)
+                    or batches[dependency_id].get("status") != "merged"
+                    or not batches[dependency_id].get("mergeCommitSha")
+                ),
+                None,
+            )
+            if dependency is not None:
+                excluded_stage_recovery.append({
+                    "batchId": batch_id,
+                    "reason": f"dependency_unmerged:{dependency}",
+                })
+                continue
+            stage_recovery.append(batch_id)
         scoped_mergeable = _scoped_batch_ids(manifest, mergeable, workspace_refs)
         scoped_stage_recovery = _scoped_batch_ids(manifest, stage_recovery, workspace_refs)
+        scoped_excluded_stage_recovery = [
+            item
+            for item in excluded_stage_recovery
+            if item["batchId"] in scoped_all_stage_recovery
+        ]
         scoped_unresolved_batches = _scoped_batch_ids(manifest, unresolved_batches, workspace_refs)
         scoped_unresolved_trains = _scoped_merge_train_keys(manifest, unresolved_trains, workspace_refs)
         max_parallel = int(manifest.get("maxParallel", 1))
@@ -863,6 +920,9 @@ def schedule(
                     "worktreePath": batch.get("worktreePath"),
                     "branchName": batch.get("branchName"),
                     "commitSha": batch.get("commitSha"),
+                    "recoveryKind": "stage_resume",
+                    "preserveWorktree": True,
+                    "reprovision": False,
                     "nextStage": "implement" if failure_context is not None else next_stage,
                     **(
                         {"failureContext": failure_context}
@@ -873,15 +933,7 @@ def schedule(
                 for batch_id in scoped_stage_recovery
                 for batch in [manifest["batches"][batch_id]]
                 for next_stage in [
-                    next(
-                        (
-                            stage
-                            for stage in DELIVERY_STAGES
-                            if not isinstance((batch.get("stageStates") or {}).get(stage), dict)
-                            or (batch.get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
-                        ),
-                        None,
-                    )
+                    _next_open_delivery_stage(batch)
                 ]
                 for failure_context in [
                     _stage_recovery_failure_context(
@@ -890,7 +942,8 @@ def schedule(
                     )
                 ]
             ],
-            "allStageRecoveryBatches": stage_recovery,
+            "allStageRecoveryBatches": all_stage_recovery,
+            "excludedStageRecoveryBatches": scoped_excluded_stage_recovery,
             "blockedBatches": sorted(
                 str(batch_id)
                 for batch_id, batch in manifest.get("batches", {}).items()
@@ -1387,6 +1440,22 @@ def resume_run(
                 "rescheduledAt": manifest.get("updatedAt"),
             }
             retry_resumed.append(str(batch_id))
+        # Persist the recovery contract for every sealed delivery that still
+        # has a stage to finish.  This is intentionally distinct from a
+        # `retry_dispatch`: its existing Worktree and commit are the only
+        # valid execution context for Review/UTest continuation.
+        for batch_id in stage_recovery_batches(manifest):
+            batch = manifest["batches"].get(batch_id)
+            if not isinstance(batch, dict):
+                continue
+            recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+            batch["recovery"] = {
+                **recovery,
+                "kind": "stage_resume",
+                "resumeFromStage": _next_open_delivery_stage(batch),
+                "preserveWorktree": True,
+                "reprovision": False,
+            }
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
         for item in stale_recovered[active_stale_recovered:]:

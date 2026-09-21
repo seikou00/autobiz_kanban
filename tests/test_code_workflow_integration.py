@@ -542,9 +542,55 @@ if (refreshes !== 2) process.exit(4);
     return True
 
 
+def test_workflow_prioritizes_stage_recovery_dispatch():
+    """A sealed UTest recovery must not be overtaken by fresh pending work."""
+    print("测试 8: 阶段恢复优先派发")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {
+  quarantinedBatchIds: new Set(),
+  runnableScheduledBatchIds: () => ["B003", "B009"],
+  runnableSchedulerFallbackBatchIds: () => [],
+  runnableStageRecoveries: () => [
+    { batchId: "B006", nextStage: "test", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
+    { batchId: "B007", nextStage: "test", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
+  ],
+  runnableMergeableBatchIds: () => [],
+  runInitialBatchLifecycle: async () => ({}),
+  runRecoveredBatchLifecycle: async () => ({}),
+  runMergeableBatchLifecycle: async () => ({}),
+};
+vm.createContext(context);
+const start = source.indexOf("function takeNextRunnableLifecycle(");
+const end = source.indexOf("function canStartLifecycle(");
+if (start < 0 || end < 0) process.exit(2);
+vm.runInContext(source.slice(start, end), context);
+const claimed = new Set();
+const jobs = [];
+for (;;) {
+  const job = context.takeNextRunnableLifecycle(claimed);
+  if (!job) break;
+  jobs.push(`${job.source}:${job.batchId}`);
+}
+if (jobs.join(",") !== "stage_recovery:B006,stage_recovery:B007,initial:B003,initial:B009") process.exit(3);
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ sealed Batch 未优先进入阶段恢复队列: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ sealed UTest 恢复会先于新 provision Batch 派发")
+    print()
+    return True
+
+
 def test_workflow_empty_response_recovery():
     """空模型响应应重试，并只用已验证波次降级继续。"""
-    print("测试 8: 空响应恢复")
+    print("测试 9: 空响应恢复")
     print("-" * 60)
 
     workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
@@ -607,7 +653,7 @@ vm.runInContext(source.slice(fallbackStart, fallbackEnd), context);
 
 def test_skill_integration():
     """测试技能集成。"""
-    print("测试 9: 技能集成")
+    print("测试 10: 技能集成")
     print("-" * 60)
 
     skill_file = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
@@ -680,6 +726,7 @@ def main():
         ("Structured Output Normalization", test_workflow_structured_output_normalization),
         ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
+        ("Stage Recovery Priority", test_workflow_prioritizes_stage_recovery_dispatch),
         ("Empty Response Recovery", test_workflow_empty_response_recovery),
         ("Skill Integration", test_skill_integration),
     ]
