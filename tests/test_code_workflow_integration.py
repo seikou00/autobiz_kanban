@@ -142,6 +142,9 @@ def test_fixed_workflow_entrypoint():
         "promotions.flatMap(mergedBatchIds)",
         "promotion_batch_ids_missing",
         "runBatchUtestAndSeal",
+        "范围护栏",
+        "git worktree list、find、grep -R、全仓库 rg/glob",
+        "utestCommandTimeout",
         "blockImplementationFinding",
         "deferBatchForRetry",
         "retry_pending",
@@ -315,16 +318,32 @@ const vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const context = {};
 vm.createContext(context);
+const schemaEnd = source.indexOf("// Review can return either");
 const helperStart = source.indexOf("function normalizeStructuredOutput(");
 const inputStart = source.indexOf("const input = unwrap(args);");
 const reworkStart = source.indexOf("function requiresImplementationRework(");
 const reworkEnd = source.indexOf("function withLatestBatchDelivery(", reworkStart);
-if (helperStart < 0 || inputStart < 0 || reworkStart < 0 || reworkEnd < 0) process.exit(2);
+if (schemaEnd < 0 || helperStart < 0 || inputStart < 0 || reworkStart < 0 || reworkEnd < 0) process.exit(2);
+vm.runInContext(
+  source.slice(0, schemaEnd).replace("export const meta =", "const meta =") +
+  "\nglobalThis.schedulerSchema = SCHEDULER_RESULT_SCHEMA;",
+  context
+);
 vm.runInContext(source.slice(helperStart, inputStart), context);
 context.normalizeScheduledGroups = groups => Array.isArray(groups)
   ? groups.map(group => Array.isArray(group) ? group.filter(value => typeof value === "string" && value) : []).filter(group => group.length)
   : [];
 vm.runInContext(source.slice(reworkStart, reworkEnd), context);
+const requiredSchedulerFields = [
+  "stageRecoveryBatches", "implementationRecoveryBatches", "mergeableBatches",
+  "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups"
+];
+if (requiredSchedulerFields.some(field => !context.schedulerSchema.properties[field])) process.exit(22);
+if (requiredSchedulerFields.some(field => !context.schedulerSchema.required.includes(field))) process.exit(23);
+const stageSchema = context.schedulerSchema.properties.stageRecoveryBatches.items;
+for (const field of ["batchId", "worktreePath", "branchName", "commitSha", "nextStage", "failureContext"]) {
+  if (!stageSchema.properties[field]) process.exit(24);
+}
 const failed = '{"status":"failed","verdict":"FAIL","failureType":"implementation","nextStage":"implement","failure":{"type":"implementation","nextStage":"implement"}}';
 const samples = [
   `<think>reasoning that must not be part of the protocol</think>\n${failed}`,
@@ -367,25 +386,20 @@ const structuredFinding = context.implementationReworkRequired(
 );
 if (!structuredFinding.recovery.failureContext.message.includes("file: src/auth.js")) process.exit(8);
 if (!structuredFinding.recovery.failureContext.message.includes("suggestedFix: authorize before writing")) process.exit(9);
-let incompleteSchedulerRejected = false;
-try {
-  context.requireSchedulerResult({
-    runId: "cw-test",
-    status: "running",
-    scheduledGroups: [["B007"]],
-    batchTaskIds: { B007: ["T010"] },
-    // Mirrors an unsafe manual summary using repositoryRef instead of the
-    // Workflow-required workspaceRef.
-    batchWorkspaces: { B007: { repositoryRef: "frontend" } },
-  }, "scheduler status");
-} catch (error) {
-  incompleteSchedulerRejected = String(error).includes("parallel_scheduler_workspace_mapping_incomplete");
-}
-if (!incompleteSchedulerRejected) process.exit(20);
-const schedulerAccepted = context.requireSchedulerResult({
+const schedulerSnapshot = overrides => ({
   runId: "cw-test",
   status: "running",
   scheduledGroups: [["B007"]],
+  readyBatches: ["B007"],
+  allReadyBatches: ["B007"],
+  mergeableBatches: [],
+  implementationRecoveryBatches: [],
+  stageRecoveryBatches: [],
+  retryPendingBatches: [],
+  blockedBatches: [],
+  parallelGroups: [["B007"]],
+  allParallelGroups: [["B007"]],
+  maxParallel: 1,
   batchTaskIds: { B007: ["T010"] },
   batchWorkspaces: {
     B007: {
@@ -397,8 +411,82 @@ const schedulerAccepted = context.requireSchedulerResult({
       branchName: null,
     },
   },
-}, "scheduler status");
+  ...overrides,
+});
+let incompleteSchedulerRejected = false;
+try {
+  context.requireSchedulerResult(schedulerSnapshot({
+    // Mirrors an unsafe manual summary using repositoryRef instead of the
+    // Workflow-required workspaceRef.
+    batchWorkspaces: { B007: { repositoryRef: "frontend" } },
+  }), "scheduler status");
+} catch (error) {
+  incompleteSchedulerRejected = String(error).includes("parallel_scheduler_workspace_mapping_incomplete");
+}
+if (!incompleteSchedulerRejected) process.exit(20);
+const schedulerAccepted = context.requireSchedulerResult(schedulerSnapshot({
+  stageRecoveryBatches: [{
+    batchId: "B006",
+    worktreePath: "/tmp/B006",
+    branchName: "batch-b006",
+    commitSha: "sealed-b006",
+    recoveryKind: "stage_resume",
+    // Simulate a structured-agent transport that defaulted these redundant
+    // booleans instead of copying scheduler stdout literally.
+    preserveWorktree: false,
+    reprovision: true,
+    nextStage: "test",
+  }],
+  batchWorkspaces: {
+    B007: {
+      workspaceRef: "frontend",
+      componentRoots: ["."],
+      executionStage: "parallel",
+      requestedPath: "C:/repo/frontend",
+      worktreePath: null,
+      branchName: null,
+    },
+    B006: {
+      workspaceRef: "frontend",
+      componentRoots: ["."],
+      executionStage: "parallel",
+      requestedPath: "C:/repo/frontend",
+      worktreePath: "/tmp/B006",
+      branchName: "batch-b006",
+    },
+  },
+}), "scheduler status");
 if (schedulerAccepted.batchWorkspaces.B007.workspaceRef !== "frontend") process.exit(21);
+if (schedulerAccepted.stageRecoveryBatches[0].nextStage !== "test") process.exit(25);
+if (schedulerAccepted.stageRecoveryBatches[0].preserveWorktree !== true) process.exit(27);
+if (schedulerAccepted.stageRecoveryBatches[0].reprovision !== false) process.exit(28);
+let invalidStageRecoveryRejected = false;
+try {
+  context.requireSchedulerResult(schedulerSnapshot({
+    stageRecoveryBatches: [{ batchId: "B006", recoveryKind: "stage_resume" }],
+    batchWorkspaces: {
+      B007: {
+        workspaceRef: "frontend",
+        componentRoots: ["."],
+        executionStage: "parallel",
+        requestedPath: "C:/repo/frontend",
+        worktreePath: null,
+        branchName: null,
+      },
+      B006: {
+        workspaceRef: "frontend",
+        componentRoots: ["."],
+        executionStage: "parallel",
+        requestedPath: "C:/repo/frontend",
+        worktreePath: "/tmp/B006",
+        branchName: "batch-b006",
+      },
+    },
+  }), "scheduler status");
+} catch (error) {
+  invalidStageRecoveryRejected = String(error).includes("parallel_scheduler_stage_recovery_invalid");
+}
+if (!invalidStageRecoveryRejected) process.exit(26);
 let missingMessageRejected = false;
 try {
   context.implementationReworkRequired(
@@ -430,7 +518,7 @@ context.readSchedulerState = async () => ({
 '''
     result = run_command(["node", "-e", script, str(workflow_script)])
     if result["returncode"] != 0:
-        print(f"✗ 结构化输出处理错误: {result['stderr'] or result['stdout']}")
+        print(f"✗ 结构化输出处理错误 (exit {result['returncode']}): {result['stderr'] or result['stdout']}")
         return False
     print("✓ think 前缀和 JSON 围栏会被正确解析")
     print("✓ 无法解析的阶段输出会阻断流程")
@@ -593,6 +681,46 @@ if (jobs.join(",") !== "stage_recovery:B006,stage_recovery:B007,implementation_r
     return True
 
 
+def test_workflow_stage_recovery_continuation():
+    """已通过 Review 的 sealed Batch 恢复 UTest 时不得重跑 Review。"""
+    print("测试 8.1: 阶段恢复续跑边界")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const calls = [];
+const context = {
+  runDeliveryReviewTestAndGate: async (_delivery, options) => {
+    calls.push(options);
+    return { status: "ready_to_candidate" };
+  },
+};
+vm.createContext(context);
+const start = source.indexOf("async function runDeliveryWithImplementationRepair(");
+const end = source.indexOf("async function validateAndPromoteBatch(", start);
+if (start < 0 || end < 0) process.exit(2);
+vm.runInContext(source.slice(start, end), context);
+(async () => {
+  await context.continueRecoveredDelivery({ batchId: "B006", nextStage: "test" });
+  await context.continueRecoveredDelivery({ batchId: "B007", nextStage: "review" });
+  if (calls.length !== 2) process.exit(3);
+  if (calls[0].reviewResolvedByRepair !== true || calls[0].testResolvedByRepair === true) process.exit(4);
+  if (Object.keys(calls[1]).length !== 0) process.exit(5);
+})().catch(() => process.exit(6));
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ sealed UTest 恢复边界错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ nextStage=test 只恢复 UTest 与 gate，不重跑 Review")
+    print("✓ nextStage=review 保留正常 Review → UTest 顺序")
+    print()
+    return True
+
+
 def test_workflow_empty_response_recovery():
     """空模型响应应重试，并只用已验证波次降级继续。"""
     print("测试 9: 空响应恢复")
@@ -732,6 +860,7 @@ def main():
         ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
         ("Stage Recovery Priority", test_workflow_prioritizes_stage_recovery_dispatch),
+        ("Stage Recovery Continuation", test_workflow_stage_recovery_continuation),
         ("Empty Response Recovery", test_workflow_empty_response_recovery),
         ("Skill Integration", test_skill_integration),
     ]
