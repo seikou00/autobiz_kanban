@@ -1,9 +1,5 @@
 # FEATURE_API_DETAIL.md 生成模板
 
-用于 `/autodev-verify` 阶段生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/FEATURE_API_DETAIL.md`。
-
-只在当前 Feature 的实际代码改动涉及新增或修改接口时生成。没有接口新增或修改时，不生成该文件。
-
 ## 生成约束
 
 1. 以实际代码为依据，只记录当前 Feature 新增或修改的接口。
@@ -224,31 +220,3 @@ SQL：
 ````
 
 多接口时，按 `# 1、{接口名称}`、`# 2、{接口名称}`、`# 3、{接口名称}` 继续追加。
-
-## VERIFY_REPORT.md 回写片段
-
-生成 `FEATURE_API_DETAIL.md` 时，在 `VERIFY_REPORT.md` 中补充：
-
-```markdown
-## 接口详细说明文档
-
-本 Feature 涉及新增或修改接口，已生成：
-
-- `FEATURE_API_DETAIL.md`
-```
-
-未生成时，在 `VERIFY_REPORT.md` 中补充：
-
-```markdown
-## 接口详细说明文档
-
-未从当前 Feature 实际代码改动中发现新增或修改接口，因此未生成 `FEATURE_API_DETAIL.md`。
-```
-
-或：
-
-```markdown
-## 接口详细说明文档
-
-上游设计提到接口变更，但当前代码改动中未能确认接口入口或请求响应定义，因此未生成 `FEATURE_API_DETAIL.md`。请人工确认是否需要补充接口详细说明。
-```
