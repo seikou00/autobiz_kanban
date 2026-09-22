@@ -49,6 +49,7 @@ from hooks.repository_snapshot import (
     current_git_branch,
     git_status_porcelain,
     resolve_git_root,
+    working_tree_changed_files,
 )
 _BOOTSTRAP_IGNORE_RULES = (
     ".cmbdevclaw/large_tool_results/",
@@ -68,6 +69,20 @@ def _parse_timestamp_epoch(value: object) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+def _next_open_delivery_stage(batch: dict[str, Any]) -> str | None:
+    """Return the first delivery stage that has not reached a durable end state."""
+    states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+    return next(
+        (
+            stage
+            for stage in DELIVERY_STAGES
+            if not isinstance(states.get(stage), dict)
+            or states[stage].get("status") not in {"passed", "skipped", "deferred"}
+        ),
+        None,
+    )
 
 
 def _lease_staleness_reason_locked(
@@ -152,6 +167,20 @@ def _mark_retry_pending_locked(
         if batch.get("commitSha")
         else "pending"
     )
+    implementation_resume = (
+        _implementation_resume_details(manifest, batch_id, batch)
+        if resume_status == "pending"
+        else None
+    )
+    recovery_kind = (
+        "integration_resume"
+        if resume_status == "ready_to_candidate"
+        else "stage_resume"
+        if resume_status == "sealed"
+        else "implementation_resume"
+        if implementation_resume is not None
+        else "retry_dispatch"
+    )
     batch.update(
         {
             "status": "retry_pending",
@@ -165,6 +194,20 @@ def _mark_retry_pending_locked(
                 "lastFailureAt": manifest.get("updatedAt"),
                 "lastError": error,
                 "resumeStatus": resume_status,
+                "kind": recovery_kind,
+                "resumeFromStage": (
+                    _next_open_delivery_stage(batch)
+                    if recovery_kind == "stage_resume"
+                    else "implement"
+                    if recovery_kind == "implementation_resume"
+                    else None
+                ),
+                # A sealed delivery or a verified dirty implementation
+                # Worktree must resume in place.  Only a clean/unbound
+                # unsealed retry is safe to provision again.
+                "preserveWorktree": recovery_kind in {"stage_resume", "implementation_resume"},
+                "reprovision": recovery_kind == "retry_dispatch",
+                **({"implementationResume": implementation_resume} if implementation_resume is not None else {}),
                 "status": "pending_retry",
             },
         }
@@ -563,6 +606,54 @@ def assert_batch_worktree_isolated(
         )
 
 
+def _implementation_resume_details(
+    manifest: dict[str, Any],
+    batch_id: str,
+    batch: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return safe in-place recovery coordinates for an unsealed Batch.
+
+    A dirty, plugin-owned linked worktree can contain implementation that was
+    interrupted between Task Runner start and the first seal.  It is unsafe to
+    provision over that checkout, but it is equally unsafe to resume an
+    arbitrary dirty directory.  Require the exact Batch binding, branch, and
+    frozen repository head before offering the Worktree to Task Runner's
+    attribution checks.
+    """
+    if batch.get("commitSha"):
+        return None
+    raw_path = batch.get("worktreePath")
+    branch_name = batch.get("branchName")
+    repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
+    repository = (manifest.get("repositories") or {}).get(repository_ref)
+    if not isinstance(raw_path, str) or not raw_path.strip() or not isinstance(branch_name, str) or not branch_name.strip():
+        return None
+    if not isinstance(repository, dict):
+        return None
+    expected_head = repository.get("headSha") or repository.get("baseSha")
+    if not isinstance(expected_head, str) or not expected_head.strip():
+        return None
+    worktree = Path(raw_path).expanduser().resolve()
+    try:
+        assert_batch_worktree_isolated(manifest, batch_id, worktree)
+        if current_git_branch(worktree) != branch_name:
+            return None
+        if _git_head(worktree) != expected_head:
+            return None
+        changed_files = working_tree_changed_files(worktree)
+    except (OSError, RepositorySnapshotError, ValueError):
+        return None
+    if not changed_files:
+        return None
+    return {
+        "worktreePath": str(worktree),
+        "branchName": branch_name,
+        "expectedHead": expected_head,
+        "changedFileCount": len(changed_files),
+        "changedFileSample": changed_files[:20],
+    }
+
+
 def validate_plan_for_parallel(workspace: Path, feature: str) -> dict[str, Any]:
     try:
         bundle = load_plan_bundle(feature_dir(workspace, feature))
@@ -783,7 +874,33 @@ def schedule(
         # recreate their candidate, while allowing unrelated DAG branches to
         # continue.  Dependency release remains enforced by `ready_batches`.
         unresolved_batches, unresolved_trains, withheld_batches = _unresolved_state(manifest)
-        ready = [batch_id for batch_id in ready_batches(manifest) if batch_id not in withheld_batches]
+        batches = manifest.get("batches", {})
+        # Once a Batch has been classified as an in-place implementation
+        # recovery, it must never silently fall back into ``ready`` just
+        # because the retained worktree later fails a verification check.  A
+        # fresh provision at that point could overwrite the exact evidence we
+        # were trying to preserve.  Keep the Batch out of the normal dispatch
+        # queue and expose the failed verification as an explicit exclusion.
+        all_implementation_recovery: list[str] = []
+        implementation_recovery_details: dict[str, dict[str, Any]] = {}
+        for raw_batch_id, batch in batches.items():
+            if not isinstance(batch, dict) or str(raw_batch_id) in withheld_batches:
+                continue
+            recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+            if batch.get("status") != "pending" or recovery.get("kind") != "implementation_resume":
+                continue
+            batch_id = str(raw_batch_id)
+            all_implementation_recovery.append(batch_id)
+            details = _implementation_resume_details(manifest, str(raw_batch_id), batch)
+            if details is None:
+                continue
+            implementation_recovery_details[batch_id] = details
+        implementation_recovery_ids = set(all_implementation_recovery)
+        ready = [
+            batch_id
+            for batch_id in ready_batches(manifest)
+            if batch_id not in withheld_batches and batch_id not in implementation_recovery_ids
+        ]
         # ``resource_groups`` treats ``None`` as "all batches" for callers
         # that intentionally omit a scope.  The scheduler has already built
         # an explicit readiness set, however, and an empty set must remain
@@ -807,14 +924,77 @@ def schedule(
         ]
         scoped_groups = [group for group in scoped_groups if group]
         mergeable = [batch_id for batch_id in mergeable_batches(manifest) if batch_id not in withheld_batches]
-        stage_recovery = [
+        def unresolved_dependency(batch: dict[str, Any]) -> str | None:
+            return next(
+                (
+                    str(dependency_id)
+                    for dependency_id in batch.get("dependencies", [])
+                    if not isinstance(batches.get(dependency_id), dict)
+                    or batches[dependency_id].get("status") != "merged"
+                    or not batches[dependency_id].get("mergeCommitSha")
+                ),
+                None,
+            )
+
+        implementation_recovery: list[str] = []
+        excluded_implementation_recovery: list[dict[str, str]] = []
+        for batch_id in all_implementation_recovery:
+            batch = batches[batch_id]
+            if batch_id not in implementation_recovery_details:
+                excluded_implementation_recovery.append({
+                    "batchId": batch_id,
+                    "reason": "worktree_verification_failed",
+                })
+                continue
+            if batch.get("lease") is not None:
+                excluded_implementation_recovery.append({"batchId": batch_id, "reason": "lease_held"})
+                continue
+            dependency = unresolved_dependency(batch)
+            if dependency is not None:
+                excluded_implementation_recovery.append({
+                    "batchId": batch_id,
+                    "reason": f"dependency_unmerged:{dependency}",
+                })
+                continue
+            implementation_recovery.append(batch_id)
+
+        all_stage_recovery = [
             batch_id
             for batch_id in stage_recovery_batches(manifest)
             if batch_id not in withheld_batches
-            and (manifest.get("batches", {}).get(batch_id, {}) or {}).get("lease") is None
         ]
+        scoped_all_stage_recovery = set(_scoped_batch_ids(manifest, all_stage_recovery, workspace_refs))
+        scoped_all_implementation_recovery = set(
+            _scoped_batch_ids(manifest, all_implementation_recovery, workspace_refs)
+        )
+        stage_recovery: list[str] = []
+        excluded_stage_recovery: list[dict[str, str]] = []
+        for batch_id in all_stage_recovery:
+            batch = batches.get(batch_id, {})
+            if batch.get("lease") is not None:
+                excluded_stage_recovery.append({"batchId": batch_id, "reason": "lease_held"})
+                continue
+            dependency = unresolved_dependency(batch)
+            if dependency is not None:
+                excluded_stage_recovery.append({
+                    "batchId": batch_id,
+                    "reason": f"dependency_unmerged:{dependency}",
+                })
+                continue
+            stage_recovery.append(batch_id)
         scoped_mergeable = _scoped_batch_ids(manifest, mergeable, workspace_refs)
+        scoped_implementation_recovery = _scoped_batch_ids(manifest, implementation_recovery, workspace_refs)
         scoped_stage_recovery = _scoped_batch_ids(manifest, stage_recovery, workspace_refs)
+        scoped_excluded_implementation_recovery = [
+            item
+            for item in excluded_implementation_recovery
+            if item["batchId"] in scoped_all_implementation_recovery
+        ]
+        scoped_excluded_stage_recovery = [
+            item
+            for item in excluded_stage_recovery
+            if item["batchId"] in scoped_all_stage_recovery
+        ]
         scoped_unresolved_batches = _scoped_batch_ids(manifest, unresolved_batches, workspace_refs)
         scoped_unresolved_trains = _scoped_merge_train_keys(manifest, unresolved_trains, workspace_refs)
         max_parallel = int(manifest.get("maxParallel", 1))
@@ -857,12 +1037,31 @@ def schedule(
             "allReadyBatches": ready,
             "mergeableBatches": scoped_mergeable,
             "allMergeableBatches": mergeable,
+            "implementationRecoveryBatches": [
+                {
+                    "batchId": batch_id,
+                    "worktreePath": implementation_recovery_details[batch_id]["worktreePath"],
+                    "branchName": implementation_recovery_details[batch_id]["branchName"],
+                    "recoveryKind": "implementation_resume",
+                    "resumeFromStage": "implement",
+                    "preserveWorktree": True,
+                    "reprovision": False,
+                    "changedFileCount": implementation_recovery_details[batch_id]["changedFileCount"],
+                    "changedFileSample": implementation_recovery_details[batch_id]["changedFileSample"],
+                }
+                for batch_id in scoped_implementation_recovery
+            ],
+            "allImplementationRecoveryBatches": all_implementation_recovery,
+            "excludedImplementationRecoveryBatches": scoped_excluded_implementation_recovery,
             "stageRecoveryBatches": [
                 {
                     "batchId": batch_id,
                     "worktreePath": batch.get("worktreePath"),
                     "branchName": batch.get("branchName"),
                     "commitSha": batch.get("commitSha"),
+                    "recoveryKind": "stage_resume",
+                    "preserveWorktree": True,
+                    "reprovision": False,
                     "nextStage": "implement" if failure_context is not None else next_stage,
                     **(
                         {"failureContext": failure_context}
@@ -873,15 +1072,7 @@ def schedule(
                 for batch_id in scoped_stage_recovery
                 for batch in [manifest["batches"][batch_id]]
                 for next_stage in [
-                    next(
-                        (
-                            stage
-                            for stage in DELIVERY_STAGES
-                            if not isinstance((batch.get("stageStates") or {}).get(stage), dict)
-                            or (batch.get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
-                        ),
-                        None,
-                    )
+                    _next_open_delivery_stage(batch)
                 ]
                 for failure_context in [
                     _stage_recovery_failure_context(
@@ -890,7 +1081,8 @@ def schedule(
                     )
                 ]
             ],
-            "allStageRecoveryBatches": stage_recovery,
+            "allStageRecoveryBatches": all_stage_recovery,
+            "excludedStageRecoveryBatches": scoped_excluded_stage_recovery,
             "blockedBatches": sorted(
                 str(batch_id)
                 for batch_id, batch in manifest.get("batches", {}).items()
@@ -1369,6 +1561,11 @@ def resume_run(
                 }
                 retry_exhausted.append(str(batch_id))
                 continue
+            implementation_resume = (
+                _implementation_resume_details(manifest, str(batch_id), batch)
+                if not batch.get("commitSha")
+                else None
+            )
             # A Merge Train retry must retain its ready-to-candidate state;
             # otherwise its completed stage evidence would be stranded.  A
             # sealed draft goes through per-Batch stage recovery, while an
@@ -1383,10 +1580,50 @@ def resume_run(
             )
             batch["recovery"] = {
                 **recovery,
+                "kind": (
+                    "implementation_resume"
+                    if implementation_resume is not None
+                    else recovery.get(
+                        "kind",
+                        "integration_resume"
+                        if recovery.get("resumeStatus") == "ready_to_candidate"
+                        else "stage_resume"
+                        if batch.get("commitSha")
+                        else "retry_dispatch",
+                    )
+                ),
+                "resumeFromStage": "implement" if implementation_resume is not None else recovery.get("resumeFromStage"),
+                "preserveWorktree": (
+                    True
+                    if implementation_resume is not None
+                    else recovery.get("preserveWorktree", bool(batch.get("commitSha")))
+                ),
+                "reprovision": (
+                    False
+                    if implementation_resume is not None
+                    else recovery.get("reprovision", not bool(batch.get("commitSha")))
+                ),
+                **({"implementationResume": implementation_resume} if implementation_resume is not None else {}),
                 "status": "rescheduled",
                 "rescheduledAt": manifest.get("updatedAt"),
             }
             retry_resumed.append(str(batch_id))
+        # Persist the recovery contract for every sealed delivery that still
+        # has a stage to finish.  This is intentionally distinct from a
+        # `retry_dispatch`: its existing Worktree and commit are the only
+        # valid execution context for Review/UTest continuation.
+        for batch_id in stage_recovery_batches(manifest):
+            batch = manifest["batches"].get(batch_id)
+            if not isinstance(batch, dict):
+                continue
+            recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+            batch["recovery"] = {
+                **recovery,
+                "kind": "stage_resume",
+                "resumeFromStage": _next_open_delivery_stage(batch),
+                "preserveWorktree": True,
+                "reprovision": False,
+            }
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
         for item in stale_recovered[active_stale_recovered:]:

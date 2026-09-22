@@ -366,6 +366,136 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             "fixed_workflow_for_manual_recovery:cw-resume-all:B001,B007,B015",
         )
 
+    def test_launcher_starts_fixed_workflow_for_sealed_stage_recovery(self) -> None:
+        """A Plan-projected done Batch must not hide an interrupted UTest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_path = root / "plugin"
+            artifact_workspace = root / "artifacts"
+            code_workspace = root / "business-code"
+            feature_dir = artifact_workspace / ".autobizdevops" / "features" / "stage-recovery"
+            (plugin_path / "workflows").mkdir(parents=True)
+            (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text(
+                "export const meta = {};", encoding="utf-8"
+            )
+            code_workspace.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
+            feature_dir.mkdir(parents=True)
+            (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
+            (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
+            bundle = PlanBundle(
+                root={
+                    "codeWorkspaces": {"api": str(code_workspace)},
+                    "batches": [{"id": "B006", "status": "done", "workspaceRef": "api", "deps": []}],
+                },
+                batches={"B006": {"tasks": [{"workspaceRef": "api"}]}},
+                tasks=[],
+                task_batches={},
+            )
+            with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), mock.patch(
+                "hooks.workflow_launcher.validate_plan_for_parallel",
+                return_value={"canParallel": False, "reason": "no_pending_batches", "errors": []},
+            ), mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-stage-006"), mock.patch(
+                "hooks.workflow_launcher.load_manifest",
+                return_value={
+                    "runId": "cw-stage-006",
+                    "batches": {
+                        "B006": {
+                            "status": "sealed",
+                            "commitSha": "sealed-commit",
+                            "lease": None,
+                            "stageStates": {
+                                "prepare": {"status": "passed"},
+                                "implement": {"status": "passed"},
+                                "review": {"status": "passed"},
+                                "test": {"status": "running"},
+                            },
+                        },
+                    },
+                },
+            ):
+                result = analyze_batches("stage-recovery", plugin_path, artifact_workspace, "Z990692-294")
+
+        self.assertTrue(result["useWorkflow"])
+        self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
+        self.assertEqual(result["workflowArgs"]["resumeMode"], "automatic")
+        self.assertIsNone(result["workflowArgs"]["resumeRunId"])
+        self.assertEqual(result["stageRecoveryBatchIds"], ["B006"])
+        self.assertEqual(result["retryRecoveryBatchIds"], [])
+        self.assertEqual(result["batches"], [
+            {
+                "id": "B006",
+                "title": None,
+                "lane": "unknown",
+                "executionLane": "unknown",
+                "workspaceRef": "api",
+                "executionStage": "parallel",
+                "deps": [],
+                "status": "done",
+                "taskCount": 1,
+                "taskIds": [],
+                "writeSet": [],
+            },
+        ])
+        self.assertEqual(result["reason"], "fixed_workflow_for_stage_recovery:cw-stage-006:B006")
+
+    def test_launcher_starts_fixed_workflow_for_dirty_implementation_recovery(self) -> None:
+        """A pre-seal owned worktree resumes automatically, never as manual provision."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_path = root / "plugin"
+            artifact_workspace = root / "artifacts"
+            code_workspace = root / "business-code"
+            feature_dir = artifact_workspace / ".autobizdevops" / "features" / "implementation-recovery"
+            (plugin_path / "workflows").mkdir(parents=True)
+            (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text(
+                "export const meta = {};", encoding="utf-8"
+            )
+            code_workspace.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
+            feature_dir.mkdir(parents=True)
+            (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
+            (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
+            bundle = PlanBundle(
+                root={
+                    "codeWorkspaces": {"api": str(code_workspace)},
+                    "batches": [{"id": "B008", "status": "done", "workspaceRef": "api", "deps": []}],
+                },
+                batches={"B008": {"tasks": [{"workspaceRef": "api"}]}},
+                tasks=[],
+                task_batches={},
+            )
+            with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), mock.patch(
+                "hooks.workflow_launcher.validate_plan_for_parallel",
+                return_value={"canParallel": False, "reason": "no_pending_batches", "errors": []},
+            ), mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-implementation-008"), mock.patch(
+                "hooks.workflow_launcher.load_manifest",
+                return_value={
+                    "runId": "cw-implementation-008",
+                    "batches": {
+                        "B008": {
+                            "status": "retry_pending",
+                            "worktreePath": str(code_workspace / "B008"),
+                            "branchName": "autodev/workspace/cw-implementation-008/B008",
+                            "recovery": {
+                                "kind": "implementation_resume",
+                                "preserveWorktree": True,
+                                "reprovision": False,
+                            },
+                        },
+                    },
+                },
+            ):
+                result = analyze_batches("implementation-recovery", plugin_path, artifact_workspace, "Z990692-294")
+
+        self.assertTrue(result["useWorkflow"])
+        self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
+        self.assertEqual(result["workflowArgs"]["resumeMode"], "automatic")
+        self.assertIsNone(result["workflowArgs"]["resumeRunId"])
+        self.assertEqual(result["implementationRecoveryBatchIds"], ["B008"])
+        self.assertEqual(result["retryRecoveryBatchIds"], [])
+        self.assertEqual(result["reason"], "fixed_workflow_for_implementation_recovery:cw-implementation-008:B008")
+
     def test_launcher_blocks_when_static_workflow_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

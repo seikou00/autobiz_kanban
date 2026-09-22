@@ -168,8 +168,12 @@ def _sync_summary(feature_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
 
 def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
     data = _sync_summary(_feature_dir(workspace, feature), data)
-    if (_feature_dir(workspace, feature) / ".runtime" / "RUN_CONTEXT.json").is_file():
+    try:
         data["diffDigest"] = compute_candidate_digest(workspace, feature)
+    except ValueError:
+        # Legacy plans without a concrete code workspace may still produce a
+        # verification decision. They simply cannot opt into stale-code checks.
+        data.pop("diffDigest", None)
     changed = atomic_write_json(_path(workspace, feature), data)
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 
@@ -235,10 +239,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         errors.append({"reason": "invalid_verify_decision_transition"})
     if not isinstance(data.get("scenarioCoverage"), list):
         errors.append({"reason": "invalid_scenario_coverage"})
-    if (_feature_dir(workspace, feature) / ".runtime" / "RUN_CONTEXT.json").is_file():
-        current_digest = compute_candidate_digest(workspace, feature)
-        if data.get("diffDigest") != current_digest:
-            errors.append({"reason": "verify_diff_digest_stale"})
+    if isinstance(data.get("diffDigest"), str) and data["diffDigest"]:
+        try:
+            current_digest = compute_candidate_digest(workspace, feature)
+        except ValueError as exc:
+            errors.append({"reason": "verify_diff_digest_unresolved", "detail": str(exc)})
+        else:
+            if data["diffDigest"] != current_digest:
+                errors.append({"reason": "verify_diff_digest_stale"})
     return render_result(WriterResult(ok=not errors, path=_path(workspace, feature), errors=errors))
 
 

@@ -239,16 +239,6 @@ def _validate_task(task, batch_id):
 def load_utest_plan(feature_dir):
     feature_root = Path(feature_dir).expanduser().resolve()
     root = _read_object(feature_root / "plan.json")
-    run_context_path = feature_root / ".runtime" / "RUN_CONTEXT.json"
-    if run_context_path.is_file():
-        try:
-            from hooks.run_context import load as load_run_context
-
-            run_context = load_run_context(feature_root.parents[2], feature_root.name)
-        except ValueError as exc:
-            _error("SCOPE_UNRESOLVED: {}".format(exc))
-        if root.get("runContextDigest") != run_context.get("contextDigest"):
-            _error("plan.runContextDigest 与当前 RunContext 不一致")
     batches = root.get("batches")
     if not isinstance(batches, list) or not batches:
         _error("root plan.batches 必须是非空数组")

@@ -59,12 +59,86 @@ const MERGE_RESULT_SCHEMA = {
   required: ["success"],
   additionalProperties: false
 };
+// Scheduler snapshots cross a structured-agent boundary before this Workflow
+// can consume them.  Every field used below must therefore be declared here:
+// `additionalProperties` permits forward-compatible scheduler diagnostics, but
+// does not cause an undeclared field to survive structured output projection.
+const RECOVERY_FAILURE_CONTEXT_SCHEMA = {
+  type: "object",
+  properties: {
+    failedStage: { type: "string" },
+    failureType: { type: "string" },
+    message: { type: "string" },
+    testLogPath: { type: "string" }
+  },
+  required: ["failedStage", "failureType", "message"],
+  additionalProperties: true
+};
+const STAGE_RECOVERY_ENTRY_SCHEMA = {
+  type: "object",
+  properties: {
+    batchId: { type: "string" },
+    worktreePath: { type: ["string", "null"] },
+    branchName: { type: ["string", "null"] },
+    commitSha: { type: ["string", "null"] },
+    recoveryKind: { const: "stage_resume" },
+    // These flags are redundant with membership in stageRecoveryBatches.
+    // Some structured-agent transports serialize their boolean defaults rather
+    // than the scheduler's literal values, so validate their shape here and
+    // canonicalize their meaning at the Workflow boundary below.
+    preserveWorktree: { type: "boolean" },
+    reprovision: { type: "boolean" },
+    nextStage: { enum: ["prepare", "implement", "review", "test"] },
+    failureContext: RECOVERY_FAILURE_CONTEXT_SCHEMA
+  },
+  required: [
+    "batchId", "worktreePath", "branchName", "commitSha",
+    "recoveryKind", "preserveWorktree", "reprovision", "nextStage"
+  ],
+  additionalProperties: true
+};
+const IMPLEMENTATION_RECOVERY_ENTRY_SCHEMA = {
+  type: "object",
+  properties: {
+    batchId: { type: "string" },
+    worktreePath: { type: ["string", "null"] },
+    branchName: { type: ["string", "null"] },
+    recoveryKind: { const: "implementation_resume" },
+    resumeFromStage: { const: "implement" },
+    preserveWorktree: { type: "boolean" },
+    reprovision: { type: "boolean" },
+    changedFileCount: { type: "number" },
+    changedFileSample: { type: "array", items: { type: "string" } }
+  },
+  required: [
+    "batchId", "worktreePath", "branchName", "recoveryKind",
+    "resumeFromStage", "preserveWorktree", "reprovision"
+  ],
+  additionalProperties: true
+};
 const SCHEDULER_RESULT_SCHEMA = {
   type: "object",
   properties: {
     runId: { type: "string" },
     status: { type: "string" },
     scheduledGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
+    readyBatches: { type: "array", items: { type: "string" } },
+    allReadyBatches: { type: "array", items: { type: "string" } },
+    mergeableBatches: { type: "array", items: { type: "string" } },
+    implementationRecoveryBatches: {
+      type: "array",
+      items: IMPLEMENTATION_RECOVERY_ENTRY_SCHEMA
+    },
+    stageRecoveryBatches: {
+      type: "array",
+      items: STAGE_RECOVERY_ENTRY_SCHEMA
+    },
+    retryPendingBatches: { type: "array", items: { type: "string" } },
+    blockedBatches: { type: "array", items: { type: "string" } },
+    rescheduledRetryBatches: { type: "array", items: { type: "string" } },
+    parallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
+    allParallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
+    maxParallel: { type: "number" },
     batchTaskIds: {
       type: "object",
       additionalProperties: { type: "array", items: { type: "string" } }
@@ -86,7 +160,14 @@ const SCHEDULER_RESULT_SCHEMA = {
       }
     }
   },
-  required: ["runId", "status", "scheduledGroups", "batchTaskIds", "batchWorkspaces"],
+  required: [
+    "runId", "status", "scheduledGroups",
+    "readyBatches", "allReadyBatches", "mergeableBatches",
+    "implementationRecoveryBatches", "stageRecoveryBatches",
+    "retryPendingBatches", "blockedBatches",
+    "parallelGroups", "allParallelGroups", "maxParallel",
+    "batchTaskIds", "batchWorkspaces"
+  ],
   additionalProperties: true
 };
 // Review can return either `parallel_batch_stage.py complete` evidence or a
@@ -317,6 +398,17 @@ function requireSchedulerResult(value, label) {
     !usableString(result.runId)
     || !usableString(result.status)
     || !Array.isArray(result.scheduledGroups)
+    || !Array.isArray(result.readyBatches)
+    || !Array.isArray(result.allReadyBatches)
+    || !Array.isArray(result.mergeableBatches)
+    || !Array.isArray(result.implementationRecoveryBatches)
+    || !Array.isArray(result.stageRecoveryBatches)
+    || !Array.isArray(result.retryPendingBatches)
+    || !Array.isArray(result.blockedBatches)
+    || !Array.isArray(result.parallelGroups)
+    || !Array.isArray(result.allParallelGroups)
+    || !Number.isInteger(result.maxParallel)
+    || result.maxParallel <= 0
     || !isObject(result.batchTaskIds)
     || !isObject(result.batchWorkspaces)
   ) {
@@ -332,6 +424,7 @@ function requireSchedulerResult(value, label) {
   const referencedBatchIds = new Set([
     ...Object.keys(result.batchTaskIds),
     ...normalizeScheduledGroups(result.scheduledGroups).flat(),
+    ...(Array.isArray(result.implementationRecoveryBatches) ? result.implementationRecoveryBatches.map(item => item && item.batchId) : []),
     ...(Array.isArray(result.stageRecoveryBatches) ? result.stageRecoveryBatches.map(item => item && item.batchId) : []),
     ...(Array.isArray(result.mergeableBatches) ? result.mergeableBatches : []),
   ].filter(usableString));
@@ -348,7 +441,66 @@ function requireSchedulerResult(value, label) {
       status: result.status,
     }));
   }
-  return result;
+  const invalidStageRecovery = result.stageRecoveryBatches.find(recovery => (
+    !isObject(recovery)
+    || !usableString(recovery.batchId)
+    || recovery.recoveryKind !== "stage_resume"
+    || typeof recovery.preserveWorktree !== "boolean"
+    || typeof recovery.reprovision !== "boolean"
+    || !usableString(recovery.worktreePath)
+    || !usableString(recovery.branchName)
+    || !usableString(recovery.commitSha)
+    || !["prepare", "implement", "review", "test"].includes(recovery.nextStage)
+    || (recovery.failureContext !== undefined && (
+      !isObject(recovery.failureContext)
+      || !usableString(recovery.failureContext.failedStage)
+      || !usableString(recovery.failureContext.failureType)
+      || !usableString(recovery.failureContext.message)
+    ))
+  ));
+  if (invalidStageRecovery) {
+    throw new Error(JSON.stringify({
+      error: "parallel_scheduler_stage_recovery_invalid",
+      label,
+      runId: result.runId,
+      recovery: invalidStageRecovery,
+    }));
+  }
+  const invalidImplementationRecovery = result.implementationRecoveryBatches.find(recovery => (
+    !isObject(recovery)
+    || !usableString(recovery.batchId)
+    || recovery.recoveryKind !== "implementation_resume"
+    || recovery.resumeFromStage !== "implement"
+    || typeof recovery.preserveWorktree !== "boolean"
+    || typeof recovery.reprovision !== "boolean"
+    || !usableString(recovery.worktreePath)
+    || !usableString(recovery.branchName)
+  ));
+  if (invalidImplementationRecovery) {
+    throw new Error(JSON.stringify({
+      error: "parallel_scheduler_implementation_recovery_invalid",
+      label,
+      runId: result.runId,
+      recovery: invalidImplementationRecovery,
+    }));
+  }
+  // The scheduler categorizes these lists after validating ownership and
+  // durable state.  Their category is the authority for Worktree semantics;
+  // do not let a structured-agent boolean default turn a stage resume into a
+  // reprovision request.  Coordinates and nextStage above remain mandatory.
+  return {
+    ...result,
+    stageRecoveryBatches: result.stageRecoveryBatches.map(recovery => ({
+      ...recovery,
+      preserveWorktree: true,
+      reprovision: false,
+    })),
+    implementationRecoveryBatches: result.implementationRecoveryBatches.map(recovery => ({
+      ...recovery,
+      preserveWorktree: true,
+      reprovision: false,
+    })),
+  };
 }
 
 function absolutePath(value) {
@@ -592,6 +744,7 @@ try {
 }
 let scheduledGroups = normalizeScheduledGroups(prepared.scheduledGroups || []);
 let mergeableBatches = (prepared.mergeableBatches || []).filter(usableString);
+let implementationRecoveryBatches = (prepared.implementationRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let retryPendingBatches = retryPendingBatchesOf(prepared);
 let batchTaskIds = prepared.batchTaskIds || {};
@@ -813,6 +966,7 @@ function applySchedulerState(scheduler) {
   cacheSchedulerFallbackGroups(scheduler);
   scheduledGroups = normalizeScheduledGroups(scheduler.scheduledGroups || []);
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
+  implementationRecoveryBatches = (scheduler.implementationRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   retryPendingBatches = retryPendingBatchesOf(scheduler);
   // Bindings are immutable within a run. Merge a validated snapshot so a
@@ -1123,11 +1277,16 @@ async function runBatchUtestAndSeal(batchResult) {
   }
   const taskIdArgs = taskIds.map(taskId => "--task-id \"" + taskId + "\"").join(" ");
   const taskList = JSON.stringify(taskIds);
+  // Keep each real test runner bounded well below the Batch lease.  A timeout
+  // becomes durable UTest evidence instead of allowing one child to consume a
+  // whole Workflow execution window.
+  const utestCommandTimeout = Math.min(600, Math.max(60, Math.floor(timeoutPerBatch / 4)));
   const prompt =
     "在 Batch " + batchId + " 的原生 Git worktree \"" + batchWorktree + "\"、分支 \"" + batchBranch + "\" 内完成该 Batch 的 UTest。TASK=" + taskList + "。测试点只来自这些 TASK 的 UTEST_ASSIGNMENT/testIntent；不得读取或修改其他 Batch、主 checkout、计划 JSON 或平台产物。\n" +
+    "范围护栏：除本 Batch worktree、上述 TASK 的 router 原文、以及本提示给出的插件命令外，不得访问任何路径。禁止运行 git worktree list、find、grep -R、全仓库 rg/glob，禁止按 B00*、测试目录或 .autobizdevops 目录枚举其他 Batch；不得 cd 到本 Batch worktree 外。测试文件必须是本 worktree 下、与当前 TASK assignment 对应的仓库根相对路径。已有测试资产先按 assignment 运行并复用，只有当前 TASK 的测试/fixture/mock/测试配置失败时才可修改；不得为寻找测试而扫描仓库。\n" +
     "这是 Code Review 之后的测试阶段：Review 只审业务生产代码；现在由你生成/补齐测试源码、fixture/mock/测试环境配置并运行测试。测试代码必须留在当前 Worktree，并会随本 Batch 再次封存后合并；禁止把测试拆成独立 Batch。\n" +
     "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + " --lease-guard，保存 lease.ownerToken。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 python \"" + utestRouterPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --json，且只使用其中 batchId=\"" + batchId + "\"、workspaceRef=\"" + batchWorkspaceRef + "\" 的 assignment 原文；5) 执行 python \"" + utestEnvironmentPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" " + taskIdArgs + " --batch-worktree \"" + batchWorktree + "\" --json。环境非 ready 时只按 UTest 协议修测试环境并重新检查；仍无法解决时按步骤 7 以 environment 记录失败并继续。\n" +
-    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints、testPoints 与全部 AC，排除 nonGoals；使用真实工程 runner。每个测试文件落地后，必须执行 python \"" + utestCommandPath + "\" --kind test --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> -- <真实精确测试 argv>。Plan V2 不提供测试 argv；UTest 必须根据实际测试资产和 runner 生成命令。测试自身、fixture、mock、测试配置的问题必须在本阶段修复并重跑。\n" +
+    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints、testPoints 与全部 AC，排除 nonGoals；使用真实工程 runner。每个测试文件落地后，必须执行 python \"" + utestCommandPath + "\" --kind test --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> --timeout " + utestCommandTimeout + " -- <真实精确测试 argv>。Plan V2 不提供测试 argv；UTest 必须根据实际测试资产和 runner 生成命令。测试自身、fixture、mock、测试配置的问题必须在本阶段修复并重跑。不得直接调用 runner 或运行未绑定 --test-file 的宽泛测试命令。\n" +
     "7) 若任一 UTest 最终仍失败，必须保留本次真实 runner 输出与 run_utest_command Evidence；source_bug 仍可用 validate_utest_source_bug 做分类，但不得在此阶段修复生产代码，也不得执行 stage fail。每次 seal 前都先执行携带 --owner-token <真实token> --require-lease-guard 的 lease check。先用 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 封存新增测试资产；随后执行 python \"" + stagePath + "\" record-test-failure --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --failure-type <implementation|test_definition|documentation|environment|needs_triage> --message \"<必须包含 targetId、commandId、evidenceId、test-output.log 路径、失败断言的 expected/actual 或 stdout/stderr 根因>\" --metadata-json '<包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>'，其中 batchCommit 必须等于刚 seal 返回的新 commitSha。最后以 final-status sealed 释放 lease。该命令会把失败记录成非阻断 issue，Workflow 继续后续流程。\n" +
     "8) 全部 UTest 通过后，执行 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 取得新的 commitSha；再执行 python \"" + stagePath + "\" complete --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --metadata-json <包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>；最后以 final-status sealed 释放 lease。\n" +
     "成功只返回 {batchId,status:\"success\",testStatus:\"passed\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。记录失败后也返回 status:\"success\"，但必须返回 testStatus:\"deferred\" 与 testFailure；不得返回 failed/timeout 以中断其他 Batch。只有无法写入失败 Evidence 或无法安全释放 lease 时才返回 failed；若能释放 lease，必须使用 final-status pending，禁止 final-status failed，由 Workflow 标记为 retry_pending。不得手工 git add/commit、merge、rebase 或删除 Worktree。";
@@ -1283,10 +1442,10 @@ async function blockImplementationFinding(delivery, staged, disposition) {
   return deferBatchForRetry(batchId, delivery.worktreePath, delivery.branchName, message);
 }
 
-async function runDeliveryWithImplementationRepair(batchResult) {
+async function runDeliveryWithImplementationRepair(batchResult, initialOptions = {}) {
   let delivery = batchResult;
   const repairedStages = new Set();
-  let options = {};
+  let options = initialOptions;
   for (;;) {
     const staged = await runDeliveryReviewTestAndGate(delivery, options);
     if (staged.status === "ready_to_candidate") return staged;
@@ -1317,7 +1476,13 @@ async function runDeliveryWithImplementationRepair(batchResult) {
 
 async function continueRecoveredDelivery(recovery) {
   if (recovery.nextStage !== "implement" || !(recovery && recovery.failureContext)) {
-    return runDeliveryWithImplementationRepair(recovery);
+    // Scheduler stage recovery is a durable checkpoint, not a request to
+    // replay already-passed Review.  A test-stage recovery must resume UTest
+    // directly; this keeps its agent scope and lease limited to the work left.
+    const initialOptions = recovery.nextStage === "test"
+      ? { reviewResolvedByRepair: true }
+      : {};
+    return runDeliveryWithImplementationRepair(recovery, initialOptions);
   }
   const repaired = await reworkDeliveryImplementation(recovery);
   await recordSingleRepairResolution(recovery, repaired);
@@ -1547,6 +1712,46 @@ async function runInitialBatchLifecycle(batchId) {
   }
 }
 
+async function runImplementationRecoveryLifecycle(recovery) {
+  const batchId = recovery.batchId;
+  const batchWorktree = recovery.worktreePath;
+  const batchBranch = recovery.branchName;
+  try {
+    const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
+    const batchWorkspace = batchWorkspaces[batchId] || {};
+    const batchWorkspaceRef = batchWorkspace.workspaceRef;
+    if (!usableString(batchWorktree) || !usableString(batchBranch) || !taskIds.length) {
+      throw new Error(`implementation_recovery_context_missing:${batchId}`);
+    }
+    if (!usableString(batchWorkspaceRef) || !codeWorkspaces[batchWorkspaceRef]) {
+      throw new Error(`scheduler did not provide a code workspace for ${batchId}`);
+    }
+    // The scheduler has already proven this is a plugin-owned worktree whose
+    // dirty changes still sit on the frozen Batch base.  Do not provision,
+    // reset, or discard it: implementationPrompt first reconciles stale Task
+    // Runner state with --force-with-changes, then continues the same TASK.
+    const taskWorkspace = batchTaskWorkspace(batchId, batchWorktree);
+    const implemented = unwrap(await workflowAgent(
+      implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef, taskWorkspace),
+      { label: `resume-implementation-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
+    ));
+    batchResults.push(implemented);
+    if (!implemented || implemented.status !== "success") {
+      return safelyDeferBatchForRetry(
+        batchId,
+        batchWorktree,
+        batchBranch,
+        implemented && (implemented.errorMessage || implemented.raw || implemented.status)
+      );
+    }
+    const delivery = await runDeliveryWithImplementationRepair(implemented);
+    if (delivery.status === "ready_to_candidate") return promoteReadyBatch(batchId);
+    return delivery;
+  } catch (error) {
+    return safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, String(error));
+  }
+}
+
 async function runRecoveredBatchLifecycle(recovery) {
   const batchId = recovery.batchId;
   try {
@@ -1603,6 +1808,18 @@ function runnableSchedulerFallbackBatchIds() {
   );
 }
 
+function runnableImplementationRecoveries() {
+  return implementationRecoveryBatches
+    .filter(recovery => (
+      recovery
+      && recovery.recoveryKind === "implementation_resume"
+      && recovery.preserveWorktree === true
+      && recovery.reprovision === false
+      && !quarantinedBatchIds.has(recovery.batchId)
+      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(recovery.batchId))
+    ));
+}
+
 function runnableStageRecoveries() {
   return stageRecoveryBatches
     .filter(recovery => (
@@ -1623,9 +1840,13 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
   const claimed = claimedBatchIds || new Set();
   const scheduledBatchIds = runnableScheduledBatchIds();
   const fallbackBatchIds = runnableSchedulerFallbackBatchIds();
+  const implementationRecoveries = runnableImplementationRecoveries();
   const recoveries = runnableStageRecoveries();
   const mergeable = runnableMergeableBatchIds();
-  const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
+  const recoveredBatchIds = new Set([
+    ...implementationRecoveries.map(item => item.batchId),
+    ...recoveries.map(item => item.batchId),
+  ]);
   const mergeableBatchIds = new Set(mergeable);
   const claim = job => {
     if (!job || claimed.has(job.batchId)) return null;
@@ -1633,6 +1854,30 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
     return job;
   };
 
+  // A sealed delivery or verified dirty implementation worktree is an owned
+  // checkpoint, not a fresh implementation candidate. Resume it before
+  // dispatching newly-ready work so a continuing DAG wave cannot repeatedly
+  // starve interrupted Review/UTest or unsealed implementation recovery.
+  for (const recovery of recoveries) {
+    if (mergeableBatchIds.has(recovery.batchId)) continue;
+    const job = claim({
+      batchId: recovery.batchId,
+      source: "stage_recovery",
+      execute: () => runRecoveredBatchLifecycle(recovery),
+      fallback: recovery,
+    });
+    if (job) return job;
+  }
+  for (const recovery of implementationRecoveries) {
+    if (mergeableBatchIds.has(recovery.batchId)) continue;
+    const job = claim({
+      batchId: recovery.batchId,
+      source: "implementation_recovery",
+      execute: () => runImplementationRecoveryLifecycle(recovery),
+      fallback: recovery,
+    });
+    if (job) return job;
+  }
   for (const batchId of scheduledBatchIds) {
     const job = claim({
       batchId,
@@ -1646,16 +1891,6 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
       batchId,
       source: "scheduler_snapshot_fallback",
       execute: () => runInitialBatchLifecycle(batchId),
-    });
-    if (job) return job;
-  }
-  for (const recovery of recoveries) {
-    if (mergeableBatchIds.has(recovery.batchId)) continue;
-    const job = claim({
-      batchId: recovery.batchId,
-      source: "stage_recovery",
-      execute: () => runRecoveredBatchLifecycle(recovery),
-      fallback: recovery,
     });
     if (job) return job;
   }
@@ -2106,6 +2341,7 @@ async function runFinalRepairAndReport() {
           ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
           ...normalizeScheduledGroups(repairState.scheduledGroups || []).flat(),
           ...(repairState.mergeableBatches || []),
+          ...(repairState.implementationRecoveryBatches || []).map(item => item && item.batchId),
           ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
         ].filter(isValidBatchId));
         for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
