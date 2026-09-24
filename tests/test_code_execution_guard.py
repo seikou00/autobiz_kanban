@@ -51,6 +51,26 @@ class CodeExecutionGuardTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_parallel_batch(self, *, review_status: str, test_status: str, active_stage: str) -> None:
+        manifest = self.feature_dir / ".parallel-runs" / "cw-007" / "manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            json.dumps({
+                "runId": "cw-007",
+                "batches": {
+                    "B005": {
+                        "worktreePath": str(self.code_worktree),
+                        "activeStage": active_stage,
+                        "stageStates": {
+                            "review": {"status": review_status},
+                            "test": {"status": test_status},
+                        },
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
     def _execute(self, command: str, **tool_input: str) -> str | None:
         return guard({
             "tool_name": "execute",
@@ -121,6 +141,21 @@ class CodeExecutionGuardTest(unittest.TestCase):
         self._write_run(self.code_worktree, status="implemented")
         with mock.patch.dict(os.environ, self.env, clear=False):
             reason = self._execute("mvn compile", cwd=str(self.code_worktree / "module"))
+        self.assertIsNone(reason)
+
+    def test_blocks_compile_during_review_after_code_task_has_finished(self) -> None:
+        self._write_run(self.code_worktree, status="implemented")
+        self._write_parallel_batch(review_status="running", test_status="pending", active_stage="review")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            reason = self._execute("mvn compile", cwd=str(self.code_worktree / "module"))
+        self.assertIn("BATCH_STAGE_VALIDATION_FORBIDDEN", reason)
+        self.assertIn("cw-007:B005", reason)
+
+    def test_allows_compile_only_while_review_passed_test_is_running(self) -> None:
+        self._write_run(self.code_worktree, status="implemented")
+        self._write_parallel_batch(review_status="passed", test_status="running", active_stage="test")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            reason = self._execute("mvn test", cwd=str(self.code_worktree / "module"))
         self.assertIsNone(reason)
 
 

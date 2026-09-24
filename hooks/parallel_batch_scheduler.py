@@ -25,6 +25,7 @@ from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
+    batch_occupies_scheduler_slot,
     batch_write_sets_conflict,
     create_manifest,
     DELIVERY_STAGES,
@@ -58,22 +59,6 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".autobizdevops/features/*/.parallel-runs/",
 )
 MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
-
-
-def _batch_occupies_scheduler_slot(batch: object) -> bool:
-    """Count the full lifecycle, including Review/UTest after seal, as active."""
-    if not isinstance(batch, dict):
-        return False
-    status = batch.get("status")
-    if status in {"retry_pending", "failed", "blocked", "cancelled", "merged"}:
-        return False
-    if status in {"leased", "running"}:
-        return True
-    states = batch.get("stageStates")
-    return isinstance(states, dict) and any(
-        isinstance(state, dict) and state.get("status") == "running"
-        for state in states.values()
-    )
 
 
 def _parse_timestamp_epoch(value: object) -> float | None:
@@ -145,14 +130,16 @@ def _lease_staleness_reason_locked(
                 path.unlink()
             return "lease_expired"
 
-        # A lease that survives beyond the configured Batch deadline is
-        # still not allowed to reserve a scheduler slot forever.  `startedAt`
-        # is persisted in the manifest once implementation begins; the lease
-        # timestamp covers a worker that dies during initial provisioning.
-        started_epoch = _parse_timestamp_epoch(batch.get("startedAt"))
-        if started_epoch is None:
-            started_epoch = _parse_timestamp_epoch(lease.get("startedAt"))
-        if started_epoch is not None and now - started_epoch >= max(1, timeout_seconds):
+        # Each acquire begins a new implementation or repair attempt. The
+        # original Batch startedAt can be hours old by the time Fix begins.
+        # Honour the guarded lease's effective TTL for older run manifests.
+        started_epoch = _parse_timestamp_epoch(lease.get("startedAt"))
+        try:
+            lease_ttl = int(lease.get("ttlSeconds", 0))
+        except (TypeError, ValueError):
+            lease_ttl = 0
+        attempt_timeout = max(1, timeout_seconds, lease_ttl)
+        if started_epoch is not None and now - started_epoch >= attempt_timeout:
             if path.exists():
                 path.unlink()
             return "batch_timeout"
@@ -980,14 +967,14 @@ def schedule(
         # continue.  Dependency release remains enforced by `ready_batches`.
         unresolved_batches, unresolved_trains, withheld_batches = _unresolved_state(manifest)
         batches = manifest.get("batches", {})
-        # Once a Batch has been classified as an in-place implementation
-        # recovery, it must never silently fall back into ``ready`` just
-        # because the retained worktree later fails a verification check.  A
-        # fresh provision at that point could overwrite the exact evidence we
-        # were trying to preserve.  Keep the Batch out of the normal dispatch
-        # queue and expose the failed verification as an explicit exclusion.
+        # Recheck an in-place implementation recovery on every dispatch.
+        # If it is no longer safe to continue in the old checkout, route the
+        # idle, unsealed Batch through provision instead.  Provision archives
+        # the old checkout before replacing it; a stale recovery marker must
+        # not strand the Batch outside both runnable queues.
         all_implementation_recovery: list[str] = []
         implementation_recovery_details: dict[str, dict[str, Any]] = {}
+        recovery_reprovisioned: list[str] = []
         for raw_batch_id, batch in batches.items():
             if not isinstance(batch, dict) or str(raw_batch_id) in withheld_batches:
                 continue
@@ -995,10 +982,22 @@ def schedule(
             if batch.get("status") != "pending" or recovery.get("kind") != "implementation_resume":
                 continue
             batch_id = str(raw_batch_id)
-            all_implementation_recovery.append(batch_id)
             details = _implementation_resume_details(manifest, str(raw_batch_id), batch)
             if details is None:
+                if batch.get("lease") is not None or batch.get("commitSha"):
+                    all_implementation_recovery.append(batch_id)
+                    continue
+                batch["recovery"] = {
+                    **recovery,
+                    "kind": "retry_dispatch",
+                    "resumeFromStage": None,
+                    "preserveWorktree": False,
+                    "reprovision": True,
+                }
+                batch["recovery"].pop("implementationResume", None)
+                recovery_reprovisioned.append(batch_id)
                 continue
+            all_implementation_recovery.append(batch_id)
             implementation_recovery_details[batch_id] = details
         implementation_recovery_ids = set(all_implementation_recovery)
         ready = [
@@ -1108,19 +1107,19 @@ def schedule(
         active = sum(
             1
             for item in manifest.get("batches", {}).values()
-            if _batch_occupies_scheduler_slot(item)
+            if batch_occupies_scheduler_slot(item)
         )
         active_outside_scope = sum(
             1
             for item in manifest.get("batches", {}).values()
-            if _batch_occupies_scheduler_slot(item)
+            if batch_occupies_scheduler_slot(item)
             and str(item.get("workspaceRef") or item.get("repositoryRef")) not in allowed_refs
         ) if workspace_refs else 0
         slots = max(0, max_parallel - active)
         active_batch_ids = sorted(
             str(batch_id)
             for batch_id, item in manifest.get("batches", {}).items()
-            if _batch_occupies_scheduler_slot(item)
+            if batch_occupies_scheduler_slot(item)
         )
         runnable = select_runnable_batches(
             manifest,
@@ -1202,6 +1201,13 @@ def schedule(
                 })
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
+        for batch_id in recovery_reprovisioned:
+            append_event(
+                workspace, feature, run_id,
+                "batch_implementation_recovery_reprovision_scheduled",
+                batchId=batch_id,
+                reason="worktree_verification_failed",
+            )
         return {
             "runId": run_id,
             "status": manifest.get("status"),
@@ -1765,30 +1771,33 @@ def resume_run(
                 "kind": (
                     "implementation_resume"
                     if implementation_resume is not None
-                    else recovery.get(
-                        "kind",
-                        "integration_resume"
-                        if recovery.get("resumeStatus") == "ready_to_candidate"
-                        else "stage_resume"
-                        if batch.get("commitSha")
-                        else "retry_dispatch",
-                    )
+                    else "integration_resume"
+                    if recovery.get("resumeStatus") == "ready_to_candidate"
+                    else "stage_resume"
+                    if batch.get("commitSha")
+                    else "retry_dispatch"
                 ),
-                "resumeFromStage": "implement" if implementation_resume is not None else recovery.get("resumeFromStage"),
+                "resumeFromStage": (
+                    "implement" if implementation_resume is not None
+                    else recovery.get("resumeFromStage") if batch.get("commitSha")
+                    else None
+                ),
                 "preserveWorktree": (
                     True
                     if implementation_resume is not None
-                    else recovery.get("preserveWorktree", bool(batch.get("commitSha")))
+                    else bool(batch.get("commitSha"))
                 ),
                 "reprovision": (
                     False
                     if implementation_resume is not None
-                    else recovery.get("reprovision", not bool(batch.get("commitSha")))
+                    else not bool(batch.get("commitSha"))
                 ),
                 **({"implementationResume": implementation_resume} if implementation_resume is not None else {}),
                 "status": "rescheduled",
                 "rescheduledAt": manifest.get("updatedAt"),
             }
+            if implementation_resume is None:
+                batch["recovery"].pop("implementationResume", None)
             retry_resumed.append(str(batch_id))
         # Persist the recovery contract for every sealed delivery that still
         # has a stage to finish.  This is intentionally distinct from a
@@ -1958,7 +1967,7 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--run-id", required=True)
         if name in {"create", "ensure"}:
             item.add_argument("--max-parallel", type=int, default=5)
-            item.add_argument("--timeout-seconds", type=int, default=3600)
+            item.add_argument("--timeout-seconds", type=int, default=4 * 60 * 60)
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
             item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")
             item.add_argument("--task-card-id", required=True, help="task card selected before the workflow starts")

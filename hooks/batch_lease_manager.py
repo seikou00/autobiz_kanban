@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 leaseGuard=(
                     {
                         "mode": "command_boundary_renewal",
-                        "ttlSeconds": args.ttl_seconds,
+                        "ttlSeconds": lease["ttlSeconds"],
                         "renewedBy": "lease-bearing plugin commands",
                     }
                     if args.lease_guard

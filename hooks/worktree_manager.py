@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.parallel_runtime import append_event, global_worktrees_root, load_manifest, renew_lease, run_lock, save_manifest
+from hooks.parallel_runtime import append_event, global_worktrees_root, lease_path, load_manifest, renew_lease, run_dir, run_lock, save_manifest
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
 from hooks.plan_write_ownership import is_test_asset_path
 from hooks.repository_snapshot import (
@@ -300,6 +303,138 @@ def _is_recoverable_incomplete_worktree(readiness: dict[str, Any]) -> bool:
     return bool({"index_missing", "worktree_initializing_locked"} & set(issues))
 
 
+def _is_recoverable_stale_base(
+    batch: dict[str, Any],
+    worktree: Path,
+    expected_path: Path,
+    readiness: dict[str, Any],
+) -> bool:
+    """Recreate an idle Batch checkout whose HEAD no longer matches the run."""
+    issues = readiness.get("issues")
+    actual_head = readiness.get("actualHead")
+    expected_head = readiness.get("expectedHead")
+    if (
+        worktree != expected_path
+        or not isinstance(issues, list)
+        or "head_mismatch" not in issues
+        or set(issues) - {"head_mismatch", "working_tree_dirty"}
+        or batch.get("status") not in {"pending", "retry_pending"}
+        or batch.get("lease") is not None
+        or batch.get("commitSha")
+        or not isinstance(actual_head, str)
+        or not isinstance(expected_head, str)
+    ):
+        return False
+    return True
+
+
+def _is_recoverable_retry_checkout(
+    batch: dict[str, Any],
+    worktree: Path,
+    expected_path: Path,
+    readiness: dict[str, Any],
+) -> bool:
+    """Replace a retry's unusable checkout only after its exact ownership is verified.
+
+    Fresh provision has no retry marker and keeps its existing behavior.  A
+    valid dirty checkout should already have been selected for in-place
+    implementation recovery; a retry_dispatch marker means that verification
+    failed and the old contents must be archived before a new provision.
+    """
+    recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+    issues = readiness.get("issues")
+    return bool(
+        recovery.get("kind") == "retry_dispatch"
+        and worktree == expected_path
+        and isinstance(issues, list)
+        and issues
+        and not set(issues) - {"head_mismatch", "working_tree_dirty"}
+        and batch.get("status") in {"pending", "retry_pending"}
+        and batch.get("lease") is None
+        and not batch.get("commitSha")
+        and isinstance(readiness.get("actualHead"), str)
+        and isinstance(readiness.get("expectedHead"), str)
+    )
+
+
+def _archive_stale_worktree_state(
+    artifact_workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    git_root: Path,
+    worktree: Path,
+    readiness: dict[str, Any],
+) -> str:
+    """Preserve old HEAD and Git-visible changes before replacing a checkout."""
+    commands = (
+        ("diff", "--name-only", "-z", "--no-renames", "HEAD"),
+        ("diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"),
+        ("diff", "--name-only", "-z", "--no-renames"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+    )
+    changed: set[str] = set()
+    for args in commands:
+        result = subprocess.run(["git", *args], cwd=worktree, capture_output=True)
+        if result.returncode != 0:
+            raise ValueError("parallel_worktree_recovery_archive_scan_failed:" + os.fsdecode(result.stderr))
+        changed.update(os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw)
+    if "working_tree_dirty" in readiness.get("issues", []) and not changed:
+        raise ValueError("parallel_worktree_recovery_archive_empty")
+    patches: dict[str, bytes] = {}
+    for name, args in (
+        ("tracked.patch", ("diff", "--binary", "--no-ext-diff", "HEAD")),
+        ("staged.patch", ("diff", "--binary", "--no-ext-diff", "--cached", "HEAD")),
+        ("unstaged.patch", ("diff", "--binary", "--no-ext-diff")),
+    ):
+        diff = subprocess.run(["git", *args], cwd=worktree, capture_output=True)
+        if diff.returncode != 0:
+            raise ValueError("parallel_worktree_recovery_archive_diff_failed:" + os.fsdecode(diff.stderr))
+        patches[name] = diff.stdout
+
+    archive_id = uuid.uuid4().hex
+    archive = run_dir(artifact_workspace, feature, run_id) / "recovery-worktrees" / f"{batch_id}-{archive_id}"
+    files_root = archive / "files"
+    saved: list[str] = []
+    deleted: list[str] = []
+    for raw in sorted(changed):
+        relative = Path(raw)
+        if relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts:
+            raise ValueError("parallel_worktree_recovery_archive_path_invalid:" + raw)
+        source = worktree / relative
+        if not source.exists() and not source.is_symlink():
+            deleted.append(raw)
+            continue
+        destination = files_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir() and not source.is_symlink():
+            shutil.copytree(source, destination, symlinks=True)
+        else:
+            shutil.copy2(source, destination, follow_symlinks=False)
+        saved.append(raw)
+    archive.mkdir(parents=True, exist_ok=True)
+    for name, data in patches.items():
+        (archive / name).write_bytes(data)
+    recovery_ref = (
+        f"refs/autodev/recovery/{_branch_component(run_id)}/"
+        f"{_branch_component(batch_id)}/{archive_id}"
+    )
+    saved_head = _git(git_root, "update-ref", recovery_ref, str(readiness["actualHead"]))
+    if saved_head.returncode != 0:
+        raise ValueError("parallel_worktree_recovery_ref_failed:" + saved_head.stderr.strip())
+    (archive / "recovery.json").write_text(json.dumps({
+        "runId": run_id,
+        "batchId": batch_id,
+        "originalWorktree": str(worktree),
+        "oldHead": readiness.get("actualHead"),
+        "expectedHead": readiness.get("expectedHead"),
+        "recoveryRef": recovery_ref,
+        "savedPaths": saved,
+        "deletedPaths": deleted,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(archive)
+
+
 def _discard_incomplete_worktree(
     git_root: Path,
     worktree: Path,
@@ -381,7 +516,12 @@ def provision_parallel_worktree(
         branch_name = "autodev/{}/{}/{}".format(
             _branch_component(feature), _branch_component(run_id), _branch_component(batch_id)
         )
+        target = _native_worktree_path(artifact_workspace, feature, run_id, repository_ref, batch_id)
+        lease_held = batch.get("lease") is not None or lease_path(
+            artifact_workspace, feature, run_id, batch_id
+        ).is_file()
         recovered_incomplete = False
+        recovery_archive_path: str | None = None
 
         raw_path = batch.get("worktreePath")
         if isinstance(raw_path, str) and raw_path.strip():
@@ -402,12 +542,35 @@ def provision_parallel_worktree(
                             "branchName": expected,
                             "reused": True,
                         }
-                    if batch.get("lease") is not None or not _is_recoverable_incomplete_worktree(readiness):
+                    recoverable_stale_base = (
+                        expected == branch_name
+                        and _is_recoverable_stale_base(batch, existing, target, readiness)
+                    )
+                    recoverable_retry = (
+                        expected == branch_name
+                        and _is_recoverable_retry_checkout(batch, existing, target, readiness)
+                    )
+                    if lease_held or not (
+                        _is_recoverable_incomplete_worktree(readiness)
+                        or recoverable_stale_base or recoverable_retry
+                    ):
                         return {
                             "success": False,
                             "error": f"parallel_worktree_incomplete:{batch_id}",
                             "readiness": readiness,
                         }
+                    if recoverable_stale_base or recoverable_retry:
+                        try:
+                            recovery_archive_path = _archive_stale_worktree_state(
+                                artifact_workspace, feature, run_id, batch_id, git_root, existing, readiness
+                            )
+                            batch["recoveryArchivePath"] = recovery_archive_path
+                        except (OSError, ValueError) as exc:
+                            return {
+                                "success": False,
+                                "error": f"parallel_worktree_recovery_archive_failed:{batch_id}:{exc}",
+                                "readiness": readiness,
+                            }
                     discarded = _discard_incomplete_worktree(git_root, existing, expected)
                     if not discarded["success"]:
                         return {
@@ -423,7 +586,6 @@ def provision_parallel_worktree(
                     return {"success": False, "error": f"parallel_worktree_stale:{batch_id}"}
             except (ValueError, OSError):
                 pass
-        target = _native_worktree_path(artifact_workspace, feature, run_id, repository_ref, batch_id)
         if target.exists():
             candidate = target
             # ``git worktree add`` and ``save_manifest`` are separate durable
@@ -442,6 +604,8 @@ def provision_parallel_worktree(
             except (ValueError, OSError):
                 return {"success": False, "error": f"parallel_worktree_path_occupied:{candidate}"}
             readiness = _worktree_readiness(candidate, head)
+            recoverable_stale_base = _is_recoverable_stale_base(batch, candidate, target, readiness)
+            recoverable_retry = _is_recoverable_retry_checkout(batch, candidate, target, readiness)
             if readiness["ready"]:
                 batch.update({
                     "worktreePath": str(candidate),
@@ -450,7 +614,22 @@ def provision_parallel_worktree(
                 })
                 save_manifest(artifact_workspace, feature, run_id, manifest)
                 reconciled = True
-            elif _is_recoverable_incomplete_worktree(readiness):
+            elif not lease_held and (
+                _is_recoverable_incomplete_worktree(readiness)
+                or recoverable_stale_base or recoverable_retry
+            ):
+                if recoverable_stale_base or recoverable_retry:
+                    try:
+                        recovery_archive_path = _archive_stale_worktree_state(
+                            artifact_workspace, feature, run_id, batch_id, git_root, candidate, readiness
+                        )
+                        batch["recoveryArchivePath"] = recovery_archive_path
+                    except (OSError, ValueError) as exc:
+                        return {
+                            "success": False,
+                            "error": f"parallel_worktree_recovery_archive_failed:{batch_id}:{exc}",
+                            "readiness": readiness,
+                        }
                 discarded = _discard_incomplete_worktree(git_root, candidate, branch_name)
                 if not discarded["success"]:
                     return {
@@ -511,6 +690,7 @@ def provision_parallel_worktree(
         owner="plugin",
         reclaimedOrphanedBranch=reclaimed_orphaned_branch,
         recoveredIncomplete=recovered_incomplete,
+        recoveryArchivePath=recovery_archive_path,
     )
     return {
         "success": True,

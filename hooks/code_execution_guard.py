@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Block validation commands inside an active Code task run.
+"""Allow validation commands in a Batch worktree only during its UTest stage.
 
 The fixed Code Workflow deliberately gives UTest exclusive ownership of
 compilation, build, lint, typecheck, test and E2E commands.  Prompt wording is
-not sufficient by itself: an implementation agent can still decide to run a
-local build "for verification".  This pre-tool hook identifies the active
-task's recorded worktree and rejects those commands only in that worktree, so a
-different Batch already in UTest remains unaffected.
+not sufficient by itself: an implementation or review agent can still decide
+to run a local build "for verification". This pre-tool hook identifies both
+active Code task worktrees and fixed-workflow Batch worktrees. A Batch may run
+validation only after Review passed and while its durable ``test`` stage is
+running; all other Batch stages, including Review, are blocked.
 """
 
 from __future__ import annotations
@@ -108,6 +109,50 @@ def _active_code_workspaces() -> dict[str, str]:
     return active
 
 
+def _parallel_batch_workspaces() -> dict[str, dict[str, str | bool]]:
+    """Return fixed-workflow Batch worktrees and their durable test authority.
+
+    ``task_runner.py finish-implementation`` deliberately completes the Code
+    task before Review begins. Looking only at ``.task-runs`` therefore leaves
+    a gap in Review. The parallel manifest is the durable authority for the
+    Batch stage, including across agent restarts.
+    """
+    feature_dir = _feature_dir()
+    if feature_dir is None:
+        return {}
+
+    batches_by_workspace: dict[str, dict[str, str | bool]] = {}
+    for manifest_path in feature_dir.glob(".parallel-runs/*/manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        run_id = str(manifest.get("runId") or manifest_path.parent.name)
+        batches = manifest.get("batches")
+        if not isinstance(batches, dict):
+            continue
+        for batch_id, batch in batches.items():
+            if not isinstance(batch, dict):
+                continue
+            workspace = _normalize_path(batch.get("worktreePath"))
+            if not workspace:
+                continue
+            states = _as_dict(batch.get("stageStates"))
+            review = _as_dict(states.get("review"))
+            test = _as_dict(states.get("test"))
+            batches_by_workspace[workspace] = {
+                "identity": f"{run_id}:{batch_id}",
+                "testRunning": (
+                    review.get("status") == "passed"
+                    and test.get("status") == "running"
+                ),
+                "stage": str(batch.get("activeStage") or "none"),
+            }
+    return batches_by_workspace
+
+
 def _command_workspace_matches(
     payload: dict[str, Any], tool_input: dict[str, Any], command: str, workspace: str
 ) -> bool:
@@ -128,7 +173,7 @@ def _command_workspace_matches(
 
 
 def guard(payload: dict[str, Any]) -> str | None:
-    """Return a blocking reason for Code-stage validation, else ``None``."""
+    """Return a blocking reason unless validation is authorized by UTest."""
     tool_name = str(payload.get("tool_name") or payload.get("toolName") or "").lower()
     if tool_name not in {"execute", "bash", "shell"}:
         return None
@@ -136,6 +181,15 @@ def guard(payload: dict[str, Any]) -> str | None:
     command = _command(payload, tool_input)
     if not command or not FORBIDDEN_COMMAND_RE.search(command):
         return None
+    for workspace, batch in _parallel_batch_workspaces().items():
+        if not _command_workspace_matches(payload, tool_input, command, workspace):
+            continue
+        if batch["testRunning"] is True:
+            return None
+        return (
+            "BATCH_STAGE_VALIDATION_FORBIDDEN: Batch {identity} 当前阶段为 {stage}；"
+            "构建、编译、typecheck、lint、测试和 E2E 命令仅允许在 Review 已通过且 test 阶段正在运行时执行。"
+        ).format(**batch)
     for workspace, run_identity in _active_code_workspaces().items():
         if _command_workspace_matches(payload, tool_input, command, workspace):
             return (

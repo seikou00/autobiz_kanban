@@ -146,9 +146,9 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             },
             "workflowHostGitRoot": str(code_workspace.resolve()),
             "maxParallel": 5,
-            "timeoutPerBatch": 3600,
+            "timeoutPerBatch": 4 * 60 * 60,
             "runtimeConfig": {
-                "parallelSchedulingMode": "conservative",
+                "parallelSchedulingMode": "optimistic",
                 "maxParallel": 5,
                 "conflictResolution": {
                     "maxAttempts": 2,
@@ -165,8 +165,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         execution_plan = result["batchExecutionPlan"]
         self.assertEqual(execution_plan["maxParallel"], 5)
         self.assertEqual([item["id"] for item in execution_plan["batches"]], ["B001", "B002"])
-        self.assertEqual(execution_plan["waves"][0]["batchIds"], ["B001"])
-        self.assertEqual(execution_plan["waves"][1]["batchIds"], ["B002"])
+        self.assertEqual(execution_plan["waves"][0]["batchIds"], ["B001", "B002"])
         self.assertTrue(any("合并" in note and "下游" in note for note in execution_plan["notes"]))
         load_bundle.assert_called_once_with(feature_dir.resolve())
         validate.assert_called_once_with(artifact_workspace.resolve(), "three-paths")

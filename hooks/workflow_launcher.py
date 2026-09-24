@@ -41,7 +41,7 @@ from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root 
 WORKFLOW_SCRIPT_NAME = "code-batched-execution.workflow.js"
 WORKFLOW_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
 DEFAULT_WORKFLOW_MAX_PARALLEL = 5
-DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 3600
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 4 * 60 * 60
 
 
 def _plan_workspace_refs(bundle: Any) -> set[str]:

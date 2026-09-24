@@ -13,7 +13,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from hooks.batch_merger import _merge_probe, preflight_merge, recover_plan_state_after_merge
-from hooks.parallel_batch_lifecycle import cleanup_run, rollback_run
+from hooks.parallel_batch_lifecycle import cleanup_run, monitor_run, rollback_run
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
     acquire_lease,
@@ -31,6 +31,7 @@ from hooks.parallel_runtime import (
 from hooks.repository_snapshot import current_git_branch, git_status_porcelain
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import (
+    _lease_staleness_reason_locked,
     assert_batch_worktree_isolated,
     create_run as _create_run,
     ensure_run,
@@ -531,13 +532,24 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
             preserved = (worktree / "interrupted-implementation.txt").is_file()
 
-            # A later mismatch must remain protected as an implementation
-            # recovery problem; it may not fall through to a new provision.
+            # A later base change invalidates in-place continuation.  The
+            # scheduler must route it to provision, which archives the old
+            # dirty checkout before replacing it.
+            (repo / "new-base.txt").write_text("next merge wave\n", encoding="utf-8")
+            _git(repo, "add", "new-base.txt")
+            _git(repo, "commit", "-m", "advance base")
+            new_head = _git(repo, "rev-parse", "HEAD")
             invalid_manifest = load_manifest(workspace, "alpha", run_id)
             repository_ref = invalid_manifest["batches"]["B001"]["repositoryRef"]
-            invalid_manifest["repositories"][repository_ref]["headSha"] = "0" * 40
+            invalid_manifest["repositories"][repository_ref]["headSha"] = new_head
             save_manifest(workspace, "alpha", run_id, invalid_manifest)
             guarded = schedule(workspace, "alpha", run_id)
+            reprovisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            recovery_path = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recoveryArchivePath"]
+            archived_implementation = (
+                Path(recovery_path) / "files" / "interrupted-implementation.txt"
+            ).read_text(encoding="utf-8")
+            new_worktree_head = _git(worktree, "rev-parse", "HEAD")
 
         self.assertEqual(batch["status"], "pending")
         self.assertEqual(batch["recovery"]["kind"], "implementation_resume")
@@ -548,11 +560,13 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
         self.assertEqual(resumed["implementationRecoveryBatches"][0]["recoveryKind"], "implementation_resume")
         self.assertFalse(resumed["implementationRecoveryBatches"][0]["reprovision"])
         self.assertTrue(preserved)
-        self.assertEqual(guarded["scheduledGroups"], [])
+        self.assertEqual(guarded["scheduledGroups"], [["B001"]])
         self.assertEqual(guarded["implementationRecoveryBatches"], [])
-        self.assertEqual(guarded["excludedImplementationRecoveryBatches"], [
-            {"batchId": "B001", "reason": "worktree_verification_failed"},
-        ])
+        self.assertEqual(guarded["excludedImplementationRecoveryBatches"], [])
+        self.assertTrue(reprovisioned["success"], reprovisioned)
+        self.assertFalse(reprovisioned["reused"])
+        self.assertEqual(archived_implementation, "preserve this implementation\n")
+        self.assertEqual(new_worktree_head, new_head)
 
     def test_manual_resume_resets_retry_exhausted_batch(self) -> None:
         """An explicit user retry is a fresh admission, not a third automatic retry."""
@@ -1174,6 +1188,218 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
                 self.assertTrue(removed["success"], removed)
 
+    def test_provision_rebuilds_clean_batch_worktree_with_unrecorded_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(
+                workspace, "alpha", max_parallel=1, timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                (worktree / "unrecorded.txt").write_text("recover this commit\n", encoding="utf-8")
+                _git(worktree, "add", "unrecorded.txt")
+                _git(worktree, "commit", "-m", "unrecorded delivery")
+                old_head = _git(worktree, "rev-parse", "HEAD")
+                (repo / "new-base.txt").write_text("next merge wave\n", encoding="utf-8")
+                _git(repo, "add", "new-base.txt")
+                _git(repo, "commit", "-m", "advance base")
+                new_head = _git(repo, "rev-parse", "HEAD")
+                manifest = load_manifest(workspace, "alpha", run_id)
+                manifest["repositories"]["default"]["headSha"] = new_head
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                # A crashed manifest write can leave a live lease file without
+                # matching metadata. Provision must not remove that checkout.
+                orphaned_lease = lease_path(workspace, "alpha", run_id, "B001")
+                orphaned_lease.parent.mkdir(parents=True, exist_ok=True)
+                orphaned_lease.write_text("{}", encoding="utf-8")
+                occupied = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertFalse(occupied["success"])
+                self.assertEqual(occupied["error"], "parallel_worktree_incomplete:B001")
+                orphaned_lease.unlink()
+
+                rebuilt = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(rebuilt["success"], rebuilt)
+                self.assertFalse(rebuilt["reused"])
+                self.assertTrue(rebuilt["recoveredIncomplete"])
+                self.assertEqual(_git(worktree, "rev-parse", "HEAD"), new_head)
+                recovery_path = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recoveryArchivePath"]
+                recovery = json.loads((Path(recovery_path) / "recovery.json").read_text(encoding="utf-8"))
+                self.assertEqual(_git(repo, "rev-parse", recovery["recoveryRef"]), old_head)
+            finally:
+                remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+
+    def test_provision_archives_dirty_batch_worktree_before_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(
+                workspace, "alpha", max_parallel=1, timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                (worktree / "unfinished.txt").write_text("preserve me\n", encoding="utf-8")
+                (worktree / "existing.txt").write_text("staged implementation\n", encoding="utf-8")
+                _git(worktree, "add", "existing.txt")
+                (worktree / "existing.txt").write_text("changed implementation\n", encoding="utf-8")
+                (repo / "new-base.txt").write_text("next merge wave\n", encoding="utf-8")
+                _git(repo, "add", "new-base.txt")
+                _git(repo, "commit", "-m", "advance base")
+                manifest = load_manifest(workspace, "alpha", run_id)
+                new_head = _git(repo, "rev-parse", "HEAD")
+                manifest["repositories"]["default"]["headSha"] = new_head
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                result = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(result["success"], result)
+                archive = Path(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recoveryArchivePath"])
+                self.assertEqual((archive / "files" / "unfinished.txt").read_text(encoding="utf-8"), "preserve me\n")
+                self.assertEqual((archive / "files" / "existing.txt").read_text(encoding="utf-8"), "changed implementation\n")
+                self.assertIn("changed implementation", (archive / "tracked.patch").read_text(encoding="utf-8"))
+                self.assertIn("staged implementation", (archive / "staged.patch").read_text(encoding="utf-8"))
+                self.assertIn("changed implementation", (archive / "unstaged.patch").read_text(encoding="utf-8"))
+                self.assertEqual(_git(worktree, "rev-parse", "HEAD"), new_head)
+                self.assertFalse((worktree / "unfinished.txt").exists())
+            finally:
+                remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+
+    def test_legacy_retry_dispatch_rebuilds_dirty_same_head_worktree(self) -> None:
+        """An old retry marker can reprovision even when only dirty files changed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(
+                workspace, "alpha", max_parallel=1, timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                (worktree / "unfinished.txt").write_text("old implementation\n", encoding="utf-8")
+                manifest = load_manifest(workspace, "alpha", run_id)
+                manifest["batches"]["B001"]["recovery"] = {
+                    "kind": "retry_dispatch", "reprovision": True,
+                    "preserveWorktree": False,
+                }
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                rebuilt = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(rebuilt["success"], rebuilt)
+                self.assertFalse(rebuilt["reused"])
+                self.assertFalse((worktree / "unfinished.txt").exists())
+                archive = Path(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recoveryArchivePath"])
+                self.assertEqual(
+                    (archive / "files" / "unfinished.txt").read_text(encoding="utf-8"),
+                    "old implementation\n",
+                )
+            finally:
+                remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+
+    def test_resume_downgrades_stale_implementation_marker_to_reprovision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(
+                workspace, "alpha", max_parallel=1, timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                (worktree / "unfinished.txt").write_text("in-flight implementation\n", encoding="utf-8")
+                mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="worker_interrupted")
+                self.assertEqual(
+                    load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recovery"]["kind"],
+                    "implementation_resume",
+                )
+                (repo / "new-base.txt").write_text("next merge wave\n", encoding="utf-8")
+                _git(repo, "add", "new-base.txt")
+                _git(repo, "commit", "-m", "advance base")
+                manifest = load_manifest(workspace, "alpha", run_id)
+                manifest["repositories"]["default"]["headSha"] = _git(repo, "rev-parse", "HEAD")
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                resumed = resume_run(workspace, "alpha", run_id)
+                recovery = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recovery"]
+                self.assertEqual(resumed["scheduledGroups"], [["B001"]])
+                self.assertEqual(resumed["implementationRecoveryBatches"], [])
+                self.assertEqual(recovery["kind"], "retry_dispatch")
+                self.assertTrue(recovery["reprovision"])
+                self.assertFalse(recovery["preserveWorktree"])
+                self.assertNotIn("implementationResume", recovery)
+            finally:
+                remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+
+    def test_fresh_provision_does_not_discard_dirty_same_head_worktree(self) -> None:
+        """A new run does not gain retry-only destructive recovery behavior."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(
+                workspace, "alpha", max_parallel=1, timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                (worktree / "unfinished.txt").write_text("keep fresh checkout\n", encoding="utf-8")
+                repeated = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertFalse(repeated["success"])
+                self.assertEqual(repeated["error"], "parallel_worktree_incomplete:B001")
+                self.assertEqual(
+                    (worktree / "unfinished.txt").read_text(encoding="utf-8"),
+                    "keep fresh checkout\n",
+                )
+            finally:
+                remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+
+    def test_provision_rebuilds_unbound_worktree_from_old_merge_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(
+                workspace, "alpha", max_parallel=1, timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            try:
+                (worktree / "unfinished.txt").write_text("unbound change\n", encoding="utf-8")
+                (repo / "new-base.txt").write_text("next merge wave\n", encoding="utf-8")
+                _git(repo, "add", "new-base.txt")
+                _git(repo, "commit", "-m", "advance base")
+                new_head = _git(repo, "rev-parse", "HEAD")
+                manifest = load_manifest(workspace, "alpha", run_id)
+                manifest["repositories"]["default"]["headSha"] = new_head
+                batch = manifest["batches"]["B001"]
+                batch["worktreePath"] = None
+                batch["branchName"] = None
+                batch.pop("worktreeOwner", None)
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                rebuilt = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(rebuilt["success"], rebuilt)
+                self.assertFalse(rebuilt["reused"])
+                self.assertEqual(_git(worktree, "rev-parse", "HEAD"), new_head)
+                recovery_path = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["recoveryArchivePath"]
+                self.assertEqual(
+                    (Path(recovery_path) / "files" / "unfinished.txt").read_text(encoding="utf-8"),
+                    "unbound change\n",
+                )
+            finally:
+                remove_parallel_worktree(workspace, "alpha", run_id, "B001", force=True)
+
     def test_plugin_worktree_manager_reclaims_unbound_branch_left_by_interrupted_provision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1545,6 +1771,46 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             time.sleep(1.05)
             self.assertTrue(reclaim_lease(workspace, feature, run, "B001"))
 
+    def test_guarded_lease_uses_current_attempt_not_original_batch_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature = "alpha"
+            run = "cw-repair-lease"
+            run_dir = workspace / ".autobizdevops" / "features" / feature / ".parallel-runs" / run
+            run_dir.mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"runId": run, "batches": {"B001": {
+                    "status": "pending", "lease": None,
+                    "startedAt": "2020-01-01T00:00:00Z",
+                }}}), encoding="utf-8",
+            )
+            lease = acquire_lease(workspace, feature, run, "B001", ttl_seconds=3600, lease_guard=True)
+            batch = load_manifest(workspace, feature, run)["batches"]["B001"]
+            self.assertEqual(lease["ttlSeconds"], 4 * 60 * 60)
+            self.assertIsNone(_lease_staleness_reason_locked(
+                workspace, feature, run, "B001", batch,
+                now=time.time() + 3601, timeout_seconds=3600,
+            ))
+
+    def test_monitor_counts_sealed_batch_running_utest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            run = "cw-test-active"
+            run_dir = workspace / ".autobizdevops" / "features" / "alpha" / ".parallel-runs" / run
+            run_dir.mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(json.dumps({
+                "runId": run,
+                "status": "running",
+                "batches": {"B001": {
+                    "status": "sealed",
+                    "activeStage": "test",
+                    "stageStates": {"test": {"status": "running"}},
+                }},
+            }), encoding="utf-8")
+            progress = monitor_run(workspace, "alpha", run)
+            self.assertEqual(progress["activeWorkers"], 1)
+            self.assertEqual(progress["activeBatchIds"], ["B001"])
+
     def test_lease_guard_does_not_require_a_background_child_process(self) -> None:
         """A completed acquire command remains valid without a shell child."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1594,6 +1860,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             payload = json.loads(acquired.stdout)
             token = payload["lease"]["ownerToken"]
             self.assertEqual(payload["leaseGuard"]["mode"], "command_boundary_renewal")
+            self.assertEqual(payload["lease"]["ttlSeconds"], 4 * 60 * 60)
+            self.assertEqual(payload["leaseGuard"]["ttlSeconds"], 4 * 60 * 60)
 
             try:
                 first_expiry = json.loads(lease_path(workspace, feature, run, "B001").read_text(encoding="utf-8"))["expiresEpoch"]

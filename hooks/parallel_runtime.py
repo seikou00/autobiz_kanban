@@ -31,6 +31,25 @@ from hooks.plan_json import (
 
 RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
+MIN_GUARDED_TTL_SECONDS = 4 * 60 * 60
+
+
+def batch_occupies_scheduler_slot(batch: object) -> bool:
+    """Count a Batch through implementation, Review, and UTest."""
+    if not isinstance(batch, dict):
+        return False
+    status = batch.get("status")
+    if status in {"retry_pending", "failed", "blocked", "cancelled", "merged"}:
+        return False
+    if status in {"leased", "running"}:
+        return True
+    states = batch.get("stageStates")
+    return isinstance(states, dict) and any(
+        isinstance(state, dict) and state.get("status") == "running"
+        for state in states.values()
+    )
+
+
 DELIVERY_STAGES = ("prepare", "implement", "review", "test")
 
 _PLAN_MUTABLE_KEYS = {
@@ -293,7 +312,7 @@ def create_manifest(
     run_id: str | None = None,
     *,
     max_parallel: int = 5,
-    timeout_seconds: int = 3600,
+    timeout_seconds: int = 4 * 60 * 60,
     repositories: dict[str, dict[str, Any]] | None = None,
     runtime_config: dict[str, Any] | None = None,
     task_card_id: str | None = None,
@@ -517,6 +536,11 @@ def acquire_lease(
     owner_token: str | None = None,
     lease_guard: bool = False,
 ) -> dict[str, Any]:
+    # Fixed-workflow agents may spend over an hour editing between plugin
+    # commands. A guarded lease must cover that normal execution window even
+    # when an older workflow snapshot still passes its legacy 3600s value.
+    if lease_guard:
+        ttl_seconds = max(ttl_seconds, MIN_GUARDED_TTL_SECONDS)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest.get("batches", {}).get(batch_id)
