@@ -286,9 +286,9 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 **重要**：支持修复 status = "implemented" 或 "done" 的任务。修复后，如果原状态是 "done"，会自动恢复为 "done" 状态。
 
-### 回检与交接
+### Code 收口
 
-本节完整协议在 `${pluginPath}/skills/references/review-protocol-code.md`：必须先读取并完整遵循该文件，不得凭记忆执行本节。
+代码审查由固定 Code Workflow 的每个 Batch `review` 子阶段完成；所有 Batch 合并后不再启动额外的 Code 回检。
 
 推进 `code_done` 前先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。
 

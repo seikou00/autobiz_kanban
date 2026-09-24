@@ -1,12 +1,4 @@
-"""回检与修复引导的契约测试。
-
-协议正文按阶段各成一份：skills/references/review-protocol-{specs,design,code}.md，
-三个 SKILL.md 只保留「读取并遵循」的指向。因此绝大多数语义断言打在**协议文件**上，
-而不是 SKILL.md 文本上；三份文件必须共有的骨架由 ReviewSkeletonIsUnifiedTest 守住。
-
-只钉语义标记，不锁整段文案。反向断言（assertNotIn）是重点：`ba3f473 -> 4ebed44`
-那次「回检四分类处置表」在合并中静默丢失，正是因为没有任何断言守着它。
-"""
+"""Design 回检和 Code Batch Review 的契约测试。"""
 
 from __future__ import annotations
 
@@ -23,23 +15,13 @@ if str(ROOT) not in sys.path:
 CODE_SKILL = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
 SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
 DESIGN_SKILL = ROOT / "skills" / "autodev" / "autodev-design" / "SKILL.md"
-SIMPLIFIER_AGENT = ROOT / "agents" / "code-simplifier.md"
-EXPLORE_AGENT = ROOT / "agents" / "explore.md"
 VERIFICATION_AGENT = ROOT / "agents" / "verification.md"
 DESIGN_CRITIC_AGENT = ROOT / "agents" / "critic_autodev_design_zh.md"
 BOARD_CONFIG = ROOT / "board_core" / "board_config.json"
 REFERENCES = ROOT / "skills" / "references"
 
-SKILL_BY_STAGE = {
-    "dev.specs": SPECS_SKILL,
-    "dev.design": DESIGN_SKILL,
-    "dev.code": CODE_SKILL,
-}
-PROTOCOL_BY_STAGE = {
-    "dev.specs": REFERENCES / "review-protocol-specs.md",
-    "dev.design": REFERENCES / "review-protocol-design.md",
-    "dev.code": REFERENCES / "review-protocol-code.md",
-}
+SKILL_BY_STAGE = {"dev.design": DESIGN_SKILL}
+PROTOCOL_BY_STAGE = {"dev.design": REFERENCES / "review-protocol-design.md"}
 STAGES = tuple(SKILL_BY_STAGE)
 
 
@@ -64,7 +46,7 @@ def _dev_code_subagents() -> dict:
 
 
 class ProtocolLivesInItsOwnFileTest(unittest.TestCase):
-    """每个阶段一份协议文件，SKILL.md 只留指向，不复制正文。"""
+    """Design 的回检协议独立存放。"""
 
     def test_every_stage_skill_points_at_its_protocol_file(self) -> None:
         for stage, skill_path in SKILL_BY_STAGE.items():
@@ -101,7 +83,7 @@ class ProtocolLivesInItsOwnFileTest(unittest.TestCase):
                 self.assertIn(f"# 回检协议 · {stage}", body)
 
     def test_merged_protocol_and_renderer_are_retired(self) -> None:
-        """恢复任何一个都会让「三份文件各自可读」的前提失效。"""
+        """旧的合并协议和渲染器不再使用。"""
         self.assertFalse((REFERENCES / "review-protocol.md").exists())
         self.assertFalse((ROOT / "hooks" / "render_review_protocol.py").exists())
 
@@ -112,7 +94,7 @@ class ProtocolLivesInItsOwnFileTest(unittest.TestCase):
 
 
 class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
-    """三份协议同形：严重度词表 -> 逐条分类 -> 产出义务 -> 收口。"""
+    """Design 协议保留逐条分类与交接格式。"""
 
     SHARED_CLASSES = ("需用户裁定", "回流上游", "仅列出", "结论不成立")
 
@@ -142,8 +124,8 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
                 self.assertIn("严重度词表", protocol(stage))
 
     def test_upstream_stages_bind_to_critic_section_names(self) -> None:
-        """严重度必须用 critic 的原文分节名，否则与 code-reviewer 的词表混淆。"""
-        for stage in ("dev.specs", "dev.design"):
+        """严重度必须用 critic 的原文分节名。"""
+        for stage in STAGES:
             with self.subTest(stage=stage):
                 output = protocol(stage)
 
@@ -152,13 +134,6 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
                 self.assertIn("Minor Findings", output)
                 self.assertIn("Open Questions (unscored)", output)
 
-    def test_code_stage_records_role_severity_divergence(self) -> None:
-        output = protocol("dev.code")
-
-        # code-reviewer 没有 MAJOR，照抄上游的「Critical / Major」措辞就会错位。
-        self.assertIn("没有 MAJOR", output)
-        self.assertIn("没有严重度轴", output)
-
     def test_overall_verdict_is_not_an_action_basis(self) -> None:
         """防止模型看到 VERDICT: ACCEPT / APPROVE 就整体跳过逐条处理。"""
         for stage in STAGES:
@@ -166,95 +141,21 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
                 self.assertIn("不作为动作依据", protocol(stage))
 
 
-class CodeReviewIsReadOnlyTest(unittest.TestCase):
-    """Code 回检在实现流程收口后只能上报，不能改码。"""
+class CodeReviewUsesBatchOnlyTest(unittest.TestCase):
+    def test_legacy_code_review_is_removed(self) -> None:
+        self.assertFalse((REFERENCES / "review-protocol-code.md").exists())
+        self.assertFalse((ROOT / "agents" / "code-reviewer.md").exists())
+        self.assertFalse((ROOT / "agents" / "code-simplifier.md").exists())
+        self.assertIn("每个 Batch `review` 子阶段", _read(CODE_SKILL))
 
-    def test_code_review_declares_closed_repair_channels(self) -> None:
-        output = protocol("dev.code")
-
-        for contract in (
-            "已完成 TASK 不得重启",
-            "旧逐 TASK 验证和项目检查入口均不可用",
-        ):
-            self.assertIn(contract, output)
-
-    def test_code_review_forbids_source_changes(self) -> None:
-        output = protocol("dev.code")
-
-        self.assertIn("不得因回检结论修改任何业务源码、测试或配置", output)
-        self.assertIn("不得为回检启动新的 task run", output)
-        self.assertIn("不得改写任何 `action=validation` evidence", output)
-
-        # 丢失的旧指令：回检后直接修代码。恢复它等于恢复绕过 runner 的裸改。
-        self.assertNotIn("如任一子代理返回有问题，则需要修复代码", output)
-
-    def test_code_stage_hands_findings_to_named_downstream_stages(self) -> None:
-        output = protocol("dev.code")
-
-        self.assertIn("交接下游", output)
-        for target in ("review", "test", "B-E2E"):
-            self.assertIn(target, output)
-
-    def test_code_review_does_not_normalize_severity(self) -> None:
-        """三个角色词表不同，本轮原样转录；归一属第二轮 disposition 改造。"""
-        self.assertIn("原样转录", protocol("dev.code"))
-
-
-class SimplifierIsConstrainedAtCallSiteTest(unittest.TestCase):
-    """agents/code-simplifier.md 保持社区版写法（可写），因此约束只能加在调用点。
-
-    该代理在回检位置直接改文件会绕过 Evidence 且无法重验，所以协议必须
-    (1) 提醒它默认会写文件、(2) 要求启动时在 prompt 里限制它、
-    (3) 给出它仍然写了之后的处置——而不是假装它是只读的。
-    """
-
-    def test_agent_file_stays_upstream_writable(self) -> None:
-        """守住「不改社区版代理定义」这个决定，防止后续有人又去加 disallowedTools。"""
-        frontmatter = _read(SIMPLIFIER_AGENT).split("---")[1]
-        self.assertNotIn("disallowedTools", frontmatter)
-
-    def test_protocol_warns_the_agent_writes_by_default(self) -> None:
-        output = protocol("dev.code")
-
-        self.assertIn("默认契约是**直接改文件**", output)
-        self.assertIn("## Files Simplified", output)
-
-    def test_protocol_constrains_the_agent_in_the_task_prompt(self) -> None:
-        output = protocol("dev.code")
-
-        self.assertIn("task prompt", output)
-        self.assertIn("不要落笔修改任何文件", output)
-
-    def test_protocol_forbids_silent_revert_and_requires_disclosure(self) -> None:
-        """用户已否决「整体还原」：可能覆盖用户自己的改动。改为如实记录。"""
-        output = protocol("dev.code")
-
-        self.assertIn("不要自行还原", output)
-        self.assertIn("未经任何验证", output)
-
-    def test_prohibition_names_its_addressee(self) -> None:
-        """禁令只对主 agent 成立；不写明主体会被读成「子代理也不会写」的假保证。"""
-        self.assertIn("主 agent 禁止", protocol("dev.code"))
-
-
-class ExploreRoleIsResolvableTest(unittest.TestCase):
-    """角色名必须与 agents/explore.md 精确一致，且在 dev.code 被真实注入。"""
-
-    def test_agent_name_is_capitalized_explore(self) -> None:
-        self.assertIn("name: Explore-autodev", _read(EXPLORE_AGENT))
-
-    def test_protocol_uses_exact_role_name(self) -> None:
-        output = protocol("dev.code")
-
-        self.assertIn("Explore-autodev", output)
-        # 小写形态无法匹配 augment_explore_task_prompt.py 的 TARGET_SUBAGENT_TYPE。
-        self.assertNotIn("explore-autodev", output)
-
-    def test_dev_code_injects_explore_agent(self) -> None:
         subagents = _dev_code_subagents()
+        self.assertNotIn("agents/code-reviewer.md", subagents["customSubagentFiles"])
+        self.assertNotIn("agents/code-simplifier.md", subagents["customSubagentFiles"])
+        self.assertNotIn("agents/explore.md", subagents["customSubagentFiles"])
 
-        self.assertIn("agents/explore.md", subagents["customSubagentFiles"])
-        self.assertIn("Explore", subagents["disabledBuiltinSubagents"])
+    def test_specs_keeps_its_lightweight_review(self) -> None:
+        self.assertIn("review-protocol-specs.md", _read(SPECS_SKILL))
+        self.assertIn("行为规格回检", _read(REFERENCES / "review-protocol-specs.md"))
 
 
 class VerificationRoleIsResolvableTest(unittest.TestCase):
@@ -308,10 +209,6 @@ class DesignCriticRoleIsResolvableTest(unittest.TestCase):
 
     def test_artifact_paths_come_from_the_dispatch_prompt(self) -> None:
         """没有 augment hook，绝对路径只能由派发点写进 prompt；缺了就退回，不自己搜。"""
-        agent = _read(DESIGN_CRITIC_AGENT)
-        self.assertIn("feature 目录绝对路径", agent)
-        self.assertIn("不要自己去搜工作区", agent)
-
         output = protocol("dev.design")
         self.assertIn("feature 目录的绝对路径", output)
         self.assertIn("输入材料清单", output)
@@ -320,7 +217,7 @@ class DesignCriticRoleIsResolvableTest(unittest.TestCase):
         agent = _read(DESIGN_CRITIC_AGENT)
 
         self.assertIn("disallowedTools", agent.split("---")[1])
-        self.assertIn("不得再派发任何子代理", agent)
+        self.assertIn("不执行任何命令", agent)
 
     def test_agent_keeps_the_section_names_the_protocol_binds_to(self) -> None:
         agent = _read(DESIGN_CRITIC_AGENT)
