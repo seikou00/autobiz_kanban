@@ -25,10 +25,11 @@ const MAX_EMPTY_AGENT_RESPONSE_RETRIES = 2;
 // remains; otherwise a retry created by the first final-repair drain is
 // incorrectly left for a manual resume.
 const MAX_FINAL_RETRY_DRAINS = 3;
-// Review findings can receive one targeted implementation repair. Batch UTest
-// failures are durable non-blocking evidence: record them and continue to the
-// Merge Train so independent Batch work is never interrupted.
-const SINGLE_REPAIRABLE_STAGES = new Set(["review"]);
+const UTEST_STAGE_TIMEOUT_SECONDS = 15 * 60;
+// Review findings and production defects proven by UTest each receive one
+// targeted repair. A deferred UTest remains explicit evidence and may proceed
+// through an unverified candidate to mandatory final B-E2E.
+const SINGLE_REPAIRABLE_STAGES = new Set(["review", "test"]);
 const BATCH_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -257,7 +258,7 @@ const UTEST_STAGE_SCHEMA = {
   properties: {
     batchId: { type: "string" },
     status: { enum: ["success", "failed", "timeout", "deferred"] },
-    testStatus: { enum: ["passed", "deferred"] },
+    testStatus: { enum: ["passed", "deferred", "source_repair_required", "timed_out"] },
     worktreePath: { type: "string" },
     branchName: { type: "string" },
     commitSha: { type: "string" },
@@ -1173,6 +1174,14 @@ function implementationReworkRequired(batchResult, failedStage, result) {
     failureType,
     message: failureMessage,
   };
+  if (failedStage === "test") {
+    const testFailure = unwrap(normalized.testFailure || failure);
+    for (const field of ["targetId", "commandId", "evidenceId", "testFile", "argv", "command"]) {
+      if (testFailure && testFailure[field] !== undefined) {
+        failureContext[field] = testFailure[field];
+      }
+    }
+  }
   return {
     batchId: batchResult.batchId,
     status: "implementation_rework_required",
@@ -1265,7 +1274,7 @@ function withLatestBatchDelivery(batchResult, result) {
   };
 }
 
-async function runBatchUtestAndSeal(batchResult) {
+async function runBatchUtestAndSeal(batchResult, retryFailure = null) {
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -1277,28 +1286,35 @@ async function runBatchUtestAndSeal(batchResult) {
   }
   const taskIdArgs = taskIds.map(taskId => "--task-id \"" + taskId + "\"").join(" ");
   const taskList = JSON.stringify(taskIds);
-  // Keep each real test runner bounded well below the Batch lease.  A timeout
-  // becomes durable UTest evidence instead of allowing one child to consume a
-  // whole Workflow execution window.
-  const utestCommandTimeout = Math.min(600, Math.max(60, Math.floor(timeoutPerBatch / 4)));
+  // A command gets only a fraction of the UTest wall-clock budget.  The
+  // runner clamps it again using the durable `test.startedAt` deadline.
+  const utestStageTimeout = Math.min(UTEST_STAGE_TIMEOUT_SECONDS, timeoutPerBatch);
+  const utestCommandTimeout = Math.min(300, Math.max(60, Math.floor(utestStageTimeout / 3)));
+  const retryInstruction = retryFailure && typeof retryFailure === "object"
+    ? "这是 source repair 后的受控重跑。只允许执行此前失败的精确命令，不得创建新测试、选择其他 target、换 runner 或扩大范围。若仍为 source_compile/source_bug，绝不再执行第二次 production repair；按步骤 7 以 failure-type implementation 记录 deferred UTest issue 后继续。失败基线=" + JSON.stringify(retryFailure) + "。\n"
+    : "";
   const prompt =
-    "在 Batch " + batchId + " 的原生 Git worktree \"" + batchWorktree + "\"、分支 \"" + batchBranch + "\" 内完成该 Batch 的 UTest。TASK=" + taskList + "。测试点只来自这些 TASK 的 UTEST_ASSIGNMENT/testIntent；不得读取或修改其他 Batch、主 checkout、计划 JSON 或平台产物。\n" +
+    "在 Batch " + batchId + " 的原生 Git worktree \"" + batchWorktree + "\"、分支 \"" + batchBranch + "\" 内完成该 Batch 的 UTest。TASK=" + taskList + "。测试点只来自这些 TASK 的 UTEST_ASSIGNMENT/testIntent；不得读取或修改其他 Batch、主 checkout、计划 JSON 或平台产物。本阶段总预算为 " + utestStageTimeout + " 秒；到期或任一 runner 返回 executionOutcome=command_timeout/stage_deadline_exceeded 时，立即收口，禁止继续探索。\n" +
+    retryInstruction +
     "范围护栏：除本 Batch worktree、上述 TASK 的 router 原文、以及本提示给出的插件命令外，不得访问任何路径。禁止运行 git worktree list、find、grep -R、全仓库 rg/glob，禁止按 B00*、测试目录或 .autobizdevops 目录枚举其他 Batch；不得 cd 到本 Batch worktree 外。测试文件必须是本 worktree 下、与当前 TASK assignment 对应的仓库根相对路径。已有测试资产先按 assignment 运行并复用，只有当前 TASK 的测试/fixture/mock/测试配置失败时才可修改；不得为寻找测试而扫描仓库。\n" +
     "这是 Code Review 之后的测试阶段：Review 只审业务生产代码；现在由你生成/补齐测试源码、fixture/mock/测试环境配置并运行测试。测试代码必须留在当前 Worktree，并会随本 Batch 再次封存后合并；禁止把测试拆成独立 Batch。\n" +
-    "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + " --lease-guard，保存 lease.ownerToken。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 python \"" + utestRouterPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --json，且只使用其中 batchId=\"" + batchId + "\"、workspaceRef=\"" + batchWorkspaceRef + "\" 的 assignment 原文；5) 执行 python \"" + utestEnvironmentPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" " + taskIdArgs + " --batch-worktree \"" + batchWorktree + "\" --json。环境非 ready 时只按 UTest 协议修测试环境并重新检查；仍无法解决时按步骤 7 以 environment 记录失败并继续。\n" +
-    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints、testPoints 与全部 AC，排除 nonGoals；使用真实工程 runner。每个测试文件落地后，必须执行 python \"" + utestCommandPath + "\" --kind test --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> --timeout " + utestCommandTimeout + " -- <真实精确测试 argv>。Plan V2 不提供测试 argv；UTest 必须根据实际测试资产和 runner 生成命令。测试自身、fixture、mock、测试配置的问题必须在本阶段修复并重跑。不得直接调用 runner 或运行未绑定 --test-file 的宽泛测试命令。\n" +
-    "7) 若任一 UTest 最终仍失败，必须保留本次真实 runner 输出与 run_utest_command Evidence；source_bug 仍可用 validate_utest_source_bug 做分类，但不得在此阶段修复生产代码，也不得执行 stage fail。每次 seal 前都先执行携带 --owner-token <真实token> --require-lease-guard 的 lease check。先用 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 封存新增测试资产；随后执行 python \"" + stagePath + "\" record-test-failure --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --failure-type <implementation|test_definition|documentation|environment|needs_triage> --message \"<必须包含 targetId、commandId、evidenceId、test-output.log 路径、失败断言的 expected/actual 或 stdout/stderr 根因>\" --metadata-json '<包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>'，其中 batchCommit 必须等于刚 seal 返回的新 commitSha。最后以 final-status sealed 释放 lease。该命令会把失败记录成非阻断 issue，Workflow 继续后续流程。\n" +
+    "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + " --lease-guard，保存 lease.ownerToken；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 router 与环境检查。环境非 ready 时仅可修测试配置/fixture/mock/helper 一次并重新检查；外部依赖、JDK、权限、网络或第二次失败立即按步骤 7 收口。禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process。\n" +
+    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints、testPoints 与全部 AC，排除 nonGoals。每个 target 初次只能执行一次精确 runner 命令：python \"" + utestCommandPath + "\" --kind test --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage-timeout " + utestStageTimeout + " --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> --timeout " + utestCommandTimeout + " -- <真实精确测试 argv>。不得直接调用 runner 或运行宽泛命令。若 failureClassification=test_failure 且根因位于测试资产，可修一次并只重跑同一命令一次。若 failureClassification=source_compile，或正常退出的失败证据经 validate_utest_source_bug 证明为 source_bug，立即停止：禁止换 runner、执行第二个测试文件或继续搜索绕过方案。\n" +
+    "7) 每次失败都保留真实 runner 输出与 Evidence。第一次 source_compile/source_bug 时，先 seal 新增测试资产，再执行 python \"" + stagePath + "\" fail --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --failure-type implementation --message \"<targetId、commandId、evidenceId、test-output.log、明确 file:line 编译根因>\"；释放 lease 后返回 testStatus:\"source_repair_required\" 和 testFailure。Workflow 会在同一 Worktree 受控修生产代码、重新 Review，并且只重跑这个原命令。若该受控重跑仍为 source_compile/source_bug，或 timeout、外部 environment 或耗尽一次测试资产修复，seal 后执行 record-test-failure（failure-type implementation、environment 或 test_definition）并返回 testStatus:\"timed_out\" 或 \"deferred\"；该 issue 会随交付保留，但不阻断后续 gate、候选合并与最终 B-E2E。\n" +
     "8) 全部 UTest 通过后，执行 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 取得新的 commitSha；再执行 python \"" + stagePath + "\" complete --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --metadata-json <包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>；最后以 final-status sealed 释放 lease。\n" +
-    "成功只返回 {batchId,status:\"success\",testStatus:\"passed\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。记录失败后也返回 status:\"success\"，但必须返回 testStatus:\"deferred\" 与 testFailure；不得返回 failed/timeout 以中断其他 Batch。只有无法写入失败 Evidence 或无法安全释放 lease 时才返回 failed；若能释放 lease，必须使用 final-status pending，禁止 final-status failed，由 Workflow 标记为 retry_pending。不得手工 git add/commit、merge、rebase 或删除 Worktree。";
+    "成功只返回 {batchId,status:\"success\",testStatus:\"passed\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。source repair 或受控 deferred 也必须返回 status:\"success\"，但必须带 testStatus 与 testFailure={message,targetId,commandId,evidenceId,testFile,argv,command}；不得手工 git add/commit、merge、rebase 或删除 Worktree。";
   return unwrap(await workflowAgent(
     prompt,
-    { label: "stage-utest-" + batchId, phase: "Batch 阶段", schema: UTEST_STAGE_SCHEMA }
+    { label: "stage-utest-" + batchId, phase: "Batch 阶段", timeoutMs: utestStageTimeout * 1000, schema: UTEST_STAGE_SCHEMA }
   ));
 }
 
 async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const reviewResolvedByRepair = options.reviewResolvedByRepair === true;
   const testResolvedByRepair = options.testResolvedByRepair === true;
+  const retryTestFailure = options.retryTestFailure && typeof options.retryTestFailure === "object"
+    ? options.retryTestFailure
+    : null;
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -1358,10 +1374,23 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     requireSuccess(review, `stage review ${batchId}`);
   }
   if (!testResolvedByRepair) {
-    const test = requireSuccess(await runBatchUtestAndSeal(batchResult), `stage test ${batchId}`);
+    const test = requireSuccess(await runBatchUtestAndSeal(batchResult, retryTestFailure), `stage test ${batchId}`);
     const testedDelivery = withLatestBatchDelivery(batchResult, test);
     const testStatus = test.testStatus || (test.status === "deferred" ? "deferred" : "passed");
-    if (!["passed", "deferred"].includes(testStatus)) {
+    if (testStatus === "source_repair_required") {
+      const sourceFailure = unwrap(test.testFailure || test.failure || {});
+      return implementationReworkRequired(testedDelivery, "test", {
+        status: "failed",
+        failureType: "implementation",
+        testFailure: sourceFailure,
+        failure: {
+          type: "implementation",
+          nextStage: "implement",
+          message: sourceFailure.message || test.errorMessage || "",
+        },
+      });
+    }
+    if (!["passed", "deferred", "timed_out"].includes(testStatus)) {
       throw new Error(`stage_test_status_invalid:${batchId}:${String(testStatus)}`);
     }
     batchResult = testedDelivery;
@@ -1468,9 +1497,13 @@ async function runDeliveryWithImplementationRepair(batchResult, initialOptions =
     }
     delivery = repaired;
     await recordSingleRepairResolution(staged.recovery, repaired);
-    options = staged.failedStage === "review"
-      ? { reviewResolvedByRepair: true }
-      : { reviewResolvedByRepair: true, testResolvedByRepair: true };
+    // A UTest-proven source defect has a new production commit and fresh
+    // Review evidence, but the test itself is still pending.  Re-enter UTest
+    // to run its original exact command; never mark it as repaired by prose.
+    options = {
+      reviewResolvedByRepair: true,
+      ...(staged.failedStage === "test" ? { retryTestFailure: staged.recovery.failureContext } : {}),
+    };
   }
 }
 
@@ -1487,9 +1520,10 @@ async function continueRecoveredDelivery(recovery) {
   const repaired = await reworkDeliveryImplementation(recovery);
   await recordSingleRepairResolution(recovery, repaired);
   const failedStage = recovery.failureContext.failedStage;
-  const options = failedStage === "review"
-    ? { reviewResolvedByRepair: true }
-    : { reviewResolvedByRepair: true, testResolvedByRepair: true };
+  const options = {
+    reviewResolvedByRepair: true,
+    ...(failedStage === "test" ? { retryTestFailure: recovery.failureContext } : {}),
+  };
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 

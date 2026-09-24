@@ -43,6 +43,7 @@ from hooks.parallel_runtime import (
 )
 from hooks.plan_json import load_plan_bundle
 from hooks.parallel_validation_ownership import validation_ownership_errors
+from hooks.parallel_batch_stage import UTEST_STAGE_TIMEOUT_SECONDS
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -251,6 +252,79 @@ def _recover_stale_active_batches_locked(
         )
         recovered.append({"batchId": batch_id, "reason": reason})
     return recovered
+
+
+def _close_overdue_utest_stages_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    manifest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Close a UTest stage whose durable wall-clock budget has elapsed.
+
+    The lease is an ownership mechanism, not a quality-stage deadline.  A
+    worker can otherwise keep a sealed Batch in ``test`` while it repeatedly
+    explores compiler workarounds. Clearing its lease makes later commands
+    fail safely; the controlled runner independently clamps each process to
+    this same deadline. Timeout is a visible non-blocking UTest deferral,
+    with final B-E2E still required before the run can succeed.
+    """
+    now = time.time()
+    stage_timeout = min(
+        UTEST_STAGE_TIMEOUT_SECONDS,
+        max(1, int(manifest.get("timeoutPerBatch", UTEST_STAGE_TIMEOUT_SECONDS))),
+    )
+    closed: list[dict[str, Any]] = []
+    for raw_batch_id, batch in manifest.get("batches", {}).items():
+        if not isinstance(batch, dict):
+            continue
+        states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+        test = states.get("test") if isinstance(states, dict) else None
+        if not isinstance(test, dict) or test.get("status") != "running":
+            continue
+        started = _parse_timestamp_epoch(test.get("startedAt"))
+        if started is None or now - started < stage_timeout:
+            continue
+        batch_id = str(raw_batch_id)
+        issue_index = 1 + sum(
+            1
+            for item in manifest.get("deferredIssues", [])
+            if isinstance(item, dict)
+            and item.get("batchId") == batch_id
+            and item.get("stage") == "test"
+            and item.get("kind") == "utest_stage_timeout"
+        )
+        issue_id = f"UTEST-TIMEOUT-{batch_id}-{issue_index:03d}"
+        message = "utest_stage_timeout:{}s".format(stage_timeout)
+        test.update({
+            "status": "deferred",
+            "completedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "failure": {"type": "environment", "message": message, "nextStage": None},
+            "deferredIssueId": issue_id,
+            "deferredDisposition": "utest_stage_timeout",
+        })
+        issues = manifest.setdefault("deferredIssues", [])
+        if isinstance(issues, list):
+            issues.append({
+                "issueId": issue_id,
+                "kind": "utest_stage_timeout",
+                "batchId": batch_id,
+                "stage": "test",
+                "failureType": "environment",
+                "message": message,
+                "disposition": "recorded_deferred",
+                "blocksWorkflow": False,
+                "status": "open",
+                "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            })
+        batch["activeStage"] = None
+        # The timed-out test has a durable terminal state. Mirror the
+        # non-blocking UTest gate outcome so an agent that timed out itself
+        # need not wake up just to advance this sealed delivery.
+        batch["status"] = "ready_to_candidate"
+        _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+        closed.append({"batchId": batch_id, "timeoutSeconds": stage_timeout})
+    return closed
 
 
 def _unresolved_state(manifest: dict[str, Any]) -> tuple[list[str], list[str], set[str]]:
@@ -867,6 +941,20 @@ def schedule(
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        overdue_utests = _close_overdue_utest_stages_locked(
+            workspace, feature, run_id, manifest
+        )
+        if overdue_utests:
+            save_manifest(workspace, feature, run_id, manifest)
+            for item in overdue_utests:
+                append_event(
+                    workspace,
+                    feature,
+                    run_id,
+                    "utest_stage_timeout",
+                    batchId=item["batchId"],
+                    timeoutSeconds=item["timeoutSeconds"],
+                )
         bundle = load_plan_bundle(feature_dir(workspace, feature))
         # A retained per-Batch conflict (or one conflicted Merge Train) owns
         # only the deliveries recorded in that retained state.  Keep those

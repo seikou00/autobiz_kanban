@@ -144,7 +144,8 @@ class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
         self.assertIn("Do not edit dependency manifests, lock files, or production sources", description)
         self.assertIn("machine-validated attestation", description)
         self.assertIn("static observation and exit 0 are invalid", description)
-        self.assertIn("records the failed UTest evidence and continues the remaining stages", description)
+        self.assertIn("performs one controlled production repair", description)
+        self.assertIn("candidate promotion, and final B-E2E continue", description)
 
     def test_only_target_role_is_modified(self):
         stdout = io.StringIO()

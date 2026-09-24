@@ -333,7 +333,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 - Workflow 启动时先执行 scheduler `ensure`：没有活动 run 时创建一个；已有交付物完整的活动 run 时复用同一个 runId；`needs_resolution` 或缺失已密封交付物时 fail-closed 并保留现场。随后 scheduler 选择依赖已经 `merged` 的 pending Batch，并在任一 Batch 完成后重新计算可运行集。
 - scheduler 按剩余 `maxParallel` 槽位派发任务：`proto`、`global`、`integration` 阶段逐 Batch 串行；普通 `parallel` 阶段依据真实依赖、仓库绑定与调度策略选择任务；Plan v2 不预报写集，隔离工作树允许同仓库任务乐观并行，真实文件冲突交给 Merge Train。只要有槽位，就立即补充符合条件的任务，不等待不相关 Batch 完成。插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner。
-- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。Review 已经由失败测试锚定的 `source_bug` 可回到同一 Batch 的 production repair；UTest 的最终失败（包括 `source_bug`）必须保留真实 Evidence 与结构化 issue，并继续后续流程；测试自身、fixture、mock、测试配置问题仍先在 UTest 中修复并重跑。
+- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。任何由真实失败测试锚定的 `source_bug`（无论 Review 或 UTest 首次发现）都必须回到同一 Batch 的受控 production repair，再重新 Review 并重跑原 UTest 命令；不得作为 deferred finding 推广。测试自身、fixture、mock、测试配置问题仅允许在 UTest 修复一次并重跑一次；外部 environment/timeout 必须保留 Evidence、阻断该 Batch，绝不带病合并。
 - 每个 `ready_to_candidate` Batch 都可立即由 `parallel_merge_train.py` 在独立临时候选 Worktree 合成并推广，不必等待同一安全波的其他 Batch 完成编码、Review 或 UTest。候选不执行额外测试：其前置条件就是该 Batch 的 Review、UTest（通过或失败已记录）和 re-seal 均已有证据。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
 - 所有 delivery 合并后，B-E2E 是唯一的 post-merge 可执行验证，使用临时验证 Worktree；通过即清理，失败保留至修复。`parallel_evidence_aggregate.py`/`parallel_final_verify.py` 仅校验已有 evidence 的内容摘要，绝不重跑 Batch UTest 或 E2E。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
 - Workflow 只接受 launcher 返回的完整 `workflowArgs`；`feature`、`pluginPath`、artifact workspace 和每个 code workspace 都必须是非空、非 `undefined` 的绝对路径。Workflow host 仅为平台审计元数据，可为空或与业务仓库不同。任一代码路径无效时在创建 Batch agent 前阻断，禁止生成临时 workflow 或手工创建分支绕过插件 Worktree 管理器。
@@ -365,7 +365,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 判断是否生成时，以代码为准：
 
 - 必须检查当前 Feature 实际改动涉及的接口入口、请求对象、响应对象、Service/Mapper/Repository、错误码和枚举定义。
-- 只有代码中能确认新增或修改接口入口，并能确认请求/响应定义时，才生成。
+- 只有代码中能确认新增或git修改接口入口，并能确认请求/响应定义时，才生成。
 - 上游文档提到接口变更但代码无法确认时，不生成。
 - 没有发现接口新增或修改时，不生成。
 

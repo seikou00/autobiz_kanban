@@ -72,6 +72,13 @@ class RunUTestCommandTest(unittest.TestCase):
             "        self.assertTrue(True)\n",
             encoding="utf-8",
         )
+        (self.repo / "test_sleep.py").write_text(
+            "import time\nimport unittest\n\n"
+            "class SleepTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        time.sleep(3)\n",
+            encoding="utf-8",
+        )
         self._write_plan()
     def _task(self, task_id="T001", argv=None, behavior="fixed amount discount"):
         criterion_id = "AC-{}-01".format(task_id)
@@ -244,6 +251,20 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual("BLOCKED", result["result"])
         self.assertEqual("blocked", self._records()[0]["validation"]["result"])
         self.assertEqual("BLOCKED", self._unit_result()["targets"][0]["result"])
+
+    def test_timeout_terminates_the_controlled_test_process_and_is_not_source_bug(self):
+        result = self._execute(
+            argv=[sys.executable, "-m", "unittest", "test_sleep"],
+            test_files=["test_sleep.py"],
+            timeout=1,
+        )
+
+        self.assertEqual(124, result["exitCode"])
+        self.assertEqual("command_timeout", result["executionOutcome"])
+        self.assertEqual("timeout", result["failureClassification"])
+        self.assertEqual("BLOCKED", result["result"])
+        log = (self.feature_dir / "test-output.log").read_text(encoding="utf-8")
+        self.assertIn("已终止整个进程组", log)
 
     def test_full_output_is_not_truncated(self):
         self._execute(

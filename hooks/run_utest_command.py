@@ -6,9 +6,12 @@ from __future__ import print_function
 
 import argparse
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
 from hooks.json_writer_common import resolve_feature, resolve_workspace, shell_join  # noqa: E402
+from hooks.parallel_runtime import load_manifest  # noqa: E402
 from hooks.unit_test_result_writer import ensure_plan_result, record_execution  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
@@ -94,45 +98,130 @@ def _validate_test_files(code_workspace, test_files):
     return result
 
 
+def _terminate_process_tree(process):
+    """Terminate the runner and every child it started after a timeout.
+
+    Maven, Gradle and Node routinely fork a JVM/daemon.  Killing only the
+    shell-facing parent makes a timeout look successful while the compiler
+    continues consuming the Batch slot in the background.
+    """
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # ``/T`` includes descendants; fall back to ``kill`` when taskkill is
+        # unavailable (for example on a constrained test host).
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            process.kill()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        process.kill()
+
+
 def _run(argv, cwd, timeout):
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-        return completed.returncode, completed.stdout or "", completed.stderr or "", False
+        process_kwargs = {
+            "cwd": str(cwd),
+            "shell": False,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "universal_newlines": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if os.name == "nt":
+            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_kwargs["start_new_session"] = True
+        process = subprocess.Popen(argv, **process_kwargs)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            stdout = stdout or exc.stdout or ""
+            stderr = stderr or exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            timeout_message = "命令超过 {} 秒，已终止整个进程组。修复：缩小测试范围或检查阻塞资源。".format(timeout)
+            stderr = "{}\n{}".format(stderr.rstrip(), timeout_message).lstrip()
+            return 124, stdout, stderr, True, "command_timeout"
+        return process.returncode, stdout or "", stderr or "", False, "completed"
     except FileNotFoundError as exc:
         return (
             127,
             "",
             "{}。修复：安装可执行文件，或从真实 manifest 选择项目 runner。".format(exc),
             True,
+            "command_unavailable",
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        timeout_message = "命令超过 {} 秒。修复：缩小测试范围或检查阻塞资源。".format(timeout)
-        stderr = "{}\n{}".format(stderr.rstrip(), timeout_message).lstrip()
-        return 124, stdout, stderr, True
     except OSError as exc:
         return (
             126,
             "",
             "{}。修复：确认可执行文件权限和当前平台支持。".format(exc),
             True,
+            "command_error",
         )
+
+
+def _parse_utc_epoch(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _remaining_stage_seconds(workspace, feature, run_id, batch_id, stage_timeout):
+    """Return the remaining durable UTest budget, when this is a Batch run."""
+    if not run_id or not batch_id or stage_timeout is None:
+        return None
+    try:
+        manifest = load_manifest(Path(workspace), feature, run_id)
+        batch = manifest.get("batches", {}).get(batch_id, {})
+        states = batch.get("stageStates", {}) if isinstance(batch, dict) else {}
+        state = states.get("test", {}) if isinstance(states, dict) else {}
+        started = _parse_utc_epoch(state.get("startedAt") if isinstance(state, dict) else None)
+    except (OSError, ValueError, TypeError):
+        return None
+    if started is None:
+        return None
+    return int(stage_timeout - (time.time() - started))
+
+
+def _failure_classification(exit_code, blocked, outcome, stdout, stderr):
+    if outcome in {"command_timeout", "stage_deadline_exceeded"}:
+        return "timeout"
+    if blocked:
+        return "environment"
+    if exit_code == 0:
+        return "passed"
+    output = "\n".join((stdout or "", stderr or ""))
+    compiler_markers = (
+        "COMPILATION ERROR",
+        "maven-compiler-plugin",
+        "javac",
+        "error TS",
+        "TypeScript error",
+        "Compilation failed",
+    )
+    return "source_compile" if any(marker in output for marker in compiler_markers) else "test_failure"
 
 
 def _timestamp():
@@ -182,6 +271,9 @@ def execute_utest_command(
     environment_target_id=None,
     code_workspace=None,
     timeout=600,
+    run_id=None,
+    batch_id=None,
+    stage_timeout=None,
 ):
     selected_kind = kind or mode
     if selected_kind not in MODES:
@@ -191,6 +283,10 @@ def execute_utest_command(
     if not isinstance(timeout, int) or timeout <= 0:
         raise UTestCommandError(
             "timeout 必须是正整数。修复：传入大于 0 的秒数。"
+        )
+    if stage_timeout is not None and (not isinstance(stage_timeout, int) or stage_timeout <= 0):
+        raise UTestCommandError(
+            "stage-timeout 必须是正整数。修复：传入整个 UTest 阶段允许的秒数。"
         )
     artifact_workspace = resolve_workspace(workspace)
     resolved_feature = resolve_feature(feature)
@@ -279,7 +375,26 @@ def execute_utest_command(
 
     command = shell_join(command_argv)
     log_path = feature_dir / "test-output.log"
-    exit_code, stdout, stderr, blocked = _run(command_argv, command_cwd, timeout)
+    remaining_stage_seconds = _remaining_stage_seconds(
+        artifact_workspace,
+        resolved_feature,
+        run_id,
+        batch_id,
+        stage_timeout,
+    )
+    if remaining_stage_seconds is not None and remaining_stage_seconds <= 0:
+        exit_code = 124
+        stdout = ""
+        stderr = "UTest 阶段总时限 {} 秒已到，未启动新的测试命令。".format(stage_timeout)
+        blocked = True
+        outcome = "stage_deadline_exceeded"
+    else:
+        effective_timeout = timeout
+        if remaining_stage_seconds is not None:
+            effective_timeout = min(timeout, max(1, remaining_stage_seconds))
+        exit_code, stdout, stderr, blocked, outcome = _run(
+            command_argv, command_cwd, effective_timeout
+        )
     _append_log(
         log_path,
         selected_kind,
@@ -296,6 +411,10 @@ def execute_utest_command(
         "kind": selected_kind,
         "result": unit_result,
         "exitCode": exit_code,
+        "executionOutcome": outcome,
+        "failureClassification": _failure_classification(
+            exit_code, blocked, outcome, stdout, stderr
+        ),
         "command": command,
         "cwd": str(command_cwd),
         "logPath": str(log_path),
@@ -416,6 +535,9 @@ def main(argv=None):
         help="仅 Workflow 内使用：当前 Batch 的原生 Git Worktree，必须与 Plan 绑定仓库共享 Git common-dir。",
     )
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--run-id")
+    parser.add_argument("--batch-id")
+    parser.add_argument("--stage-timeout", type=int)
     parser.add_argument("--argv-json", "--command-json", dest="argv_json")
     parser.add_argument("command_argv", nargs=argparse.REMAINDER)
     try:
@@ -460,6 +582,9 @@ def main(argv=None):
             environment_target_id=args.environment_target_id,
             code_workspace=args.code_workspace,
             timeout=args.timeout,
+            run_id=args.run_id,
+            batch_id=args.batch_id,
+            stage_timeout=args.stage_timeout,
         )
     except UTestCommandError as exc:
         print("run_utest_command_failed: {}".format(exc), file=sys.stderr)
