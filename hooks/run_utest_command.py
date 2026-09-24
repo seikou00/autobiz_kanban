@@ -11,6 +11,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -127,37 +128,60 @@ def _terminate_process_tree(process):
         process.kill()
 
 
+def _read_capture(handle):
+    size = os.fstat(handle.fileno()).st_size
+    if hasattr(os, "pread"):
+        # A surviving child may still share the writer's file offset. Read a
+        # fixed snapshot without seeking that offset backwards.
+        chunks = []
+        offset = 0
+        while offset < size:
+            chunk = os.pread(handle.fileno(), min(size - offset, 1024 * 1024), offset)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            offset += len(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    handle.seek(0)
+    return handle.read(size).decode("utf-8", errors="replace")
+
+
 def _run(argv, cwd, timeout):
     try:
-        process_kwargs = {
-            "cwd": str(cwd),
-            "shell": False,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-            "universal_newlines": True,
-            "encoding": "utf-8",
-            "errors": "replace",
-        }
-        if os.name == "nt":
-            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            process_kwargs["start_new_session"] = True
-        process = subprocess.Popen(argv, **process_kwargs)
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            _terminate_process_tree(process)
-            stdout, stderr = process.communicate()
-            stdout = stdout or exc.stdout or ""
-            stderr = stderr or exc.stderr or ""
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode("utf-8", errors="replace")
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode("utf-8", errors="replace")
-            timeout_message = "命令超过 {} 秒，已终止整个进程组。修复：缩小测试范围或检查阻塞资源。".format(timeout)
-            stderr = "{}\n{}".format(stderr.rstrip(), timeout_message).lstrip()
-            return 124, stdout, stderr, True, "command_timeout"
-        return process.returncode, stdout or "", stderr or "", False, "completed"
+        # Maven/Gradle may leave a child holding stdout or stderr after the
+        # runner itself exits. Waiting for PIPE EOF would then hide the real
+        # exit code (and the second communicate after timeout could hang).
+        # Regular files let us wait for the runner process, not its pipe owners.
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process_kwargs = {
+                "cwd": str(cwd),
+                "shell": False,
+                "stdout": stdout_file,
+                "stderr": stderr_file,
+            }
+            if os.name == "nt":
+                process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                process_kwargs["start_new_session"] = True
+            process = subprocess.Popen(argv, **process_kwargs)
+            timed_out = False
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _terminate_process_tree(process)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            stdout = _read_capture(stdout_file)
+            stderr = _read_capture(stderr_file)
+            if timed_out:
+                timeout_message = "命令超过 {} 秒，已终止整个进程组。修复：缩小测试范围或检查阻塞资源。".format(timeout)
+                stderr = "{}\n{}".format(stderr.rstrip(), timeout_message).lstrip()
+                return 124, stdout, stderr, True, "command_timeout"
+            return process.returncode, stdout, stderr, False, "completed"
     except FileNotFoundError as exc:
         return (
             127,
@@ -498,6 +522,7 @@ def execute_utest_command(
             )
         )
     response["evidenceId"] = evidence_id
+    response["evidenceLogPath"] = str(feature_dir / "evidence" / (evidence_id + ".log"))
     if writer_result.data and isinstance(writer_result.data.get("target"), dict):
         response["targetId"] = writer_result.data["target"].get("targetId")
     response["resultPath"] = str(writer_result.path)
