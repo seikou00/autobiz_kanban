@@ -343,6 +343,11 @@ const requiredSchedulerFields = [
 ];
 if (requiredSchedulerFields.some(field => !context.schedulerSchema.properties[field])) process.exit(22);
 if (requiredSchedulerFields.some(field => !context.schedulerSchema.required.includes(field))) process.exit(23);
+const manifestSchema = context.schedulerSchema.properties.manifest;
+if (!manifestSchema?.properties?.batches || !manifestSchema.properties.mergeTrains || !manifestSchema.properties.deferredIssues) process.exit(29);
+if (!source.includes("status --workflow-view")) process.exit(30);
+if (!context.schedulerSchema.properties.dispatchDiagnostics.properties.activeBatchIds) process.exit(31);
+if (!context.schedulerSchema.properties.stageRecoveryBatches.items.properties.failureContext.properties.argv) process.exit(32);
 const stageSchema = context.schedulerSchema.properties.stageRecoveryBatches.items;
 for (const field of ["batchId", "worktreePath", "branchName", "commitSha", "nextStage", "failureContext"]) {
   if (!stageSchema.properties[field]) process.exit(24);

@@ -942,6 +942,8 @@ def schedule(
     feature: str,
     run_id: str,
     workspace_refs: list[str] | None = None,
+    *,
+    workflow_view: bool = False,
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
@@ -1208,7 +1210,7 @@ def schedule(
                 batchId=batch_id,
                 reason="worktree_verification_failed",
             )
-        return {
+        result = {
             "runId": run_id,
             "status": manifest.get("status"),
             "readyBatches": scoped_ready,
@@ -1317,6 +1319,7 @@ def schedule(
             },
             "isolation": manifest.get("isolation"),
         }
+        return _workflow_status_view(result, manifest) if workflow_view else result
 
 
 def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status: str, **details: Any) -> dict[str, Any]:
@@ -1956,6 +1959,83 @@ def _emit(ok: bool, **payload: Any) -> int:
     return 0 if ok else 1
 
 
+_WORKFLOW_STATUS_FIELDS = (
+    "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
+    "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",
+    "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",
+    "maxParallel", "activeWorkers", "dispatchDiagnostics", "batchTaskIds",
+)
+_WORKFLOW_WORKSPACE_FIELDS = (
+    "workspaceRef", "componentRoots", "executionStage", "requestedPath",
+    "worktreePath", "branchName",
+)
+_WORKFLOW_ISSUE_FIELDS = (
+    "issueId", "kind", "batchId", "stage", "failureType", "message",
+    "disposition", "blocksWorkflow", "status", "evidenceId", "batchCommit",
+    "createdAt",
+)
+
+
+def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Project only fields consumed by the fixed Workflow across the agent boundary."""
+    batches = manifest.get("batches")
+    batches = batches if isinstance(batches, dict) else {}
+    trains = manifest.get("mergeTrains")
+    trains = trains if isinstance(trains, dict) else {}
+    issues = manifest.get("deferredIssues")
+    issues = issues if isinstance(issues, list) else []
+    result = {key: scheduled[key] for key in _WORKFLOW_STATUS_FIELDS if key in scheduled}
+    result["dispatchDiagnostics"] = {
+        "activeBatchIds": (scheduled.get("dispatchDiagnostics") or {}).get("activeBatchIds", [])
+    }
+    result["batchWorkspaces"] = {
+        batch_id: {key: workspace.get(key) for key in _WORKFLOW_WORKSPACE_FIELDS}
+        for batch_id, workspace in scheduled.get("batchWorkspaces", {}).items()
+        if isinstance(workspace, dict)
+    }
+    result["manifest"] = {
+        "batches": {
+            batch_id: {
+                "status": batch.get("status"),
+                "dependencies": batch.get("dependencies", []),
+                "error": batch.get("error"),
+                "worktreePath": batch.get("worktreePath"),
+                "branchName": batch.get("branchName"),
+                "commitSha": batch.get("commitSha"),
+                "mergeCommitSha": batch.get("mergeCommitSha"),
+                "recovery": {
+                    key: (batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}).get(key)
+                    for key in ("status", "retryAttempts", "lastError")
+                },
+            }
+            for batch_id, batch in batches.items()
+            if isinstance(batch, dict)
+        },
+        "mergeTrains": {
+            train_id: {
+                key: train.get(key)
+                for key in (
+                    "status", "batchIds", "repositoryRef", "wave", "error",
+                    "worktreePath", "cleanupErrors",
+                )
+            } | {
+                "conflictContext": {
+                    "conflictedFiles": (train.get("conflictContext") if isinstance(train.get("conflictContext"), dict) else {}).get("conflictedFiles")
+                }
+            }
+            for train_id, train in trains.items()
+            if isinstance(train, dict)
+            and train.get("status") in {"candidate_conflicted", "needs_resolution", "failed", "stale", "built"}
+        },
+        "deferredIssues": [
+            {key: issue[key] for key in _WORKFLOW_ISSUE_FIELDS if key in issue}
+            for issue in issues
+            if isinstance(issue, dict)
+        ],
+    }
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Schedule parallel Code batch runs")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1973,6 +2053,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--task-card-id", required=True, help="task card selected before the workflow starts")
         if name in {"status", "resume", "manual-resume", "ensure"}:
             item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
+        if name == "status":
+            item.add_argument("--workflow-view", action="store_true", help="emit only fields consumed by the fixed Code Workflow")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
     mark.add_argument("--feature", required=True)
@@ -2018,6 +2100,8 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
         if args.command == "status":
+            if args.workflow_view:
+                return _emit(True, **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs, workflow_view=True))
             return _emit(True, manifest=load_manifest(workspace, feature, args.run_id), **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "resume":
             return _emit(True, **resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))

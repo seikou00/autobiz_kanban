@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import copy
+import io
 import re
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from unittest.mock import patch
 from pathlib import Path
@@ -32,10 +34,12 @@ from hooks.repository_snapshot import current_git_branch, git_status_porcelain
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import (
     _lease_staleness_reason_locked,
+    _workflow_status_view,
     assert_batch_worktree_isolated,
     create_run as _create_run,
     ensure_run,
     manual_resume_run,
+    main as scheduler_main,
     mark_batch,
     resume_run,
     schedule,
@@ -123,6 +127,73 @@ def _seal_native_worktree(
 
 
 class ParallelBatchRuntimeTest(unittest.TestCase):
+    def test_workflow_status_view_keeps_report_fields_without_runtime_payload(self) -> None:
+        scheduled = {
+            "runId": "cw-test", "status": "blocked", "scheduledGroups": [],
+            "batchTaskIds": {"B001": ["T001"]},
+            "batchWorkspaces": {"B001": {"workspaceRef": "api", "componentRoots": ["."],
+                                           "executionStage": "parallel", "requestedPath": "/repo",
+                                           "worktreePath": "/worktree", "branchName": "batch",
+                                           "batchRationale": "x" * 100_000}},
+        }
+        manifest = {
+            "batches": {"B001": {"status": "blocked", "dependencies": ["B000"],
+                                  "error": "test failed", "worktreePath": "/worktree",
+                                  "branchName": "batch", "commitSha": "sealed",
+                                  "mergeCommitSha": None,
+                                  "recovery": {"status": "retry_exhausted", "retryAttempts": 2,
+                                               "lastError": "test failed", "largeTrace": "x" * 100_000}}},
+            "mergeTrains": {"api:wave-001": {"status": "candidate_conflicted",
+                                              "batchIds": ["B001"], "repositoryRef": "api",
+                                              "wave": 1, "error": "conflict",
+                                              "conflictContext": {"conflictedFiles": ["src/a.py"],
+                                                                  "largeTrace": "x" * 100_000}}},
+            "deferredIssues": [{"issueId": "TEST-FAILED-B001-001", "batchId": "B001",
+                                "message": "src/a.py:4 compile error", "largeTrace": "x" * 100_000}],
+        }
+
+        view = _workflow_status_view(scheduled, manifest)
+
+        self.assertEqual("api", view["batchWorkspaces"]["B001"]["workspaceRef"])
+        self.assertEqual(["B000"], view["manifest"]["batches"]["B001"]["dependencies"])
+        self.assertEqual("retry_exhausted", view["manifest"]["batches"]["B001"]["recovery"]["status"])
+        self.assertEqual(["src/a.py"], view["manifest"]["mergeTrains"]["api:wave-001"]["conflictContext"]["conflictedFiles"])
+        self.assertEqual("src/a.py:4 compile error", view["manifest"]["deferredIssues"][0]["message"])
+        self.assertLess(len(json.dumps(view)), 10_000)
+
+    def test_workflow_status_view_avoids_large_manifest_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=2,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["largeDiagnostic"] = "x" * 120_000
+            save_manifest(workspace, "alpha", run_id, manifest)
+            args = ["status", "--workspace", str(workspace), "--feature", "alpha", "--run-id", run_id]
+
+            full_output = io.StringIO()
+            with redirect_stdout(full_output):
+                self.assertEqual(0, scheduler_main(args))
+            view_output = io.StringIO()
+            with redirect_stdout(view_output):
+                self.assertEqual(0, scheduler_main([*args, "--workflow-view"]))
+
+            self.assertGreater(len(full_output.getvalue().encode("utf-8")), 80_000)
+            self.assertLess(len(view_output.getvalue().encode("utf-8")), 20_000)
+            view = json.loads(view_output.getvalue())
+            self.assertTrue(view["ok"])
+            self.assertEqual([["B001"]], view["scheduledGroups"])
+            self.assertEqual("default", view["batchWorkspaces"]["B001"]["workspaceRef"])
+            self.assertEqual("pending", view["manifest"]["batches"]["B001"]["status"])
+            self.assertNotIn("largeDiagnostic", view["manifest"])
+
     def test_generated_run_id_contains_time_and_disambiguates_same_millisecond(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "artifacts"

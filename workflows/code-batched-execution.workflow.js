@@ -76,7 +76,13 @@ const RECOVERY_FAILURE_CONTEXT_SCHEMA = {
     failedStage: { type: "string" },
     failureType: { type: "string" },
     message: { type: "string" },
-    testLogPath: { type: "string" }
+    testLogPath: { type: "string" },
+    targetId: { type: "string" },
+    commandId: { type: "string" },
+    evidenceId: { type: "string" },
+    testFile: { type: "string" },
+    argv: { type: "array", items: { type: "string" } },
+    command: { type: "string" }
   },
   required: ["failedStage", "failureType", "message"],
   additionalProperties: true
@@ -123,6 +129,82 @@ const IMPLEMENTATION_RECOVERY_ENTRY_SCHEMA = {
   ],
   additionalProperties: true
 };
+const WORKFLOW_MANIFEST_SCHEMA = {
+  type: "object",
+  properties: {
+    batches: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        properties: {
+          status: { type: "string" },
+          dependencies: { type: "array", items: { type: "string" } },
+          error: { type: ["string", "null"] },
+          worktreePath: { type: ["string", "null"] },
+          branchName: { type: ["string", "null"] },
+          commitSha: { type: ["string", "null"] },
+          mergeCommitSha: { type: ["string", "null"] },
+          recovery: {
+            type: "object",
+            properties: {
+              status: { type: ["string", "null"] },
+              retryAttempts: { type: ["number", "null"] },
+              lastError: { type: ["string", "null"] }
+            },
+            additionalProperties: false
+          }
+        },
+        required: ["status", "dependencies", "worktreePath", "branchName", "commitSha", "mergeCommitSha", "recovery"],
+        additionalProperties: false
+      }
+    },
+    mergeTrains: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        properties: {
+          status: { type: "string" },
+          batchIds: { type: "array", items: { type: "string" } },
+          repositoryRef: { type: ["string", "null"] },
+          wave: { type: ["number", "null"] },
+          error: { type: ["string", "null"] },
+          worktreePath: { type: ["string", "null"] },
+          cleanupErrors: { type: ["array", "null"], items: { type: "string" } },
+          conflictContext: {
+            type: "object",
+            properties: { conflictedFiles: { type: ["array", "null"], items: { type: "string" } } },
+            additionalProperties: false
+          }
+        },
+        required: ["status", "batchIds", "repositoryRef", "wave"],
+        additionalProperties: false
+      }
+    },
+    deferredIssues: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          issueId: { type: "string" },
+          kind: { type: "string" },
+          batchId: { type: "string" },
+          stage: { type: "string" },
+          failureType: { type: "string" },
+          message: { type: "string" },
+          disposition: { type: "string" },
+          blocksWorkflow: { type: "boolean" },
+          status: { type: "string" },
+          evidenceId: { type: "string" },
+          batchCommit: { type: ["string", "null"] },
+          createdAt: { type: "string" }
+        },
+        additionalProperties: false
+      }
+    }
+  },
+  required: ["batches", "mergeTrains", "deferredIssues"],
+  additionalProperties: false
+};
 const SCHEDULER_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -147,7 +229,11 @@ const SCHEDULER_RESULT_SCHEMA = {
     allParallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
     maxParallel: { type: "number" },
     activeWorkers: { type: "number" },
-    dispatchDiagnostics: { type: "object", additionalProperties: true },
+    dispatchDiagnostics: {
+      type: "object",
+      properties: { activeBatchIds: { type: "array", items: { type: "string" } } },
+      additionalProperties: true
+    },
     batchTaskIds: {
       type: "object",
       additionalProperties: { type: "array", items: { type: "string" } }
@@ -167,7 +253,8 @@ const SCHEDULER_RESULT_SCHEMA = {
         required: ["workspaceRef", "componentRoots", "executionStage", "requestedPath", "worktreePath", "branchName"],
         additionalProperties: true
       }
-    }
+    },
+    manifest: WORKFLOW_MANIFEST_SCHEMA
   },
   required: [
     "runId", "status", "scheduledGroups",
@@ -998,10 +1085,17 @@ async function readSchedulerState(label, phaseName = "准备") {
   schedulerReadInFlight = (async () => {
     try {
       const state = requireSchedulerResult(await workflowAgent(
-        `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-        `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。必须只原样返回该命令 stdout 的完整 JSON。不得读取 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。`,
+        `执行 python "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+        `这是调度器输出的固定工作流字段视图；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只原样返回该命令 stdout 的 JSON；不得读取完整 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。`,
         { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
       ), label);
+      const view = state.manifest;
+      const missingBatches = view && view.batches && typeof view.batches === "object"
+        ? Object.keys(state.batchTaskIds).filter(batchId => !view.batches[batchId])
+        : Object.keys(state.batchTaskIds);
+      if (!view || !view.batches || !view.mergeTrains || !Array.isArray(view.deferredIssues) || missingBatches.length) {
+        throw new Error(`parallel_scheduler_manifest_view_incomplete:${missingBatches.join(",")}`);
+      }
       applySchedulerState(state);
       markSchedulerRecovered();
       return state;
