@@ -292,7 +292,7 @@ def create_manifest(
     feature: str,
     run_id: str | None = None,
     *,
-    max_parallel: int = 4,
+    max_parallel: int = 5,
     timeout_seconds: int = 3600,
     repositories: dict[str, dict[str, Any]] | None = None,
     runtime_config: dict[str, Any] | None = None,
@@ -795,7 +795,7 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
     # Load runtime config
     config = manifest.get("runtimeConfig", {})
     optimistic_parallel = config.get("parallelSchedulingMode") == "optimistic"
-    max_parallel = config.get("maxParallel", 4)
+    max_parallel = config.get("maxParallel", 5)
 
     stages = {"proto": 0, "global": 1, "parallel": 2, "integration": 3}
     by_id = manifest.get("batches", {})

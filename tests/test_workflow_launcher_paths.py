@@ -145,11 +145,11 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "web": str(code_workspace.resolve()),
             },
             "workflowHostGitRoot": str(code_workspace.resolve()),
-            "maxParallel": 4,
+            "maxParallel": 5,
             "timeoutPerBatch": 3600,
             "runtimeConfig": {
                 "parallelSchedulingMode": "conservative",
-                "maxParallel": 4,
+                "maxParallel": 5,
                 "conflictResolution": {
                     "maxAttempts": 2,
                     "enableAutoResolve": False,
@@ -163,7 +163,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["workspaceContractPath"], str((feature_dir / "plan.json").resolve()))
         self.assertEqual(result["reason"], "fixed_workflow_for_pending_batches:2")
         execution_plan = result["batchExecutionPlan"]
-        self.assertEqual(execution_plan["maxParallel"], 4)
+        self.assertEqual(execution_plan["maxParallel"], 5)
         self.assertEqual([item["id"] for item in execution_plan["batches"]], ["B001", "B002"])
         self.assertEqual(execution_plan["waves"][0]["batchIds"], ["B001"])
         self.assertEqual(execution_plan["waves"][1]["batchIds"], ["B002"])

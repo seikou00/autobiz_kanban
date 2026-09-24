@@ -42,7 +42,7 @@ class OptimisticWorkflowIntegrationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(_load_runtime_config(workspace)["parallelSchedulingMode"], "conservative")
-            self.assertEqual(_load_runtime_config(workspace)["maxParallel"], 4)
+            self.assertEqual(_load_runtime_config(workspace)["maxParallel"], 5)
 
     def test_conflict_extractor_reports_all_content_conflicts(self) -> None:
         output = """

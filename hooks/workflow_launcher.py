@@ -40,7 +40,7 @@ from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root 
 
 WORKFLOW_SCRIPT_NAME = "code-batched-execution.workflow.js"
 WORKFLOW_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
-DEFAULT_WORKFLOW_MAX_PARALLEL = 4
+DEFAULT_WORKFLOW_MAX_PARALLEL = 5
 DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 3600
 
 

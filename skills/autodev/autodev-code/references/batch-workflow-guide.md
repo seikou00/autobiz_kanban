@@ -140,10 +140,14 @@ one explicit baseline commit per physical Git root before Batch worktrees are
 provisioned.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`,
-   whose write sets are safe with every leased/running Batch, and for which a
-   `maxParallel` slot is free. A completed Batch immediately triggers a fresh
-   selection, so no unrelated Batch completion barrier exists.
-2. The selected tasks run concurrently with `parallel()` up to `maxParallel`.
+   whose write sets are safe with every active Batch lifecycle, and for which a
+   `maxParallel` slot is free. Active includes running Review/UTest stages after
+   a delivery has been sealed. The Workflow runs a fixed `maxParallel` worker
+   pool: each worker executes one lifecycle, refreshes immediately on completion,
+   and idle workers poll every five minutes while another lifecycle is active.
+   A failure releases that worker to dispatch an unrelated Batch; dependents
+   remain blocked until their dependency is merged.
+2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
    Every Batch independently runs code → Review → UTest/seal
    → Merge Train promotion. A fast Batch may therefore
    review, test, and merge while another Batch in the same frontier is still

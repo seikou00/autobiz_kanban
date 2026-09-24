@@ -25,6 +25,7 @@ from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
+    batch_write_sets_conflict,
     create_manifest,
     DELIVERY_STAGES,
     get_active_run,
@@ -57,6 +58,22 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".autobizdevops/features/*/.parallel-runs/",
 )
 MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
+
+
+def _batch_occupies_scheduler_slot(batch: object) -> bool:
+    """Count the full lifecycle, including Review/UTest after seal, as active."""
+    if not isinstance(batch, dict):
+        return False
+    status = batch.get("status")
+    if status in {"retry_pending", "failed", "blocked", "cancelled", "merged"}:
+        return False
+    if status in {"leased", "running"}:
+        return True
+    states = batch.get("stageStates")
+    return isinstance(states, dict) and any(
+        isinstance(state, dict) and state.get("status") == "running"
+        for state in states.values()
+    )
 
 
 def _parse_timestamp_epoch(value: object) -> float | None:
@@ -501,12 +518,12 @@ def _bootstrap_repository(
         raise ValueError(f"parallel_code_workspace_bootstrap_stage_failed:{add.stderr.strip()}")
     reason = "unborn_head" if before_head is None else "dirty_worktree"
     message = build_commit_message(task_card_id, f"初始化 {feature} 工作流基线")
+    # Use the target repository's normal Git identity and hook chain. This is
+    # the same commit path used later by native Batch worktrees; overriding it
+    # with a plugin address makes corporate author-domain hooks reject the
+    # bootstrap before the Workflow can start.
     commit = _git(
         git_root,
-        "-c",
-        "user.name=AutoDevOps",
-        "-c",
-        "user.email=autodev@localhost",
         "commit",
         "--allow-empty",
         "-m",
@@ -1091,20 +1108,19 @@ def schedule(
         active = sum(
             1
             for item in manifest.get("batches", {}).values()
-            if isinstance(item, dict) and item.get("status") in {"leased", "running"}
+            if _batch_occupies_scheduler_slot(item)
         )
         active_outside_scope = sum(
             1
             for item in manifest.get("batches", {}).values()
-            if isinstance(item, dict)
-            and item.get("status") in {"leased", "running"}
+            if _batch_occupies_scheduler_slot(item)
             and str(item.get("workspaceRef") or item.get("repositoryRef")) not in allowed_refs
         ) if workspace_refs else 0
         slots = max(0, max_parallel - active)
         active_batch_ids = sorted(
             str(batch_id)
             for batch_id, item in manifest.get("batches", {}).items()
-            if isinstance(item, dict) and item.get("status") in {"leased", "running"}
+            if _batch_occupies_scheduler_slot(item)
         )
         runnable = select_runnable_batches(
             manifest,
@@ -1116,6 +1132,74 @@ def schedule(
             # Keep the nested response shape for fixed-workflow compatibility;
             # it is now one dynamic dispatch batch, not a completion barrier.
             selected.append(runnable)
+        selected_ids = set(runnable)
+        dispatch_exclusions: list[dict[str, str]] = []
+        optimistic = (
+            isinstance(manifest.get("runtimeConfig"), dict)
+            and manifest["runtimeConfig"].get("parallelSchedulingMode") == "optimistic"
+        )
+        for batch_id in scoped_ready:
+            if batch_id in selected_ids:
+                continue
+            batch = batches.get(batch_id, {})
+            stage = str(batch.get("executionStage", "parallel")) if isinstance(batch, dict) else "parallel"
+            selected_stage_batch = next(
+                (batches.get(selected_id, {}) for selected_id in runnable),
+                {},
+            )
+            selected_stage = (
+                str(selected_stage_batch.get("executionStage", "parallel"))
+                if isinstance(selected_stage_batch, dict)
+                else "parallel"
+            )
+            if slots <= 0:
+                reason = "max_parallel_capacity"
+            elif stage == "parallel" and selected_stage != "parallel":
+                reason = f"execution_stage_order:{runnable[0]}"
+            elif stage != "parallel":
+                reason = "critical_stage_waiting_for_active_workers" if active else "critical_stage_frontier"
+            elif optimistic:
+                reason = "max_parallel_capacity"
+            else:
+                conflict = next(
+                    (
+                        other
+                        for other in [*active_batch_ids, *runnable]
+                        if batch_write_sets_conflict(manifest, batch_id, other)
+                    ),
+                    None,
+                )
+                reason = f"write_set_conflict:{conflict}" if conflict else "not_selected_by_scheduler"
+            dispatch_exclusions.append({"batchId": batch_id, "reason": reason})
+        out_of_scope_ready = sorted(set(ready) - set(scoped_ready))
+        dispatch_exclusions.extend(
+            {"batchId": batch_id, "reason": "workspace_scope_excluded"}
+            for batch_id in out_of_scope_ready
+        )
+        ready_ids = set(ready)
+        allowed_scope = {str(ref) for ref in workspace_refs or []}
+        for raw_batch_id, batch in batches.items():
+            batch_id = str(raw_batch_id)
+            if not isinstance(batch, dict) or batch.get("status") != "pending" or batch_id in ready_ids:
+                continue
+            workspace_ref = str(batch.get("workspaceRef") or batch.get("repositoryRef") or "")
+            if allowed_scope and workspace_ref not in allowed_scope:
+                continue
+            dependency = next(
+                (
+                    str(dependency_id)
+                    for dependency_id in batch.get("dependencies", [])
+                    if not isinstance(batches.get(dependency_id), dict)
+                    or batches[dependency_id].get("status") != "merged"
+                    or not batches[dependency_id].get("mergeCommitSha")
+                ),
+                None,
+            )
+            if dependency is not None:
+                dispatch_exclusions.append({
+                    "batchId": batch_id,
+                    "reason": f"dependency_unmerged:{dependency}",
+                })
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
         return {
@@ -1195,6 +1279,16 @@ def schedule(
             )),
             "maxParallel": max_parallel,
             "activeWorkers": active,
+            "dispatchDiagnostics": {
+                "maxParallel": max_parallel,
+                "occupiedSlots": active,
+                "availableSlots": slots,
+                "activeBatchIds": active_batch_ids,
+                "eligibleBatchIds": scoped_ready,
+                "selectedBatchIds": runnable,
+                "recoveryBatchIds": sorted(set(scoped_stage_recovery + scoped_implementation_recovery + scoped_mergeable)),
+                "notSelected": dispatch_exclusions,
+            },
             "batchWorkspaces": {
                 batch_id: {
                     "workspaceRef": item.get("workspaceRef"),
@@ -1863,7 +1957,7 @@ def main(argv: list[str] | None = None) -> int:
         if name in {"status", "resume", "manual-resume"}:
             item.add_argument("--run-id", required=True)
         if name in {"create", "ensure"}:
-            item.add_argument("--max-parallel", type=int, default=4)
+            item.add_argument("--max-parallel", type=int, default=5)
             item.add_argument("--timeout-seconds", type=int, default=3600)
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
             item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")

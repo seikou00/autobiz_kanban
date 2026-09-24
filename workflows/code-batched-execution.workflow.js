@@ -10,8 +10,13 @@ export const meta = {
   ]
 };
 
-const DEFAULT_MAX_PARALLEL = 4;
+const DEFAULT_MAX_PARALLEL = 5;
 const MAX_SCHEDULER_CYCLES = 100;
+// Idle dispatch workers keep checking the durable scheduler snapshot while
+// another Batch lifecycle is still running. Completion-triggered refreshes
+// remain the fast path; this bounded poll closes the gap when readiness changes
+// outside the worker that currently owns the only active lifecycle.
+const DISPATCH_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // A transport-level empty model response happens before the child can return
 // its command result.  It is neither a Batch verdict nor evidence that the
 // command failed, so give that same child a small, bounded retry budget.
@@ -140,6 +145,8 @@ const SCHEDULER_RESULT_SCHEMA = {
     parallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
     allParallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
     maxParallel: { type: "number" },
+    activeWorkers: { type: "number" },
+    dispatchDiagnostics: { type: "object", additionalProperties: true },
     batchTaskIds: {
       type: "object",
       additionalProperties: { type: "array", items: { type: "string" } }
@@ -760,6 +767,7 @@ const quarantinedBatchIds = new Set();
 const schedulerFailures = [];
 const finalRepairResults = [];
 let schedulerCycles = 0;
+let schedulerReadInFlight = null;
 let mergeSequence = 0;
 let blockedBatches = (prepared.blockedBatches || []).filter(usableString);
 let lastScheduler = prepared;
@@ -985,23 +993,30 @@ function applySchedulerState(scheduler) {
 }
 
 async function readSchedulerState(label, phaseName = "准备") {
+  if (schedulerReadInFlight) return schedulerReadInFlight;
+  schedulerReadInFlight = (async () => {
+    try {
+      const state = requireSchedulerResult(await workflowAgent(
+        `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+        `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。必须只原样返回该命令 stdout 的完整 JSON。不得读取 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。`,
+        { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
+      ), label);
+      applySchedulerState(state);
+      markSchedulerRecovered();
+      return state;
+    } catch (error) {
+      recordSchedulerFailure(label, error);
+      // A blank model completion did not produce a scheduler verdict. Continue
+      // only from the last proven-safe fallback; malformed or real command
+      // failures never authorize dispatch from stale grants.
+      if (emptyAgentResponseFailure(error)) return schedulerSnapshotFallback(label, error);
+      return null;
+    }
+  })();
   try {
-    const state = requireSchedulerResult(await workflowAgent(
-      `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-      `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。必须只原样返回该命令 stdout 的完整 JSON。不得读取 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。`,
-      { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
-    ), label);
-    applySchedulerState(state);
-    markSchedulerRecovered();
-    return state;
-  } catch (error) {
-    recordSchedulerFailure(label, error);
-    // A blank model completion did not produce a scheduler verdict.  Continue
-    // only from a previously returned scheduler grouping; malformed or real
-    // command failures remain a stop condition so the workflow cannot guess
-    // about leases, dependencies, or conflicts.
-    if (emptyAgentResponseFailure(error)) return schedulerSnapshotFallback(label, error);
-    return null;
+    return await schedulerReadInFlight;
+  } finally {
+    schedulerReadInFlight = null;
   }
 }
 
@@ -1952,68 +1967,158 @@ function canStartLifecycle() {
   return false;
 }
 
-async function runLifecycleChain(initialJob, claimedBatchIds, drainLabel) {
-  let job = initialJob;
-  let result = null;
-  while (job) {
-    if (!canStartLifecycle()) return result;
-    result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback);
-    // Whether this Batch merged or failed into retry_pending, its execution
-    // slot is now free. Refresh immediately so an independent pending Batch
-    // can use it; only a real merge releases this Batch's own dependents.
-    // Do not wait for unrelated jobs passed to the same `parallel()` call.
-    if (!result) return result;
+function dispatchHasPotentialWork(state) {
+  if (!state || typeof state !== "object") return false;
+  return Boolean(
+    (Array.isArray(state.readyBatches) && state.readyBatches.length)
+    || (Array.isArray(state.mergeableBatches) && state.mergeableBatches.length)
+    || (Array.isArray(state.implementationRecoveryBatches) && state.implementationRecoveryBatches.length)
+    || (Array.isArray(state.stageRecoveryBatches) && state.stageRecoveryBatches.length)
+    || (Number.isInteger(state.activeWorkers) && state.activeWorkers > 0)
+  );
+}
+
+function dispatchOccupiedSlots(state, dispatcherState) {
+  const activeIds = new Set(
+    state
+    && state.dispatchDiagnostics
+    && Array.isArray(state.dispatchDiagnostics.activeBatchIds)
+      ? state.dispatchDiagnostics.activeBatchIds.filter(isValidBatchId)
+      : []
+  );
+  for (const batchId of dispatcherState.runningBatchIds) activeIds.add(batchId);
+  const reported = state && Number.isInteger(state.activeWorkers) ? state.activeWorkers : 0;
+  return Math.max(activeIds.size, reported);
+}
+
+async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispatcherState) {
+  let idlePolls = 0;
+  const maxIdlePolls = Math.ceil(((timeoutPerBatch + 60) * 1000) / DISPATCH_POLL_INTERVAL_MS);
+  for (;;) {
+    // Recovery and merge candidates share the same worker pool as fresh
+    // implementation grants. Enforce the run-wide limit here as well, since
+    // their arrays are recovery candidates rather than scheduler reservations.
+    if (dispatchOccupiedSlots(lastScheduler, dispatcherState) >= maxParallel) {
+      if (dispatcherState.active === 0 && lastScheduler && lastScheduler.activeWorkers === 0) return;
+      await new Promise(resolve => setTimeout(resolve, DISPATCH_POLL_INTERVAL_MS));
+      idlePolls += 1;
+      const refreshed = await readSchedulerState(
+        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`,
+        "Batch 阶段"
+      );
+      if (!refreshed && dispatcherState.active === 0) return;
+      if (idlePolls > maxIdlePolls) {
+        recordUnresolved({
+          kind: "scheduler",
+          status: "dispatcher_idle_timeout",
+          durable: false,
+          error: `dispatcher_capacity_wait_timeout:${workerIndex}:${maxIdlePolls}`,
+        });
+        return;
+      }
+      continue;
+    }
+    // Claim synchronously from the latest shared snapshot before awaiting any
+    // tool call. Other worker callbacks therefore cannot take the same Batch.
+    const job = takeNextRunnableLifecycle(claimedBatchIds);
+    if (job) {
+      idlePolls = 0;
+      if (!canStartLifecycle()) return;
+      dispatcherState.active += 1;
+      dispatcherState.runningBatchIds.add(job.batchId);
+      dispatcherState.ranAny = true;
+      try {
+        await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback);
+      } catch (error) {
+        // A failure to persist this Batch's retry marker must be visible, but
+        // must not terminate the worker and strand unrelated ready Batches.
+        recordUnresolved({
+          kind: "batch",
+          batchId: job.batchId,
+          status: "dispatch_worker_failed",
+          durable: false,
+          error: errorText(error),
+          source: job.source,
+        });
+      } finally {
+        dispatcherState.active -= 1;
+        dispatcherState.runningBatchIds.delete(job.batchId);
+      }
+
+      // Every outcome, including retry_pending, triggers an immediate refresh.
+      // A null result from a real scheduler error blocks new dispatch until a
+      // later successful poll; it never causes us to reuse stale grants.
+      const state = await readSchedulerState(
+        `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`,
+        "Batch 阶段"
+      );
+      if (state && state.schedulerSnapshotFallback === true) {
+        schedulerFallbackConsumed.add(job.batchId);
+      }
+      if (!state) {
+        await new Promise(resolve => setTimeout(resolve, DISPATCH_POLL_INTERVAL_MS));
+        const recovered = await readSchedulerState(
+          `${drainLabel}-worker-${workerIndex}-scheduler-retry`,
+          "Batch 阶段"
+        );
+        if (!recovered && dispatcherState.active === 0) return;
+      }
+      continue;
+    }
+
+    // Other workers may still be running while this worker has no assignment.
+    // Keep polling so newly eligible work is dispatched without a completion
+    // barrier. If no worker is active and the scheduler reports no candidate,
+    // the pool is drained and this worker can exit.
+    const snapshot = lastScheduler;
+    if (dispatcherState.active === 0 && !dispatchHasPotentialWork(snapshot)) return;
+    if (dispatcherState.active === 0 && snapshot && snapshot.activeWorkers === 0) return;
+    await new Promise(resolve => setTimeout(resolve, DISPATCH_POLL_INTERVAL_MS));
+    idlePolls += 1;
     const state = await readSchedulerState(
-      `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}`,
+      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`,
       "Batch 阶段"
     );
-    if (!state) return result;
-    if (state.schedulerSnapshotFallback === true) {
-      // This Batch has completed a lifecycle attempt. Do not replay it from a
-      // stale scheduler grant while walking the cached, conservative waves.
-      schedulerFallbackConsumed.add(job.batchId);
+    if (!state && dispatcherState.active === 0) return;
+    if (idlePolls > maxIdlePolls) {
+      recordUnresolved({
+        kind: "scheduler",
+        status: "dispatcher_idle_timeout",
+        durable: false,
+        error: `dispatcher_idle_timeout:${workerIndex}:${maxIdlePolls}`,
+      });
+      return;
     }
-    job = takeNextRunnableLifecycle(claimedBatchIds);
   }
-  return result;
 }
 
 async function drainRunnableLifecycles(drainLabel) {
   let ranAny = false;
-  for (;;) {
-    // Claim this snapshot in-memory before launching.  The scheduler's
-    // selection is read-only until a worker acquires its lease, so this avoids
-    // two concurrently completed chains starting the same pending Batch.
-    const claimedBatchIds = new Set();
-    const lifecycleJobs = [];
-    for (;;) {
-      const job = takeNextRunnableLifecycle(claimedBatchIds);
-      if (!job) break;
-      lifecycleJobs.push(() => runLifecycleChain(job, claimedBatchIds, drainLabel));
-    }
-    if (!lifecycleJobs.length) {
-      return { ranAny, reason: "no_runnable_independent_batches" };
-    }
-
-    // A failed Batch is quarantined locally and its slot is immediately reused
-    // by another eligible Batch. Successful merges use the same eager path,
-    // so independent peers never form a completion barrier.
-    phase("Batch 阶段");
-    try {
-      await parallel(lifecycleJobs);
-    } catch (error) {
-      // This is defensive: each job above catches its own failures.  Keep an
-      // unexpected parallel-engine failure observable rather than aborting.
-      recordUnresolved({ kind: "scheduler", status: "parallel_execution_failed", durable: false, error });
-    }
-    ranAny = true;
-
-    // `status` schedules currently-independent work but deliberately leaves
-    // retry_pending records untouched.  Retries are deferred to the explicit
-    // final repair phase so a flaky Batch cannot starve peer branches.
-    const state = await readSchedulerState(`${drainLabel}-schedule-cycle-${schedulerCycles}`);
-    if (!state) return { ranAny, reason: "scheduler_snapshot_unavailable" };
+  // Start a stable pool for the whole drain, rather than a snapshot-sized set
+  // of callbacks. Empty workers remain alive while another lifecycle runs and
+  // poll the scheduler, so a later-ready Batch can use a free slot promptly.
+  // Each worker handles one Batch at a time and immediately asks for another.
+  const claimedBatchIds = new Set();
+  const dispatcherState = { active: 0, ranAny: false, runningBatchIds: new Set() };
+  const poolSize = Math.max(1, maxParallel);
+  phase("Batch 阶段");
+  try {
+    await parallel(Array.from({ length: poolSize }, (_, index) => async () => {
+      await runDispatchWorker(index + 1, claimedBatchIds, drainLabel, dispatcherState);
+    }));
+  } catch (error) {
+    recordUnresolved({ kind: "scheduler", status: "parallel_execution_failed", durable: false, error });
   }
+  ranAny = dispatcherState.ranAny || schedulerCycles > 0;
+  const snapshot = lastScheduler;
+  return {
+    ranAny,
+    reason: snapshot && snapshot.activeWorkers > 0
+      ? "other_active_workers"
+      : snapshot && Array.isArray(snapshot.readyBatches) && snapshot.readyBatches.length
+        ? "ready_batches_not_dispatchable"
+        : "no_runnable_independent_batches",
+  };
 }
 
 function manifestFromScheduler(scheduler = lastScheduler) {
