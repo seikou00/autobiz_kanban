@@ -35,6 +35,9 @@ board_config.json 注册::
 否则放弃写入并在结果里给出 boardConfigWriteError。
 只读安装环境可从命令里去掉该参数、改为打包前手动 bake 一次。
 
+``--prefer-manifest``：克隆完成后仅从 agents.manifest.json 解析部署单元，
+不运行 collect-knowledge.js；清单不可用时直接返回失败。
+
 UI 直调约定：逻辑失败也输出 ok:false 的 JSON 并 exit 0，绝不让 UI 收到非 JSON。
 """
 
@@ -266,6 +269,7 @@ def run(
     repo_url: Optional[str],
     ref: Optional[str],
     ssh_url: Optional[str] = None,
+    prefer_manifest: bool = False,
 ) -> dict:
     try:
         url, resolved_ref, resolved_ssh_url = _resolve_repo(repo_url, ref, ssh_url)
@@ -295,6 +299,17 @@ def run(
         "ref": resolved_ref,
         **repo_info,
     }
+    if prefer_manifest:
+        try:
+            manifest_payload = build_sync_payload(repo_info=repo_info)
+        except AgentsManifestError as exc:
+            result = _fail(f"仓库已拉取但 agents.manifest.json 不可用: {exc}")
+            result["repo"] = repo_info
+            result["knowledge_path"] = str(dest)
+            return result
+        manifest_payload["supported_deploy_units_source"] = "agents.manifest.json"
+        return manifest_payload
+
     collector_units: Optional[List[str]] = None
     collector_error = ""
     try:
@@ -445,6 +460,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--ref", dest="ref", default=None, help="覆盖 agentsRepo.ref（分支/标签/commit，默认 main）")
     parser.add_argument(
+        "--prefer-manifest",
+        action="store_true",
+        help="仅从 agents.manifest.json 读取部署单元，不运行 collect-knowledge.js",
+    )
+    parser.add_argument(
         "--write-board-config",
         dest="write_board_config",
         action="store_true",
@@ -452,7 +472,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
-    result = run(args.repo_url, args.ref, args.ssh_url)
+    result = run(args.repo_url, args.ref, args.ssh_url, prefer_manifest=args.prefer_manifest)
     if args.write_board_config and result.get("ok") and isinstance(result.get("supported_deploy_units"), list):
         try:
             merge_supported_units_into_board_config(result["supported_deploy_units"])
