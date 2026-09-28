@@ -314,6 +314,58 @@ class RunSuccessPathTest(unittest.TestCase):
         self.assertIn("node failed", result["message"])
         self.assertIn("missing manifest", result["message"])
 
+    def test_prefer_manifest_flag_skips_collector_and_uses_manifest_units(self):
+        stdout = io.StringIO()
+        manifest_payload = {
+            "ok": True,
+            "message": "清单解析完成",
+            "supported_deploy_units": ["MANIFEST-1"],
+            "systems": [],
+        }
+        with mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            side_effect=AssertionError("collector should not run"),
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            return_value=manifest_payload,
+        ) as build_payload, contextlib.redirect_stdout(stdout):
+            code = sync_agents.main(
+                ["--repo-url", "https://git/x.git", "--ref", "main", "--prefer-manifest"]
+            )
+
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(["MANIFEST-1"], result["supported_deploy_units"])
+        self.assertEqual("agents.manifest.json", result["supported_deploy_units_source"])
+        build_payload.assert_called_once()
+
+    def test_prefer_manifest_fails_when_manifest_is_unavailable(self):
+        with mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            side_effect=AssertionError("collector should not run"),
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            side_effect=sync_agents.AgentsManifestError("missing manifest"),
+        ):
+            result = sync_agents.run("https://git/x.git", "main", prefer_manifest=True)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("missing manifest", result["message"])
+        self.assertIn("agents.manifest.json", result["message"])
+
 
 def _git(args, cwd):
     return subprocess.run(
