@@ -111,7 +111,7 @@ def test_fixed_workflow_entrypoint():
         "required: [\"batchId\", \"status\", \"worktreePath\", \"branchName\", \"commitSha\"]",
         "drainRunnableLifecycles",
         "takeNextRunnableLifecycle",
-        "runLifecycleChain",
+        "runDispatchWorker",
         "validateAndPromoteBatch(batchId, promotionWave)",
         "after-batch-${job.batchId}",
         "resolve-conflicted-candidate",
@@ -161,9 +161,12 @@ def test_fixed_workflow_entrypoint():
         "生产代码修复和封存",
         "failureContext",
         "本次打回的精确问题如下",
-        "targetId、commandId、evidenceId、test-output.log 路径",
+        "targetId、commandId、evidenceId、test-output.log",
         "record-test-failure",
-        'testStatus:\\"deferred\\"',
+        'testStatus:\\"source_repair_required\\"',
+        "UTEST_STAGE_TIMEOUT_SECONDS",
+        "--stage-timeout",
+        "executionOutcome=command_timeout/stage_deadline_exceeded",
         "--purpose review",
         "parallel_git_index_lock_busy",
         "parallel_git_index_lock_recovery_failed",
@@ -340,6 +343,11 @@ const requiredSchedulerFields = [
 ];
 if (requiredSchedulerFields.some(field => !context.schedulerSchema.properties[field])) process.exit(22);
 if (requiredSchedulerFields.some(field => !context.schedulerSchema.required.includes(field))) process.exit(23);
+const manifestSchema = context.schedulerSchema.properties.manifest;
+if (!manifestSchema?.properties?.batches || !manifestSchema.properties.mergeTrains || !manifestSchema.properties.deferredIssues) process.exit(29);
+if (!source.includes("status --workflow-view")) process.exit(30);
+if (!context.schedulerSchema.properties.dispatchDiagnostics.properties.activeBatchIds) process.exit(31);
+if (!context.schedulerSchema.properties.stageRecoveryBatches.items.properties.failureContext.properties.argv) process.exit(32);
 const stageSchema = context.schedulerSchema.properties.stageRecoveryBatches.items;
 for (const field of ["batchId", "worktreePath", "branchName", "commitSha", "nextStage", "failureContext"]) {
   if (!stageSchema.properties[field]) process.exit(24);
@@ -573,7 +581,7 @@ if (failed.batchIds.length !== 0 || failed.promoted === true) process.exit(6);
 
 
 def test_workflow_eager_dependent_dispatch():
-    """一个 Batch 结束后，应立即在该执行槽中接手独立的可运行 Batch。"""
+    """一个 Batch 结束后，常驻 worker 应立即在该执行槽中接手可运行 Batch。"""
     print("测试 7: Batch 结束后即时调度")
     print("-" * 60)
 
@@ -586,6 +594,15 @@ const context = {
   schedulerCycles: 0,
   MAX_SCHEDULER_CYCLES: 10,
   quarantinedBatchIds: new Set(),
+  schedulerFallbackConsumed: new Set(),
+  schedulerSnapshotDegraded: false,
+  mergeableBatches: [],
+  lastScheduler: { activeWorkers: 0 },
+  maxParallel: 5,
+  timeoutPerBatch: 0,
+  DISPATCH_POLL_INTERVAL_MS: 1,
+  isValidBatchId: value => typeof value === "string" && value.length > 0,
+  errorText: error => String(error),
   recordUnresolved: () => {},
 };
 let scheduled = ["B001"];
@@ -607,7 +624,8 @@ context.runLifecycleSafely = async (batchId, source, execute) => {
 context.readSchedulerState = async () => {
   refreshes += 1;
   scheduled = refreshes === 1 ? ["B002"] : [];
-  return { status: "running" };
+  context.lastScheduler = { status: "running", activeWorkers: 0 };
+  return context.lastScheduler;
 };
 vm.createContext(context);
 const start = source.indexOf("function takeNextRunnableLifecycle(");
@@ -616,8 +634,8 @@ if (start < 0 || end < 0) process.exit(2);
 vm.runInContext(source.slice(start, end), context);
 (async () => {
   const claimed = new Set();
-  const first = context.takeNextRunnableLifecycle(claimed);
-  await context.runLifecycleChain(first, claimed, "test");
+  const dispatcherState = { active: 0, ranAny: false, runningBatchIds: new Set() };
+  await context.runDispatchWorker(1, claimed, "test", dispatcherState);
 if (executed.join(",") !== "initial:B001,initial:B002") process.exit(3);
 if (refreshes !== 2) process.exit(4);
 })().catch(() => process.exit(5));

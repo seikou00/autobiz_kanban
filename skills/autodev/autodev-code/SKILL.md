@@ -286,9 +286,9 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 **重要**：支持修复 status = "implemented" 或 "done" 的任务。修复后，如果原状态是 "done"，会自动恢复为 "done" 状态。
 
-### 回检与交接
+### Code 收口
 
-本节完整协议在 `${pluginPath}/skills/references/review-protocol-code.md`：必须先读取并完整遵循该文件，不得凭记忆执行本节。
+代码审查由固定 Code Workflow 的每个 Batch `review` 子阶段完成；所有 Batch 合并后不再启动额外的 Code 回检。
 
 推进 `code_done` 前先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。
 
@@ -323,7 +323,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 在调用平台 `workflow` 前，必须把 launcher 返回的 `batchExecutionPlan` 展示给用户：逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集，并展示 `initialDispatch`。必须说明运行时不是整波屏障：每当一个 Batch 释放槽位，scheduler 都会从依赖已合并且与当前 active Batch 安全的任务中立即补位，直至 `maxParallel`；同仓库重叠写集和 `proto`/`global`/`integration` 特殊阶段仍会串行。`waves` 仅是 Plan 的兼容预览/审计分组，不代表实际等待边界。展示是执行前的可见性步骤，不额外等待确认，除非用户明确要求审批后再执行。
 
-无论一个或多个物理 Git 根，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`，且 `requiredAction` 为 `start_fixed_workflow` 或 `resume_fixed_workflow`，才使用 launcher 返回的固定脚本路径启动一次 Workflow。前者要求校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`；后者是用户明确要求继续运行时的人工恢复入口，即使 Plan 投影中的 Batch 已是 `failed`，也必须按 launcher 返回的同一 runId 和 `workflowArgs.resumeMode=manual` 恢复。完整的 `codeWorkspaces` 映射必须原样传入该 Workflow；它在同一个共享 scheduler run 中由 `parallel()` 为当前可运行集的每个 Batch 启动独立 agent，并在有空槽时立即补位。各 Batch 仍从自身映射的 Git 根创建原生 Worktree，并按仓库独立走 Merge Train；不得按 Git 根拆成多个平台 Workflow。全部 delivery 推广后，固定 Workflow 自己执行 B-E2E 和 evidence aggregate。launcher 会保留 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的 Feature 专属归档副本，并将同一 SHA 的启动副本复制到 `workflow_workspace/.cmbdevclaw/workflows/<feature>/`；返回的 `workflowScriptPath` 始终是后者，`workflowArtifactScriptPath` 是前者。不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
+无论一个或多个物理 Git 根，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`，且 `requiredAction` 为 `start_fixed_workflow` 或 `resume_fixed_workflow`，才使用 launcher 返回的固定脚本路径启动一次 Workflow。前者要求校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`；后者是用户明确要求继续运行时的人工恢复入口，即使 Plan 投影中的 Batch 已是 `failed`，也必须按 launcher 返回的同一 runId 和 `workflowArgs.resumeMode=manual` 恢复。完整的 `codeWorkspaces` 映射必须原样传入该 Workflow；它在同一个共享 scheduler run 中由 `parallel()` 启动固定数量的 dispatcher worker。每个 worker 一次执行一个 Batch，完成、失败或超时后立即刷新并补位；空闲 worker 在其他 Batch 运行时每 5 分钟刷新一次以发现新 ready 的 Batch。Review、UTest 等 stage 状态为 `running` 时也计入占槽。各 Batch 仍从自身映射的 Git 根创建原生 Worktree，并按仓库独立走 Merge Train；不得按 Git 根拆成多个平台 Workflow。全部 delivery 推广后，固定 Workflow 自己执行 B-E2E 和 evidence aggregate。launcher 会保留 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的 Feature 专属归档副本，并将同一 SHA 的启动副本复制到 `workflow_workspace/.cmbdevclaw/workflows/<feature>/`；返回的 `workflowScriptPath` 始终是后者，`workflowArtifactScriptPath` 是前者。不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
 
 调用平台顶层 `workflow` tool 前，先取得其已挂载会话工作路径并作为 `--workflow-workspace` 传给 launcher（默认值就是启动 launcher 的当前路径）。launcher 返回的 `workflowWorkspaceRoot` 必须等于该路径，且 `workflowScriptPath` 必须在其下；随后唯一允许的调用形式是 `scriptPath=launcher.workflowScriptPath` 且 `args=launcher.workflowArgs`（原生 JSON 对象，不得 `JSON.stringify`）。`workflowScriptRelativePath` 仅用于审计该脚本确实位于该 root 下，不得改用它重建绝对路径。若返回 root 与平台实际工作路径不一致，必须报告 `workflow_workspace_root_mismatch` 并停止；不得改用插件源码、业务仓库路径或内联脚本。
 
@@ -333,7 +333,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 - Workflow 启动时先执行 scheduler `ensure`：没有活动 run 时创建一个；已有交付物完整的活动 run 时复用同一个 runId；`needs_resolution` 或缺失已密封交付物时 fail-closed 并保留现场。随后 scheduler 选择依赖已经 `merged` 的 pending Batch，并在任一 Batch 完成后重新计算可运行集。
 - scheduler 按剩余 `maxParallel` 槽位派发任务：`proto`、`global`、`integration` 阶段逐 Batch 串行；普通 `parallel` 阶段依据真实依赖、仓库绑定与调度策略选择任务；Plan v2 不预报写集，隔离工作树允许同仓库任务乐观并行，真实文件冲突交给 Merge Train。只要有槽位，就立即补充符合条件的任务，不等待不相关 Batch 完成。插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner。
-- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。Review 已经由失败测试锚定的 `source_bug` 可回到同一 Batch 的 production repair；UTest 的最终失败（包括 `source_bug`）必须保留真实 Evidence 与结构化 issue，并继续后续流程；测试自身、fixture、mock、测试配置问题仍先在 UTest 中修复并重跑。
+- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。任何由真实失败测试锚定的 `source_bug`（无论 Review 或 UTest 首次发现）都必须回到同一 Batch 的受控 production repair，再重新 Review 并重跑原 UTest 命令；不得作为 deferred finding 推广。测试自身、fixture、mock、测试配置问题仅允许在 UTest 修复一次并重跑一次；外部 environment/timeout 必须保留 Evidence、阻断该 Batch，绝不带病合并。
 - 每个 `ready_to_candidate` Batch 都可立即由 `parallel_merge_train.py` 在独立临时候选 Worktree 合成并推广，不必等待同一安全波的其他 Batch 完成编码、Review 或 UTest。候选不执行额外测试：其前置条件就是该 Batch 的 Review、UTest（通过或失败已记录）和 re-seal 均已有证据。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
 - 所有 delivery 合并后，B-E2E 是唯一的 post-merge 可执行验证，使用临时验证 Worktree；通过即清理，失败保留至修复。`parallel_evidence_aggregate.py`/`parallel_final_verify.py` 仅校验已有 evidence 的内容摘要，绝不重跑 Batch UTest 或 E2E。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
 - Workflow 只接受 launcher 返回的完整 `workflowArgs`；`feature`、`pluginPath`、artifact workspace 和每个 code workspace 都必须是非空、非 `undefined` 的绝对路径。Workflow host 仅为平台审计元数据，可为空或与业务仓库不同。任一代码路径无效时在创建 Batch agent 前阻断，禁止生成临时 workflow 或手工创建分支绕过插件 Worktree 管理器。

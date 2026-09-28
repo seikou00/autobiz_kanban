@@ -702,15 +702,9 @@
           },
           "subagentConfig": {
             "disabledBuiltinSubagents": [
-              "Explore",
-              "code-reviewer",
-              "code-simplifier",
               "verification"
             ],
             "customSubagentFiles": [
-              "agents/explore.md",
-              "agents/code-reviewer.md",
-              "agents/code-simplifier.md",
               "agents/verification.md"
             ]
           }

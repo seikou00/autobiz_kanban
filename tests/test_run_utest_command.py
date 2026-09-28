@@ -10,6 +10,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.run_utest_command import (  # noqa: E402
     UTestCommandError,
+    _run,
     execute_utest_command,
     main,
 )
@@ -70,6 +72,13 @@ class RunUTestCommandTest(unittest.TestCase):
             "    def test_value(self):\n"
             "        print('x' * 6000)\n"
             "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        (self.repo / "test_sleep.py").write_text(
+            "import time\nimport unittest\n\n"
+            "class SleepTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        time.sleep(3)\n",
             encoding="utf-8",
         )
         self._write_plan()
@@ -218,6 +227,7 @@ class RunUTestCommandTest(unittest.TestCase):
         )
 
         self.assertEqual("FAIL", result["result"])
+        self.assertIn("source behavior mismatch", Path(result["evidenceLogPath"]).read_text(encoding="utf-8"))
         self.assertEqual("FAIL", self._unit_result()["verdict"])
         self.assertEqual("source_bug", attestation["classification"])
 
@@ -244,6 +254,40 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual("BLOCKED", result["result"])
         self.assertEqual("blocked", self._records()[0]["validation"]["result"])
         self.assertEqual("BLOCKED", self._unit_result()["targets"][0]["result"])
+
+    def test_timeout_terminates_the_controlled_test_process_and_is_not_source_bug(self):
+        result = self._execute(
+            argv=[sys.executable, "-m", "unittest", "test_sleep"],
+            test_files=["test_sleep.py"],
+            timeout=1,
+        )
+
+        self.assertEqual(124, result["exitCode"])
+        self.assertEqual("command_timeout", result["executionOutcome"])
+        self.assertEqual("timeout", result["failureClassification"])
+        self.assertEqual("BLOCKED", result["result"])
+        log = (self.feature_dir / "test-output.log").read_text(encoding="utf-8")
+        self.assertIn("已终止整个进程组", log)
+
+    def test_failed_runner_returns_when_child_keeps_output_open(self):
+        command = (
+            "import subprocess, sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)']); "
+            "print('[ERROR] COMPILATION ERROR', flush=True); "
+            "sys.exit(1)"
+        )
+        started = time.monotonic()
+
+        exit_code, stdout, stderr, blocked, outcome = _run(
+            [sys.executable, "-c", command], self.repo, 1
+        )
+
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertEqual(1, exit_code)
+        self.assertIn("COMPILATION ERROR", stdout)
+        self.assertEqual("", stderr)
+        self.assertFalse(blocked)
+        self.assertEqual("completed", outcome)
 
     def test_full_output_is_not_truncated(self):
         self._execute(

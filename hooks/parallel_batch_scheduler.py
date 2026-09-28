@@ -25,6 +25,8 @@ from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
+    batch_occupies_scheduler_slot,
+    batch_write_sets_conflict,
     create_manifest,
     DELIVERY_STAGES,
     get_active_run,
@@ -43,6 +45,7 @@ from hooks.parallel_runtime import (
 )
 from hooks.plan_json import load_plan_bundle
 from hooks.parallel_validation_ownership import validation_ownership_errors
+from hooks.parallel_batch_stage import UTEST_STAGE_TIMEOUT_SECONDS
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -127,14 +130,16 @@ def _lease_staleness_reason_locked(
                 path.unlink()
             return "lease_expired"
 
-        # A lease that survives beyond the configured Batch deadline is
-        # still not allowed to reserve a scheduler slot forever.  `startedAt`
-        # is persisted in the manifest once implementation begins; the lease
-        # timestamp covers a worker that dies during initial provisioning.
-        started_epoch = _parse_timestamp_epoch(batch.get("startedAt"))
-        if started_epoch is None:
-            started_epoch = _parse_timestamp_epoch(lease.get("startedAt"))
-        if started_epoch is not None and now - started_epoch >= max(1, timeout_seconds):
+        # Each acquire begins a new implementation or repair attempt. The
+        # original Batch startedAt can be hours old by the time Fix begins.
+        # Honour the guarded lease's effective TTL for older run manifests.
+        started_epoch = _parse_timestamp_epoch(lease.get("startedAt"))
+        try:
+            lease_ttl = int(lease.get("ttlSeconds", 0))
+        except (TypeError, ValueError):
+            lease_ttl = 0
+        attempt_timeout = max(1, timeout_seconds, lease_ttl)
+        if started_epoch is not None and now - started_epoch >= attempt_timeout:
             if path.exists():
                 path.unlink()
             return "batch_timeout"
@@ -251,6 +256,79 @@ def _recover_stale_active_batches_locked(
         )
         recovered.append({"batchId": batch_id, "reason": reason})
     return recovered
+
+
+def _close_overdue_utest_stages_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    manifest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Close a UTest stage whose durable wall-clock budget has elapsed.
+
+    The lease is an ownership mechanism, not a quality-stage deadline.  A
+    worker can otherwise keep a sealed Batch in ``test`` while it repeatedly
+    explores compiler workarounds. Clearing its lease makes later commands
+    fail safely; the controlled runner independently clamps each process to
+    this same deadline. Timeout is a visible non-blocking UTest deferral,
+    with final B-E2E still required before the run can succeed.
+    """
+    now = time.time()
+    stage_timeout = min(
+        UTEST_STAGE_TIMEOUT_SECONDS,
+        max(1, int(manifest.get("timeoutPerBatch", UTEST_STAGE_TIMEOUT_SECONDS))),
+    )
+    closed: list[dict[str, Any]] = []
+    for raw_batch_id, batch in manifest.get("batches", {}).items():
+        if not isinstance(batch, dict):
+            continue
+        states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+        test = states.get("test") if isinstance(states, dict) else None
+        if not isinstance(test, dict) or test.get("status") != "running":
+            continue
+        started = _parse_timestamp_epoch(test.get("startedAt"))
+        if started is None or now - started < stage_timeout:
+            continue
+        batch_id = str(raw_batch_id)
+        issue_index = 1 + sum(
+            1
+            for item in manifest.get("deferredIssues", [])
+            if isinstance(item, dict)
+            and item.get("batchId") == batch_id
+            and item.get("stage") == "test"
+            and item.get("kind") == "utest_stage_timeout"
+        )
+        issue_id = f"UTEST-TIMEOUT-{batch_id}-{issue_index:03d}"
+        message = "utest_stage_timeout:{}s".format(stage_timeout)
+        test.update({
+            "status": "deferred",
+            "completedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "failure": {"type": "environment", "message": message, "nextStage": None},
+            "deferredIssueId": issue_id,
+            "deferredDisposition": "utest_stage_timeout",
+        })
+        issues = manifest.setdefault("deferredIssues", [])
+        if isinstance(issues, list):
+            issues.append({
+                "issueId": issue_id,
+                "kind": "utest_stage_timeout",
+                "batchId": batch_id,
+                "stage": "test",
+                "failureType": "environment",
+                "message": message,
+                "disposition": "recorded_deferred",
+                "blocksWorkflow": False,
+                "status": "open",
+                "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            })
+        batch["activeStage"] = None
+        # The timed-out test has a durable terminal state. Mirror the
+        # non-blocking UTest gate outcome so an agent that timed out itself
+        # need not wake up just to advance this sealed delivery.
+        batch["status"] = "ready_to_candidate"
+        _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+        closed.append({"batchId": batch_id, "timeoutSeconds": stage_timeout})
+    return closed
 
 
 def _unresolved_state(manifest: dict[str, Any]) -> tuple[list[str], list[str], set[str]]:
@@ -427,12 +505,12 @@ def _bootstrap_repository(
         raise ValueError(f"parallel_code_workspace_bootstrap_stage_failed:{add.stderr.strip()}")
     reason = "unborn_head" if before_head is None else "dirty_worktree"
     message = build_commit_message(task_card_id, f"初始化 {feature} 工作流基线")
+    # Use the target repository's normal Git identity and hook chain. This is
+    # the same commit path used later by native Batch worktrees; overriding it
+    # with a plugin address makes corporate author-domain hooks reject the
+    # bootstrap before the Workflow can start.
     commit = _git(
         git_root,
-        "-c",
-        "user.name=AutoDevOps",
-        "-c",
-        "user.email=autodev@localhost",
         "commit",
         "--allow-empty",
         "-m",
@@ -864,9 +942,25 @@ def schedule(
     feature: str,
     run_id: str,
     workspace_refs: list[str] | None = None,
+    *,
+    workflow_view: bool = False,
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        overdue_utests = _close_overdue_utest_stages_locked(
+            workspace, feature, run_id, manifest
+        )
+        if overdue_utests:
+            save_manifest(workspace, feature, run_id, manifest)
+            for item in overdue_utests:
+                append_event(
+                    workspace,
+                    feature,
+                    run_id,
+                    "utest_stage_timeout",
+                    batchId=item["batchId"],
+                    timeoutSeconds=item["timeoutSeconds"],
+                )
         bundle = load_plan_bundle(feature_dir(workspace, feature))
         # A retained per-Batch conflict (or one conflicted Merge Train) owns
         # only the deliveries recorded in that retained state.  Keep those
@@ -875,14 +969,14 @@ def schedule(
         # continue.  Dependency release remains enforced by `ready_batches`.
         unresolved_batches, unresolved_trains, withheld_batches = _unresolved_state(manifest)
         batches = manifest.get("batches", {})
-        # Once a Batch has been classified as an in-place implementation
-        # recovery, it must never silently fall back into ``ready`` just
-        # because the retained worktree later fails a verification check.  A
-        # fresh provision at that point could overwrite the exact evidence we
-        # were trying to preserve.  Keep the Batch out of the normal dispatch
-        # queue and expose the failed verification as an explicit exclusion.
+        # Recheck an in-place implementation recovery on every dispatch.
+        # If it is no longer safe to continue in the old checkout, route the
+        # idle, unsealed Batch through provision instead.  Provision archives
+        # the old checkout before replacing it; a stale recovery marker must
+        # not strand the Batch outside both runnable queues.
         all_implementation_recovery: list[str] = []
         implementation_recovery_details: dict[str, dict[str, Any]] = {}
+        recovery_reprovisioned: list[str] = []
         for raw_batch_id, batch in batches.items():
             if not isinstance(batch, dict) or str(raw_batch_id) in withheld_batches:
                 continue
@@ -890,10 +984,22 @@ def schedule(
             if batch.get("status") != "pending" or recovery.get("kind") != "implementation_resume":
                 continue
             batch_id = str(raw_batch_id)
-            all_implementation_recovery.append(batch_id)
             details = _implementation_resume_details(manifest, str(raw_batch_id), batch)
             if details is None:
+                if batch.get("lease") is not None or batch.get("commitSha"):
+                    all_implementation_recovery.append(batch_id)
+                    continue
+                batch["recovery"] = {
+                    **recovery,
+                    "kind": "retry_dispatch",
+                    "resumeFromStage": None,
+                    "preserveWorktree": False,
+                    "reprovision": True,
+                }
+                batch["recovery"].pop("implementationResume", None)
+                recovery_reprovisioned.append(batch_id)
                 continue
+            all_implementation_recovery.append(batch_id)
             implementation_recovery_details[batch_id] = details
         implementation_recovery_ids = set(all_implementation_recovery)
         ready = [
@@ -1003,20 +1109,19 @@ def schedule(
         active = sum(
             1
             for item in manifest.get("batches", {}).values()
-            if isinstance(item, dict) and item.get("status") in {"leased", "running"}
+            if batch_occupies_scheduler_slot(item)
         )
         active_outside_scope = sum(
             1
             for item in manifest.get("batches", {}).values()
-            if isinstance(item, dict)
-            and item.get("status") in {"leased", "running"}
+            if batch_occupies_scheduler_slot(item)
             and str(item.get("workspaceRef") or item.get("repositoryRef")) not in allowed_refs
         ) if workspace_refs else 0
         slots = max(0, max_parallel - active)
         active_batch_ids = sorted(
             str(batch_id)
             for batch_id, item in manifest.get("batches", {}).items()
-            if isinstance(item, dict) and item.get("status") in {"leased", "running"}
+            if batch_occupies_scheduler_slot(item)
         )
         runnable = select_runnable_batches(
             manifest,
@@ -1028,9 +1133,84 @@ def schedule(
             # Keep the nested response shape for fixed-workflow compatibility;
             # it is now one dynamic dispatch batch, not a completion barrier.
             selected.append(runnable)
+        selected_ids = set(runnable)
+        dispatch_exclusions: list[dict[str, str]] = []
+        optimistic = (
+            isinstance(manifest.get("runtimeConfig"), dict)
+            and manifest["runtimeConfig"].get("parallelSchedulingMode") == "optimistic"
+        )
+        for batch_id in scoped_ready:
+            if batch_id in selected_ids:
+                continue
+            batch = batches.get(batch_id, {})
+            stage = str(batch.get("executionStage", "parallel")) if isinstance(batch, dict) else "parallel"
+            selected_stage_batch = next(
+                (batches.get(selected_id, {}) for selected_id in runnable),
+                {},
+            )
+            selected_stage = (
+                str(selected_stage_batch.get("executionStage", "parallel"))
+                if isinstance(selected_stage_batch, dict)
+                else "parallel"
+            )
+            if slots <= 0:
+                reason = "max_parallel_capacity"
+            elif stage == "parallel" and selected_stage != "parallel":
+                reason = f"execution_stage_order:{runnable[0]}"
+            elif stage != "parallel":
+                reason = "critical_stage_waiting_for_active_workers" if active else "critical_stage_frontier"
+            elif optimistic:
+                reason = "max_parallel_capacity"
+            else:
+                conflict = next(
+                    (
+                        other
+                        for other in [*active_batch_ids, *runnable]
+                        if batch_write_sets_conflict(manifest, batch_id, other)
+                    ),
+                    None,
+                )
+                reason = f"write_set_conflict:{conflict}" if conflict else "not_selected_by_scheduler"
+            dispatch_exclusions.append({"batchId": batch_id, "reason": reason})
+        out_of_scope_ready = sorted(set(ready) - set(scoped_ready))
+        dispatch_exclusions.extend(
+            {"batchId": batch_id, "reason": "workspace_scope_excluded"}
+            for batch_id in out_of_scope_ready
+        )
+        ready_ids = set(ready)
+        allowed_scope = {str(ref) for ref in workspace_refs or []}
+        for raw_batch_id, batch in batches.items():
+            batch_id = str(raw_batch_id)
+            if not isinstance(batch, dict) or batch.get("status") != "pending" or batch_id in ready_ids:
+                continue
+            workspace_ref = str(batch.get("workspaceRef") or batch.get("repositoryRef") or "")
+            if allowed_scope and workspace_ref not in allowed_scope:
+                continue
+            dependency = next(
+                (
+                    str(dependency_id)
+                    for dependency_id in batch.get("dependencies", [])
+                    if not isinstance(batches.get(dependency_id), dict)
+                    or batches[dependency_id].get("status") != "merged"
+                    or not batches[dependency_id].get("mergeCommitSha")
+                ),
+                None,
+            )
+            if dependency is not None:
+                dispatch_exclusions.append({
+                    "batchId": batch_id,
+                    "reason": f"dependency_unmerged:{dependency}",
+                })
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
-        return {
+        for batch_id in recovery_reprovisioned:
+            append_event(
+                workspace, feature, run_id,
+                "batch_implementation_recovery_reprovision_scheduled",
+                batchId=batch_id,
+                reason="worktree_verification_failed",
+            )
+        result = {
             "runId": run_id,
             "status": manifest.get("status"),
             "readyBatches": scoped_ready,
@@ -1107,6 +1287,16 @@ def schedule(
             )),
             "maxParallel": max_parallel,
             "activeWorkers": active,
+            "dispatchDiagnostics": {
+                "maxParallel": max_parallel,
+                "occupiedSlots": active,
+                "availableSlots": slots,
+                "activeBatchIds": active_batch_ids,
+                "eligibleBatchIds": scoped_ready,
+                "selectedBatchIds": runnable,
+                "recoveryBatchIds": sorted(set(scoped_stage_recovery + scoped_implementation_recovery + scoped_mergeable)),
+                "notSelected": dispatch_exclusions,
+            },
             "batchWorkspaces": {
                 batch_id: {
                     "workspaceRef": item.get("workspaceRef"),
@@ -1129,6 +1319,7 @@ def schedule(
             },
             "isolation": manifest.get("isolation"),
         }
+        return _workflow_status_view(result, manifest) if workflow_view else result
 
 
 def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status: str, **details: Any) -> dict[str, Any]:
@@ -1583,30 +1774,33 @@ def resume_run(
                 "kind": (
                     "implementation_resume"
                     if implementation_resume is not None
-                    else recovery.get(
-                        "kind",
-                        "integration_resume"
-                        if recovery.get("resumeStatus") == "ready_to_candidate"
-                        else "stage_resume"
-                        if batch.get("commitSha")
-                        else "retry_dispatch",
-                    )
+                    else "integration_resume"
+                    if recovery.get("resumeStatus") == "ready_to_candidate"
+                    else "stage_resume"
+                    if batch.get("commitSha")
+                    else "retry_dispatch"
                 ),
-                "resumeFromStage": "implement" if implementation_resume is not None else recovery.get("resumeFromStage"),
+                "resumeFromStage": (
+                    "implement" if implementation_resume is not None
+                    else recovery.get("resumeFromStage") if batch.get("commitSha")
+                    else None
+                ),
                 "preserveWorktree": (
                     True
                     if implementation_resume is not None
-                    else recovery.get("preserveWorktree", bool(batch.get("commitSha")))
+                    else bool(batch.get("commitSha"))
                 ),
                 "reprovision": (
                     False
                     if implementation_resume is not None
-                    else recovery.get("reprovision", not bool(batch.get("commitSha")))
+                    else not bool(batch.get("commitSha"))
                 ),
                 **({"implementationResume": implementation_resume} if implementation_resume is not None else {}),
                 "status": "rescheduled",
                 "rescheduledAt": manifest.get("updatedAt"),
             }
+            if implementation_resume is None:
+                batch["recovery"].pop("implementationResume", None)
             retry_resumed.append(str(batch_id))
         # Persist the recovery contract for every sealed delivery that still
         # has a stage to finish.  This is intentionally distinct from a
@@ -1765,6 +1959,83 @@ def _emit(ok: bool, **payload: Any) -> int:
     return 0 if ok else 1
 
 
+_WORKFLOW_STATUS_FIELDS = (
+    "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
+    "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",
+    "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",
+    "maxParallel", "activeWorkers", "dispatchDiagnostics", "batchTaskIds",
+)
+_WORKFLOW_WORKSPACE_FIELDS = (
+    "workspaceRef", "componentRoots", "executionStage", "requestedPath",
+    "worktreePath", "branchName",
+)
+_WORKFLOW_ISSUE_FIELDS = (
+    "issueId", "kind", "batchId", "stage", "failureType", "message",
+    "disposition", "blocksWorkflow", "status", "evidenceId", "batchCommit",
+    "createdAt",
+)
+
+
+def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Project only fields consumed by the fixed Workflow across the agent boundary."""
+    batches = manifest.get("batches")
+    batches = batches if isinstance(batches, dict) else {}
+    trains = manifest.get("mergeTrains")
+    trains = trains if isinstance(trains, dict) else {}
+    issues = manifest.get("deferredIssues")
+    issues = issues if isinstance(issues, list) else []
+    result = {key: scheduled[key] for key in _WORKFLOW_STATUS_FIELDS if key in scheduled}
+    result["dispatchDiagnostics"] = {
+        "activeBatchIds": (scheduled.get("dispatchDiagnostics") or {}).get("activeBatchIds", [])
+    }
+    result["batchWorkspaces"] = {
+        batch_id: {key: workspace.get(key) for key in _WORKFLOW_WORKSPACE_FIELDS}
+        for batch_id, workspace in scheduled.get("batchWorkspaces", {}).items()
+        if isinstance(workspace, dict)
+    }
+    result["manifest"] = {
+        "batches": {
+            batch_id: {
+                "status": batch.get("status"),
+                "dependencies": batch.get("dependencies", []),
+                "error": batch.get("error"),
+                "worktreePath": batch.get("worktreePath"),
+                "branchName": batch.get("branchName"),
+                "commitSha": batch.get("commitSha"),
+                "mergeCommitSha": batch.get("mergeCommitSha"),
+                "recovery": {
+                    key: (batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}).get(key)
+                    for key in ("status", "retryAttempts", "lastError")
+                },
+            }
+            for batch_id, batch in batches.items()
+            if isinstance(batch, dict)
+        },
+        "mergeTrains": {
+            train_id: {
+                key: train.get(key)
+                for key in (
+                    "status", "batchIds", "repositoryRef", "wave", "error",
+                    "worktreePath", "cleanupErrors",
+                )
+            } | {
+                "conflictContext": {
+                    "conflictedFiles": (train.get("conflictContext") if isinstance(train.get("conflictContext"), dict) else {}).get("conflictedFiles")
+                }
+            }
+            for train_id, train in trains.items()
+            if isinstance(train, dict)
+            and train.get("status") in {"candidate_conflicted", "needs_resolution", "failed", "stale", "built"}
+        },
+        "deferredIssues": [
+            {key: issue[key] for key in _WORKFLOW_ISSUE_FIELDS if key in issue}
+            for issue in issues
+            if isinstance(issue, dict)
+        ],
+    }
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Schedule parallel Code batch runs")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1775,13 +2046,15 @@ def main(argv: list[str] | None = None) -> int:
         if name in {"status", "resume", "manual-resume"}:
             item.add_argument("--run-id", required=True)
         if name in {"create", "ensure"}:
-            item.add_argument("--max-parallel", type=int, default=4)
-            item.add_argument("--timeout-seconds", type=int, default=3600)
+            item.add_argument("--max-parallel", type=int, default=5)
+            item.add_argument("--timeout-seconds", type=int, default=4 * 60 * 60)
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
             item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")
             item.add_argument("--task-card-id", required=True, help="task card selected before the workflow starts")
         if name in {"status", "resume", "manual-resume", "ensure"}:
             item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
+        if name == "status":
+            item.add_argument("--workflow-view", action="store_true", help="emit only fields consumed by the fixed Code Workflow")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
     mark.add_argument("--feature", required=True)
@@ -1827,6 +2100,8 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
         if args.command == "status":
+            if args.workflow_view:
+                return _emit(True, **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs, workflow_view=True))
             return _emit(True, manifest=load_manifest(workspace, feature, args.run_id), **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "resume":
             return _emit(True, **resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))

@@ -11,7 +11,7 @@ mkdir -p .autobiz
 cat > .autobiz/runtime_config.json << 'EOF'
 {
   "parallelSchedulingMode": "optimistic",
-  "maxParallel": 4,
+  "maxParallel": 5,
   "conflictResolution": {
     "maxAttempts": 2,
     "enableAutoResolve": true,
@@ -31,7 +31,7 @@ python hooks/workflow_launcher.py analyze \
 
 # 输出示例：
 # Wave 1:
-#   Strategy: Optimistic parallel (maxParallel=4)
+#   Strategy: Optimistic parallel (maxParallel=5)
 #   Batches: B001, B002, B003
 #   ⚠️  Write-set overlap: src/core.py
 #       Conflicts will be resolved in Merge Train
@@ -130,7 +130,7 @@ python hooks/parallel_merge_train.py resume \
 ```json
 {
   "parallelSchedulingMode": "conservative",
-  "maxParallel": 4
+  "maxParallel": 5
 }
 ```
 
@@ -212,7 +212,7 @@ cat .autobizdevops/features/your-feature/.parallel-runs/cw-20260830-001/manifest
 ```json
 {
   "parallelSchedulingMode": "optimistic",
-  "maxParallel": 4,
+  "maxParallel": 5,
   "conflictResolution": {
     "maxAttempts": 2,
     "enableAutoResolve": true,

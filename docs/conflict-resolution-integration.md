@@ -173,7 +173,7 @@ if (pendingResolution.length > 0) {
 ```json
 {
   "parallelSchedulingMode": "optimistic",
-  "maxParallel": 4,
+  "maxParallel": 5,
   "conflictResolution": {
     "maxAttempts": 2,
     "enableAutoResolve": true,

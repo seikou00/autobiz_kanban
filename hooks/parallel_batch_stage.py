@@ -37,6 +37,10 @@ FAILURE_NEXT_STAGE = {
     "environment": "__retry__",
     "needs_triage": None,
 }
+# UTest is a bounded quality loop.  This value is mirrored by the Workflow
+# runner and the scheduler so a model cannot keep a Batch in ``test`` merely
+# by trying another command after the command-level timeout has fired.
+UTEST_STAGE_TIMEOUT_SECONDS = 15 * 60
 
 
 def _utc_now() -> str:
@@ -304,6 +308,8 @@ def complete_stage(
             prior_failure = state.get("failure")
             if isinstance(prior_failure, dict):
                 repaired_failure = dict(prior_failure)
+            elif isinstance(metadata.get("repairedFailure"), dict):
+                repaired_failure = dict(metadata["repairedFailure"])
         state.update({
             "status": "passed",
             "completedAt": evidence["createdAt"],
@@ -392,18 +398,39 @@ def record_single_repair_resolution(
     """
     stages_by_failure = {
         "review": ("prepare", "implement", "review"),
+        # A production defect first proven by UTest invalidates the code and
+        # review evidence, but deliberately leaves ``test`` pending.  The
+        # Workflow must rerun the exact failing command after the repair.
+        "test": ("prepare", "implement", "review"),
     }
     stages = stages_by_failure.get(failed_stage)
     if stages is None:
         raise ValueError(f"parallel_single_repair_stage_invalid:{batch_id}:{failed_stage}")
     if not isinstance(metadata, dict):
         raise ValueError("parallel_single_repair_metadata_must_be_object")
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        failed_state = states.get(failed_stage)
+        repaired_failure = (
+            dict(failed_state.get("failure"))
+            if isinstance(failed_state, dict) and isinstance(failed_state.get("failure"), dict)
+            else None
+        )
+    # A test-proven source defect rebuilds prepare/implement/review but leaves
+    # the test itself pending for its exact-command retry. Persist the accepted
+    # repair marker on that rebuilt Review evidence, which is also where later
+    # UTest failures can reliably determine that the one repair was used.
+    repair_marker_stage = failed_stage if failed_stage in stages else stages[-1]
     completed: list[dict[str, Any]] = []
     for stage in stages:
         start_stage(workspace, feature, run_id, batch_id, stage)
         stage_metadata = dict(metadata)
-        if stage == failed_stage:
+        if stage == repair_marker_stage:
             stage_metadata["repairDisposition"] = "single_repair_accepted"
+            if repaired_failure is not None:
+                stage_metadata["repairedFailure"] = repaired_failure
         completed.append(complete_stage(
             workspace,
             feature,
@@ -442,11 +469,11 @@ def fail_stage(
     failure_type: str,
     message: str,
 ) -> dict[str, Any]:
-    # Keep compatibility with existing UTest agents that still issue the
-    # generic ``fail`` command. Test-stage failures are intentionally
-    # non-blocking; route them through the durable record-and-continue
-    # transition instead of resetting delivery evidence for a repair loop.
-    if stage == "test":
+    # Test/environment failures are final only after UTest has exhausted its
+    # bounded local retry.  A production defect found by a real failing test
+    # follows the ordinary implementation-repair path below: it resets stale
+    # delivery evidence and returns the Batch to the same Worktree for repair.
+    if stage == "test" and failure_type != "implementation":
         return record_test_failure(
             workspace,
             feature,
@@ -455,6 +482,27 @@ def fail_stage(
             failure_type=failure_type,
             message=message,
         )
+    if stage == "test" and failure_type == "implementation":
+        # A source failure proven by UTest gets exactly one controlled
+        # production repair. If the original command still proves the same
+        # class of source failure after that repair, close it as a visible
+        # UTest deferral rather than restarting another repair/compile loop.
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            batch = _batch(manifest, batch_id)
+            states = _ensure_stage_states(batch)
+            review = states.get("review") if isinstance(states.get("review"), dict) else {}
+            resolution = review.get("repairResolution") if isinstance(review.get("repairResolution"), dict) else {}
+            repair_already_used = resolution.get("disposition") == "single_repair_accepted"
+        if repair_already_used:
+            return record_test_failure(
+                workspace,
+                feature,
+                run_id,
+                batch_id,
+                failure_type=failure_type,
+                message=message,
+            )
     if failure_type not in FAILURE_NEXT_STAGE:
         raise ValueError(f"parallel_batch_failure_type_invalid:{failure_type}")
     with run_lock(workspace, feature, run_id):
@@ -529,13 +577,12 @@ def record_test_failure(
     message: str,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Keep a Batch UTest failure as evidence and continue the delivery flow.
+    """Durably defer a non-repairable UTest failure without claiming a pass.
 
-    A Batch test failure is useful delivery evidence, but it must not erase
-    completed code-review/compile evidence or force unrelated Batches to
-    stop.  This transition is deliberately separate from ``fail_stage``:
-    that function is still the blocking/recovery path for Review, quality and
-    final validation failures.
+    This is the terminal escape hatch for an exhausted test/environment retry
+    budget. It keeps the evidence and lets this delivery continue as an
+    explicitly unverified candidate. The final B-E2E remains mandatory and
+    the deferred UTest finding remains visible in the run result.
     """
     if failure_type not in FAILURE_NEXT_STAGE:
         raise ValueError(f"parallel_batch_failure_type_invalid:{failure_type}")
@@ -550,7 +597,7 @@ def record_test_failure(
         failure = {
             "type": failure_type,
             "message": message,
-            "nextStage": "continue",
+            "nextStage": None,
         }
         issue_index = 1 + sum(
             1
@@ -574,7 +621,7 @@ def record_test_failure(
         metadata={
             **metadata,
             "testFailure": failure,
-            "testFailureDisposition": "recorded_continue",
+            "testFailureDisposition": "recorded_deferred",
             "testFailureIssueId": issue_id,
         },
     )
@@ -592,7 +639,7 @@ def record_test_failure(
             "stage": "test",
             "failureType": failure_type,
             "message": message,
-            "disposition": "recorded_continue",
+            "disposition": "recorded_deferred",
             "blocksWorkflow": False,
             "status": "open",
             "evidenceId": completed["evidenceId"],
@@ -607,7 +654,7 @@ def record_test_failure(
             "status": "deferred",
             "failure": failure,
             "deferredIssueId": issue_id,
-            "deferredDisposition": "test_failure_recorded_continue",
+            "deferredDisposition": "test_failure_recorded_deferred",
         })
         batch["activeStage"] = None
         save_manifest(workspace, feature, run_id, manifest)
@@ -700,14 +747,11 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
         deferred = [stage for stage in stage_names(batch) if states[stage].get("status") == "deferred"]
-        blocking_deferred = [
-            stage
-            for stage in deferred
-            if not (
-                stage == "test"
-                and states[stage].get("deferredDisposition") == "test_failure_recorded_continue"
-            )
-        ]
+        # UTest is the only delivery stage that may defer without stopping its
+        # Batch. It is explicitly carried to an `allow-unverified` candidate
+        # and final B-E2E. Deferred prepare/implement/review findings still
+        # represent unresolved production-quality issues and block the gate.
+        blocking_deferred = [stage for stage in deferred if stage != "test"]
         if blocking_deferred:
             batch["status"] = "blocked"
             batch["activeStage"] = None

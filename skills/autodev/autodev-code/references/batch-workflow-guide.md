@@ -140,10 +140,14 @@ one explicit baseline commit per physical Git root before Batch worktrees are
 provisioned.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`,
-   whose write sets are safe with every leased/running Batch, and for which a
-   `maxParallel` slot is free. A completed Batch immediately triggers a fresh
-   selection, so no unrelated Batch completion barrier exists.
-2. The selected tasks run concurrently with `parallel()` up to `maxParallel`.
+   whose write sets are safe with every active Batch lifecycle, and for which a
+   `maxParallel` slot is free. Active includes running Review/UTest stages after
+   a delivery has been sealed. The Workflow runs a fixed `maxParallel` worker
+   pool: each worker executes one lifecycle, refreshes immediately on completion,
+   and idle workers poll every five minutes while another lifecycle is active.
+   A failure releases that worker to dispatch an unrelated Batch; dependents
+   remain blocked until their dependency is merged.
+2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
    Every Batch independently runs code → Review → UTest/seal
    → Merge Train promotion. A fast Batch may therefore
    review, test, and merge while another Batch in the same frontier is still
@@ -208,8 +212,10 @@ Within its plugin-provisioned native Git Worktree, a Batch agent must:
 - pass `--workspace`, `--parallel-run-id`, and `--lease-token` to every
   `task_runner.py` command;
 - acquire the Batch lease with the scheduler's `timeoutPerBatch` as
-  `--ttl-seconds <timeoutPerBatch> --lease-guard`. Agent command sandboxes do not preserve child
-  processes, so the plugin renews the durable lease at each lease-bearing
+  `--ttl-seconds <timeoutPerBatch> --lease-guard`. Guarded leases have a
+  four-hour minimum even when an older Workflow snapshot passes 3600 seconds.
+  Agent command sandboxes do not preserve child processes, so the plugin
+  renews the durable lease at each lease-bearing
   `task_runner.py` and `worktree_manager.py` command boundary instead of
   requiring a background daemon. Agents must not start a heartbeat through
   shell backgrounding, `run_in_background`, `&`, `nohup`, or `Start-Process`.
@@ -240,10 +246,26 @@ state.
   recovery after inspecting the retained run.
 - Use `batch_lease_manager.py reclaim` for an expired lease and
   `parallel_batch_lifecycle.py monitor` to inspect a run.
-- The scheduler timeout and lease TTL are distinct unless the fixed Workflow
-  explicitly passes `--ttl-seconds ${timeoutPerBatch}`. Do not rely on the
-  lease CLI's 15-minute default for a Batch allowed to run longer. A lease
-  naturally expires if the agent cannot reach another lease-bearing plugin
+- On an old unsealed Batch retry, verify the existing worktree against the
+  exact Batch binding, branch, and frozen repository HEAD. If its dirty
+  implementation passes, continue in place without provisioning. If it no
+  longer passes, change the recovery to `retry_dispatch` so the Batch enters
+  normal scheduling and provision archives and replaces its old checkout.
+  A fresh Batch without a retry marker keeps the original provision behavior.
+- When an idle plugin-owned Batch worktree has a HEAD different from the run's
+  current repository HEAD, provision saves its old commit under a recovery Git
+  ref and archives Git-visible uncommitted files under the run's
+  `recovery-worktrees/` directory. It then recreates the checkout from the
+  current repository HEAD. An explicit `retry_dispatch` also archives and
+  replaces a dirty same-HEAD checkout that could not be resumed in place.
+  The Batch manifest and event report
+  `recoveryArchivePath`; active leases and recorded delivery commits prevent
+  this replacement.
+- The fixed Workflow defaults to four hours per Batch; UTest keeps its separate
+  15-minute stage budget. The scheduler measures a repair attempt from its
+  current lease acquisition, not from the Batch's first implementation.
+  Do not rely on the lease CLI's 15-minute default for an unguarded Batch.
+  A lease naturally expires if the agent cannot reach another lease-bearing plugin
   command before its TTL; every failure path must still release the lease with
   its prescribed final status.
 - A candidate conflict, failed Batch stage, plan digest change, or failed B-E2E

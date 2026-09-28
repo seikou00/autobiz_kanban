@@ -20,6 +20,7 @@ from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.parallel_runtime import (
     append_event,
+    batch_occupies_scheduler_slot,
     get_active_run,
     lease_path,
     list_runs,
@@ -436,6 +437,7 @@ def monitor_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     batches = manifest.get("batches", {})
     now = time.time()
     counts: dict[str, int] = {}
+    active_batch_ids: list[str] = []
     timeline: list[dict[str, Any]] = []
     def epoch(value: Any) -> float | None:
         if not isinstance(value, str) or not value:
@@ -450,6 +452,8 @@ def monitor_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
             continue
         status = str(item.get("status"))
         counts[status] = counts.get(status, 0) + 1
+        if batch_occupies_scheduler_slot(item):
+            active_batch_ids.append(str(batch_id))
         started = item.get("startedAt")
         completed = item.get("completedAt")
         started_epoch = epoch(started)
@@ -458,7 +462,7 @@ def monitor_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
         if started_epoch is not None:
             duration = round(max(0.0, (completed_epoch if completed_epoch is not None else now) - started_epoch), 3)
         timeline.append({"batchId": batch_id, "status": status, "startedAt": started, "completedAt": completed, "durationSeconds": duration})
-    return {"runId": run_id, "status": manifest.get("status"), "counts": counts, "activeWorkers": counts.get("running", 0) + counts.get("leased", 0), "timeline": timeline, "updatedAt": manifest.get("updatedAt"), "nowEpoch": now}
+    return {"runId": run_id, "status": manifest.get("status"), "counts": counts, "activeWorkers": len(active_batch_ids), "activeBatchIds": sorted(active_batch_ids), "timeline": timeline, "updatedAt": manifest.get("updatedAt"), "nowEpoch": now}
 
 
 def auto_cleanup_old_runs(workspace: Path, feature: str, *, keep_days: int = 7) -> list[dict[str, Any]]:
