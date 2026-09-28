@@ -684,7 +684,8 @@ const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 // started this fixed Workflow. Keep the no-interaction contract at the call
 // boundary so adding a later phase cannot accidentally reintroduce a user
 // confirmation prompt.
-const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。\n";
+const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。" +
+  `凡本 Workflow 任一阶段确需读取 JSON 文件中的字段，且该文件在当前阶段允许访问范围内，禁止用 read_file/cat 或分段读取整个文件来取字段；改用 python "${pluginPath}/hooks/query_json_fields.py" --file "<JSON_PATH>" --field "<FIELD_PATH>"，多个字段重复传入 --field。数组下标使用 [0]，对象集合可用 *；不要因此扩大当前阶段允许访问的文件范围。\n`;
 function emptyAgentResponse(value) {
   if (value === null || value === undefined) return true;
   if (typeof value === "string") return value.trim().length === 0;
@@ -1086,7 +1087,8 @@ async function readSchedulerState(label, phaseName = "准备") {
     try {
       const state = requireSchedulerResult(await workflowAgent(
         `执行 python "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-        `这是调度器输出的固定工作流字段视图；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只原样返回该命令 stdout 的 JSON；不得读取完整 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。`,
+        `这是调度器输出的固定工作流字段视图；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只原样返回该命令 stdout 的 JSON；不得读取完整 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。` +
+        `本读取器供准备、调度、Batch、候选验证、最终修复和最终报告的所有阶段共用（包括 final-repair-initial、final-repair-before-retry、final-repair-after-drain-* 与 final-report-snapshot）。状态必须通过此 status --workflow-view 命令取得；若需单独检查视图未包含的清单字段，另用 python "${pluginPath}/hooks/query_json_fields.py" --file "${artifactWorkspace}/.autobizdevops/features/${feature}/.parallel-runs/${runId}/manifest.json" --field "batches.<BATCH_ID>.status" 查询，不得读取完整 manifest，也不得用查询结果重建或替换 status 命令的工作流状态。`,
         { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
       ), label);
       const view = state.manifest;
