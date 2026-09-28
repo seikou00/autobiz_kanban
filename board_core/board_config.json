@@ -26,7 +26,7 @@
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
+      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --prefer-manifest --write-board-config",
       "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path ${pluginPath}/sys"
     },
     "linux": {
@@ -40,7 +40,7 @@
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
+      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --prefer-manifest --write-board-config",
       "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path ${pluginPath}/sys"
     },
     "win32": {
@@ -54,7 +54,7 @@
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
+      "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --prefer-manifest --write-board-config",
       "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}\\sys"
     }
   },
