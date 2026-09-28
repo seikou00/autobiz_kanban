@@ -6,13 +6,15 @@ version: v1.2.0
 
 ## 路由原则
 
+执行本阶段以及下游子技能中的所有 Python 命令时，统一使用 `python -X utf8 <script.py>`（等效于 `PYTHONUTF8=1`）。
+
 唯一的流程事实源是 `board_core/board_config.json` 与
 `resolve_next_skill.py --json`。不得根据旧报告、旧技能描述或历史 checkpoint
 推断下一步。
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
-python "${pluginPath}/hooks/resolve_next_skill.py" --json
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 根路由只路由 Board 中声明的节点：Specs、Technical Design、Plan、可选 Detailed

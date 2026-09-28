@@ -19,7 +19,7 @@ allowed-tools: execute task_output read_file grep glob write_file edit_file
 1. 前端 Task 在其 Agent 内解析并记录 route：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --start-route-run --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --start-route-run --json
 ```
 
 active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRefs`，由 resolver 从 Feature 内 `frontend-html/VIS-xxx/` 读取；不要用本轮 `--html-file` 替换 required VIS。只有没有 active Plan 绑定的兼容迁移场景，才允许追加 `--html-file`。
@@ -32,13 +32,13 @@ active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRe
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-skill-read-complete --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-skill-read-complete --json
 ```
 
 3. 把 route SKILL 中定义的 `write_todos` 主流程转成该 Agent 的可见任务清单，逐项执行并更新状态，不能合并成一句“实现前端页面”。清单创建后立即记录机器证据：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-created --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-created --json
 ```
 
 4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
@@ -47,19 +47,19 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFA
    - `/autodev-code` 根技能不得直接跳入 parser 文档。
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark parser-read --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark parser-read --json
 ```
 
 5. route SKILL 的全部主流程清单完成后记录：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-completed --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-completed --json
 ```
 
 6. 统一前端回检后，把结果写入 `{FEATURE_DIR}/FRONTEND_ROUTE.json`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --review-status passed --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --review-status passed --json
 ```
 
 允许值：`passed`、`has-suggestions`、`skipped-by-user`、`failed`。`failed` 或未写明且未明确跳过时，`frontend_route_gate` 会阻断 `code_done`。
@@ -73,7 +73,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFA
 ## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
+python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
 ```
 
 ## 前端 HTML 实现分支（由前端 Task Agent 触发）
@@ -112,7 +112,7 @@ HTML 分流规则：
 
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 准入只验证 Plan 声明的生产 workspace 与 scope 绑定，不执行命令，也不检查 TASK 测试命令的 cwd、manifest、依赖或可执行文件；这些测试设施由后续 UTest/E2E 阶段负责。
@@ -122,7 +122,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 ```
 
 ## 执行协议
@@ -138,7 +138,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 首次为当前 Feature 启动 Code Session 前，如果还没有基线，先对计划声明的每个生产代码 workspace 执行一次独立回退脚本的基线捕获；同一 Session 后续批次不得重复捕获：
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --capture-code-session \
   --feature "${feature}" \
   --code-workspace "<plan 中声明的生产代码 workspace>" \
@@ -173,7 +173,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 2. 通过任务上下文解析脚本读取唯一 `plan.json` 中当前 TASK 的结构化执行契约；**不得直接打开或分段读取根/Batch plan JSON。必须先运行脚本，且这一步发生在上面的 `start` 命令之前：**
 
 ```bash
-python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
+python -X utf8 "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 该脚本输出是当前 Task 的上游上下文，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`runtimeIgnoreIssues` 与 `startArgv`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位生产源码和理解既有实现。脚本返回 `ok=false`、存在 `runtimeIgnoreIssues` 或 `startAllowed=false` 时必须停止编码，修复后重新运行。若返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
@@ -183,7 +183,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 4. context 返回 `startAllowed=true` 后，在修改业务代码前启动任务运行并保存 Git 快照：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
+python -X utf8 "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
 ```
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `resume` / `abort` 处理原 run。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。业务源码写入前，写入闸门会严格校验完整 v2 run、路径身份和 `executionMode=code`；`verified_existing` / `external_dependency` 不允许写业务源码。
@@ -203,7 +203,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不生成或执行测试命令，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+python -X utf8 "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 若返回 scope/workspace 错误，仍按原 run 修正或回流 Plan，不得重新 start 掩盖基线。`implemented` 是实现终态，不等于业务完成；同批后继 TASK 可以依赖它，跨批依赖、handoff 和 code-done 只接受 `done`。
@@ -211,13 +211,13 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 实现 Evidence 尚未落盘时发生进程中断，才使用原 runId 恢复：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+python -X utf8 "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有生产实现文件；Plan 中仍必须保留该 TASK 的测试意图，Code 阶段不执行它：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
+python -X utf8 "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
 ```
 
 `--supporting-file` 必须是仓库根相对路径；多仓库时使用 `repoId:relative/path`。`--no-code-change-why` 只用于 start 前已经存在且经行为验证确认满足契约的实现，不得用它绕过误 abort、重启 run 或 staging 操作造成的空 diff；runner 会拒绝与历史 aborted run 变更冲突的 no-code claim。
@@ -249,7 +249,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 2. **获取 evidence ID**：不得打开或分段读取计划 JSON。先只查询根计划中的 Batch ID 与任务 ID 映射：
 
    ```bash
-   python "${pluginPath}/hooks/query_json_fields.py" \
+   python -X utf8 "${pluginPath}/hooks/query_json_fields.py" \
      --file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json" \
      --field 'batches.*.id' --field 'batches.*.taskIds'
    ```
@@ -257,7 +257,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
    根据返回的映射确定目标 Batch 后，只查询该 Batch 计划中的任务 ID 与 evidence ID：
 
    ```bash
-   python "${pluginPath}/hooks/query_json_fields.py" \
+   python -X utf8 "${pluginPath}/hooks/query_json_fields.py" \
      --file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plans/<BATCH_ID>/plan.json" \
      --field 'tasks.*.id' --field 'tasks.*.latestImplementationEvidenceId'
    ```
@@ -289,14 +289,14 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 ```bash
 # 1. 启动任务修复
-python "${pluginPath}/hooks/task_runner.py" start-task-repair --feature "${feature}" --task-id "<TASK_ID>" --prior-evidence-id "<PRIOR_EVIDENCE_ID>" --code-workspace "<BUSINESS_REPO>"
+python -X utf8 "${pluginPath}/hooks/task_runner.py" start-task-repair --feature "${feature}" --task-id "<TASK_ID>" --prior-evidence-id "<PRIOR_EVIDENCE_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 `--prior-evidence-id` 是该 TASK 的 `latestImplementationEvidenceId`（可从 PLAN.json 或 PLAN.md 中查看）。
 
 ```bash
 # 2. 修复完成后
-python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --repair-mode
+python -X utf8 "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --repair-mode
 ```
 
 这会生成新的 implementation evidence，保留 `priorEvidenceId` 引用链，并自动更新计划中该 TASK 的 evidence 指针。
@@ -312,8 +312,8 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 项目级验证收敛后：
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
+python -X utf8 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## Workflow 并行执行模式
 
@@ -327,7 +327,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 ```bash
 workflow_workspace="$(pwd)"
-launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
+launcher_result=$(python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" \
   --feature "${feature}" \
   --plugin-path "${pluginPath}" \
   --workspace "${pluginWorkspace}/${projectDir}" \

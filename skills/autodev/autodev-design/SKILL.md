@@ -15,7 +15,7 @@ version: v1.1.0905
 先读取当前 Feature 状态、上游产物和相关代码现实：
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 - 读取 `proposal.md`、`specs/**/*.md`、`UI_CONTEXT.json`、已有 `design.md`（如有），以及相关代码、测试、配置和接口定义。
@@ -30,7 +30,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 用户确认后进入本节点：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_in_progress --stage "技术设计（来源: Specs）"
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_in_progress --stage "技术设计（来源: Specs）"
 ```
 
 ## 生成 design.md
@@ -65,8 +65,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_in_progres
 未决项全部消解后，`design.md` 即为下一阶段的只读事实源。锁定后 `.design-contract.lock.json` 是 Plan 的机器读取快照，包含 Design 已校验的 SHA、API/DATA/D ID 与 no-API/no-SQL 标记。
 
 ```bash
-python "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature "${feature}"
 ```
 
 读取全部失败项，按返回的 `artifact` / `target` / `problem` / `action` / `route` 一次性修复；`ask_user` 必须回到用户确认。通过前不得推进 checkpoint。
@@ -78,9 +78,9 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature
 回检导致设计变化时，重新完成受影响的未决项裁定、重新锁定设计契约并重跑产物契约预检（机器校验）。完成后立即调用统一 checkpoint 更新脚本推进 `design_done`；不得自行增加文本确认或绕过该命令。项目会话会在这条命令执行前由平台触发 Human Gate，Auto 托管会话须等用户在该门禁中批准后再进入下游阶段：
 
 ```bash
-python "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_done
+python -X utf8 "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_done
 ```
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

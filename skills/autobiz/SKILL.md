@@ -7,6 +7,8 @@ version: v1.1.08311
 
 # /autobiz — Biz 阶段统一入口
 
+执行本阶段以及下游子技能中的所有 Python 命令时，统一使用 `python -X utf8 <script.py>`（等效于 `PYTHONUTF8=1`）。
+
 > 本技能是 Biz 阶段的唯一统一入口，负责 workspace 前置准入、流程编排和产出物脚本校验。
 >
 > 下游包含一个子技能：
@@ -15,7 +17,7 @@ version: v1.1.08311
 ### 读取 State
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -23,7 +25,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "${pluginPath}/hooks/resolve_next_skill.py" --json
+python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 ## 流程编排
@@ -49,7 +51,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ```bash
 # PRD 完成后
-set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
+python -X utf8 "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
 ### 校验不通过时的处理

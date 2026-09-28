@@ -1484,6 +1484,8 @@ def run_sync_subprocesses(
             result = subprocess.run(
                 [
                     sys.executable,
+                    "-X",
+                    "utf8",
                     str(script),
                     "--feature",
                     feature,

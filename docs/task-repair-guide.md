@@ -42,7 +42,7 @@ Claude 会询问具体问题，然后执行完整的修复流程。
 
 ```bash
 # 查看 PLAN.md 或使用 inspect 命令
-python hooks/task_runner.py inspect \
+python -X utf8 hooks/task_runner.py inspect \
   --feature <FEATURE> \
   --task-id T001 \
   --code-workspace <BUSINESS_REPO>
@@ -53,7 +53,7 @@ python hooks/task_runner.py inspect \
 ### 步骤 2：启动任务修复
 
 ```bash
-python hooks/task_runner.py start-task-repair \
+python -X utf8 hooks/task_runner.py start-task-repair \
   --feature <FEATURE> \
   --task-id T001 \
   --prior-evidence-id ev-20240818-abc123 \
@@ -77,7 +77,7 @@ python hooks/task_runner.py start-task-repair \
 ### 步骤 4：完成修复
 
 ```bash
-python hooks/task_runner.py finish-implementation \
+python -X utf8 hooks/task_runner.py finish-implementation \
   --feature <FEATURE> \
   --task-id T001 \
   --run-id run-20240818-xyz789 \
@@ -155,7 +155,7 @@ Error: prior_evidence_mismatch
 ```bash
 # 1. 发现 T001 有 bug
 # 2. 启动修复
-python hooks/task_runner.py start-task-repair \
+python -X utf8 hooks/task_runner.py start-task-repair \
   --feature login \
   --task-id T001 \
   --prior-evidence-id ev-20240818-001 \
@@ -165,7 +165,7 @@ python hooks/task_runner.py start-task-repair \
 # ... 修复 bug ...
 
 # 4. 完成修复
-python hooks/task_runner.py finish-implementation \
+python -X utf8 hooks/task_runner.py finish-implementation \
   --feature login \
   --task-id T001 \
   --run-id run-20240818-001 \

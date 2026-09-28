@@ -143,14 +143,14 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - [ ] 使用完整命令模板，参数齐全后再执行：
     - `autodev-code` 技能根目录：
       ```
-      python references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
+      python -X utf8 references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
         --project-root . \
         --task-stem <task-stem> \
         --html-file <HTML_PATH>
       ```
     - `references/frontend-html/with-absolute-html/` 目录：
       ```
-      python scripts/prepare_html_analysis.py \
+      python -X utf8 scripts/prepare_html_analysis.py \
         --project-root <CODE_WORKSPACE> \
         --task-stem <task-stem> \
         --html-file <HTML_PATH>

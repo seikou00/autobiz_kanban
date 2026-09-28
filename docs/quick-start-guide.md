@@ -25,7 +25,7 @@ EOF
 
 ```bash
 # 运行预览，查看执行计划
-python hooks/workflow_launcher.py analyze \
+python -X utf8 hooks/workflow_launcher.py analyze \
   --workspace . \
   --feature your-feature-name
 
@@ -116,7 +116,7 @@ git add src/core.py src/api.py
 git commit -m "Resolve conflicts: preserve both B003 and B004 logic"
 
 # 6. 恢复验证流程
-python hooks/parallel_merge_train.py resume \
+python -X utf8 hooks/parallel_merge_train.py resume \
   --workspace . \
   --feature your-feature \
   --run-id cw-20260830-001 \

@@ -15,9 +15,9 @@ Plan 的职责是确定交付结果、仓库归属、真实依赖、主要实现
 首次发布前不要预读 writer、门禁或校验器源码来猜机器规则。正常输入只以本 skill、模板和上游产物为准；直接发布，让结构化错误指出具体契约缺口，再只检查与该错误对应的单一规则。不要把十多个插件源码文件的防御性预读变成 Plan 的常规成本。
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "执行计划"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "执行计划"
 ```
 
 ## 唯一模型输入
@@ -53,7 +53,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 先提交完整输入，原子生成供 Critic 审查的 `plan.json` 与 Batch 计划；此时不得生成 `PLAN.md`：
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" prepare-plan \
+python -X utf8 "${pluginPath}/hooks/plan_writer.py" prepare-plan \
   --feature "${feature}" \
   --code-workspace "<ACTUAL_CODE_WORKSPACE>" \
   --body-stdin
@@ -66,7 +66,7 @@ writer 负责验证引用、覆盖、Design ID、仓库绑定和 DAG，保留输
 回检收敛且没有阻断项后，才将机器事实源 `plan.json` 原子定稿为 `finalized`，并投影其人类视图 `PLAN.md`：
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" publish-plan \
+python -X utf8 "${pluginPath}/hooks/plan_writer.py" publish-plan \
   --feature "${feature}"
 ```
 
@@ -83,8 +83,8 @@ Plan 回检检查：本期行为是否覆盖、任务归属和依赖是否可信
 回检协议在 `${pluginPath}/skills/references/review-protocol-plan.md`，必须先读取并完整遵循该文件，不得凭记忆执行本节。
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
+python -X utf8 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 ```
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

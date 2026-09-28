@@ -3,7 +3,7 @@
 原件或快照写入 `sources/SRC-NNN/`，再运行脚本生成 `source-context.json`，不手写该文件：
 
 ```bash
-python "${pluginPath}/hooks/source_context.py" sync --feature-dir "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}"
+python -X utf8 "${pluginPath}/hooks/source_context.py" sync --feature-dir "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}"
 ```
 
 脚本以 PRD 来源表为准建立来源集合，扫 `sources/SRC-NNN/` 写入快照路径；报告某个 `SRC-NNN` 未找到快照时，补齐原件后重跑，或从 PRD 来源表移除该依赖。

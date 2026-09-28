@@ -21,7 +21,7 @@ is automatically generated in the same directory. This Markdown file:
 **Synchronization**:
 - JSON → MD: automatic (on every JSON write)
 - Plan → MD: automatic (on every formal Plan write, to refresh exact task IDs and titles)
-- MD → JSON: manual (using `python hooks/ui_context_writer.py sync-from-md --feature <feature>`)
+- MD → JSON: manual (using `python -X utf8 hooks/ui_context_writer.py sync-from-md --feature <feature>`)
 
 See `docs/ui-context-md-generation.md` for detailed documentation.
 
@@ -136,7 +136,7 @@ artifact directory before leaving the discussion stage. Use the writer's
 source. A bundle with local assets can be archived with `--source-root`:
 
 ```bash
-python "${pluginPath}/hooks/ui_context_writer.py" add-visual-source \
+python -X utf8 "${pluginPath}/hooks/ui_context_writer.py" add-visual-source \
   --feature "${feature}" \
   --type high_fidelity_html \
   --source-file "<HTML_PATH>" \

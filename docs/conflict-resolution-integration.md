@@ -90,7 +90,7 @@ async function buildAndMergeWave(wave, batchIds) {
   // 构建候选
   const buildResult = requireSuccess(await agent(
     `Build merge candidate for wave ${wave} with batches ${batchIds.join(', ')}. ` +
-    `Execute: python "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" ` +
+    `Execute: python -X utf8 "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" ` +
     `--feature "${feature}" --run-id "${runId}" --wave ${wave} ${batchIds.map(id => `--batch-id "${id}"`).join(' ')}. ` +
     `Return JSON result with status field.`,
     { label: `build-candidate-wave-${wave}`, phase: "候选验证" }

@@ -22,7 +22,7 @@ const buildResult = requireSuccess(await agent(
 ```javascript
 const buildResult = await agent(
   `Build merge candidate for wave ${waveNum}. ` +
-  `Execute: python "${mergeTrainPath}" build-candidate ` +
+  `Execute: python -X utf8 "${mergeTrainPath}" build-candidate ` +
   `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
   `--run-id "${runId}" --wave ${waveNum} ` +
   `${batchIds.map(id => `--batch-id "${id}"`).join(' ')}. ` +
@@ -91,7 +91,7 @@ if (conflictedWaves.length > 0) {
   log(`║   2. Edit conflicted files`);
   log(`║   3. git add <files>`);
   log(`║   4. git commit`);
-  log(`║   5. python "${mergeTrainPath}" resume-candidate --workspace "${artifactWorkspace}" \\`);
+  log(`║   5. python -X utf8 "${mergeTrainPath}" resume-candidate --workspace "${artifactWorkspace}" \\`);
   log(`║      --feature "${feature}" --run-id "${runId}" --wave <wave-num>`);
   log(`╚══════════════════════════════════════════════════════════════\n`);
 }
@@ -128,7 +128,7 @@ for (const [repo, repoBatches] of Object.entries(batchesByRepo)) {
     // Build candidate
     const buildResult = await agent(
       `Build merge candidate for wave ${waveNum} batches ${waveBatches.join(', ')}. ` +
-      `Execute: python "${mergeTrainPath}" build-candidate ` +
+      `Execute: python -X utf8 "${mergeTrainPath}" build-candidate ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
       `--run-id "${runId}" --wave ${waveNum} ` +
       `${waveBatches.map(id => `--batch-id "${id}"`).join(' ')}. ` +
@@ -152,7 +152,7 @@ for (const [repo, repoBatches] of Object.entries(batchesByRepo)) {
         // Mark batches as needs_resolution
         await agent(
           `Mark batches ${waveBatches.join(', ')} as needs_resolution in manifest. ` +
-          `Execute: python "${schedulerPath}" mark-batches --workspace "${artifactWorkspace}" ` +
+          `Execute: python -X utf8 "${schedulerPath}" mark-batches --workspace "${artifactWorkspace}" ` +
           `--feature "${feature}" --run-id "${runId}" ` +
           `${waveBatches.map(id => `--batch-id "${id}"`).join(' ')} ` +
           `--status needs_resolution`,

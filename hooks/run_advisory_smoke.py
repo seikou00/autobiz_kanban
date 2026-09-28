@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -72,6 +73,7 @@ def _run_command(command: str, *, cwd: Path, timeout: int) -> tuple[int, str, st
             shell=True,
             text=True,
             capture_output=True,
+            env={**os.environ, "PYTHONUTF8": "1"},
             timeout=timeout,
             check=False,
         )

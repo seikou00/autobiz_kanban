@@ -157,7 +157,7 @@
 从 `autodev-code` 技能根目录运行：
 
 ```bash
-python references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
 退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的转换候选项，应把输出作为待处理清单继续处理，不视为脚本故障。

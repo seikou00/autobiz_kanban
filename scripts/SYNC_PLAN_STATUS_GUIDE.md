@@ -32,10 +32,10 @@
 
 ```bash
 # 预览变更（推荐先执行）
-python scripts/sync_plan_status.py <feature_dir> --dry-run
+python -X utf8 scripts/sync_plan_status.py <feature_dir> --dry-run
 
 # 实际应用变更
-python scripts/sync_plan_status.py <feature_dir>
+python -X utf8 scripts/sync_plan_status.py <feature_dir>
 ```
 
 ### 命令参数
@@ -55,10 +55,10 @@ python scripts/sync_plan_status.py <feature_dir>
 # 找到 T001，将 status 从 "in_progress" 改为 "done"
 
 # 步骤 2：预览同步结果
-python scripts/sync_plan_status.py .autodev/features/feature-001 --dry-run
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001 --dry-run
 
 # 步骤 3：确认无误后执行
-python scripts/sync_plan_status.py .autodev/features/feature-001
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001
 ```
 
 **脚本自动处理：**
@@ -77,7 +77,7 @@ python scripts/sync_plan_status.py .autodev/features/feature-001
 # 将批次中所有任务的 status 改为 "done"
 
 # 步骤 2：运行同步
-python scripts/sync_plan_status.py .autodev/features/feature-001
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001
 ```
 
 **脚本自动处理：**
@@ -99,7 +99,7 @@ python scripts/sync_plan_status.py .autodev/features/feature-001
 # - 将下一个批次 B002 标记为 "in_progress"
 
 # 步骤 2：运行同步
-python scripts/sync_plan_status.py .autodev/features/feature-001
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001
 ```
 
 **脚本自动处理：**
@@ -114,7 +114,7 @@ python scripts/sync_plan_status.py .autodev/features/feature-001
 
 ```bash
 # 直接运行脚本
-python scripts/sync_plan_status.py .autodev/features/feature-001
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001
 ```
 
 **脚本会：**
@@ -301,7 +301,7 @@ todo → in_progress → done
 
 1. **使用 --dry-run 模式**
    ```bash
-   python scripts/sync_plan_status.py <feature_dir> --dry-run
+   python -X utf8 scripts/sync_plan_status.py <feature_dir> --dry-run
    ```
 
 2. **查看详细错误信息**
@@ -310,7 +310,7 @@ todo → in_progress → done
 
 3. **验证 plan.json 完整性**
    ```bash
-   python hooks/plan_json.py validate <feature_dir>/plan.json
+   python -X utf8 hooks/plan_json.py validate <feature_dir>/plan.json
    ```
 
 ## 工作流集成
@@ -325,10 +325,10 @@ cat .autodev/features/feature-001/plan.json | jq '.status, .activeBatchId'
 vim .autodev/features/feature-001/plans/B001/plan.json
 
 # 3. 预览同步结果
-python scripts/sync_plan_status.py .autodev/features/feature-001 --dry-run
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001 --dry-run
 
 # 4. 应用变更
-python scripts/sync_plan_status.py .autodev/features/feature-001
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001
 
 # 5. 验证结果
 cat .autodev/features/feature-001/plan.json | jq '.taskSetDigest'

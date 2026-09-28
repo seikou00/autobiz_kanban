@@ -13,13 +13,13 @@ version: v1.0.08311
 始终先读取当前状态，不得从 `STATE.md`、hooks 日志或产物推断 checkpoint：
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 用户未提供 Feature 时先读取全量状态并要求明确选择。确认目标阶段后，必须先运行 dry-run：
 
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --feature "${feature}" \
   --to-stage "<node-id-or-stage-alias>" \
   --code-source keep \
@@ -36,7 +36,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 收到用户选择后，使用相同模式重跑 dry-run，展示已选的当前/目标 checkpoint、清理产物、Code task 重置清单、源码影响和阻断错误。未获得对该状态选择和回退执行的明确确认前不得调用 `--apply`：
 
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --feature "${feature}" \
   --to-stage "<node-id-or-stage-alias>" \
   --state-mode target_in_progress \
@@ -47,7 +47,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 确认后以相同的 `--state-mode` 执行：
 
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --feature "${feature}" \
   --to-stage "<node-id-or-stage-alias>" \
   --state-mode target_in_progress \
@@ -62,7 +62,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 回退 history 默认不会自动删除。需要维护磁盘空间时，先预览每个 Feature 超出最近 10 次的记录：
 
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --prune-history \
   --keep-history 10 \
   --dry-run --json
@@ -95,7 +95,7 @@ git -C "<business-repository>" worktree list --porcelain
 Code 开始前必须用同一个独立脚本捕获一次整个 Session 基线：
 
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --capture-code-session \
   --feature "${feature}" \
   --code-workspace "<business-repository>" \

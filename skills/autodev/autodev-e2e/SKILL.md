@@ -25,8 +25,8 @@ version: v1.3.0917
 ## 建立上下文与恢复
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 只能在固定 Code Workflow 已创建并启动 V-E2E 的 `e2e_test` 子阶段后执行。全局 checkpoint 保持 `code_in_progress`；不得写入 `e2e_in_progress` 或 `e2e_done`。
@@ -38,7 +38,7 @@ PRD 中类型为外部接口的每个 `SRC-NNN` 必须在 `E2E_TEST_CASES.yaml` 
 恢复时读取全部 E2E 机器产物和 `e2e-diagnostics/**/**/*.pending.json`。旧格式 `E2E_RESULT.json` 或纯文本 `e2e-run.log` 只读保留，列出需重新执行的用例；旧产物不能形成新 PASS。存在 pending 时执行：
 
 ```bash
-python "${pluginPath}/hooks/run_e2e_command.py" resume \
+python -X utf8 "${pluginPath}/hooks/run_e2e_command.py" resume \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --run-id "<runId>"
@@ -51,21 +51,21 @@ python "${pluginPath}/hooks/run_e2e_command.py" resume \
 首次执行：
 
 ```bash
-python "${pluginPath}/hooks/e2e_result_writer.py" init \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" init \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/e2e_result_writer.py" add-case \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" add-case \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
   --task-id "<taskId>" --spec-ref "<spec#REQ-NNN>" --spec-ref "<spec#SCN-NNN>" \
   --priority P0 --ui-required true --execution-mode mixed \
   --step-json '{"action":"<action>","expected":"<visible result>","verification":{"type":"ui","details":"<mechanical assertion>"}}'
-python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --kind initial
 ```
 
 任何测试资产或源码修复前开 repair 轮；最多三轮：
 
 ```bash
-python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --kind repair
 ```
 
@@ -78,7 +78,7 @@ python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
 探索、服务与鉴权事实写 JSONL note：
 
 ```bash
-python "${pluginPath}/hooks/run_e2e_command.py" note \
+python -X utf8 "${pluginPath}/hooks/run_e2e_command.py" note \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
   --phase discovery --text "<URL、auth、service、locator 或诊断摘要>"
 ```
@@ -88,7 +88,7 @@ python "${pluginPath}/hooks/run_e2e_command.py" note \
 读取 [`${pluginPath}/skills/autodev/autodev-e2e/reference/e2e-quality-gate.md`](reference/e2e-quality-gate.md)。先扫描持久化 spec 及其依赖：
 
 ```bash
-python "${pluginPath}/hooks/e2e_quality_check.py" scan \
+python -X utf8 "${pluginPath}/hooks/e2e_quality_check.py" scan \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
@@ -99,7 +99,7 @@ python "${pluginPath}/hooks/e2e_quality_check.py" scan \
 无法解析的 alias、barrel、动态 import 或自定义 fixture 注入用保守目录哈希补齐后重扫：
 
 ```bash
-python "${pluginPath}/hooks/e2e_quality_check.py" scan \
+python -X utf8 "${pluginPath}/hooks/e2e_quality_check.py" scan \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
@@ -110,12 +110,12 @@ python "${pluginPath}/hooks/e2e_quality_check.py" scan \
 逐条裁定 candidate；误报使用 `dismissed` 并填写理由，真实问题使用 `confirmed` 后修复和重扫。语义审查新问题以 `semantic:<name>` 登记。
 
 ```bash
-python "${pluginPath}/hooks/e2e_quality_check.py" resolve \
+python -X utf8 "${pluginPath}/hooks/e2e_quality_check.py" resolve \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
   --finding-id "<findingId>" --status dismissed \
   --reviewer autodev-e2e --rationale "<why false positive>" \
   --input "<reviewed source>"
-python "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
 ```
 
@@ -126,7 +126,7 @@ python "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
 每个 case 单独用 `--grep <caseId>` 重放；浏览器跟随项目配置。只接受直接 Playwright Test 命令，不使用探索 CLI 或 `npm/pnpm/yarn run` 包脚本。
 
 ```bash
-python "${pluginPath}/hooks/run_e2e_command.py" run \
+python -X utf8 "${pluginPath}/hooks/run_e2e_command.py" run \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
@@ -160,11 +160,11 @@ python "${pluginPath}/hooks/run_e2e_command.py" run \
 ## 派生 coverage 与最终 verdict
 
 ```bash
-python "${pluginPath}/hooks/e2e_result_writer.py" derive-scenario-coverage \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" derive-scenario-coverage \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/e2e_result_writer.py" finalize \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" finalize \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/e2e_result_writer.py" validate \
+python -X utf8 "${pluginPath}/hooks/e2e_result_writer.py" validate \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --gate
 ```
 

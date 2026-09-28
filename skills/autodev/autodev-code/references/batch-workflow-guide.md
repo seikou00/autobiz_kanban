@@ -12,7 +12,7 @@ the artifact workspace as the `--workspace` value and pass the mounted path as
 `--workflow-workspace`:
 
 ```bash
-python "${pluginPath}/hooks/workflow_launcher.py" \
+python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" \
   --feature "${feature}" \
   --plugin-path "${pluginPath}" \
   --workspace "${artifactWorkspace}" \

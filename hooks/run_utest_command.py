@@ -158,6 +158,7 @@ def _run(argv, cwd, timeout):
                 "shell": False,
                 "stdout": stdout_file,
                 "stderr": stderr_file,
+                "env": {**os.environ, "PYTHONUTF8": "1"},
             }
             if os.name == "nt":
                 process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

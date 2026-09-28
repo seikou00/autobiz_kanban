@@ -14,7 +14,7 @@ version: v1.4.0917
 
 ### 获取feature状态
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -24,7 +24,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始需求澄清时必须用脚本写入开始态：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
 ```
 ### 缓存检测与清理
 
@@ -41,7 +41,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
 角色选择只决定分析关注点，不等于实现范围。用户确认后立即写入：
 
 ```bash
-python "${pluginPath}/hooks/implementation_scope.py" set \
+python -X utf8 "${pluginPath}/hooks/implementation_scope.py" set \
   --feature "${feature}" \
   --scope "${implementationScope}" \
   --source user_confirmed
@@ -230,7 +230,7 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 ### 更新状态
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
 ```
 
 
@@ -239,7 +239,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
 Skill 完成后，必须运行脚本校验：
 
 ```bash
-python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
+python -X utf8 "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
 脚本通过即视为以下清单已完成：

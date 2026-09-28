@@ -6,6 +6,8 @@ version: v1.1.08311
 
 # /autoops — Ops 阶段根路由器
 
+执行本阶段以及下游子技能中的所有 Python 命令时，统一使用 `python -X utf8 <script.py>`（等效于 `PYTHONUTF8=1`）。
+
 ## 技能映射
 
 | 阶段 | 调用 Skill | 本工程文件 |
@@ -36,14 +38,14 @@ version: v1.1.08311
 ###  确定 Feature状态
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "${pluginPath}/hooks/resolve_next_skill.py" --json
+python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 ---

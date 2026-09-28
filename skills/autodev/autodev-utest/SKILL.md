@@ -11,7 +11,7 @@ version: v1.2.08311
 ## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --plain
+python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --plain
 ```
 
 # /autodev-utest - 单测协调与验证
@@ -23,7 +23,7 @@ Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创�
 调用脚本读取当前 Feature 状态：
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
@@ -33,7 +33,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 测试 assignment 只通过以下脚本生成：
 
 ```bash
-python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python -X utf8 "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
 每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`outcome`、`implementationPoints`、`testPoints`、`verificationIntent` 和 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
@@ -70,7 +70,7 @@ Code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前
 task 工具可用时，主协调器必须使用 `test-engineer-autodev`：
 
 ```bash
-python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python -X utf8 "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
 1. 使用 router 返回的 assignment 顺序。
@@ -95,7 +95,7 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 一次检查当前 Feature 的全部 assignment：
 
 ```bash
-python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python -X utf8 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
 检查器只从当前 Plan 的 `codeWorkspaces` 映射解析仓库，再用 `scope.modules` 定位测试模块；模型不得填写 repo、仓库地址、framework 或 cwd，也不得从历史 Task Run、当前 cwd 或任何缓存推断仓库。`workspace_binding_missing` 时回到 `/autodev-plan` 修正 `codeWorkspaces`；`contract_gap` 只用于 plan 的 `workspaceRef`、`scope.modules` 与仓库绑定不一致。
@@ -113,13 +113,13 @@ ${pluginPath}/skills/autodev/autodev-utest/reference/test-environment-profiles.m
 Spring Boot 2/3 按目标选择 `fundamentals`、`mvc`、`security`、`websocket`、`persistence`：
 
 ```bash
-python "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>
+python -X utf8 "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>
 ```
 
 Vue3/React 按目标选择 `fundamentals`、`component`、`logic`、`state`、`integration`：
 
 ```bash
-python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|react> --domain <domain>
+python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|react> --domain <domain>
 ```
 
 路由：
@@ -175,7 +175,7 @@ python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|
 setup 命令：
 
 ```bash
-python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
+python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
 ```
 
 一个 TASK 有多个环境目标时，按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`。
@@ -183,7 +183,7 @@ python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pl
 test 命令提交 assignment 绑定、生成的测试文件与真实测试 argv：
 
 ```bash
-python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
+python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
 ```
 
 `--task-id` 取 `promptContent`。`<TEST_ARGV...>` 根据真实 manifest、测试配置与新建测试文件生成，必须实际执行测试。runner 根据当前 plan、绑定、TASK 与测试文件自动选择仓库和模块目录，生成稳定 digest、commandId/targetId，并校验位置、specRefs 与全部 AC。完整输出追加到 `test-output.log`；重跑保留历史 evidence IDs。
@@ -202,7 +202,7 @@ python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${plu
 任何生产修复或 `source_fix_request` 前，先校验失败锚点：
 
 ```bash
-python "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --command-id "<GENERATED_COMMAND_ID>" --target-id "<UT_ID>" --task-digest "<RUNNER_RETURNED_TASK_DIGEST>" --evidence-id "<EVIDENCE_ID>"
+python -X utf8 "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --command-id "<GENERATED_COMMAND_ID>" --target-id "<UT_ID>" --task-digest "<RUNNER_RETURNED_TASK_DIGEST>" --evidence-id "<EVIDENCE_ID>"
 ```
 
 静态观察、未执行测试或 exit 0 不得分类为 `source_bug`。
@@ -247,8 +247,8 @@ python "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginW
 报告落盘后，由 writer 从当前 TASK 契约与 Evidence 派生 coverage、target result 和 verdict，并校验稳定 JSON 契约：
 
 ```bash
-python "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --structure --gate
+python -X utf8 "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --structure --gate
 ```
 
 ## 分支决策

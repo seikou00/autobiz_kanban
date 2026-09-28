@@ -207,6 +207,8 @@ def _context_argv(
 ) -> list[str]:
     argv = [
         sys.executable,
+        "-X",
+        "utf8",
         str(Path(__file__).resolve()),
         "--workspace",
         str(workspace),
@@ -223,6 +225,8 @@ def _context_argv(
 def _start_argv(workspace: Path, feature: str, task_id: str, code_workspace: Path | None) -> list[str]:
     argv = [
         sys.executable,
+        "-X",
+        "utf8",
         str(Path(__file__).with_name("task_runner.py").resolve()),
         "start",
         "--workspace",

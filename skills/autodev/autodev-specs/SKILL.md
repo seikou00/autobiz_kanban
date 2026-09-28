@@ -21,7 +21,7 @@ version: v1.18.0917
 开始生成时更新状态：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 ```
 ## Explore 协议
 
@@ -76,7 +76,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 完成后推进状态：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
 ```
 
 校验失败时按返回的产物与问题修复后重试且只重试一次；需要行为裁定的先问用户，不通过补空表或改状态词绕过问题。连续出现相同失败时报告具体阻塞，不重复尝试。

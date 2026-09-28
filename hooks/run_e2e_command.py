@@ -262,6 +262,8 @@ def _resolve_command_cwd(code_workspace: Path, cwd: Optional[str]) -> Tuple[Path
 
 def _run(argv: Sequence[str], cwd: Path, timeout: int, env: Optional[Dict[str, str]] = None) -> Tuple[int, str, str, bool]:
     try:
+        child_env = dict(os.environ if env is None else env)
+        child_env["PYTHONUTF8"] = "1"
         completed = subprocess.run(
             list(argv),
             cwd=str(cwd),
@@ -273,7 +275,7 @@ def _run(argv: Sequence[str], cwd: Path, timeout: int, env: Optional[Dict[str, s
             errors="replace",
             timeout=timeout,
             check=False,
-            env=env,
+            env=child_env,
         )
         return completed.returncode, completed.stdout or "", completed.stderr or "", False
     except FileNotFoundError as exc:

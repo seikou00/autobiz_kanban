@@ -21,7 +21,7 @@ description: HTML 路线生成框架代码之后的回检依赖。用于对已�
 进入本参考前，优先复用 code 根技能自动回检已经生成的统一报告；若尚未生成报告，再运行 `references/frontend-html/scripts/review_runner.py` 收集确定性静态证据：
 
 ```bash
-python references/frontend-html/scripts/review_runner.py --target <file-or-dir> --source-html <html> --analysis <json> --plan <PLAN.md> --format markdown
+python -X utf8 references/frontend-html/scripts/review_runner.py --target <file-or-dir> --source-html <html> --analysis <json> --plan <PLAN.md> --format markdown
 ```
 
 脚本职责：

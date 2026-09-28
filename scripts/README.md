@@ -15,10 +15,10 @@
 **快速使用**：
 ```bash
 # 预览变更
-python scripts/sync_plan_status.py <feature_dir> --dry-run
+python -X utf8 scripts/sync_plan_status.py <feature_dir> --dry-run
 
 # 应用变更
-python scripts/sync_plan_status.py <feature_dir>
+python -X utf8 scripts/sync_plan_status.py <feature_dir>
 ```
 
 **详细文档**：[SYNC_PLAN_STATUS_GUIDE.md](./SYNC_PLAN_STATUS_GUIDE.md)
@@ -45,10 +45,10 @@ python scripts/sync_plan_status.py <feature_dir>
 vim .autodev/features/feature-001/plans/B001/plan.json
 
 # 2. 预览同步结果
-python scripts/sync_plan_status.py .autodev/features/feature-001 --dry-run
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001 --dry-run
 
 # 3. 确认后应用变更
-python scripts/sync_plan_status.py .autodev/features/feature-001
+python -X utf8 scripts/sync_plan_status.py .autodev/features/feature-001
 
 # 4. 验证结果
 cat .autodev/features/feature-001/plan.json | jq '.taskSetDigest'
