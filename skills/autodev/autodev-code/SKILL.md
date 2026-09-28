@@ -154,7 +154,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 ### 建立执行上下文与任务队列
 
-- 只读取根 `plan.json` 的批次摘要和 `activeBatchId` 对应的一个 `plans/Bxxx/plan.json`，不得把其他批次完整 task 契约加载进当前对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 实现已就绪 / 完成 / 失败；每次只置一个任务为进行中。根 plan 含 `tasks` 或缺少批次时回流 `/autodev-plan` 重建。
+- 批次与任务队列只使用 launcher `batchExecutionPlan` 和固定 Workflow/scheduler 返回的字段，不得直接打开根 `plan.json` 或任一 `plans/Bxxx/plan.json`。如果缺少某个路由字段，使用 `${pluginPath}/hooks/query_json_fields.py` 查询指定字段；需要单个 TASK 契约时，调用下方 `code_task_context.py`，只消费脚本返回的当前 Task 上下文。不得为组装队列而把计划 JSON 全量读入对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 实现已就绪 / 完成 / 失败；每次只置一个任务为进行中。若 launcher 或计划校验脚本报告根 Plan 含 `tasks` 或缺少批次，回流 `/autodev-plan` 重建。
 
 ### Batch 上下文
 
@@ -170,7 +170,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。启动前必须确保每个业务仓库都通过 `.gitignore` 或 `.git/info/exclude` 忽略 `.cmbdevclaw/large_tool_results/`；runner 只校验该契约，不会代写业务仓库。未命中 ignore 时先配置窄规则，再执行 start。
 
-2. 读唯一 `plan.json` 中的结构化执行契约。**必须先运行任务上下文解析脚本，且这一步发生在上面的 `start` 命令之前：**
+2. 通过任务上下文解析脚本读取唯一 `plan.json` 中当前 TASK 的结构化执行契约；**不得直接打开或分段读取根/Batch plan JSON。必须先运行脚本，且这一步发生在上面的 `start` 命令之前：**
 
 ```bash
 python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -245,8 +245,25 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 收到修复请求后，你应该：
 
-1. **查看任务状态**：先读取根 Plan 与当前 `.parallel-runs/<runId>/manifest.json`，或调用 `parallel_batch_lifecycle.py monitor` 确认任务状态
-2. **获取 evidence ID**：从计划中获取该任务的 `latestImplementationEvidenceId`
+1. **查看任务状态**：调用 `parallel_batch_lifecycle.py monitor --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --run-id "<RUN_ID>"`，从脚本返回的 timeline 查看目标 Batch 状态；不得直接读取 `.parallel-runs/<runId>/manifest.json`。
+2. **获取 evidence ID**：不得打开或分段读取计划 JSON。先只查询根计划中的 Batch ID 与任务 ID 映射：
+
+   ```bash
+   python "${pluginPath}/hooks/query_json_fields.py" \
+     --file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json" \
+     --field 'batches.*.id' --field 'batches.*.taskIds'
+   ```
+
+   根据返回的映射确定目标 Batch 后，只查询该 Batch 计划中的任务 ID 与 evidence ID：
+
+   ```bash
+   python "${pluginPath}/hooks/query_json_fields.py" \
+     --file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plans/<BATCH_ID>/plan.json" \
+     --field 'tasks.*.id' --field 'tasks.*.latestImplementationEvidenceId'
+   ```
+
+   在两组按原数组顺序对应的结果中，选择 ID 等于目标 TASK 的 `latestImplementationEvidenceId`。若批次/任务映射、目标 TASK 或 evidence ID 缺失，停止修复并按返回错误回流；不得改为读取完整计划文件。
+
 3. **启动修复**：调用 `start-task-repair` 命令
 4. **修改代码**：根据问题描述修改相关代码
 5. **完成修复**：调用 `finish-implementation --repair-mode`
