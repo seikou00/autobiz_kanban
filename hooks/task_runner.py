@@ -189,11 +189,17 @@ def recover_interrupted_parallel_runs(
             if isinstance(task_id, str) and task_id and isinstance(run_id, str) and run_id:
                 candidates.append((task_id, run_id, state))
         for task_id, run_id, prior_state in candidates:
+            recovery_workspace = _interrupted_run_requested_workspace(
+                prior_state,
+                code_workspace,
+                task_id=task_id,
+                run_id=run_id,
+            )
             state = _abort_task_unlocked(
                 workspace,
                 feature,
                 task_id,
-                code_workspace,
+                recovery_workspace,
                 run_id,
                 force_with_changes=True,
                 abort_why=abort_why,
@@ -232,6 +238,75 @@ def recover_interrupted_parallel_runs(
                 "restoredImplemented": restored_implemented,
             })
     return {"recovered": recovered, "count": len(recovered)}
+
+
+def _interrupted_run_requested_workspace(
+    state: dict[str, Any],
+    batch_worktree: Path,
+    *,
+    task_id: str,
+    run_id: str,
+) -> Path:
+    """Use the exact workspace persisted by ``start`` when aborting a run.
+
+    Batch-level recovery receives the worktree root, but a TASK can have been
+    started against a component-root subdirectory within that worktree.  The
+    run's requested path is authoritative for the abort contract; validate it
+    remains inside the same worktree and Git repository before trusting it.
+    Older task-run records without the requested-workspace contract continue
+    to use the batch worktree root.
+    """
+    if state.get("scopePathBase") != "requested_code_workspace":
+        return batch_worktree
+
+    requested = state.get("requestedCodeWorkspaces")
+    if (
+        not isinstance(requested, list)
+        or len(requested) != 1
+        or not isinstance(requested[0], str)
+        or not requested[0].strip()
+    ):
+        raise TaskRunnerError(
+            "task_run_requested_workspace_state_invalid",
+            taskId=task_id,
+            runId=run_id,
+            requestedCodeWorkspaces=requested,
+        )
+
+    stored_path = Path(requested[0])
+    if not stored_path.is_absolute():
+        raise TaskRunnerError(
+            "task_run_requested_workspace_not_absolute",
+            taskId=task_id,
+            runId=run_id,
+            requestedCodeWorkspace=requested[0],
+        )
+
+    worktree_root = batch_worktree.resolve()
+    requested_path = stored_path.resolve()
+    try:
+        requested_path.relative_to(worktree_root)
+    except ValueError as exc:
+        raise TaskRunnerError(
+            "task_run_requested_workspace_outside_batch_worktree",
+            taskId=task_id,
+            runId=run_id,
+            batchWorktree=str(worktree_root),
+            requestedCodeWorkspace=str(requested_path),
+        ) from exc
+
+    batch_git_root = _git_root(worktree_root)
+    requested_git_root = _git_root(requested_path)
+    if requested_git_root != batch_git_root:
+        raise TaskRunnerError(
+            "task_run_requested_workspace_repository_mismatch",
+            taskId=task_id,
+            runId=run_id,
+            batchGitRoot=str(batch_git_root),
+            requestedGitRoot=str(requested_git_root),
+            requestedCodeWorkspace=str(requested_path),
+        )
+    return requested_path
 
 
 def _load_plan_and_task(
