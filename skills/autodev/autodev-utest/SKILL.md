@@ -95,10 +95,10 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 一次检查当前 Feature 的全部 assignment：
 
 ```bash
-python -X utf8 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python -X utf8 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --batch-worktree "${batchWorktree}" --json
 ```
 
-检查器只从当前 Plan 的 `codeWorkspaces` 映射解析仓库，再用 `scope.modules` 定位测试模块；模型不得填写 repo、仓库地址、framework 或 cwd，也不得从历史 Task Run、当前 cwd 或任何缓存推断仓库。`workspace_binding_missing` 时回到 `/autodev-plan` 修正 `codeWorkspaces`；`contract_gap` 只用于 plan 的 `workspaceRef`、`scope.modules` 与仓库绑定不一致。
+检查器只从当前 Plan 的 `codeWorkspaces` 映射解析仓库；模型不得填写 repo、仓库地址、framework 或 cwd，也不得从历史 Task Run、当前 cwd 或任何缓存推断仓库。必须传入当前 Batch 的 `--batch-worktree`，让检查和执行都绑定到同一 worktree。`scope.modules` 是可选的范围收窄项：声明时只检查所列模块；未声明时，检查器只在当前 Batch worktree 和 `scope.workspaceRoots` 内发现构建项目，不跨出该范围，也不进入嵌套 Git 仓库、依赖缓存或构建输出目录。若 Batch 当前提交或 UTest 改动能定位工程，检查器只检查改动所属的最深项目根；否则返回候选目标。`environment_target_ambiguous` 时，依据 TASK 与候选路径判断；能确定时用 `--task-id <TASK_ID> --environment-target "<TASK_ID>=<ENVIRONMENT_TARGET_ID>"` 重跑检查，并保留 `--batch-worktree`，不能确定时按环境阻断收口，不得猜选、初始化全部候选或要求把路径补写进 Plan。环境 ready 后，执行器仍按测试文件路径选择所属目标，嵌套项目优先匹配最深项目根。`workspace_binding_missing` 时回到 `/autodev-plan` 修正 `codeWorkspaces`；`contract_gap` 只用于 plan 的 `workspaceRef`、显式 `scope.modules` 与仓库绑定不一致。
 
 `status=init_required` 时读取并应用：
 
@@ -106,7 +106,7 @@ python -X utf8 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${
 ${pluginPath}/skills/autodev/autodev-utest/reference/test-environment-profiles.md
 ```
 
-环境初始化只修改测试配置、manifest 与对应锁文件。按 profile 完成改动后用 `--kind setup` 执行安装或校验命令，再重新运行 inspector 并输出返回的 `status`；`status` 未变为 `ready` 前不进入测试生成与执行，不得用一条自拟的 `--kind setup` 命令通过环境检查。`conflict` / `unsupported` 不做猜测性初始化；网络或安装授权被拒绝时分类为 `environment` 并阻断。
+环境初始化只修改测试配置、manifest 与对应锁文件。按 profile 完成改动后用 `--kind setup` 执行安装或校验命令，再重新运行 inspector 并输出返回的 `status`；`status` 未变为 `ready` 前不进入测试生成与执行，不得用一条自拟的 `--kind setup` 命令通过环境检查。`conflict` / `unsupported` 不做猜测性初始化；环境目标有歧义时按上面的 runtime selector 重查，不要求把模块路径补写到 Plan。网络或安装授权被拒绝时分类为 `environment` 并阻断。
 
 ## 测试域路由
 
@@ -175,10 +175,10 @@ python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framewo
 环境 setup 命令（依赖安装或受支持 profile 的环境校验）仍由 runner 执行：
 
 ```bash
-python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
+python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --batch-worktree "${batchWorktree}" -- <argv...>
 ```
 
-一个 TASK 有多个环境目标时，按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`。
+一个 TASK 有多个环境目标时，setup 阶段按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`；test 阶段由测试文件路径选择其所属目标，嵌套项目使用最深匹配目录。
 
 行为测试由 Bash 直接执行，Python runner 仅在执行后登记真实结果与 Evidence。先在 Bash 中捕获输出并保留测试进程自己的退出码：
 
@@ -187,7 +187,7 @@ RAW_OUTPUT="$(mktemp)"
 set -o pipefail
 <TEST_ARGV...> 2>&1 | tee "$RAW_OUTPUT"
 test_exit=${PIPESTATUS[0]}
-python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind test --record-only --exit-code "$test_exit" --output-file "$RAW_OUTPUT" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <同一组 TEST_ARGV...>
+python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind test --record-only --exit-code "$test_exit" --output-file "$RAW_OUTPUT" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --batch-worktree "${batchWorktree}" --test-file "<RELATIVE_TEST_FILE>" -- <同一组 TEST_ARGV...>
 record_exit=$?
 if [ "$record_exit" -ne 0 ]; then
   exit "$record_exit"

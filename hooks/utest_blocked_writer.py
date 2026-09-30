@@ -22,6 +22,7 @@ BLOCKING_STATUSES = {
     "contract_gap",
     "workspace_binding_missing",
     "workspace_binding_invalid",
+    "environment_target_ambiguous",
     "conflict",
     "unsupported",
     "environment_inspection_failed",

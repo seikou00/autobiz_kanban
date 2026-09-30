@@ -7,6 +7,7 @@ from __future__ import print_function
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -308,6 +309,105 @@ def _module_root(repository_root, workspace_root, locations, module, task_id):
     )
 
 
+_PROJECT_MANIFESTS = {
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "package.json",
+}
+_PROJECT_SCAN_PRUNED_DIRS = {
+    ".autobizdevops",
+    ".git",
+    ".idea",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".venv",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+    "vendor",
+}
+
+
+def _discover_project_roots(repository_root):
+    """Find build roots only inside the Plan-bound repository/worktree.
+
+    This is a fallback for Plans that intentionally omit implementation module
+    paths. Symlinked directories and nested Git repositories are not traversed.
+    """
+    root = Path(repository_root).resolve()
+    found = []
+    for current, dirnames, filenames in os.walk(str(root), followlinks=False):
+        current_path = Path(current).resolve()
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _PROJECT_SCAN_PRUNED_DIRS
+            and not (current_path / name).is_symlink()
+            and not (current_path / name / ".git").exists()
+        ]
+        manifests = _PROJECT_MANIFESTS.intersection(filenames)
+        if not any(
+            not (current_path / name).is_symlink()
+            and path_within((current_path / name).resolve(), root)
+            for name in manifests
+        ):
+            continue
+        if not path_within(current_path, root):
+            continue
+        found.append(current_path)
+    return sorted(set(found), key=lambda path: (len(path.parts), str(path).casefold()))
+
+
+def _git_changed_paths(repository_root):
+    """Return paths changed by the current sealed commit or local UTest edits."""
+    root = Path(repository_root).resolve()
+    commands = (
+        ["git", "-C", str(root), "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"],
+        ["git", "-C", str(root), "diff", "--name-only", "-z", "HEAD", "--"],
+        ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    paths = []
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except OSError:
+            continue
+        if completed.returncode != 0:
+            continue
+        for raw_path in completed.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            value = os.fsdecode(raw_path)
+            if value not in paths:
+                paths.append(value)
+    return paths
+
+
+def _projects_for_changed_paths(repository_root, project_roots, changed_paths):
+    repository_root = Path(repository_root).resolve()
+    matched_roots = set()
+    for changed_path in changed_paths:
+        changed = (repository_root / changed_path).resolve()
+        if not path_within(changed, repository_root):
+            continue
+        matches = [root for root in project_roots if path_within(changed, root)]
+        if matches:
+            # A changed file belongs to the nearest project root. This avoids
+            # selecting an unrelated Maven aggregator above a nested module.
+            matched_roots.add(max(matches, key=lambda root: len(root.parts)))
+    return sorted(matched_roots, key=lambda path: (len(path.parts), str(path).casefold()))
+
+
 def _execution_target_id(task_id, repository_root, execution_root):
     relative = execution_root.relative_to(repository_root).as_posix()
     digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:8].upper()
@@ -337,13 +437,64 @@ def resolve_task_workspace(
     workspace_root = _workspace_prefix(task)
     modules = _task_modules(task)
     execution_roots = []
+    location_warnings = []
+    auto_discovery_ambiguous = False
     if modules:
         for module in modules:
             execution_roots.append(
                 (module, _module_root(repository_root, workspace_root, locations, module, task_id))
             )
     else:
-        execution_roots.extend((None, item["root"]) for item in locations)
+        scan_root = (repository_root / workspace_root).resolve()
+        if not path_within(scan_root, repository_root) or not scan_root.is_dir():
+            raise UTestWorkspaceBindingError(
+                "contract_gap",
+                "{} scope.workspaceRoots 指向绑定仓库外或不存在的目录：{}。修复：在 /autodev-plan 修正 workspaceRoots。".format(
+                    task_id, workspace_root
+                ),
+                "repair_plan_task_location",
+            )
+        discovered_roots = _discover_project_roots(scan_root)
+        changed_paths = _git_changed_paths(repository_root)
+        changed_roots = _projects_for_changed_paths(
+            repository_root, discovered_roots, changed_paths
+        )
+        if changed_roots:
+            discovered_roots = changed_roots
+            location_warnings.append(
+                "{} 未声明 scope.modules；已按当前 Batch 的 Git 改动把环境检查范围收敛到：{}。".format(
+                    task_id,
+                    ", ".join(
+                        path.relative_to(repository_root).as_posix() or "."
+                        for path in discovered_roots
+                    ),
+                )
+            )
+        if discovered_roots:
+            if not changed_roots:
+                auto_discovery_ambiguous = len(discovered_roots) > 1
+                location_warnings.append(
+                    "{} 未声明 scope.modules，且当前 Batch 改动未能定位到工程；仅在 Plan 绑定的当前 worktree/workspaceRoot 内发现候选：{}。".format(
+                        task_id,
+                        ", ".join(
+                            path.relative_to(repository_root).as_posix() or "."
+                            for path in discovered_roots
+                        ),
+                    )
+                )
+            execution_roots.extend(
+                (path.relative_to(repository_root).as_posix() or ".", path)
+                for path in discovered_roots
+            )
+        else:
+            location_warnings.append(
+                "{} 未声明 scope.modules，且当前 Plan 绑定的 worktree/workspaceRoot 内没有发现构建清单；保留 workspaceRoot 作为检查目标。".format(
+                    task_id
+                )
+            )
+            execution_roots.append(
+                (workspace_root.as_posix() or ".", scan_root)
+            )
 
     targets = []
     for module, execution_root in execution_roots:
@@ -369,6 +520,9 @@ def resolve_task_workspace(
             "module": module,
             "repositoryRoot": str(repository_root),
             "executionRoot": str(execution_root),
+            "projectBoundary": str(
+                scan_root if not modules else repository_root
+            ),
             "executionCwd": execution_root.relative_to(repository_root).as_posix(),
             "planLocation": {"repo": plan_location["repo"], "cwd": plan_location["cwd"]},
         }
@@ -394,6 +548,8 @@ def resolve_task_workspace(
         "taskDigest": task["taskDigest"],
         "binding": binding,
         "targets": targets,
+        "locationWarnings": location_warnings,
+        "autoDiscoveryAmbiguous": auto_discovery_ambiguous and selected_target_id is None,
     }
 
 
@@ -420,7 +576,7 @@ def select_task_execution_target(context, test_files=None):
             return matches[0]
         raise UTestWorkspaceBindingError(
             "contract_gap",
-            "{} 的测试文件不属于 scope.modules。修复：把测试写入该 TASK 的模块，或在 /autodev-plan 修正模块范围。".format(
+            "{} 的测试文件不属于本 TASK 解析出的环境目标。修复：把测试写入其所属项目目录，或用 scope.modules 在 /autodev-plan 显式限定目录。".format(
                 context.get("taskId", "TASK")
             ),
             "align_test_file_with_task_module",

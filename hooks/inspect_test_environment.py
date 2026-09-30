@@ -372,7 +372,7 @@ def inspect_environment(workspace, framework):
     normalized = str(framework or "").strip().lower()
     if not root.is_dir():
         raise TestEnvironmentError(
-            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 scope.modules。".format(
+            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 scope.workspaceRoots 或显式 scope.modules。".format(
                 root
             )
         )
@@ -435,7 +435,14 @@ def _status_for_targets(targets):
     return "ready" if statuses and all(value == "ready" for value in statuses) else "unsupported"
 
 
-def inspect_feature_environments(workspace, feature, task_ids=None, *, code_workspace=None):
+def inspect_feature_environments(
+    workspace,
+    feature,
+    task_ids=None,
+    *,
+    code_workspace=None,
+    selected_environment_targets=None,
+):
     artifact_workspace = resolve_workspace(workspace)
     feature = resolve_feature(feature)
     feature_dir = artifact_workspace / ".autobizdevops" / "features" / feature
@@ -447,6 +454,7 @@ def inspect_feature_environments(workspace, feature, task_ids=None, *, code_work
             str(exc),
             "repair_plan_task_location",
         )
+    selected_environment_targets = dict(selected_environment_targets or {})
     requested = set(task_ids or [])
     known_task_ids = [
         task["id"]
@@ -460,31 +468,66 @@ def inspect_feature_environments(workspace, feature, task_ids=None, *, code_work
                 ", ".join(unknown)
             )
         )
+    unknown_selectors = sorted(set(selected_environment_targets) - set(known_task_ids))
+    if unknown_selectors:
+        raise TestEnvironmentError(
+            "environment target 选择包含未知 TASK：{}。修复：使用当前 Plan 的 TASK ID。".format(
+                ", ".join(unknown_selectors)
+            )
+        )
+    requested.update(selected_environment_targets)
     selected_task_ids = [task_id for task_id in known_task_ids if not requested or task_id in requested]
     inspected = {}
     task_targets = []
     bindings = {}
     location_warnings = []
+    target_selection_required = []
     for task_id in selected_task_ids:
         context = resolve_task_workspace(
             artifact_workspace,
             feature,
             task_id,
+            selected_target_id=selected_environment_targets.get(task_id),
             code_workspace=code_workspace,
         )
         bindings[context["workspaceRef"]] = context["binding"]
         for warning in context.get("locationWarnings", []):
             if warning not in location_warnings:
                 location_warnings.append(warning)
+        if context.get("autoDiscoveryAmbiguous"):
+            target_selection_required.append(
+                {
+                    "taskId": task_id,
+                    "candidates": [
+                        {
+                            "environmentTargetId": target["environmentTargetId"],
+                            "projectRoot": target["executionRoot"],
+                        }
+                        for target in context["targets"]
+                    ],
+                }
+            )
+            for target in context["targets"]:
+                task_targets.append(
+                    {
+                        "taskId": task_id,
+                        "environmentTargetId": target["environmentTargetId"],
+                        "projectRoot": target["executionRoot"],
+                    }
+                )
+            # Do not inspect or initialize candidates until runtime selection.
+            # An unrelated malformed manifest must not block a resolvable task.
+            continue
         for target in context["targets"]:
             execution_root = Path(target["executionRoot"])
             repository_root = Path(target["repositoryRoot"])
-            project_root = _nearest_project_root(execution_root, repository_root)
+            project_boundary = Path(target.get("projectBoundary") or repository_root)
+            project_root = _nearest_project_root(execution_root, project_boundary)
             framework = _detected_framework(project_root)
             if framework is None:
                 inspection = _base_result("unknown")
                 inspection["errors"].append(
-                    "{} 的 UTest 执行目录未发现受支持的测试工程清单。修复：修正模块声明，或补齐项目真实使用的构建清单。".format(
+                    "{} 的 UTest 执行目录未发现受支持的测试工程清单。修复：在当前 Plan 绑定仓库内补齐项目真实使用的构建清单；必要时再用 scope.modules 限定执行目录。".format(
                         task_id
                     )
                 )
@@ -514,8 +557,13 @@ def inspect_feature_environments(workspace, feature, task_ids=None, *, code_work
     for target in targets:
         warnings.extend(target.get("warnings", []))
         errors.extend(target.get("errors", []))
-    return {
-        "status": _status_for_targets(targets),
+    status = (
+        "environment_target_ambiguous"
+        if target_selection_required
+        else _status_for_targets(targets)
+    )
+    result = {
+        "status": status,
         "bindings": bindings,
         "targets": targets,
         "taskTargets": task_targets,
@@ -523,6 +571,13 @@ def inspect_feature_environments(workspace, feature, task_ids=None, *, code_work
         "warnings": warnings,
         "errors": errors,
     }
+    if target_selection_required:
+        result["targetSelectionRequired"] = target_selection_required
+        result["requiredAction"] = "select_environment_target"
+        result["errors"].append(
+            "多个自动发现的项目无法由当前 Batch Git 改动定位。请依据 TASK 的实际实现目录，使用列出的 environmentTargetId 重跑该 TASK 的环境检查；不要修改 Plan 或初始化所有候选。"
+        )
+    return result
 
 
 def _record_blocked_if_requested(args, payload):
@@ -547,6 +602,13 @@ def main(argv=None):
     parser.add_argument("--feature", required=True)
     parser.add_argument("--task-id", action="append")
     parser.add_argument(
+        "--environment-target",
+        action="append",
+        default=[],
+        metavar="TASK_ID=ENVIRONMENT_TARGET_ID",
+        help="仅用于多候选自动发现：针对一个 TASK 选择 inspector 返回的目标 ID。",
+    )
+    parser.add_argument(
         "--batch-worktree",
         dest="code_workspace",
         help="仅 Workflow 内使用：当前 Batch 的原生 Git Worktree。",
@@ -555,16 +617,33 @@ def main(argv=None):
     parser.add_argument(
         "--record-blocked",
         action="store_true",
-        help="对 contract_gap/environment 终态写入 BLOCKED 产物与 FIX_REQUEST",
+        help="对 contract_gap/environment/ambiguous 终态写入 BLOCKED 产物与 FIX_REQUEST",
     )
     args = None
     try:
         args = parser.parse_args(argv)
+        selected_environment_targets = {}
+        for value in args.environment_target:
+            if "=" not in value:
+                raise TestEnvironmentError(
+                    "--environment-target 格式无效：{}。修复：使用 TASK_ID=ENVIRONMENT_TARGET_ID。".format(
+                        value
+                    )
+                )
+            task_id, target_id = value.split("=", 1)
+            if not task_id or not target_id or task_id in selected_environment_targets:
+                raise TestEnvironmentError(
+                    "--environment-target 包含空值或重复 TASK：{}。修复：每个 TASK 只选择一个本轮目标。".format(
+                        value
+                    )
+                )
+            selected_environment_targets[task_id] = target_id
         result = inspect_feature_environments(
             args.workspace,
             args.feature,
             args.task_id,
             code_workspace=args.code_workspace,
+            selected_environment_targets=selected_environment_targets,
         )
     except UTestWorkspaceBindingError as exc:
         payload = _record_blocked_if_requested(args, exc.payload())

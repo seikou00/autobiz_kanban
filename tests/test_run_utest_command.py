@@ -412,6 +412,35 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual("yudao-module-mkt", validation["executionCwd"])
         self.assertEqual([], validate_result_against_plan(self.feature_dir, self._unit_result()))
 
+    def test_empty_scope_modules_uses_discovered_project_for_test_file_cwd(self):
+        module = self.repo / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
+        module.mkdir(parents=True)
+        (module / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        test_file = module / "test_sample.py"
+        test_file.write_text(
+            "import unittest\n\n"
+            "class ModuleTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        output_file = Path(self.temporary.name) / "test-output.txt"
+        output_file.write_text("recorded test output\n", encoding="utf-8")
+
+        result = self._execute(
+            record_only=True,
+            recorded_exit_code=0,
+            recorded_output_file=str(output_file),
+            test_files=[test_file.relative_to(self.repo).as_posix()],
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(str(module.resolve()), result["cwd"])
+        self.assertEqual(
+            "后台服务/零售客户经营/LF39.05_bccompliancemng",
+            result["executionCwd"],
+        )
+
     def test_writer_failure_retains_evidence_and_reports_recovery(self):
         with mock.patch(
             "hooks.run_utest_command.record_execution", side_effect=OSError("read-only")

@@ -330,6 +330,124 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertIn("T001", payload["errors"][0])
         self.assertIn("scope.modules", payload["errors"][0])
 
+    def test_empty_scope_modules_discovers_nested_project_from_batch_changes(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "comparison-repo"
+        module_a = repo / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
+        module_b = repo / "unrelated-module"
+        module_a.mkdir(parents=True)
+        module_b.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.name", "Test User"],
+            check=True,
+        )
+        (module_a / "pom.xml").write_text(
+            "<project><dependency><artifactId>spring-boot-starter-test</artifactId></dependency></project>",
+            encoding="utf-8",
+        )
+        (module_b / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        source = module_a / "src" / "main" / "java" / "Example.java"
+        source.parent.mkdir(parents=True)
+        source.write_text("class Example {}\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "base"], check=True
+        )
+        source.write_text("class Example { int value() { return 1; } }\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "implement module A"],
+            check=True,
+        )
+        self._feature(workspace, repo)
+
+        result = inspect_feature_environments(workspace, "alpha")
+
+        self.assertEqual("ready", result["status"])
+        self.assertEqual([str(module_a.resolve())], [item["projectRoot"] for item in result["targets"]])
+        self.assertTrue(any("Git 改动" in warning for warning in result["locationWarnings"]))
+
+    def test_ambiguous_discovery_lists_candidates_and_allows_runtime_selection(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "comparison-repo"
+        module_a = repo / "module-a"
+        module_b = repo / "module-b"
+        module_a.mkdir(parents=True)
+        module_b.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.name", "Test User"],
+            check=True,
+        )
+        for module in (module_a, module_b):
+            (module / "pom.xml").write_text(
+                "<project><dependency><artifactId>spring-boot-starter-test</artifactId></dependency></project>",
+                encoding="utf-8",
+            )
+        readme = repo / "README.md"
+        readme.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "base"], check=True
+        )
+        readme.write_text("non-project change\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "documentation"],
+            check=True,
+        )
+        self._feature(workspace, repo)
+
+        ambiguous = inspect_feature_environments(workspace, "alpha")
+
+        self.assertEqual("environment_target_ambiguous", ambiguous["status"])
+        self.assertEqual([], ambiguous["targets"])
+        candidates = ambiguous["targetSelectionRequired"][0]["candidates"]
+        self.assertEqual(2, len(candidates))
+        selected = inspect_feature_environments(
+            workspace,
+            "alpha",
+            selected_environment_targets={
+                "T001": candidates[0]["environmentTargetId"]
+            },
+        )
+
+        self.assertEqual("ready", selected["status"])
+        self.assertEqual(1, len(selected["targets"]))
+        self.assertEqual(candidates[0]["projectRoot"], selected["targets"][0]["projectRoot"])
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--task-id",
+                    "T001",
+                    "--environment-target",
+                    "T001={}".format(candidates[0]["environmentTargetId"]),
+                    "--batch-worktree",
+                    str(repo),
+                ]
+            )
+        cli_payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("ready", cli_payload["status"])
+        self.assertEqual(1, len(cli_payload["targets"]))
+
     def test_invalid_plan_module_is_contract_gap_not_environment_failure(self):
         root = self._root()
         workspace = root / "output"
