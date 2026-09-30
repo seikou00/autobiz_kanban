@@ -159,7 +159,10 @@ def read_agents_md(system: SystemEntry, plugin_root: Optional[Path] = None) -> O
 
 # ---- 清单解析 / 校验 -----------------------------------------------------
 
-def parse_manifest(data: object) -> Manifest:
+def parse_manifest(
+    data: object, *, duplicate_unit_ids: Optional[set[str]] = None
+) -> Manifest:
+    """默认严格校验；传入集合时记录重复 ID 并继续解析其他单元。"""
     if not isinstance(data, dict):
         raise AgentsManifestError("manifest 根必须是对象")
     schema_version = data.get("schemaVersion", MANIFEST_SCHEMA_VERSION)
@@ -219,11 +222,14 @@ def parse_manifest(data: object) -> Manifest:
                 raise AgentsManifestError(f"{uctx}.deployUnitId 必须是非空字符串")
             unit_id = unit_id.strip()
             if unit_id in seen_units:
-                raise AgentsManifestError(
-                    f"deployUnitId 全局重复: {unit_id} "
-                    f"(系统 {seen_units[unit_id]} 与 {system_id})"
-                )
-            seen_units[unit_id] = system_id
+                if duplicate_unit_ids is None:
+                    raise AgentsManifestError(
+                        f"deployUnitId 全局重复: {unit_id} "
+                        f"(系统 {seen_units[unit_id]} 与 {system_id})"
+                    )
+                duplicate_unit_ids.add(unit_id)
+            else:
+                seen_units[unit_id] = system_id
             # 展示名：description 优先，兼容旧 name。
             name = raw_unit.get("description", raw_unit.get("name", ""))
             if not isinstance(name, str):
@@ -250,15 +256,20 @@ def parse_manifest(data: object) -> Manifest:
     return Manifest(schema_version=schema_version, systems=tuple(systems))
 
 
-def load_manifest(plugin_root: Optional[Path] = None) -> Manifest:
-    path = get_manifest_path(plugin_root)
+def load_manifest(
+    plugin_root: Optional[Path] = None,
+    *,
+    duplicate_unit_ids: Optional[set[str]] = None,
+    manifest_path: Optional[Path] = None,
+) -> Manifest:
+    path = Path(manifest_path) if manifest_path is not None else get_manifest_path(plugin_root)
     if not path.is_file():
         raise AgentsManifestError(f"未找到清单文件，请先同步 agents 仓库: {path}")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise AgentsManifestError(f"清单 JSON 解析失败: {path}:{exc.lineno}:{exc.colno}") from exc
-    return parse_manifest(data)
+    return parse_manifest(data, duplicate_unit_ids=duplicate_unit_ids)
 
 
 def index_units(manifest: Manifest) -> Dict[str, str]:
@@ -310,12 +321,14 @@ def build_sync_payload(
     """读取已克隆的清单，整形为 sync_agents.py 打到 stdout 的形状。
 
     与 git 操作解耦：只要 ``<pluginPath>/sys/`` 里有合法清单即可调用，便于测试。
-    清单缺失/非法时抛 AgentsManifestError，由调用方转为 ok:false。
+    重复 deployUnitId 不阻断同步；其他清单结构错误仍抛 AgentsManifestError。
     """
-    manifest = load_manifest(plugin_root)
+    duplicate_unit_ids: set[str] = set()
+    manifest = load_manifest(plugin_root, duplicate_unit_ids=duplicate_unit_ids)
     agents_root = get_agents_root(plugin_root)
 
     supported_units: List[str] = []
+    seen_supported_units: set[str] = set()
     systems_payload: List[dict] = []
     ready_count = 0
     for system in manifest.systems:
@@ -328,7 +341,9 @@ def build_sync_payload(
         agents_rel_display = f"{agents_root.name}/{system.agents_relpath()}".replace("\\", "/")
         units_payload = []
         for unit in system.deploy_units:
-            supported_units.append(unit.deploy_unit_id)
+            if unit.deploy_unit_id not in seen_supported_units:
+                supported_units.append(unit.deploy_unit_id)
+                seen_supported_units.add(unit.deploy_unit_id)
             units_payload.append({"deployUnitId": unit.deploy_unit_id, "name": unit.name})
         systems_payload.append(
             {
@@ -353,5 +368,6 @@ def build_sync_payload(
         # 的 inspectCommands.<platform>.knowledge_path。
         "knowledge_path": str(agents_root),
         "supported_deploy_units": supported_units,
+        "duplicate_deploy_unit_ids": sorted(duplicate_unit_ids),
         "systems": systems_payload,
     }

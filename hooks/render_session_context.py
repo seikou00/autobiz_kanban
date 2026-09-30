@@ -107,6 +107,7 @@ from hooks.agents_repo import (  # noqa: E402
     Manifest,
     display_path_join,
     get_agents_root,
+    get_manifest_path,
     index_unit_pairs,
     load_manifest,
     sys_abspath,
@@ -896,13 +897,18 @@ def render(
             "agentConfig": agent_config,
         }
 
-    # 清单不可用（缺失/非法）时降级：所有单元当作未命中，直接走 local 兜底。
+    # 重复的 deployUnitId 只影响该 ID；清单其余条目仍可供会话加载。
+    duplicate_unit_ids: set[str] = set()
+    # 清单不可用（缺失/其他非法结构）时降级：所有单元当作未命中，直接走 local 兜底。
     manifest: Optional[Manifest]
     try:
-        manifest = load_manifest(plugin_root)
+        manifest = load_manifest(plugin_root, duplicate_unit_ids=duplicate_unit_ids)
     except AgentsManifestError:
         manifest = None
+        duplicate_unit_ids.clear()
     pairs = index_unit_pairs(manifest) if manifest is not None else {}
+    for uid in duplicate_unit_ids:
+        pairs.pop(uid, None)
 
     load_status: List[dict] = []
     system_sections: List[dict] = []  # ② 按 systemId 去重，首次出现顺序
@@ -925,6 +931,15 @@ def render(
     for sel in selected:
         uid = sel["deployUnitId"]
         local = sel["localRepoPath"]
+        if uid in duplicate_unit_ids:
+            load_status.append({
+                "deployUnitId": uid,
+                "path": display_path_join(get_manifest_path(plugin_root), platform=platform),
+                "loaded": False,
+                "source": "remote",
+                "message": f"agents.manifest.json 中 deployUnitId 重复: {uid}",
+            })
+            continue
         pair = pairs.get(uid)
         if pair is not None:
             system, unit = pair
@@ -1024,6 +1039,12 @@ def render(
     local_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "local")
     miss_n = sum(1 for s in load_status if not s["loaded"])
     message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
+    selected_duplicates = sorted({
+        sel["deployUnitId"] for sel in selected
+        if sel["deployUnitId"] in duplicate_unit_ids
+    })
+    if selected_duplicates:
+        message += "；清单中重复的 deployUnitId: " + ", ".join(selected_duplicates)
     # 会话级条目（工作区指令、领域词汇表，若有正文注入）在 agentmdLoadStatus 里排前；其加载
     # 结果不计入上面的 remote/local/缺 单元摘要（那行只反映部署单元），避免混进单元统计。
     session_entries: List[dict] = []

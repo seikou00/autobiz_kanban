@@ -39,7 +39,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.agents_repo import MANIFEST_NAME, display_path_join, get_agents_root  # noqa: E402
+from hooks.agents_repo import (  # noqa: E402
+    AgentsManifestError,
+    MANIFEST_NAME,
+    display_path_join,
+    get_agents_root,
+    load_manifest,
+)
 from hooks.render_session_context import (  # noqa: E402
     LOCAL_AGENTS_MD,
     WORKSPACE_AGENTS_MD,
@@ -586,6 +592,17 @@ def render(
             board_config_path=board_config_path,
         )
 
+    duplicate_unit_ids: set[str] = set()
+    manifest_path = Path(resolved_knowledge_path) / MANIFEST_NAME
+    try:
+        load_manifest(
+            duplicate_unit_ids=duplicate_unit_ids,
+            manifest_path=manifest_path,
+        )
+    except AgentsManifestError as exc:
+        duplicate_unit_ids.clear()
+        _timing_log("manifest.duplicates", "warning", str(exc))
+
     agent_config = _agent_config(
         _timed_call(
             "runtime.policy", _session_runtime_policy,
@@ -610,6 +627,17 @@ def render(
     seen_local_paths: Set[Path] = set()
 
     for item in selected:
+        if item["deployUnitId"] in duplicate_unit_ids:
+            status = {
+                "deployUnitId": item["deployUnitId"],
+                "path": display_path_join(manifest_path, platform=platform),
+                "loaded": False,
+                "source": "remote",
+                "message": f"agents.manifest.json 中 deployUnitId 重复: {item['deployUnitId']}",
+            }
+            load_status.append(status)
+            _timing_log("unit.{}".format(item["deployUnitId"]), "result", status["message"])
+            continue
         status, local_path, content = _timed_call(
             "unit.{}.resolve".format(item["deployUnitId"]), _resolve_unit,
             item,
@@ -678,6 +706,13 @@ def render(
         key = status["source"] if status["loaded"] else "miss"
         units_by_source[key].append(status["deployUnitId"])
     remote_n, local_n, miss_n = (len(units_by_source[key]) for key in ("remote", "local", "miss"))
+    message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
+    selected_duplicates = sorted({
+        item["deployUnitId"] for item in selected
+        if item["deployUnitId"] in duplicate_unit_ids
+    })
+    if selected_duplicates:
+        message += "；清单中重复的 deployUnitId: " + ", ".join(selected_duplicates)
     _timing_log("render.summary", "done", "remote={} local={} miss={}".format(
         json.dumps(units_by_source["remote"], ensure_ascii=False),
         json.dumps(units_by_source["local"], ensure_ascii=False),
@@ -691,7 +726,7 @@ def render(
         session_entries.append(_domain_context_status(session_workspace_path, platform=platform))
     return {
         "ok": True,
-        "message": f"remote {remote_n} / local {local_n} / 缺 {miss_n}",
+        "message": message,
         "sessionContext": prompt,
         "agentmdLoadStatus": [*session_entries, *load_status],
         "agentConfig": agent_config,
