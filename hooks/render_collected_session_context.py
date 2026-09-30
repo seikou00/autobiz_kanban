@@ -18,11 +18,14 @@
 非法外，外部接口故障不会中断会话。
 
 各阶段的开始、结束和耗时输出到 stderr，stdout 保持原有 JSON 契约。
+remote 未命中时按 ``collector.env`` → ``collector.* stderr/stdout`` →
+``unit.<id> result`` → ``render.summary`` 的顺序排查。
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import shutil
@@ -59,6 +62,7 @@ from hooks.render_session_context import (  # noqa: E402
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
 NPM_INSTALL_TIMEOUT_SECONDS = 300
+DIAGNOSTIC_LOG_LIMIT = 2000
 
 
 class KnowledgeCollectorError(RuntimeError):
@@ -72,15 +76,48 @@ def _short_error(text: str, limit: int = 500) -> str:
     return compact[: limit - 1] + "…"
 
 
-def _timing_log(stage, event, detail=""):
+def _as_text(value) -> str:
+    """POSIX 下 TimeoutExpired 携带的是 bytes，即使 run 传了 text=True。"""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _timing_log(stage, event, detail="", limit=500):
     print(
         "[session-context] {} pid={} {} {} {}".format(
             time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            os.getpid(), stage, event, _short_error(detail),
+            os.getpid(), stage, event, _short_error(detail, limit),
         ).rstrip(),
         file=sys.stderr,
         flush=True,
     )
+
+
+def _log_collector_env(collector_script, knowledge_path, node_command):
+    """collector 自身不写诊断日志，路径和命令是否就绪只能在这里留痕。"""
+    try:
+        script = Path(collector_script)
+        detail = "script={} exists={} cwd={} node={} knowledge_path={} exists={}".format(
+            script.resolve(), script.is_file(), os.getcwd(),
+            shutil.which(node_command) or "<PATH 中未找到 {}>".format(node_command),
+            knowledge_path, Path(knowledge_path).is_dir(),
+        )
+    except OSError as exc:
+        detail = "环境信息采集失败: {}".format(exc)
+    _timing_log("collector.env", "info", detail, limit=DIAGNOSTIC_LOG_LIMIT)
+
+
+def _log_collector_output(stage, stdout, stderr, *, include_stdout=False):
+    """stderr 无论成败都记录；stdout 只在失败时记录，避免打印整段知识。"""
+    stdout, stderr = _as_text(stdout), _as_text(stderr)
+    _timing_log(stage, "output", "stdout_chars={} stderr_chars={}".format(
+        len(stdout), len(stderr),
+    ))
+    if stderr.strip():
+        _timing_log(stage, "stderr", stderr, limit=DIAGNOSTIC_LOG_LIMIT)
+    if include_stdout and stdout.strip():
+        _timing_log(stage, "stdout", stdout, limit=DIAGNOSTIC_LOG_LIMIT)
 
 
 def _timed_call(stage, function, *args, **kwargs):
@@ -167,11 +204,12 @@ def _run_collector(
         "--knowledgePath",
         knowledge_path,
     ]
+    stage = "collector.{}".format(" ".join(collector_args))
+    _timing_log(stage, "argv", json.dumps(command, ensure_ascii=False),
+                limit=DIAGNOSTIC_LOG_LIMIT)
     try:
         proc = _timed_call(
-            "collector.{}(timeout={}s)".format(
-                " ".join(collector_args), KNOWLEDGE_COLLECT_TIMEOUT_SECONDS,
-            ),
+            "{}(timeout={}s)".format(stage, KNOWLEDGE_COLLECT_TIMEOUT_SECONDS),
             subprocess.run,
             command,
             capture_output=True,
@@ -185,21 +223,30 @@ def _run_collector(
         missing = exc.filename or node_command
         raise KnowledgeCollectorError(f"未找到知识恢复命令: {missing}") from exc
     except subprocess.TimeoutExpired as exc:
+        _log_collector_output(stage, exc.stdout, exc.stderr, include_stdout=True)
         raise KnowledgeCollectorError(
             f"知识恢复接口超时（{KNOWLEDGE_COLLECT_TIMEOUT_SECONDS} 秒）"
         ) from exc
     except OSError as exc:
         raise KnowledgeCollectorError(f"启动知识恢复接口失败: {_short_error(str(exc))}") from exc
 
-    if proc.returncode != 0:
-        detail = _short_error(proc.stderr or proc.stdout) or f"返回码 {proc.returncode}"
-        raise KnowledgeCollectorError(f"知识恢复接口失败: {detail}")
+    failed = proc.returncode != 0
+    _log_collector_output(stage, proc.stdout, proc.stderr, include_stdout=failed)
+    if failed:
+        detail = _short_error(proc.stderr or proc.stdout) or "无任何输出"
+        if not Path(knowledge_path).is_dir():
+            # collector 对不存在的 knowledgePath 静默 exit(1)
+            detail += f"；knowledgePath 不存在: {knowledge_path}"
+        raise KnowledgeCollectorError(
+            f"知识恢复接口失败（返回码 {proc.returncode}）: {detail}"
+        )
     output = (proc.stdout or "").strip().lstrip("\ufeff")
     if not output:
         raise KnowledgeCollectorError("知识恢复接口未输出 JSON")
     try:
         return json.loads(output)
     except json.JSONDecodeError as exc:
+        _timing_log(stage, "stdout", output, limit=DIAGNOSTIC_LOG_LIMIT)
         raise KnowledgeCollectorError(
             f"知识恢复接口返回非法 JSON: {_short_error(output)}"
         ) from exc
@@ -232,11 +279,12 @@ def list_supported_deploy_units(
     npm_command: str = "npm",
 ) -> List[str]:
     """按需安装 collector 依赖并读取其支持的部署单元。"""
+    _log_collector_env(collector_script, knowledge_path, node_command)
     npm_error = _npm_install(collector_script, npm_command=npm_command)
     if npm_error:
         _timing_log("npm.install", "warning", npm_error)
     try:
-        return _list_deploy_units(
+        units = _list_deploy_units(
             collector_script,
             knowledge_path=knowledge_path,
             node_command=node_command,
@@ -244,6 +292,10 @@ def list_supported_deploy_units(
     except KnowledgeCollectorError as exc:
         reason = f"{npm_error}；{exc}" if npm_error else str(exc)
         raise KnowledgeCollectorError(reason) from exc
+    _timing_log("collector.listDeployUnits", "result", "count={} ids={}".format(
+        len(units), json.dumps(units, ensure_ascii=False),
+    ), limit=DIAGNOSTIC_LOG_LIMIT)
+    return units
 
 
 def _manifest_deploy_ids(knowledge_path: str) -> List[str]:
@@ -327,12 +379,27 @@ def _deploy_unit_prompt(
         node_command=node_command,
     )
     if not isinstance(payload, dict):
-        raise KnowledgeCollectorError(f"deployUnit {deploy_unit_id} 必须返回 JSON 对象")
+        # collector 在多个失败分支都只输出 []，这里补上可能原因
+        hint = (
+            "；collector 返回空数组，通常是应用类型接口(archguardservice)调用失败，"
+            "或匹配文件所在目录向上找不到 AGENTS.md"
+            if payload == [] else ""
+        )
+        raise KnowledgeCollectorError(
+            f"deployUnit {deploy_unit_id} 必须返回 JSON 对象，实际为 "
+            f"{type(payload).__name__}: "
+            f"{_short_error(json.dumps(payload, ensure_ascii=False), 200)}{hint}"
+        )
     system_prompt = payload.get("systemPrompt")
+    file_lists = payload.get("fileLists")
+    file_count = len(file_lists) if isinstance(file_lists, list) else "缺失"
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         raise KnowledgeCollectorError(
             f"deployUnit {deploy_unit_id} 返回缺少非空 systemPrompt"
+            f"（keys={sorted(payload)} fileLists={file_count}）"
         )
+    _timing_log("unit.{}".format(deploy_unit_id), "remote_hit",
+                "prompt_chars={} fileLists={}".format(len(system_prompt), file_count))
     return system_prompt
 
 
@@ -368,6 +435,13 @@ def _legacy_result(
     return result
 
 
+def _similar_units(uid: str, candidates: Set[str]) -> List[str]:
+    """忽略大小写找相近 ID，定位 deployUnitId 拼写或大小写不一致。"""
+    lowered = {candidate.lower(): candidate for candidate in candidates}
+    matches = difflib.get_close_matches(uid.lower(), list(lowered), n=3, cutoff=0.8)
+    return [lowered[match] for match in matches]
+
+
 def _resolve_unit(
     selected: dict,
     *,
@@ -380,7 +454,11 @@ def _resolve_unit(
     uid = selected["deployUnitId"]
     collector_error = ""
     if uid not in supported_units:
-        collector_error = f"deployUnit 不在知识库列表中: {uid}"
+        similar = _similar_units(uid, supported_units)
+        collector_error = "deployUnit 不在知识库列表中: {}（列表共 {} 个{}）".format(
+            uid, len(supported_units),
+            "，相近: " + ", ".join(similar) if similar else "",
+        )
     else:
         try:
             prompt = _deploy_unit_prompt(
@@ -411,6 +489,9 @@ def _resolve_unit(
         display_path_join(local_repo, LOCAL_AGENTS_MD, platform=platform) if local_repo else ""
     )
     local_content = _read_nonempty(local_path) if local_path is not None else None
+    _timing_log("unit.{}".format(uid), "local_agents", "path={} found={}".format(
+        local_path or "<未配置 localRepoPath>", local_content is not None,
+    ))
     if local_content is not None:
         return (
             {
@@ -470,6 +551,18 @@ def render(
     resolved_knowledge_path = (knowledge_path or "").strip() or str(
         get_agents_root(plugin_root).resolve()
     )
+    _timing_log("render.input", "info", "knowledge_path={}({}) units={}".format(
+        resolved_knowledge_path,
+        "arg" if (knowledge_path or "").strip() else "default",
+        json.dumps(
+            [
+                {"deployUnitId": item["deployUnitId"],
+                 "localRepoPath": item.get("localRepoPath", "")}
+                for item in selected
+            ],
+            ensure_ascii=False,
+        ),
+    ), limit=DIAGNOSTIC_LOG_LIMIT)
     try:
         supported_units = set(
             list_supported_deploy_units(
@@ -527,6 +620,10 @@ def render(
             node_command=node_command,
         )
         load_status.append(status)
+        _timing_log("unit.{}".format(item["deployUnitId"]), "result",
+                    "source={} loaded={} path={} {}".format(
+                        status["source"], status["loaded"], status["path"], status["message"],
+                    ), limit=DIAGNOSTIC_LOG_LIMIT)
         if content is None:
             continue
         if local_path is not None:
@@ -576,13 +673,16 @@ def render(
         unit_sections,
         domain_context,
     )
-    remote_n = sum(
-        1 for status in load_status if status["loaded"] and status["source"] == "remote"
-    )
-    local_n = sum(
-        1 for status in load_status if status["loaded"] and status["source"] == "local"
-    )
-    miss_n = sum(1 for status in load_status if not status["loaded"])
+    units_by_source = {"remote": [], "local": [], "miss": []}
+    for status in load_status:
+        key = status["source"] if status["loaded"] else "miss"
+        units_by_source[key].append(status["deployUnitId"])
+    remote_n, local_n, miss_n = (len(units_by_source[key]) for key in ("remote", "local", "miss"))
+    _timing_log("render.summary", "done", "remote={} local={} miss={}".format(
+        json.dumps(units_by_source["remote"], ensure_ascii=False),
+        json.dumps(units_by_source["local"], ensure_ascii=False),
+        json.dumps(units_by_source["miss"], ensure_ascii=False),
+    ), limit=DIAGNOSTIC_LOG_LIMIT)
 
     session_entries: List[dict] = []
     if workspace_content is not None:
@@ -686,9 +786,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
             npm_command=args.npm_command,
         )
 
-    _timing_log("session.result", "ready", "ok={} context_chars={}".format(
-        result.get("ok"), len(result.get("sessionContext", "")),
-    ))
+    _timing_log("session.result", "ready", "ok={} context_chars={} message={}".format(
+        result.get("ok"), len(result.get("sessionContext", "")), result.get("message", ""),
+    ), limit=DIAGNOSTIC_LOG_LIMIT)
     _timed_call("output.json", json.dump, result, sys.stdout, ensure_ascii=False, indent=2)
     print()
     return 0

@@ -278,6 +278,68 @@ class CollectedSessionContextTest(unittest.TestCase):
         self.assertTrue(result["agentmdLoadStatus"][0]["loaded"])
         self.assertIn("缺少非空 systemPrompt", result["agentmdLoadStatus"][0]["message"])
 
+    def test_empty_array_payload_falls_back_to_local_and_logs_reason(self):
+        local = Path(tempfile.mkdtemp())
+        (local / "AGENTS.md").write_text("# 本地知识\n", encoding="utf-8")
+        responses = [
+            _proc(""),
+            _proc(["U1"]),
+            _proc([], stderr="[WARN] 获取应用类型信息失败: 请求超时"),
+        ]
+        stderr = io.StringIO()
+        with patch(
+            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+        ), contextlib.redirect_stderr(stderr):
+            result = render(
+                [{"deployUnitId": "U1", "localRepoPath": str(local)}],
+                collector_script="collect-knowledge.js",
+            )
+
+        self.assertEqual(result["message"], "remote 0 / local 1 / 缺 0")
+        self.assertIn("# 本地知识", result["sessionContext"])
+        status = result["agentmdLoadStatus"][0]
+        self.assertEqual(status["source"], "local")
+        self.assertTrue(status["loaded"])
+        self.assertIn("已回退本地 AGENTS.md", status["message"])
+        self.assertIn("空数组", status["message"])
+        self.assertIn("archguardservice", status["message"])
+        log = stderr.getvalue()
+        self.assertIn("collector.env info script=", log)
+        self.assertIn("collector.--deployUnit U1 stderr [WARN] 获取应用类型信息失败: 请求超时", log)
+        self.assertIn('render.summary done remote=[] local=["U1"] miss=[]', log)
+
+    def test_unlisted_unit_reports_similar_ids(self):
+        responses = [_proc(""), _proc(["LF39.18_WG_FLOW", "OTHER"])]
+        stderr = io.StringIO()
+        with patch(
+            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+        ), contextlib.redirect_stderr(stderr):
+            result = render(
+                [{"deployUnitId": "LF39.18_wg_flow", "localRepoPath": ""}],
+                collector_script="collect-knowledge.js",
+            )
+
+        message = result["agentmdLoadStatus"][0]["message"]
+        self.assertIn("列表共 2 个，相近: LF39.18_WG_FLOW", message)
+        self.assertIn('collector.listDeployUnits result count=2 ids=["LF39.18_WG_FLOW", "OTHER"]',
+                      stderr.getvalue())
+
+    def test_silent_collector_failure_mentions_missing_knowledge_path(self):
+        missing = str(Path(tempfile.mkdtemp()) / "missing")
+        responses = [_proc(""), _proc(["U1"]), _proc("", returncode=1)]
+        with patch(
+            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+        ), contextlib.redirect_stderr(io.StringIO()):
+            result = render(
+                [{"deployUnitId": "U1", "localRepoPath": ""}],
+                collector_script="collect-knowledge.js",
+                knowledge_path=missing,
+            )
+
+        message = result["agentmdLoadStatus"][0]["message"]
+        self.assertIn("返回码 1", message)
+        self.assertIn(f"knowledgePath 不存在: {missing}", message)
+
     def test_npm_install_failure_still_allows_collector(self):
         def fake_run(command, **_kwargs):
             if command[-1] == "install":
