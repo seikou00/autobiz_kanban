@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run one setup/test argv inside an assigned repository without a shell."""
+"""Run or record one UTest command inside its assigned repository."""
 
 from __future__ import print_function
 
@@ -299,11 +299,18 @@ def execute_utest_command(
     run_id=None,
     batch_id=None,
     stage_timeout=None,
+    record_only=False,
+    recorded_exit_code=None,
+    recorded_output_file=None,
 ):
     selected_kind = kind or mode
     if selected_kind not in MODES:
         raise UTestCommandError(
             "kind 无效：{}。修复：使用 setup 或 test。".format(selected_kind)
+        )
+    if selected_kind == "test" and not record_only:
+        raise UTestCommandError(
+            "行为测试必须由 Bash 直接执行；使用 --record-only 登记 Bash 的真实退出码与输出，禁止由 Python runner 启动测试进程。"
         )
     if not isinstance(timeout, int) or timeout <= 0:
         raise UTestCommandError(
@@ -400,26 +407,48 @@ def execute_utest_command(
 
     command = shell_join(command_argv)
     log_path = feature_dir / "test-output.log"
-    remaining_stage_seconds = _remaining_stage_seconds(
-        artifact_workspace,
-        resolved_feature,
-        run_id,
-        batch_id,
-        stage_timeout,
-    )
-    if remaining_stage_seconds is not None and remaining_stage_seconds <= 0:
-        exit_code = 124
-        stdout = ""
-        stderr = "UTest 阶段总时限 {} 秒已到，未启动新的测试命令。".format(stage_timeout)
-        blocked = True
-        outcome = "stage_deadline_exceeded"
+    if record_only:
+        if selected_kind != "test":
+            raise UTestCommandError("--record-only 仅用于已由 Bash 执行的 test 命令。")
+        if not isinstance(recorded_exit_code, int) or recorded_exit_code < 0:
+            raise UTestCommandError("--record-only 需要 Bash 返回的非负 --exit-code。")
+        if not isinstance(recorded_output_file, str) or not recorded_output_file.strip():
+            raise UTestCommandError("--record-only 需要包含 Bash 原始输出的 --output-file。")
+        output_path = Path(recorded_output_file).expanduser().resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if not path_within(output_path, temp_root) or not output_path.is_file():
+            raise UTestCommandError(
+                "--output-file 必须是系统临时目录内的现有输出文件，避免把仓库文件当成命令日志。"
+            )
+        try:
+            stdout = output_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise UTestCommandError("无法读取 Bash 输出文件 {}：{}".format(output_path, exc))
+        exit_code = recorded_exit_code
+        stderr = ""
+        blocked = False
+        outcome = "recorded_bash_execution"
     else:
-        effective_timeout = timeout
-        if remaining_stage_seconds is not None:
-            effective_timeout = min(timeout, max(1, remaining_stage_seconds))
-        exit_code, stdout, stderr, blocked, outcome = _run(
-            command_argv, command_cwd, effective_timeout
+        remaining_stage_seconds = _remaining_stage_seconds(
+            artifact_workspace,
+            resolved_feature,
+            run_id,
+            batch_id,
+            stage_timeout,
         )
+        if remaining_stage_seconds is not None and remaining_stage_seconds <= 0:
+            exit_code = 124
+            stdout = ""
+            stderr = "UTest 阶段总时限 {} 秒已到，未启动新的测试命令。".format(stage_timeout)
+            blocked = True
+            outcome = "stage_deadline_exceeded"
+        else:
+            effective_timeout = timeout
+            if remaining_stage_seconds is not None:
+                effective_timeout = min(timeout, max(1, remaining_stage_seconds))
+            exit_code, stdout, stderr, blocked, outcome = _run(
+                command_argv, command_cwd, effective_timeout
+            )
     _append_log(
         log_path,
         selected_kind,
@@ -545,7 +574,7 @@ def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] in MODES and "--kind" not in raw_argv and "--mode" not in raw_argv:
         raw_argv = ["--kind", raw_argv[0]] + raw_argv[1:]
-    parser = RepairArgumentParser(description="在分配仓库内无 shell 执行 UTest 命令")
+    parser = RepairArgumentParser(description="在分配仓库内执行或登记 UTest 命令")
     parser.add_argument("--kind", "--mode", dest="kind", choices=MODES)
     parser.add_argument("--workspace")
     parser.add_argument("--feature")
@@ -564,6 +593,13 @@ def main(argv=None):
     parser.add_argument("--run-id")
     parser.add_argument("--batch-id")
     parser.add_argument("--stage-timeout", type=int)
+    parser.add_argument(
+        "--record-only",
+        action="store_true",
+        help="不执行命令；登记 Bash 已执行的 test 命令、退出码与输出。",
+    )
+    parser.add_argument("--exit-code", type=int, help="--record-only 时 Bash 命令的退出码。")
+    parser.add_argument("--output-file", help="--record-only 时包含 Bash 合并输出的临时文件。")
     parser.add_argument("--argv-json", "--command-json", dest="argv_json")
     parser.add_argument("command_argv", nargs=argparse.REMAINDER)
     try:
@@ -611,6 +647,9 @@ def main(argv=None):
             run_id=args.run_id,
             batch_id=args.batch_id,
             stage_timeout=args.stage_timeout,
+            record_only=args.record_only,
+            recorded_exit_code=args.exit_code,
+            recorded_output_file=args.output_file,
         )
     except UTestCommandError as exc:
         print("run_utest_command_failed: {}".format(exc), file=sys.stderr)
@@ -624,6 +663,11 @@ def main(argv=None):
         )
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=False))
+    if args.record_only:
+        # A failed test is still a successfully recorded execution.  The
+        # structured JSON carries the test exitCode; this process status only
+        # reports whether evidence/result recording itself succeeded.
+        return 0
     return int(result["exitCode"])
 
 

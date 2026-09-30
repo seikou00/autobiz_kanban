@@ -26,4 +26,4 @@ Apply a profile only when `inspect_test_environment.py` returns `status=init_req
 - Add a minimal Vitest config/setup only when the current Vite config cannot host the test settings.
 - Add `test:unit` using Vitest when no equivalent unit-test script exists.
 
-After manifest edits, update only the lock file for the detected `packageManager`, rerun the inspector, then run the smallest test command through `run_utest_command.py`.
+After manifest edits, update only the lock file for the detected `packageManager`, rerun the inspector, then run the smallest test command directly in Bash and register its captured output through `run_utest_command.py --record-only`.

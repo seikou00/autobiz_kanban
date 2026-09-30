@@ -197,7 +197,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 5. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：交付 `goal` 与 `acceptanceCriteria` 指向的业务范围；`implementationPoints` 是方向指导，可按真实仓库调整内部结构、算法和局部步骤，保持已确认行为/公开契约并记录有意义的偏差；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。`testPoints` 用于检查实现是否覆盖测试关注的边界，不等于在 Code 阶段写测试。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
-   - 读取 `testPoints` 与 `verificationIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
+   - 读取 `testPoints` 与 `verificationIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。该规则适用于主 Agent、cowork/协作 Agent 和 Workflow worker。后端 TASK 写完生产代码后、执行 `finish-implementation` 前，必须在对应业务 Worktree 中通过 Bash 执行项目的生产代码编译命令；只运行编译，不运行测试、打包、typecheck 或 lint。先从项目文档及构建配置确认 compile-only 命令，记录实际命令和完整输出；编译失败时读取输出定位根因、修复生产代码并重新编译，直到通过。无法确定 compile-only 命令或编译环境故障时，不得假报通过或完成 TASK，保留错误输出并按流程报告失败。前端 TASK 不新增此编译门槛。批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 7. **实现差异协议**：固定 Code Workflow 内不得为以下差异发起用户确认或创建阻断。`EVD` / design 与代码现实不符，或必须偏离 `API` / `DATA` / `D` 形态时，始终采用不违反 `REQ` / `SCN` 的最小兼容实现并在非阻断 Evidence 中记录差异。行为契约存在歧义时，按明确的 `REQ` / `SCN`、再按 Plan、最后按现有工程模式确定实现；TASK 状态由 runner 负责流转，不得手工置「失败」。
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不生成或执行测试命令，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
@@ -222,7 +222,7 @@ python -X utf8 "${pluginPath}/hooks/task_runner.py" finish-implementation --feat
 
 `--supporting-file` 必须是仓库根相对路径；多仓库时使用 `repoId:relative/path`。`--no-code-change-why` 只用于 start 前已经存在且经行为验证确认满足契约的实现，不得用它绕过误 abort、重启 run 或 staging 操作造成的空 diff；runner 会拒绝与历史 aborted run 变更冲突的 no-code claim。
 
-`finish-implementation` 成功后，把该 TASK 在 `write_todos` 标记为“实现已就绪/待 Review”，不是完成；返回 `continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId` 时，同批仍有可执行任务时禁止询问用户是否继续，立即进入下一个 Task。最后一个 TASK 完成后，固定 Workflow 只允许草稿封存并进入 Review；并行返回的 `requiredAction=await_review` 不是让实现 Agent 执行编译。
+`finish-implementation` 成功后，把该 TASK 在 `write_todos` 标记为“实现已就绪/待 Review”，不是完成；返回 `continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId` 时，同批仍有可执行任务时禁止询问用户是否继续，立即进入下一个 Task。最后一个 TASK 完成后，固定 Workflow 只允许草稿封存并进入 Review；并行返回的 `requiredAction=await_review` 不会取消后端 TASK 在 finish 前的必需编译。
 
 ### Review 后的 UTest 与模型修复
 

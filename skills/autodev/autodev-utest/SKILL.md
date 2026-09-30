@@ -172,7 +172,7 @@ python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framewo
 
 ### 执行与证据
 
-setup 命令：
+环境 setup 命令（依赖安装或受支持 profile 的环境校验）仍由 runner 执行：
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
@@ -180,13 +180,23 @@ python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspa
 
 一个 TASK 有多个环境目标时，按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`。
 
-test 命令提交 assignment 绑定、生成的测试文件与真实测试 argv：
+行为测试由 Bash 直接执行，Python runner 仅在执行后登记真实结果与 Evidence。先在 Bash 中捕获输出并保留测试进程自己的退出码：
 
 ```bash
-python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
+RAW_OUTPUT="$(mktemp)"
+set -o pipefail
+<TEST_ARGV...> 2>&1 | tee "$RAW_OUTPUT"
+test_exit=${PIPESTATUS[0]}
+python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind test --record-only --exit-code "$test_exit" --output-file "$RAW_OUTPUT" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <同一组 TEST_ARGV...>
+record_exit=$?
+if [ "$record_exit" -ne 0 ]; then
+  exit "$record_exit"
+fi
+rm -f "$RAW_OUTPUT"
+exit 0
 ```
 
-`--task-id` 取 `promptContent`。`<TEST_ARGV...>` 根据真实 manifest、测试配置与新建测试文件生成，必须实际执行测试。runner 根据当前 plan、绑定、TASK 与测试文件自动选择仓库和模块目录，生成稳定 digest、commandId/targetId，并校验位置、specRefs 与全部 AC。完整输出追加到 `test-output.log`；重跑保留历史 evidence IDs。
+`<TEST_ARGV...>` 由真实 manifest、测试配置与新建测试文件确定；`--task-id` 取 `promptContent`。Bash 是测试命令的唯一执行者，因此编译器和测试失败会即时显示；不要再把测试 argv 交给 Python runner 执行。之后的 `--record-only` 必须传入完全相同的 argv，它会校验当前 Plan/TASK/测试文件绑定、生成稳定 digest 与 commandId/targetId、把捕获输出追加到 `test-output.log`，并创建 Evidence、更新 `UNIT_TEST_RESULT.json`。记录成功后删除临时输出文件；如果记录失败则保留该文件，修复记录问题时不得重新执行测试。
 
 ### 失败分类与修复
 
@@ -217,9 +227,21 @@ python -X utf8 "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "$
 
 ### 扩大验证
 
-所有 P0/P1 精确目标通过后，按 assignment 顺序重跑修改过的测试文件、受影响模块轻量测试，以及项目约定的编译/测试编译命令。
+所有 P0/P1 精确目标通过后，按 assignment 顺序用 Bash 重跑修改过的测试文件和受影响模块轻量测试，并对每次执行调用 `run_utest_command.py --record-only` 登记 target、Evidence 和结构化结果。
 
-扩大验证命令用 `--kind setup` 执行，不带 `--target-id`、`--task-id`、`--spec-ref`，不产生 UT target；命令、退出码与结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`，完整输出在 `test-output.log`。扩大验证失败必须归因，不得用精确测试通过覆盖失败。
+项目约定的生产编译或测试编译命令也使用 Bash 直接执行。不要把 compile-only 命令传给 `run_utest_command.py --kind setup`：这样能在执行现场直接看到编译器输出和退出码。通过 Bash 的 `tee` 把完整 stdout/stderr 同时显示并追加到 Feature 的 `test-output.log`，保留 pipeline 前一个进程的退出码：
+
+```bash
+set -o pipefail
+UTEST_LOG="${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log"
+printf '\n=== DIRECT BASH COMPILE ===\ncwd: %s\ncommand: %s\n' "$PWD" '<真实 compile-only 命令>' | tee -a "$UTEST_LOG"
+<真实 compile-only 命令> 2>&1 | tee -a "$UTEST_LOG"
+compile_exit=${PIPESTATUS[0]}
+printf 'compile_exit_code: %s\n=== END DIRECT BASH COMPILE ===\n' "$compile_exit" | tee -a "$UTEST_LOG"
+exit "$compile_exit"
+```
+
+从真实项目构建配置选择 compile-only 或 test-compile 目标；不要运行 package/build/check 等会混入打包或行为测试的复合目标。将精确命令、cwd、退出码和结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`。编译失败必须读取这次 Bash 输出并归因，不得用精确测试通过覆盖失败；生产源码问题按 `source_fix_request` 流程返回实现阶段修复。
 
 ### 生成结果与报告
 

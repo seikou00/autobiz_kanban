@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Allow validation commands in a Batch worktree only during its UTest stage.
 
-The fixed Code Workflow deliberately gives UTest exclusive ownership of
-compilation, build, lint, typecheck, test and E2E commands.  Prompt wording is
-not sufficient by itself: an implementation or review agent can still decide
-to run a local build "for verification". This pre-tool hook identifies both
+The fixed Code Workflow gives backend implementation a production-only
+compile gate before task completion; behavioral tests and other validation
+belong to UTest. Prompt wording is not sufficient by itself: an implementation
+or review agent can still run broader commands. This pre-tool hook identifies
 active Code task worktrees and fixed-workflow Batch worktrees. A Batch may run
 validation only after Review passed and while its durable ``test`` stage is
 running; all other Batch stages, including Review, are blocked.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,9 +23,8 @@ from typing import Any
 
 ACTIVE_CODE_RUN_STATUSES = frozenset({"started", "in_progress", "implementation_recording"})
 
-# The runner owns validation in UTest.  Keep this intentionally focused on
-# executable validation entrypoints rather than generic commands such as git
-# or package-manager inspection.
+# Keep this focused on executable validation entrypoints rather than generic
+# commands such as git or package-manager inspection.
 FORBIDDEN_COMMAND_RE = re.compile(
     r"(?:"
     r"(?<![\w.-])(?:mvn|mvnw(?:\.cmd)?|gradle|gradlew(?:\.bat)?)(?![\w.-])"
@@ -172,6 +172,55 @@ def _command_workspace_matches(
     return False
 
 
+def _is_backend_production_compile(command: str) -> bool:
+    """Recognize a narrow compile-only command allowed during Code TASKs."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name.casefold()
+    if executable in {"bash", "sh", "zsh"}:
+        command_index = next(
+            (index + 1 for index, token in enumerate(tokens[:-1]) if token in {"-c", "-lc", "-cl"}),
+            None,
+        )
+        if command_index is None:
+            return False
+        return _is_backend_production_compile(tokens[command_index])
+
+    executable = executable.removesuffix(".cmd").removesuffix(".bat")
+    if executable in {"mvn", "mvnw"}:
+        goals: set[str] = set()
+        skip_next = False
+        value_options = {"-f", "--file", "-pl", "--projects", "-P", "--define", "-s", "--settings", "-t", "--toolchains"}
+        for token in tokens[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if token in value_options:
+                skip_next = True
+                continue
+            if not token.startswith("-"):
+                goals.add(token)
+        return "compile" in goals and goals <= {"compile", "clean"}
+    if executable in {"gradle", "gradlew"}:
+        tasks = {token.rsplit(":", 1)[-1] for token in tokens[1:] if not token.startswith("-")}
+        return bool(tasks) and tasks <= {
+            "classes", "compileJava", "compileKotlin", "compileGroovy", "compileScala"
+        }
+    if executable == "go":
+        return len(tokens) >= 2 and tokens[1] == "build" and not any(
+            token in {"test", "vet", "run", "install"} for token in tokens[1:]
+        )
+    if executable == "cargo":
+        return len(tokens) >= 2 and tokens[1] == "check" and not any(
+            token in {"test", "build", "clippy", "bench"} for token in tokens[1:]
+        )
+    return False
+
+
 def guard(payload: dict[str, Any]) -> str | None:
     """Return a blocking reason unless validation is authorized by UTest."""
     tool_name = str(payload.get("tool_name") or payload.get("toolName") or "").lower()
@@ -181,6 +230,10 @@ def guard(payload: dict[str, Any]) -> str | None:
     command = _command(payload, tool_input)
     if not command or not FORBIDDEN_COMMAND_RE.search(command):
         return None
+    if _is_backend_production_compile(command):
+        for workspace in _active_code_workspaces():
+            if _command_workspace_matches(payload, tool_input, command, workspace):
+                return None
     for workspace, batch in _parallel_batch_workspaces().items():
         if not _command_workspace_matches(payload, tool_input, command, workspace):
             continue
@@ -194,8 +247,8 @@ def guard(payload: dict[str, Any]) -> str | None:
         if _command_workspace_matches(payload, tool_input, command, workspace):
             return (
                 "CODE_EXECUTION_VALIDATION_FORBIDDEN: 活动 Code task run {} 的 worktree 禁止执行构建、编译、"
-                "typecheck、lint、测试或 E2E 命令；请只完成实现并执行 task_runner.py "
-                "finish-implementation，Review 通过后由 UTest 阶段运行验证。"
+                "typecheck、lint、测试或 E2E 命令（后端 production-only compile 除外）；"
+                "其余验证由 Review 通过后的 UTest 阶段运行。"
             ).format(run_identity)
     return None
 
