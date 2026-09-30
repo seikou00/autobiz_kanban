@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -634,6 +635,17 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         self.assertEqual(
             payload2["supported_deploy_units"], ["LF39.18_Outservice", "LA64.05_UEXgateway"]
         )
+
+    def test_clone_failure_message_keeps_full_git_output(self):
+        # 真正原因在中间行，最后一行只是 git 的通用提示；只留尾行无法排错。
+        missing = (Path(tempfile.mkdtemp()) / "missing-repository").as_uri()
+        dest = Path(tempfile.mkdtemp()) / "sys"
+        with mock.patch.dict(os.environ, {"LC_ALL": "C"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                sync_agents.sync_repo(missing, "main", dest)
+        message = str(ctx.exception)
+        self.assertIn("does not appear to be a git repository", message)
+        self.assertIn("and the repository exists.", message)
 
     def test_nonempty_nongit_dir_is_wiped_and_recloned(self):
         # 旧的非 git 残留目录不再报错：整目录删掉后重新克隆。

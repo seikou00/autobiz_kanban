@@ -127,15 +127,21 @@ def _run_git(
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        # git 输出 UTF-8，中文 Windows 默认按 GBK 解码会乱码；坏字节替换，不抛异常。
+        encoding="utf-8",
+        errors="replace",
         check=False,
         timeout=timeout,
     )
 
 
 def _git_error(proc: subprocess.CompletedProcess, action: str) -> str:
-    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-    tail = detail[-1] if detail else f"git 返回码 {proc.returncode}"
-    return f"{action} 失败: {tail}"
+    """保留 git 的全部输出：真正原因（如 ``Permission denied (publickey).``、
+    ``Host key verification failed.``）常在中间行，最后一行只是通用提示。"""
+    detail = "\n".join(
+        text.strip() for text in (proc.stderr, proc.stdout) if text and text.strip()
+    ) or f"git 返回码 {proc.returncode}"
+    return f"{action} 失败: {detail}"
 
 
 def _git_timeout_error(action: str, timeout: float) -> str:
@@ -234,7 +240,7 @@ def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> 
             commit = _clone_from_url(fallback_url, ref, dest)
         except RuntimeError as ssh_error:
             raise RuntimeError(
-                f"HTTPS 克隆失败: {https_error}；SSH 兜底失败: {ssh_error}"
+                f"HTTPS 克隆失败: {https_error}\nSSH 兜底失败: {ssh_error}"
             ) from ssh_error
         return {"commit": commit, "transport": "ssh"}
     return {"commit": commit, "transport": _transport_for_url(url)}
