@@ -48,11 +48,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -75,6 +78,66 @@ BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 KNOWLEDGE_COLLECTOR_PATH = ROOT / "hooks" / "collect-knowledge.js"
 DEFAULT_REF = "main"
 HTTPS_CLONE_TIMEOUT_SECONDS = 20
+# 超时杀掉进程树后，最多再等这么久收尾读取输出，避免被残留进程的管道拖住。
+KILL_REAP_SECONDS = 5
+# 同步在后台运行，不能停在凭据输入/GCM 弹窗上：无凭据时直接失败。
+GIT_NONINTERACTIVE_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+# 连续 15 秒低于 1 B/s 时由 git 自行中止，作为进程级超时之外的兜底。
+GIT_CONFIG_ARGS = ["-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=15"]
+
+
+def _log(message: str) -> None:
+    """排查日志只写 stderr：stdout 留给同步协议 JSON。"""
+    line = f"[sync_agents {time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()}] {message}"
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except (OSError, UnicodeEncodeError):
+        pass
+
+
+def _mask_url(url: str) -> str:
+    """隐藏 https://user:token@host 里的凭据，避免写进日志。"""
+    try:
+        parts = urlsplit(url)
+        if not parts.username and not parts.password:
+            return url
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+    except ValueError:
+        return url
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _describe_args(args: List[str]) -> str:
+    return " ".join(_mask_url(arg) if "://" in arg else arg for arg in args)
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """结束 git 及其派生进程。
+
+    Windows 的 ``cmd\\git.exe`` 只是外壳，真正干活的 git.exe、git-remote-https.exe
+    继承了输出管道；只 kill 外壳时它们继续运行，读取输出会一直阻塞到它们自己退出。
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log(f"taskkill 失败 pid={proc.pid} {exc!r}")
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 class _CloneUnavailableError(RuntimeError):
@@ -82,6 +145,7 @@ class _CloneUnavailableError(RuntimeError):
 
 
 def _fail(message: str, errors: Optional[List[str]] = None) -> dict:
+    _log(f"同步失败: {message}")
     return {
         "ok": False,
         "schemaVersion": SYNC_SCHEMA_VERSION,
@@ -122,17 +186,42 @@ def _run_git(
     cwd: Optional[Path] = None,
     timeout: Optional[float] = None,
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args],
+    described = _describe_args(args)
+    _log(f"git {described} 开始 timeout={timeout}")
+    started = time.monotonic()
+    command = ["git", *GIT_CONFIG_ARGS, *args]
+    # 不用 subprocess.run：它在 Windows 超时后只 kill 外壳进程，再无限期等管道关闭。
+    proc = subprocess.Popen(
+        command,
         cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
+        env={**os.environ, **GIT_NONINTERACTIVE_ENV},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         # git 输出 UTF-8，中文 Windows 默认按 GBK 解码会乱码；坏字节替换，不抛异常。
         encoding="utf-8",
         errors="replace",
-        check=False,
-        timeout=timeout,
+        # POSIX 上放进独立进程组，超时可整组结束。
+        start_new_session=os.name != "nt",
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            proc.communicate(timeout=KILL_REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            _log(f"git {described} 结束进程树后管道仍未关闭，放弃读取剩余输出")
+        _log(f"git {described} 超时 elapsed={time.monotonic() - started:.1f}s timeout={timeout}")
+        raise
+    except BaseException as exc:
+        _kill_process_tree(proc)
+        _log(f"git {described} 异常 elapsed={time.monotonic() - started:.1f}s {exc!r}")
+        raise
+    _log(f"git {described} 结束 rc={proc.returncode} elapsed={time.monotonic() - started:.1f}s")
+    if proc.returncode != 0:
+        for item in (stderr or "").strip().splitlines()[-5:]:
+            _log(f"  stderr: {item}")
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
 def _git_error(proc: subprocess.CompletedProcess, action: str) -> str:
@@ -222,6 +311,7 @@ def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> 
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     fallback_url = (ssh_url or "").strip()
+    _log(f"同步开始 url={_mask_url(url)} ref={ref} ssh_url={fallback_url or '-'}")
     try:
         commit = _clone_from_url(
             url,
@@ -234,15 +324,19 @@ def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> 
             ),
         )
     except _CloneUnavailableError as https_error:
+        _log(f"主地址克隆不可用: {https_error}")
         if not url.strip().lower().startswith("https://") or not fallback_url:
             raise
+        _log(f"进入 SSH 兜底（无超时） url={fallback_url}")
         try:
             commit = _clone_from_url(fallback_url, ref, dest)
         except RuntimeError as ssh_error:
             raise RuntimeError(
                 f"HTTPS 克隆失败: {https_error}\nSSH 兜底失败: {ssh_error}"
             ) from ssh_error
+        _log(f"SSH 兜底成功 commit={commit}")
         return {"commit": commit, "transport": "ssh"}
+    _log(f"克隆成功 commit={commit}")
     return {"commit": commit, "transport": _transport_for_url(url)}
 
 
@@ -271,12 +365,26 @@ def _collector_payload(
     }
 
 
+def _log_environment() -> None:
+    try:
+        git_version = subprocess.run(
+            ["git", "--version"], capture_output=True, text=True, check=False, timeout=10
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        git_version = f"获取失败 {exc!r}"
+    _log(
+        f"环境 platform={sys.platform} python={sys.version.split()[0]} "
+        f"git={git_version} git_path={shutil.which('git') or '-'}"
+    )
+
+
 def run(
     repo_url: Optional[str],
     ref: Optional[str],
     ssh_url: Optional[str] = None,
     prefer_manifest: bool = False,
 ) -> dict:
+    _log_environment()
     try:
         url, resolved_ref, resolved_ssh_url = _resolve_repo(repo_url, ref, ssh_url)
     except BoardConfigError as exc:
