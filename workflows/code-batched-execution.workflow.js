@@ -17,7 +17,7 @@ const MAX_SCHEDULER_CYCLES = 100;
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
 // outside the worker that currently owns the only active lifecycle.
-const DISPATCH_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const DISPATCH_POLL_INTERVAL_MS = 30 * 60 * 1000;
 // A transport-level empty model response happens before the child can return
 // its command result.  It is neither a Batch verdict nor evidence that the
 // command failed, so give that same child a small, bounded retry budget.
@@ -25,13 +25,11 @@ const DISPATCH_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // command failure after a state-changing operation.
 const MAX_EMPTY_AGENT_RESPONSE_RETRIES = 2;
 // The scheduler is the authority for the per-Batch retry budget (currently
-// two failure admissions).  Keep one extra pass to let the scheduler turn a
+// two failure admissions). Keep one extra pass to let the scheduler turn a
 // legacy retry marker with a zero counter into its explicit exhausted state.
-// The Workflow must keep draining until that budget is consumed or no retry
-// remains; otherwise a retry created by the first final-repair drain is
-// incorrectly left for a manual resume.
+// Final repair keeps draining until that budget is consumed or no retry remains.
 const MAX_FINAL_RETRY_DRAINS = 3;
-const UTEST_STAGE_TIMEOUT_SECONDS = 15 * 60;
+const UTEST_STAGE_TIMEOUT_SECONDS = 30 * 60;
 // Review findings and production defects proven by UTest each receive one
 // targeted repair. A deferred UTest remains explicit evidence and may proceed
 // through an unverified candidate to mandatory final B-E2E.
@@ -225,6 +223,7 @@ const SCHEDULER_RESULT_SCHEMA = {
     retryPendingBatches: { type: "array", items: { type: "string" } },
     blockedBatches: { type: "array", items: { type: "string" } },
     rescheduledRetryBatches: { type: "array", items: { type: "string" } },
+    manualRetryBatches: { type: "array", items: { type: "string" } },
     parallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
     allParallelGroups: { type: "array", items: { type: "array", items: { type: "string" } } },
     maxParallel: { type: "number" },
@@ -817,16 +816,27 @@ try {
 
 const runId = prepared.runId;
 
-async function recoverPendingRetries(scheduler, label) {
+let retryRecoveryInFlight = null;
+async function recoverPendingRetries(scheduler, label, phaseName = "准备") {
   if (!retryPendingBatchesOf(scheduler).length) return scheduler;
+  if (retryRecoveryInFlight) return retryRecoveryInFlight;
   // A normal ensure/resume already performs this transition.  One immediate,
   // explicit retry makes the Workflow resilient to an interrupted lease
   // handoff while still letting the scheduler remain the sole state owner.
-  return requireSchedulerResult(await workflowAgent(
-    `执行 python -X utf8 "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；必须原样返回该命令 stdout 的完整 JSON，不得自行概括或重建 batchWorkspaces。`,
-    { label, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
-  ), label);
+  const recovery = (async () => {
+    const result = await workflowAgent(
+      `执行 python -X utf8 "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+      `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；必须原样返回该命令 stdout 的完整 JSON，不得自行概括或重建 batchWorkspaces。`,
+      { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
+    );
+    return requireSchedulerResult(result, label);
+  })();
+  retryRecoveryInFlight = recovery;
+  try {
+    return await recovery;
+  } finally {
+    if (retryRecoveryInFlight === recovery) retryRecoveryInFlight = null;
+  }
 }
 
 let initialRetryRecoveryFailure = null;
@@ -844,6 +854,12 @@ let mergeableBatches = (prepared.mergeableBatches || []).filter(usableString);
 let implementationRecoveryBatches = (prepared.implementationRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let retryPendingBatches = retryPendingBatchesOf(prepared);
+const retryPriorityBatchIds = new Set(
+  [
+    ...(Array.isArray(prepared.rescheduledRetryBatches) ? prepared.rescheduledRetryBatches : []),
+    ...(Array.isArray(prepared.manualRetryBatches) ? prepared.manualRetryBatches : []),
+  ].filter(isValidBatchId)
+);
 let batchTaskIds = prepared.batchTaskIds || {};
 let batchWorkspaces = prepared.batchWorkspaces || {};
 const batchResults = [];
@@ -1067,6 +1083,9 @@ function applySchedulerState(scheduler) {
   implementationRecoveryBatches = (scheduler.implementationRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   retryPendingBatches = retryPendingBatchesOf(scheduler);
+  for (const batchId of Array.isArray(scheduler.rescheduledRetryBatches) ? scheduler.rescheduledRetryBatches : []) {
+    if (isValidBatchId(batchId)) retryPriorityBatchIds.add(batchId);
+  }
   // Bindings are immutable within a run. Merge a validated snapshot so a
   // scoped future response cannot erase coordinates used by an in-flight
   // Review repair or a newly-unblocked Batch.
@@ -1982,7 +2001,7 @@ function runnableMergeableBatchIds() {
   ));
 }
 
-function takeNextRunnableLifecycle(claimedBatchIds) {
+function takeNextRunnableLifecycle(claimedBatchIds, runningBatchIds = new Set()) {
   const claimed = claimedBatchIds || new Set();
   const scheduledBatchIds = runnableScheduledBatchIds();
   const fallbackBatchIds = runnableSchedulerFallbackBatchIds();
@@ -1999,57 +2018,65 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
     claimed.add(job.batchId);
     return job;
   };
+  const candidates = [];
 
-  // A sealed delivery or verified dirty implementation worktree is an owned
-  // checkpoint, not a fresh implementation candidate. Resume it before
-  // dispatching newly-ready work so a continuing DAG wave cannot repeatedly
-  // starve interrupted Review/UTest or unsealed implementation recovery.
+  // Keep the established recovery/scheduled/mergeable order for ordinary work,
+  // then move every scheduler-rescheduled retry behind all non-retry candidates.
+  // A sealed delivery or verified dirty implementation worktree remains an
+  // owned checkpoint and is represented by the scheduler's recovery arrays.
   for (const recovery of recoveries) {
     if (mergeableBatchIds.has(recovery.batchId)) continue;
-    const job = claim({
+    candidates.push({
       batchId: recovery.batchId,
       source: "stage_recovery",
       execute: () => runRecoveredBatchLifecycle(recovery),
       fallback: recovery,
     });
-    if (job) return job;
   }
   for (const recovery of implementationRecoveries) {
     if (mergeableBatchIds.has(recovery.batchId)) continue;
-    const job = claim({
+    candidates.push({
       batchId: recovery.batchId,
       source: "implementation_recovery",
       execute: () => runImplementationRecoveryLifecycle(recovery),
       fallback: recovery,
     });
-    if (job) return job;
   }
   for (const batchId of scheduledBatchIds) {
-    const job = claim({
+    candidates.push({
       batchId,
       source: "initial",
       execute: () => runInitialBatchLifecycle(batchId),
     });
-    if (job) return job;
   }
   for (const batchId of fallbackBatchIds) {
-    const job = claim({
+    candidates.push({
       batchId,
       source: "scheduler_snapshot_fallback",
       execute: () => runInitialBatchLifecycle(batchId),
     });
-    if (job) return job;
   }
   for (const batchId of mergeable) {
     if (recoveredBatchIds.has(batchId)) continue;
-    const job = claim({
+    candidates.push({
       batchId,
       source: "merge_candidate",
       execute: () => runMergeableBatchLifecycle(batchId),
     });
-    if (job) return job;
   }
-  return null;
+  const retryPriorities = typeof retryPriorityBatchIds === "undefined" ? null : retryPriorityBatchIds;
+  if (retryPriorities) {
+    for (const job of candidates) {
+      if (retryPriorities.has(job.batchId) && !runningBatchIds.has(job.batchId)) {
+        // A retried Batch has already been claimed during this drain. Release
+        // that claim only after it is again runnable and no worker owns it.
+        claimed.delete(job.batchId);
+      }
+    }
+  }
+  const available = candidates.filter(job => !claimed.has(job.batchId));
+  return claim(available.find(job => !retryPriorities || !retryPriorities.has(job.batchId)))
+    || claim(available[0]);
 }
 
 function canStartLifecycle() {
@@ -2071,6 +2098,7 @@ function dispatchHasPotentialWork(state) {
     || (Array.isArray(state.mergeableBatches) && state.mergeableBatches.length)
     || (Array.isArray(state.implementationRecoveryBatches) && state.implementationRecoveryBatches.length)
     || (Array.isArray(state.stageRecoveryBatches) && state.stageRecoveryBatches.length)
+    || (Array.isArray(state.retryPendingBatches) && state.retryPendingBatches.length)
     || (Number.isInteger(state.activeWorkers) && state.activeWorkers > 0)
   );
 }
@@ -2088,10 +2116,67 @@ function dispatchOccupiedSlots(state, dispatcherState) {
   return Math.max(activeIds.size, reported);
 }
 
+async function refreshSchedulerForDispatch(label) {
+  let state = await readSchedulerState(label, "Batch 阶段");
+  if (!state) return null;
+  const pendingRetriesOf = scheduler => (
+    scheduler && Array.isArray(scheduler.retryPendingBatches)
+      ? scheduler.retryPendingBatches.filter(isValidBatchId)
+      : []
+  );
+
+  let resumePass = 0;
+  while (pendingRetriesOf(state).length) {
+    const pendingBefore = pendingRetriesOf(state);
+    let resumed;
+    try {
+      resumed = await recoverPendingRetries(state, `${label}-resume-retry-pending`, "Batch 阶段");
+    } catch (error) {
+      // A retry recovery error must not keep independent, already-scheduled
+      // work from using the dispatcher. The next scheduler refresh can retry
+      // the recovery while keeping these durable retry markers intact.
+      recordSchedulerFailure(`${label}-resume-retry-pending`, error);
+      return state;
+    }
+    applySchedulerState(resumed);
+    const rescheduled = new Set([
+      ...(Array.isArray(resumed.rescheduledRetryBatches) ? resumed.rescheduledRetryBatches : []),
+      ...normalizeScheduledGroups(resumed.scheduledGroups || []).flat(),
+      ...(resumed.mergeableBatches || []),
+      ...(resumed.implementationRecoveryBatches || []).map(item => item && item.batchId),
+      ...(resumed.stageRecoveryBatches || []).map(item => item && item.batchId),
+    ].filter(isValidBatchId));
+    for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
+
+    // Re-read after resume so a retry marker written concurrently with that
+    // resume is picked up before the worker decides the queue is drained.
+    state = await readSchedulerState(`${label}-after-retry-resume-${++resumePass}`, "Batch 阶段");
+    if (!state) return null;
+    const stillPending = pendingRetriesOf(state);
+    const madeProgress = pendingBefore.some(batchId => !stillPending.includes(batchId))
+      || stillPending.some(batchId => !pendingBefore.includes(batchId));
+    if (!madeProgress) break;
+  }
+  return state;
+}
+
 async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispatcherState) {
   let idlePolls = 0;
   const maxIdlePolls = Math.ceil(((timeoutPerBatch + 60) * 1000) / DISPATCH_POLL_INTERVAL_MS);
   for (;;) {
+    // Resume retry-pending work as soon as it is visible to the drain. The
+    // candidate selector keeps these retries behind every available non-retry
+    // lifecycle, so recovery does not delay independent work.
+    const pendingRetryIds = lastScheduler && Array.isArray(lastScheduler.retryPendingBatches)
+      ? lastScheduler.retryPendingBatches.filter(isValidBatchId)
+      : [];
+    if (pendingRetryIds.length) {
+      const refreshed = await refreshSchedulerForDispatch(
+        `${drainLabel}-retry-pending-${workerIndex}-${schedulerCycles}`
+      );
+      if (!refreshed && dispatcherState.active === 0) return;
+    }
+
     // Recovery and merge candidates share the same worker pool as fresh
     // implementation grants. Enforce the run-wide limit here as well, since
     // their arrays are recovery candidates rather than scheduler reservations.
@@ -2099,9 +2184,8 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       if (dispatcherState.active === 0 && lastScheduler && lastScheduler.activeWorkers === 0) return;
       await new Promise(resolve => setTimeout(resolve, DISPATCH_POLL_INTERVAL_MS));
       idlePolls += 1;
-      const refreshed = await readSchedulerState(
-        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`,
-        "Batch 阶段"
+      const refreshed = await refreshSchedulerForDispatch(
+        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`
       );
       if (!refreshed && dispatcherState.active === 0) return;
       if (idlePolls > maxIdlePolls) {
@@ -2117,7 +2201,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
     }
     // Claim synchronously from the latest shared snapshot before awaiting any
     // tool call. Other worker callbacks therefore cannot take the same Batch.
-    const job = takeNextRunnableLifecycle(claimedBatchIds);
+    const job = takeNextRunnableLifecycle(claimedBatchIds, dispatcherState.runningBatchIds);
     if (job) {
       idlePolls = 0;
       if (!canStartLifecycle()) return;
@@ -2145,18 +2229,16 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       // Every outcome, including retry_pending, triggers an immediate refresh.
       // A null result from a real scheduler error blocks new dispatch until a
       // later successful poll; it never causes us to reuse stale grants.
-      const state = await readSchedulerState(
-        `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`,
-        "Batch 阶段"
+      const state = await refreshSchedulerForDispatch(
+        `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`
       );
       if (state && state.schedulerSnapshotFallback === true) {
         schedulerFallbackConsumed.add(job.batchId);
       }
       if (!state) {
         await new Promise(resolve => setTimeout(resolve, DISPATCH_POLL_INTERVAL_MS));
-        const recovered = await readSchedulerState(
-          `${drainLabel}-worker-${workerIndex}-scheduler-retry`,
-          "Batch 阶段"
+        const recovered = await refreshSchedulerForDispatch(
+          `${drainLabel}-worker-${workerIndex}-scheduler-retry`
         );
         if (!recovered && dispatcherState.active === 0) return;
       }
@@ -2165,16 +2247,20 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
 
     // Other workers may still be running while this worker has no assignment.
     // Keep polling so newly eligible work is dispatched without a completion
-    // barrier. If no worker is active and the scheduler reports no candidate,
-    // the pool is drained and this worker can exit.
+    // barrier. A retry-pending marker also keeps the worker alive until the
+    // retry recovery path has had a chance to reschedule it.
     const snapshot = lastScheduler;
     if (dispatcherState.active === 0 && !dispatchHasPotentialWork(snapshot)) return;
-    if (dispatcherState.active === 0 && snapshot && snapshot.activeWorkers === 0) return;
+    if (
+      dispatcherState.active === 0
+      && snapshot
+      && snapshot.activeWorkers === 0
+      && (!Array.isArray(snapshot.retryPendingBatches) || snapshot.retryPendingBatches.length === 0)
+    ) return;
     await new Promise(resolve => setTimeout(resolve, DISPATCH_POLL_INTERVAL_MS));
     idlePolls += 1;
-    const state = await readSchedulerState(
-      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`,
-      "Batch 阶段"
+    const state = await refreshSchedulerForDispatch(
+      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`
     );
     if (!state && dispatcherState.active === 0) return;
     if (idlePolls > maxIdlePolls) {
@@ -2611,9 +2697,9 @@ async function runFinalRepairAndReport() {
 await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
 applySchedulerState(prepared);
 
-// First drain every currently runnable branch without automatically resuming
-// failed work.  This lets siblings and their downstream waves finish even when
-// one model call, worktree, or merge candidate is unhealthy.
+// Drain every currently runnable branch, including retry-pending Batches.
+// Retry candidates stay behind all available non-retry work so independent
+// branches and their newly-ready downstream waves get dispatched first.
 await drainRunnableLifecycles("drain");
 
 const finalScheduler = await runFinalRepairAndReport();
