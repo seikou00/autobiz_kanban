@@ -1,8 +1,38 @@
 # 工作流冲突处理改造指南
 
-## 问题
+## 当前实现：后台命令结果与冲突恢复
 
-当前 `code-batched-execution.workflow.js` 在 build-candidate 返回 `{success:false, status:"candidate_conflicted"}` 时，使用 `requireSuccess()` 会立即抛错，无法处理冲突。
+`validateAndPromoteBatch()` 会先检查构建结果的 `status`。若为
+`candidate_conflicted`，立即对同一个 repository/wave 调用 `resolve-candidate`；
+只有恢复结果为 `built` 且没有失败信号，才调用 `promote-candidate`。
+无法恢复时保留候选 Worktree 和冲突上下文，记录 `needs_resolution`。
+
+后台执行的子 Agent 可能返回包装对象：
+
+```json
+{
+  "command": "python ... build-candidate ...",
+  "run_in_background": true,
+  "task_id": "f005fa70",
+  "exit_code": 1,
+  "final_result": {"ok": false, "success": false, "status": "candidate_conflicted"}
+}
+```
+
+`unwrap()` 统一展开 `final_result`（包括 JSON 字符串和嵌套包装），使状态、
+`candidateSha`、`conflictContext` 等命令字段直接可用。无效的 `final_result`
+不得通过 `requireSuccess()`；包装层非零 `exit_code` 或显式失败也不会被内部成功字段覆盖。
+冲突构建退出 1 时仍先进入恢复分支，恢复命令的结果独立判断。
+即时恢复和最终恢复都检查失败信号；推广的 `stale` 字段也在展开后判断。
+
+回归验证：`node --test tests/test_workflow_command_results.mjs`，也由
+`python3 tests/test_code_workflow_integration.py` 调用。
+
+## 历史改造方案
+
+以下保留早期冲突处理设计供参考，当前行为以以上实现为准。
+早期 Workflow 在 build-candidate 返回 `{success:false, status:"candidate_conflicted"}` 时，
+直接使用 `requireSuccess()` 会立即抛错，无法处理冲突。
 
 ## 修改方案
 

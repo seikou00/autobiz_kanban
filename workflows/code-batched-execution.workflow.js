@@ -432,7 +432,25 @@ function unwrap(value) {
   if (value && typeof value === "object" && typeof value.value === "string") return unwrap(value.value);
   if (typeof value === "string") {
     const parsed = parseStructuredOutput(value);
-    return parsed.parsed ? parsed.value : { raw: value, unparsedStructuredOutput: true };
+    return parsed.parsed ? unwrap(parsed.value) : { raw: value, unparsedStructuredOutput: true };
+  }
+  if (value && typeof value === "object" && (
+    Object.prototype.hasOwnProperty.call(value, "final_result")
+    || (value.run_in_background === true && Object.prototype.hasOwnProperty.call(value, "task_id"))
+  )) {
+    // Background-command agents sometimes return the task envelope rather
+    // than stdout itself. Expose the command's status and candidate metadata
+    // before branching, including when either layer is serialized JSON.
+    const result = unwrap(value.final_result);
+    if (!value.final_result || !result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).length === 0) {
+      return { raw: value, unparsedStructuredOutput: true };
+    }
+    // Do not let a successful-looking payload erase an execution failure.
+    // candidate_conflicted may legitimately exit 1; its dedicated recovery
+    // branch runs before requireSuccess and consumes a fresh resolved result.
+    return hasDirectFailureSignal(value) || hasDirectFailureSignal(unwrap(value.failure))
+      ? { ...result, commandExecutionFailure: true, commandExitCode: value.exit_code }
+      : result;
   }
   return value || {};
 }
@@ -444,22 +462,25 @@ function isFailedVerdict(value) {
 
 function isFailedStatus(value) {
   return typeof value === "string"
-    && ["failed", "error", "timeout", "blocked", "needs_resolution"].includes(value.trim().toLowerCase());
+    && ["failed", "error", "timeout", "blocked", "needs_resolution", "candidate_conflicted"].includes(value.trim().toLowerCase());
+}
+
+function hasDirectFailureSignal(candidate) {
+  return Boolean(candidate && (
+    candidate.ok === false
+    || candidate.success === false
+    || candidate.passed === false
+    || candidate.commandExecutionFailure === true
+    || (candidate.exit_code != null && candidate.exit_code !== 0 && candidate.exit_code !== "0")
+    || isFailedVerdict(candidate.verdict)
+    || isFailedStatus(candidate.status)
+  ));
 }
 
 function hasFailureSignal(value) {
   const result = unwrap(value);
   const failure = unwrap(result.failure);
-  return [result, failure].some(candidate => (
-    candidate
-    && (
-      candidate.ok === false
-      || candidate.success === false
-      || candidate.passed === false
-      || isFailedVerdict(candidate.verdict)
-      || isFailedStatus(candidate.status)
-    )
-  ));
+  return [result, failure].some(hasDirectFailureSignal);
 }
 
 function requireSuccess(value, label) {
@@ -1675,7 +1696,7 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
       const builtRaw = unwrap(await workflowAgent(
         `构建 Batch ${batchId} 的独立 Merge Train 候选（候选序号 ${wave}，第 ${attempt} 次）。执行 python -X utf8 "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
         `这是可能超过 60 秒的 Git 候选构建：若当前 execute 支持 run_in_background，必须只启动一次 execute({command:<上述命令>,run_in_background:true})，保存 task_id 并在同一子 Agent 内反复 task_output（每次可 timeout:120000）直至获得最终退出结果；task_output 的等待超时不是构建失败，禁止重启该命令。若当前为托管前台会话，则只执行一次并等待其最终结果。子 Agent 在 task_output 得到终态前不得结束，否则平台会清理其后台进程。` +
-        `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。build-candidate 在同一 wave 中只能真正启动一次；只能轮询同一 task_id，不得因本地终端超时或中断再次执行。只返回最终命令 JSON。`,
+        `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。build-candidate 在同一 wave 中只能真正启动一次；只能轮询同一 task_id，不得因本地终端超时或中断再次执行。只返回最终命令 stdout 的完整 JSON；若工具返回后台任务包装对象，提取 final_result，不得把 command、task_id、exit_code 包装层当作命令结果。status=candidate_conflicted 是可恢复冲突，完整保留 conflictContext 交由本 Workflow 处理。`,
         { label: `build-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
       ));
 
@@ -2559,7 +2580,7 @@ async function attemptFinalCandidateRepair(record) {
       `只可处理该既有候选；不得创建新 Worktree、修改 main 或继续其他 Batch。无法自动解决时保留候选和冲突上下文。只返回 JSON。`,
       { label: `final-repair-candidate-${record.repositoryRef}-${record.wave}`, phase: "最终修复与报告" }
     ));
-    if (!resolved || resolved.status !== "built" || resolved.success === false) {
+    if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
       finalRepairResults.push({
         kind: "resolve_candidate",
         repositoryRef: record.repositoryRef,

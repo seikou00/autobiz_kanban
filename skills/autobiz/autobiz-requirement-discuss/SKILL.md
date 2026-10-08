@@ -30,15 +30,29 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_pr
 
 用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在时，先删除该文件再走完整流程。
 
-### 实现范围选择
+### 实现范围与分析维度
 
-在需求分析角色选择之外，必须单独确认本 Feature 的实现范围：
+开始需求分析前，先读取当前对话中的范围结论，并运行以下命令查看本 Feature 已记录的范围：
 
-- `full_stack`：前后端都实现
-- `backend_only`：只实现后端
-- `frontend_only`：只实现前端
+```bash
+python -X utf8 "${pluginPath}/hooks/implementation_scope.py" show --feature "${feature}"
+```
 
-角色选择只决定分析关注点，不等于实现范围。用户确认后立即写入：
+- 当前对话已经明确本轮实现端，或命令返回 `ok=true` 且 `source=user_confirmed` 时，直接复用；用户主动调整范围时采用其最新明确结论。继续或重新 Discuss 不重新询问已确认的范围。
+- 缺少明确结论时，按共享 `ask-user-question.md` 协议用 `request_user_input` 只提一个问题：“本轮要实现哪些端？需求分析将按同一范围检查。”`id` 使用 `implementation_scope`，选项为“仅前端”“仅后端”“全栈（前后端）”，按需求匹配程度排序并标记推荐项。
+- `source=legacy_default` 或其他未确认来源不代表用户已选择全栈，仍需上述一次确认。此前只确认过分析角色、未明确本轮实现端时，仅补问实现范围。
+
+同一次选择同时确定实现范围与默认分析维度：
+
+| 用户选择 | `implementationScope` | 默认分析维度 |
+|----------|-----------------------|--------------|
+| 仅前端 | `frontend_only` | 通用、业务、前端；后端接口作为外部依赖 |
+| 仅后端 | `backend_only` | 通用、业务、后端；页面和交互不纳入本轮实现 |
+| 全栈（前后端） | `full_stack` | 通用、业务、前端、后端及跨端一致性 |
+
+不再单独询问“需求分析角色”。分析维度用于发现问题，实现范围约束实际交付；用户主动指定不同分析视角时可补充检查维度，不得据此修改已确认范围或再次弹出范围选择。
+
+用户明确范围后立即写入（已存在相同的有效用户确认记录时直接复用）：
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/implementation_scope.py" set \
@@ -47,7 +61,7 @@ python -X utf8 "${pluginPath}/hooks/implementation_scope.py" set \
   --source user_confirmed
 ```
 
-同时在 `PRD.md` 写入 `## 当前实现范围`。
+同时在 `PRD.md` 写入 `## 当前实现范围`，在“当前已确认结论”记录该范围对应的分析维度；`${implementationScope}` 使用上表的机器值。
 
 当用户已明确选择 `backend_only` 时，该选择同时确认了“本 Feature 不需要 UI 实现”，不得再单独询问 UI 范围。立即使用 `ui_context_writer.py set-ui-required false` 写入具体的 `--reason` 与 `--decision-source user_confirmed`，再使用 `confirm --decision-source user_confirmed` 将该 UI 决策收口为 `confirmed`。
 
@@ -93,7 +107,7 @@ python -X utf8 "${pluginPath}/hooks/implementation_scope.py" set \
 - 存在来源项时完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/source-context.md`，按其中的脚本生成 `source-context.json`。
 ### 需求分析
 
-- 严格按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单。
+- 严格按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单；复用已确认范围及其分析维度，不再发起角色选择。
 - 仅输出有问题、有遗漏、不明确的事项；无问题则不制造问题。
 
 ### UI 范围收口
@@ -157,7 +171,7 @@ python -X utf8 "${pluginPath}/hooks/implementation_scope.py" set \
     - 若用户通过客户端自动提供的 Other 自由输入补充说明 → 记录补充内容，继续下一问题
     - 若选择「后续补充并继续」→ 标记为待确认并继续其他问题，同一轮不得再次追问该内容
 5. **记录完整对话**：将每个问题的对话内容（问题、选项、用户选择、补充内容）记录到 PRD.md
-6. **处理新增文件**：若用户在回答中提供文件，按“讨论过程中新增资料的处理”执行；其中，在角色选择前端时用户提供的每个 HTML 文件位置，均视为讨论补充资料，必须登记文件名称、原始文档绝对路径和“前端页面/交互分析”的用途。
+6. **处理新增文件**：若用户在回答中提供文件，按“讨论过程中新增资料的处理”执行；其中，分析维度包含前端时用户提供的每个 HTML 文件位置，均视为讨论补充资料，必须登记文件名称、原始文档绝对路径和“前端页面/交互分析”的用途。
 
 **示例对话流程：**
 
@@ -195,7 +209,7 @@ python -X utf8 "${pluginPath}/hooks/implementation_scope.py" set \
 4. **待确认事项**
 5. **假设与风险**
 6. **历次讨论记录**：按时间记录
-7. **讨论补充资料**：讨论过程中新增文件的名称、绝对路径和用途；前端角色下用户提供的 HTML 文件逐项登记，用途填“前端页面/交互分析”。初始上传的原始需求文档不入本清单（快照在 `prd_original`）；无新增文件时保留空清单说明
+7. **讨论补充资料**：讨论过程中新增文件的名称、绝对路径和用途；分析维度包含前端时，用户提供的 HTML 文件逐项登记，用途填“前端页面/交互分析”。初始上传的原始需求文档不入本清单（快照在 `prd_original`）；无新增文件时保留空清单说明
 8. **外部资料与实现约束**：只登记会约束实现或验收的资料，以稳定 `SRC-NNN` 建立跨阶段引用；它与“讨论补充资料”的过程记录用途不同
 
 #### 写作要求

@@ -309,6 +309,16 @@ for (const roots of [["backend", "frontend"], ["../outside"]]) {
     return True
 
 
+def test_workflow_background_command_results():
+    """后台命令包装不能跳过候选冲突恢复或掩盖执行失败。"""
+    result = run_command(["node", "--test", str(ROOT / "tests" / "test_workflow_command_results.mjs")])
+    print(result["stdout"])
+    if result["returncode"] != 0:
+        print(result["stderr"])
+        return False
+    return True
+
+
 def test_workflow_structured_output_normalization():
     """Review 的 think 前缀或 Markdown 围栏不得吞掉失败信号。"""
     print("测试 5: Workflow 结构化输出归一化")
@@ -875,6 +885,7 @@ def main():
         ("Fixed Workflow Entrypoint", test_fixed_workflow_entrypoint),
         ("Task Workspace Component Root", test_workflow_component_root_binding),
         ("Structured Output Normalization", test_workflow_structured_output_normalization),
+        ("Background Command Results", test_workflow_background_command_results),
         ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
         ("Stage Recovery Priority", test_workflow_prioritizes_stage_recovery_dispatch),
