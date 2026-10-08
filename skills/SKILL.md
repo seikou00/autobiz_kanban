@@ -28,9 +28,11 @@ version: v1.1.08311
 
 任何技能准备使用 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。业务技能中定义的问题和选项继续有效；阶段门只有在符合共享协议的必要提问条件时才生效。工具字段、问题数量、Other 处理、自动继续和文本降级方式以该共享协议为准。
 
-以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
+以下三个为 `autobizdevops` 阶段流程的直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
 
 横切回退使用独立技能 `/autobizdevops-rollback`，其全部状态、产物清理、Code 执行态重置和可选源码恢复逻辑集中在 `hooks/rollback_stage.py`；不要在其他 workflow stage 中复制回退逻辑。
+
+产物同步使用独立技能 [`/autobizdevops-artifact-sync`](autobizdevops-artifact-sync/SKILL.md)，统一负责 `FEATURE_API_DETAIL.md` 生成、产物上传、增量同步与失败重试。同步脚本位于该技能的 `scripts/`，不作为 Board 节点，不推进 checkpoint；checkpoint 更新后不再自动上传。
 
 ### 技能映射
 | 阶段                  | 调用 Skill   | 本工程文件                               |

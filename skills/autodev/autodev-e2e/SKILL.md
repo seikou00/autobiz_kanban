@@ -174,4 +174,6 @@ PASS 时由固定 Workflow 完成 V-E2E 的 `e2e_test` 子阶段并聚合证据�
 
 ## 完成交接
 
+`FEATURE_API_DETAIL.md` 生成与产物上传由独立的 [`/autobizdevops-artifact-sync`](../../autobizdevops-artifact-sync/SKILL.md) 负责。用户请求同步时进入该技能，不作为 E2E verdict 或完成门禁。
+
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

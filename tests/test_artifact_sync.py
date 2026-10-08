@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -477,7 +479,7 @@ class ArtifactSyncExecuteHookTest(unittest.TestCase):
 
         schedule.assert_not_called()
 
-    def test_project_hook_config_registers_post_execute_without_dropping_pre_hooks(self) -> None:
+    def test_sync_is_not_registered_automatically_and_other_hooks_remain(self) -> None:
         config = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         self.assertGreaterEqual(len(config["PreToolUse"]), 4)
         registrations = [
@@ -486,9 +488,167 @@ class ArtifactSyncExecuteHookTest(unittest.TestCase):
             if registration.get("matcher") == "execute"
             for hook in registration.get("hooks", [])
         ]
-        self.assertTrue(
-            any(hook.get("command") == "python hooks/artifact_sync_execute_hook.py" for hook in registrations)
-        )
+        self.assertFalse(any("artifact_sync" in hook.get("command", "") for hook in registrations))
+        self.assertTrue(any("verified_digest_guard.py" in hook.get("command", "") for hook in registrations))
+
+
+class ArtifactSyncSkillTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.workspace = self.root / "demo"
+        self.feature_dir = self.workspace / ".autobizdevops/features/alpha"
+        self.feature_dir.mkdir(parents=True)
+        self.state_path = self.workspace / ".autobizdevops/state.json"
+        self.set_checkpoint("code_done")
+        record = artifact_sync.current_feature_record(self.workspace, "alpha")
+        contracts = artifact_sync.load_contracts(self.workspace, record)
+        for contract in contracts.skill_contracts.values():
+            if contract.group in artifact_sync.UPLOAD_GROUPS:
+                for output in contract.outputs:
+                    self.write_artifact(_sample_path(output.path))
+        self.write_artifact("FEATURE_API_DETAIL.md")
+        self.write_artifact("prd_original/source.docx")
+        self.write_artifact("sources/SRC-001.md")
+        environment = patch.dict(os.environ, {
+            "PLUGIN_WORKSPACE": str(self.root), "PROJECT_DIR": "demo",
+            "PROJECT_CODE": "P001", "FEATURE_ID": "alpha",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def set_checkpoint(self, checkpoint: str, **workflow_fields) -> None:
+        self.state_path.write_text(json.dumps({
+            "schemaVersion": "autobizdevops.state.v3",
+            "features": {"alpha": {"feature": "alpha", "checkpoint": checkpoint, **workflow_fields}},
+        }), encoding="utf-8")
+
+    def write_artifact(self, path: str, content: str = "artifact\n") -> None:
+        target = self.feature_dir / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def test_first_sync_uploads_completed_stages_and_unchanged_repeat_is_noop(self) -> None:
+        state_before = self.state_path.read_bytes()
+        with patch.object(sync_artifacts, "upload_file", return_value=(True, "")) as upload:
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+            uploaded = {call.args[0]["path"] for call in upload.call_args_list}
+            self.assertTrue({"PRD.md", "plan.json", "FEATURE_API_DETAIL.md", "sources/SRC-001.md"}.issubset(uploaded))
+            status = artifact_sync.read_status(self.feature_dir)
+            self.assertTrue(all(event["status"] == "success" for event in status["events"].values()))
+            for event in status["events"].values():
+                self.assertEqual(event["artifacts"][-1]["path"], artifact_sync.CATALOG_FILE_NAME)
+            upload.reset_mock()
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+            upload.assert_not_called()
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_changed_api_document_is_republished(self) -> None:
+        with patch.object(sync_artifacts, "upload_file", return_value=(True, "")) as upload:
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+            self.write_artifact("FEATURE_API_DETAIL.md", "updated interface fields\n")
+            upload.reset_mock()
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+        uploaded = {call.args[0]["path"] for call in upload.call_args_list}
+        self.assertIn("FEATURE_API_DETAIL.md", uploaded)
+        self.assertNotIn("PRD.md", uploaded)
+
+    def test_in_progress_stage_and_future_stages_are_not_first_published(self) -> None:
+        self.set_checkpoint("plan_in_progress")
+        with patch.object(sync_artifacts, "upload_file", return_value=(True, "")) as upload:
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+        uploaded = {call.args[0]["path"] for call in upload.call_args_list}
+        self.assertIn("design.md", uploaded)
+        self.assertTrue({"PLAN.md", "plan.json", "FEATURE_API_DETAIL.md"}.isdisjoint(uploaded))
+
+    def test_failed_upload_can_be_retried_without_changing_checkpoint(self) -> None:
+        self.set_checkpoint("prd_done")
+        state_before = self.state_path.read_bytes()
+        with patch.object(sync_artifacts, "upload_file", return_value=(False, "test network failure")):
+            self.assertEqual(sync_artifacts.main(["--sync"]), 1)
+        status = artifact_sync.read_status(self.feature_dir)
+        self.assertEqual(len(status["events"]), 1)
+        event_id, event = next(iter(status["events"].items()))
+        self.assertEqual(event["status"], "failed")
+        with patch.object(sync_artifacts, "upload_file", return_value=(True, "")):
+            self.assertEqual(sync_artifacts.main(["--retry-failed"]), 0)
+        retried = artifact_sync.read_status(self.feature_dir)["events"][event_id]
+        self.assertEqual(retried["status"], "success")
+        self.assertEqual(retried["attempts"], 2)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_prepare_only_cli_works_outside_plugin_root_at_new_and_legacy_paths(self) -> None:
+        self.set_checkpoint("prd_done")
+        for script in (
+            ROOT / "skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py",
+            ROOT / "hooks/sync_artifacts.py",
+        ):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [sys.executable, "-X", "utf8", str(script), "--sync", "--prepare-only"],
+                    cwd=self.root, env=dict(os.environ), capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                prepared = json.loads(result.stdout)
+                self.assertFalse(prepared["uploaded"])
+                self.assertTrue(prepared["event_ids"])
+        status = artifact_sync.read_status(self.feature_dir)
+        self.assertEqual(status["published_artifacts"], {})
+        self.assertTrue(all(event["status"] == "pending" and event["attempts"] == 0 for event in status["events"].values()))
+
+    def test_reconcile_preserves_legacy_tracked_only_scope(self) -> None:
+        with patch.object(sync_artifacts, "upload_file") as upload:
+            self.assertEqual(sync_artifacts.main(["--reconcile"]), 0)
+        upload.assert_not_called()
+        self.assertFalse((self.feature_dir / artifact_sync.STATUS_FILE_NAME).exists())
+
+    def test_skipped_stage_is_not_first_published(self) -> None:
+        self.set_checkpoint("code_done", workflowSkippedNodes=["dev.design"])
+        with patch.object(sync_artifacts, "upload_file", return_value=(True, "")) as upload:
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+        uploaded = {call.args[0]["path"] for call in upload.call_args_list}
+        self.assertIn("FEATURE_API_DETAIL.md", uploaded)
+        self.assertNotIn("design.md", uploaded)
+
+    def test_archived_sync_uses_the_state_selected_iteration(self) -> None:
+        self.set_checkpoint("archived", iteration="2")
+        archive = self.workspace / ".autobizdevops/archive"
+        archive.mkdir()
+        selected = archive / "alpha-iter2"
+        self.feature_dir.rename(selected)
+        (archive / "alpha-iter1").mkdir()
+        with patch.object(sync_artifacts, "upload_file", return_value=(True, "")) as upload:
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+        self.assertTrue(upload.called)
+        self.assertTrue(all(Path(call.args[0]["local_path"]).is_relative_to(selected.resolve()) for call in upload.call_args_list))
+        self.assertTrue((selected / artifact_sync.STATUS_FILE_NAME).is_file())
+        self.assertFalse(self.feature_dir.exists())
+
+    def test_missing_api_document_is_reported_without_blocking_other_artifacts(self) -> None:
+        (self.feature_dir / "FEATURE_API_DETAIL.md").unlink()
+        catalogs = []
+
+        def capture_upload(artifact):
+            if artifact["path"] == artifact_sync.CATALOG_FILE_NAME:
+                catalogs.append(json.loads(Path(artifact["local_path"]).read_text(encoding="utf-8")))
+            return True, ""
+
+        with patch.object(sync_artifacts, "upload_file", side_effect=capture_upload) as upload:
+            self.assertEqual(sync_artifacts.main(["--sync"]), 0)
+        code_catalogs = []
+        for event in artifact_sync.read_status(self.feature_dir)["events"].values():
+            if event["source_stage"] == "dev.code":
+                code_catalogs.append(event)
+        self.assertEqual(len(code_catalogs), 1)
+        self.assertEqual(code_catalogs[0]["status"], "success")
+        uploaded = {call.args[0]["path"] for call in upload.call_args_list}
+        self.assertIn("evidence/EVIDENCE.jsonl", uploaded)
+        self.assertNotIn("FEATURE_API_DETAIL.md", uploaded)
+        self.assertTrue(any(
+            entry["path"] == "FEATURE_API_DETAIL.md" and entry["upload_status"] == "missing"
+            for catalog in catalogs for entry in catalog["artifacts"]
+        ))
 
 
 if __name__ == "__main__":

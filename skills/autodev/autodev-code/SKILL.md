@@ -369,6 +369,8 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 ## 完成条件
 
+`FEATURE_API_DETAIL.md` 生成与产物上传由独立的 [`/autobizdevops-artifact-sync`](../../autobizdevops-artifact-sync/SKILL.md) 负责。用户请求同步时进入该技能，不作为 Code 完成门禁。
+
 - 队列所有任务「完成」，且都有 `action=implementation` evidence；任务级 evidence 继续记录真实生产文件变更，测试意图保留在 `testPoints` 与 `verificationIntent` 供 UTest/E2E 阶段消费。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与任务 implementation evidence 完整性和哈希校验通过；Batch 之间只通过 scheduler manifest 的依赖状态推进。
 
