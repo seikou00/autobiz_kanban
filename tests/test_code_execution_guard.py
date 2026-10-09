@@ -243,19 +243,66 @@ class CodeExecutionGuardTest(unittest.TestCase):
         path = self.feature_dir / ".task-runs" / "T007" / "run-007.json"
         original = json.loads(path.read_text(encoding="utf-8"))
         with mock.patch.dict(os.environ, self.env, clear=False):
-            for field, value in [("parallelRunId", "old-run"), ("batchId", "B001"), ("status", "implemented")]:
+            for field, value, check in [
+                ("parallelRunId", "old-run", "TASK_BATCH_BINDING_MISMATCH"),
+                ("batchId", "B001", "TASK_BATCH_BINDING_MISMATCH"),
+                ("status", "implemented", "TASK_RUN_INACTIVE"),
+            ]:
                 with self.subTest(field=field):
                     path.write_text(json.dumps({**original, field: value}), encoding="utf-8")
-                    self.assertIn("BATCH_STAGE_VALIDATION_FORBIDDEN", self._execute("mvn compile", cwd=str(self.code_worktree)))
+                    reason = self._execute("mvn compile", cwd=str(self.code_worktree))
+                    details = json.loads(reason.split("GUARD_DIAGNOSTICS: ", 1)[1])
+                    self.assertEqual(details["guardVersion"], "code-stage-v2")
+                    self.assertIn(check, details["failedChecks"])
+                    self.assertEqual(details["commandKind"], "production_compile")
+                    self.assertEqual(details["batch"]["stage"], "none")
 
-    def test_completed_implementation_does_not_inherit_stale_compile_authority(self) -> None:
-        self._write_parallel_batch(review_status="passed", test_status="pending", active_stage="")
-        path = self.feature_dir / ".parallel-runs" / "cw-007" / "manifest.json"
+    def test_workspace_mismatch_diagnostic_includes_actual_task_paths(self) -> None:
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="")
+        path = self.feature_dir / ".task-runs" / "T007" / "run-007.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state.update(codeWorkspace=str(self.root / 'different'), requestedCodeWorkspaces=[], resolvedGitRoots=[])
+        path.write_text(json.dumps(state), encoding="utf-8")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            reason = self._execute("mvn compile", cwd=str(self.code_worktree))
+        details = json.loads(reason.split("GUARD_DIAGNOSTICS: ", 1)[1])
+        self.assertIn("TASK_WORKSPACE_MISMATCH", details["failedChecks"])
+        self.assertEqual(details["taskRuns"][0]["codeWorkspace"], str(self.root / 'different'))
+        self.assertEqual(details["featureDir"], str(self.feature_dir.resolve()))
+
+    def test_windows_utf8_bom_runtime_files_do_not_hide_code_authority(self) -> None:
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="")
+        paths = [
+            self.feature_dir / '.task-runs' / 'T007' / 'run-007.json',
+            self.feature_dir / '.parallel-runs' / 'cw-007' / 'manifest.json',
+        ]
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            path.write_text(source, encoding="utf-8-sig")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertIsNone(self._execute("mvn clean compile 2>&1 | tail -100", cwd=str(self.code_worktree)))
+
+    def test_blocked_batch_cannot_inherit_stale_active_code_authority(self) -> None:
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="implement")
+        path = self.feature_dir / '.parallel-runs' / 'cw-007' / 'manifest.json'
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        manifest["batches"]["B005"]["stageStates"]["implement"] = {"status": "passed"}
+        manifest['batches']['B005']['status'] = 'blocked'
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with mock.patch.dict(os.environ, self.env, clear=False):
-            self.assertIn("BATCH_STAGE_VALIDATION_FORBIDDEN", self._execute("mvn compile", cwd=str(self.code_worktree)))
+            reason = self._execute("mvn compile", cwd=str(self.code_worktree))
+        self.assertIn("BATCH_NOT_EXECUTABLE", reason)
+
+    def test_completed_implementation_does_not_inherit_stale_compile_authority(self) -> None:
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            for stage in ["", "implement"]:
+                for status in ["passed", "skipped", "deferred", "needs_triage"]:
+                    with self.subTest(stage=stage, status=status):
+                        self._write_parallel_batch(review_status="passed", test_status="pending", active_stage=stage)
+                        path = self.feature_dir / ".parallel-runs" / "cw-007" / "manifest.json"
+                        manifest = json.loads(path.read_text(encoding="utf-8"))
+                        manifest["batches"]["B005"]["stageStates"]["implement"] = {"status": status}
+                        path.write_text(json.dumps(manifest), encoding="utf-8")
+                        self.assertIn("IMPLEMENTATION_ALREADY_FINISHED", self._execute("mvn compile", cwd=str(self.code_worktree)))
 
     def test_stale_test_status_does_not_authorize_other_stages(self) -> None:
         self._write_parallel_batch(review_status="passed", test_status="running", active_stage="review")

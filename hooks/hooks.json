@@ -82,7 +82,7 @@
           "onBlock": {
             "reason": "命令不符合当前 Batch 阶段的验证权限",
             "systemMessage": "环境版本/帮助查询允许执行；当前 Batch 绑定的活动 Code/修复 task 允许生产纯编译；Review 禁止验证；其余构建、测试、typecheck、lint、E2E 仅由 Review 通过后的运行中 UTest 阶段执行。",
-            "additionalContext": "生产纯编译支持 cwd/workdir 或 cd 前缀、输出重定向及 head/tail/tee 管道；不得附加 test/package/verify、其他验证命令或后台进程。被拦截时检查 task_runner inspect 的状态及当前 Batch 绑定，保留真实错误，不得切换中立目录绕过 guard 或直接修改运行状态。后端生产编译通过后再 finish-implementation。"
+            "additionalContext": "生产纯编译支持 cwd/workdir 或 cd 前缀、输出重定向及 head/tail/tee 管道；默认直接使用 PATH 中的 mvn。task_runner 启动/恢复 TASK 时自动登记 implement；旧 Run 的 none 本身不阻止绑定正确的活动 TASK 纯编译。被拦截时读取 GUARD_DIAGNOSTICS.failedChecks、executionCwd 与 taskRuns，对照 task_runner inspect 检查具体失败条件。不得附加 test/package/verify、其他验证命令或后台进程，不得切换中立目录绕过 guard 或直接修改运行状态。后端生产编译通过后再 finish-implementation。"
           },
           "persistAfterInterrupt": true
         },

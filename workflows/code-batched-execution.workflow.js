@@ -754,7 +754,7 @@ const codeWorkspaceArgs = Object.entries(codeWorkspaces)
 // Keep this exact boundary in both implementation prompts, including cowork.
 const CODE_STAGE_EXECUTION_BOUNDARY = "本 Code 执行规则适用于主 Agent、cowork/协作 Agent 以及实现修复 Agent。Code 阶段和修复阶段只允许生产源码、生产配置、迁移和公开接口的最小实现，以及本 Prompt 明确列出的 lease、scheduler、route resolver、task_runner、worktree seal/release 命令。可以只读既有测试理解契约，但在 task_runner.py finish-implementation 成功前，禁止创建、修改或删除测试源码（包括 src/test、test、tests、__tests__）、fixture/mock、测试环境或测试配置。后端 lane 的每个 TASK 在实现或修复生产代码后、finish-implementation 前，必须使用 Bash 在该 TASK 的业务 Worktree 执行项目文档/构建配置指定的 production-only compile 命令；只编译生产代码，不得连带运行测试、打包、typecheck 或 lint。记录精确命令和完整输出；失败时根据真实输出定位根因、修复生产代码并重编，直到通过；编译命令或环境无法使用时保留真实错误并返回失败，禁止假报通过或完成。前端 lane 不执行此新增编译门槛。除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E 或 TASK validation 命令，也禁止为此启动后台进程。包括但不限于 mvn/mvnw（package、verify、test）、Gradle/gradlew（build、assemble、check、test）、npm/pnpm/yarn（build、typecheck、lint、test）、npx/vite/webpack/tsc/vue-tsc/eslint、jest、vitest、pytest；Maven/Gradle 等只允许使用对应的生产 compile-only 目标，不得使用会触发测试或打包的复合目标。所有测试资产和行为验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行；不得以“验证实现”为由绕过该阶段。\n";
 
-const CODE_STAGE_COMPILE_COMMAND_GUIDANCE = "编译和环境查询使用前台 Bash；优先将执行工具的 cwd/workdir 设置为当前 TASK 的业务模块目录，也可使用 cd \"<模块目录>\" && <纯编译命令>。guard 支持输出重定向及 head/tail/tee 管道；必须保留完整输出和真实编译退出码，推荐 set -o pipefail && <纯编译命令> 2>&1 | tee \"<编译日志>\"，不要仅凭 tail/head 的最后几行判断通过。允许 mvn -v/--version/--help 等环境查询；禁止附加 test/package/verify 等目标、其他验证命令或后台进程。若 guard 拦截，先用 task_runner.py inspect 核对真实 run 状态、parallelRunId、batchId 和 codeWorkspace；初始实现的 activeStage 可能尚未登记，不能仅凭 none 判定 Code 不在运行。不得切换中立目录绕过 guard，也不得直接修改运行状态 JSON。\n";
+const CODE_STAGE_COMPILE_COMMAND_GUIDANCE = "编译和环境查询使用前台 Bash；优先将执行工具的 cwd/workdir 设置为当前 TASK 的业务模块目录，也可使用 cd \"<模块目录>\" && <纯编译命令>。guard 支持输出重定向及 head/tail/tee 管道；必须保留完整输出和真实编译退出码，推荐 set -o pipefail && <纯编译命令> 2>&1 | tee \"<编译日志>\"，不要仅凭 tail/head 的最后几行判断通过。默认直接使用执行终端 PATH 中的 mvn，不要求定位 mvn.exe、读取启动脚本或使用绝对路径；只有命令不存在或启动失败时才检查环境。允许 mvn -v/--version/--help 等环境查询；禁止附加 test/package/verify 等目标、其他验证命令或后台进程。若 guard 拦截，先用 task_runner.py inspect 核对真实 run 状态、parallelRunId、batchId 和 codeWorkspace；task_runner start/start-task-repair/resume 成功前会自动登记运行中的 implement。旧 Run 的 activeStage 即使为 none，绑定正确的活动 TASK 仍允许纯编译；被拦截时以 GUARD_DIAGNOSTICS.failedChecks 为准，不要把 none 当作失败原因。不得切换中立目录绕过 guard，也不得直接修改运行状态 JSON。\n";
 
 function taskWorkspacePath(batchId, batchWorktree, componentRoots) {
   if (!usableString(batchWorktree)) {
@@ -1478,11 +1478,8 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const metadata = JSON.stringify({ batchCommit: commitSha, worktreePath: batchWorktree, branchName: batchBranch });
   if (!reviewResolvedByRepair && !testResolvedByRepair) {
     const stageResult = requireSuccess(await workflowAgent(
-      `登记 Batch ${batchId} 已完成的准备与实现阶段。依次执行：` +
-      `python -X utf8 "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage prepare；` +
-      `python -X utf8 "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage prepare --metadata-json '${metadata}'；` +
-      `python -X utf8 "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage implement；` +
-      `python -X utf8 "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage implement --metadata-json '${metadata}'。只返回最后一个 JSON。`,
+      `收口 Batch ${batchId} 的 implement 阶段。task_runner 在 TASK 启动/恢复成功前已自动登记 prepare 与运行中的 implement；不要在实现完成后补写 start。执行 ` +
+      `python -X utf8 "${stagePath}" finalize-implementation --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。Runtime 会校验全部 TASK 已收口并使用已封存的真实 commitSha 写阶段 Evidence；旧 Run 的阶段登记由 Runtime 校验后兼容恢复。只原样返回 JSON。`,
       { label: `stage-implement-${batchId}`, phase: "Batch 阶段" }
     ), `stage implement ${batchId}`);
     void stageResult;
@@ -1500,7 +1497,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
         `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。Review 是完全只读阶段：禁止执行任何构建、编译、打包、typecheck、lint、测试、E2E 或验证命令，包括 mvn/mvnw、Gradle/gradlew、npm/pnpm/yarn、npx/tsc/vite/webpack、jest/vitest/pytest。后端 compile-only 已在 implement 的 finish-implementation 前完成；UTest 的行为测试及收尾编译通过 Bash 执行，再由 run_utest_command.py 登记 Evidence 和结果。` +
         `通过后执行 python -X utf8 "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
         `发现问题时必须先执行 python -X utf8 "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题：file:line、期望与实际行为、影响及建议修复>"。` +
-        `最后必须执行 python -X utf8 "${stagePath}" validate-review-result --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"，并且只原样返回它的 stdout JSON。不得信任或返回此前命令的原始文本；该脚本会验证并规范化 durable Review 结果。可由当前 Batch 生产代码修复时，Workflow 会在同一 Worktree 修复、跳过编译记录并封存一次，然后直接进入 UTest，不会再次执行 Review。` +
+        `最后必须执行 python -X utf8 "${stagePath}" validate-review-result --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"，并且只原样返回它的 stdout JSON。不得信任或返回此前命令的原始文本；该脚本会验证并规范化 durable Review 结果。可由当前 Batch 生产代码修复时，Workflow 会在同一 Worktree 修复、完成必要的后端纯编译并封存一次，然后直接进入 UTest，不会再次执行 Review。` +
         `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
         { label: `stage-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_STAGE_RESULT_SCHEMA }
       ));

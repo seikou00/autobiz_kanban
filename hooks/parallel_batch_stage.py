@@ -167,7 +167,7 @@ def _stage_input(manifest: dict[str, Any], batch: dict[str, Any], stage: str, me
     toolchain_digest = "sha256:" + hashlib.sha256(
         json.dumps(toolchain, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    return {
+    inputs = {
         "planRevision": pipeline.get("planRevision"),
         "batchCommit": metadata.get("batchCommit") or metadata.get("candidateSha") or batch.get("candidateSha") or batch.get("commitSha"),
         "dependencies": _dependency_snapshot(manifest, batch),
@@ -175,6 +175,17 @@ def _stage_input(manifest: dict[str, Any], batch: dict[str, Any], stage: str, me
         "toolchainDigest": toolchain_digest,
         "stage": stage,
     }
+    if stage == "prepare" and metadata.get("preparationSource") == "task_runner_workspace_binding":
+        # Preparation happens before production changes exist. Its evidence
+        # binds the frozen repository base, not the future sealed delivery.
+        repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
+        repository = manifest.get("repositories", {}).get(repository_ref, {})
+        inputs.update({
+            "commitScope": "repository_base",
+            "repositoryRef": repository_ref,
+            "batchCommit": repository.get("headSha") or repository.get("baseSha"),
+        })
+    return inputs
 
 
 def _digest(value: Any) -> str:
@@ -231,6 +242,15 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
                 "reused": True,
             }
         if state.get("status") == "running":
+            conflicting = [
+                name for name, item in states.items()
+                if name != stage and item.get("status") == "running"
+            ]
+            if conflicting or batch.get("activeStage") not in {None, "", stage}:
+                raise ValueError(f"parallel_batch_stage_running_conflict:{batch_id}:{stage}")
+            # Older interrupted runs may have lost only the active pointer.
+            # Reuse the durable attempt while restoring the actual stage.
+            batch["activeStage"] = stage
             save_manifest(workspace, feature, run_id, manifest)
             return {
                 "batchId": batch_id,
@@ -257,6 +277,76 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
         save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "batch_stage_started", batchId=batch_id, stage=stage, attempt=state["attempt"])
     return {"batchId": batch_id, "stage": stage, "attempt": state["attempt"], "status": "running"}
+
+
+def begin_implementation(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Register Code before a validated Task Runner start/resume can return.
+
+    Callers must first verify the lease and native worktree binding. This
+    function never reopens completed implementation or a delivery-stage run.
+    Repeating it for subsequent TASKs/retries preserves the stage attempt.
+    """
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        if "implement" not in states or not batch.get("worktreePath"):
+            raise ValueError(f"parallel_batch_implementation_workspace_missing:{batch_id}")
+        if batch.get("activeStage") not in {None, "", "prepare", "implement"} or any(
+            states[name].get("status") == "running" for name in ("review", "test")
+        ):
+            raise ValueError(f"parallel_batch_implementation_stage_conflict:{batch_id}:{batch.get('activeStage')}")
+        if states["implement"].get("status") in {"passed", "skipped", "deferred", "needs_triage"}:
+            raise ValueError(f"parallel_batch_implementation_not_open:{batch_id}:{states['implement'].get('status')}")
+        if states["prepare"].get("status") in {"deferred", "needs_triage"}:
+            raise ValueError(f"parallel_batch_preparation_not_ready:{batch_id}")
+        prepared = states["prepare"].get("status") in {"passed", "skipped"}
+        metadata = {
+            "preparationSource": "task_runner_workspace_binding",
+            "worktreePath": batch["worktreePath"],
+            "branchName": batch.get("branchName"),
+        }
+    if not prepared:
+        start_stage(workspace, feature, run_id, batch_id, "prepare")
+        complete_stage(workspace, feature, run_id, batch_id, "prepare", metadata=metadata)
+    return start_stage(workspace, feature, run_id, batch_id, "implement")
+
+
+def finalize_implementation(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Complete Code from the actual sealed commit, including legacy retries."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        commit = batch.get("commitSha")
+        if not commit or batch.get("status") not in {"sealed", "ready_to_candidate", "merged"}:
+            raise ValueError(f"parallel_batch_implementation_delivery_not_sealed:{batch_id}")
+        if states["implement"].get("status") == "passed":
+            return {"batchId": batch_id, "stage": "implement", "status": "passed", "reused": True}
+        # A sealed delivery from before live stage registration can be adopted
+        # only when every TASK has a completed run from this exact Batch/run.
+        # Active TASKs must never be hidden by sealing or stage completion.
+        finished: set[str] = set()
+        active: list[str] = []
+        feature_dir = run_dir(workspace, feature, run_id).parent.parent
+        for path in (feature_dir / ".task-runs").glob("*/*.json"):
+            state = json.loads(path.read_text(encoding="utf-8-sig"))
+            if state.get("parallelRunId") != run_id or state.get("batchId") != batch_id:
+                continue
+            if state.get("status") in {"started", "in_progress", "implementation_recording"}:
+                active.append(str(state.get("taskId") or path.parent.name))
+            elif state.get("status") in {"implemented", "done"} and state.get("implementationEvidenceId"):
+                finished.add(str(state.get("taskId") or path.parent.name))
+        if active:
+            raise ValueError(f"parallel_batch_implementation_tasks_active:{batch_id}:{','.join(sorted(set(active)))}")
+        task_ids = set(batch.get("taskIds") or [])
+        if not task_ids or not task_ids <= finished:
+            raise ValueError(f"parallel_batch_implementation_tasks_incomplete:{batch_id}:{','.join(sorted(task_ids - finished))}")
+        running = states["implement"].get("status") == "running"
+        metadata = {"batchCommit": commit, "worktreePath": batch.get("worktreePath"), "branchName": batch.get("branchName")}
+    if not running:
+        begin_implementation(workspace, feature, run_id, batch_id)
+    return complete_stage(workspace, feature, run_id, batch_id, "implement", metadata=metadata)
 
 
 def complete_stage(
@@ -807,7 +897,7 @@ def triage_failure(workspace: Path, feature: str, run_id: str, batch_id: str, st
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Advance a staged parallel Batch")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("next", "start", "complete", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair"):
+    for name in ("next", "start", "complete", "finalize-implementation", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -840,6 +930,8 @@ def main(argv: list[str] | None = None) -> int:
             result = next_stage(workspace, feature, args.run_id, args.batch_id)
         elif args.command == "start":
             result = start_stage(workspace, feature, args.run_id, args.batch_id, args.stage)
+        elif args.command == "finalize-implementation":
+            result = finalize_implementation(workspace, feature, args.run_id, args.batch_id)
         elif args.command == "complete":
             metadata = json.loads(args.metadata_json)
             if not isinstance(metadata, dict):

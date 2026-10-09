@@ -70,7 +70,13 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         inputs = evidence.get("inputs") if isinstance(evidence.get("inputs"), dict) else {}
         if inputs.get("planRevision") != pipeline.get("planRevision"):
             errors.append(f"{batch_id}.{stage}_plan_revision_stale")
-        if batch.get("type") == "validation":
+        if stage == "prepare" and inputs.get("commitScope") == "repository_base":
+            repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
+            repository = manifest.get("repositories", {}).get(repository_ref, {})
+            expected_commit = repository.get("headSha") or repository.get("baseSha")
+            if inputs.get("repositoryRef") != repository_ref or not expected_commit:
+                errors.append(f"{batch_id}.{stage}_repository_binding_invalid")
+        elif batch.get("type") == "validation":
             expected_commit = batch.get("candidateSha")
         else:
             expected_commit = batch.get("commitSha")

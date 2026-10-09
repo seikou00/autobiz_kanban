@@ -24,6 +24,7 @@ from typing import Any
 
 
 ACTIVE_CODE_RUN_STATUSES = frozenset({"started", "in_progress", "implementation_recording"})
+GUARD_VERSION = "code-stage-v2"
 
 # Preserve quoted shell operators until after control-flow/redirection parsing.
 # This is a bounded command recognizer, not a general shell interpreter.
@@ -93,7 +94,7 @@ def _normalize_path(raw: Any) -> str:
     return posixpath.normpath(path).casefold()
 
 
-def _active_code_workspaces() -> dict[str, list[dict[str, str]]]:
+def _code_workspaces(*, active_only: bool = True) -> dict[str, list[dict[str, str]]]:
     feature_dir = _feature_dir()
     if feature_dir is None:
         return {}
@@ -101,10 +102,10 @@ def _active_code_workspaces() -> dict[str, list[dict[str, str]]]:
     active: dict[str, list[dict[str, str]]] = {}
     for run_path in feature_dir.glob(".task-runs/*/*.json"):
         try:
-            state = json.loads(run_path.read_text(encoding="utf-8"))
+            state = json.loads(run_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(state, dict) or state.get("status") not in ACTIVE_CODE_RUN_STATUSES:
+        if not isinstance(state, dict) or (active_only and state.get("status") not in ACTIVE_CODE_RUN_STATUSES):
             continue
         identity = "{}:{}".format(
             state.get("taskId", run_path.parent.name),
@@ -120,10 +121,16 @@ def _active_code_workspaces() -> dict[str, list[dict[str, str]]]:
             if normalized:
                 active.setdefault(normalized, []).append({
                     "identity": identity,
+                    "status": str(state.get("status") or "unknown"),
+                    "codeWorkspace": str(state.get("codeWorkspace") or ""),
                     "parallelRunId": str(state.get("parallelRunId") or ""),
                     "batchId": str(state.get("batchId") or ""),
                 })
     return active
+
+
+def _active_code_workspaces() -> dict[str, list[dict[str, str]]]:
+    return _code_workspaces()
 
 
 def _parallel_batch_workspaces() -> dict[str, dict[str, str | bool]]:
@@ -141,7 +148,7 @@ def _parallel_batch_workspaces() -> dict[str, dict[str, str | bool]]:
     batches_by_workspace: dict[str, dict[str, str | bool]] = {}
     for manifest_path in feature_dir.glob(".parallel-runs/*/manifest.json"):
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(manifest, dict):
@@ -165,6 +172,10 @@ def _parallel_batch_workspaces() -> dict[str, dict[str, str | bool]]:
                 "identity": f"{run_id}:{batch_id}",
                 "runId": run_id,
                 "batchId": str(batch_id),
+                "batchStatus": str(batch.get("status") or "unknown"),
+                "implementStatus": str(implement.get("status") or "pending"),
+                "reviewStatus": str(review.get("status") or "pending"),
+                "testStatus": str(test.get("status") or "pending"),
                 "testRunning": (
                     stage == "test"
                     and review.get("status") == "passed"
@@ -175,9 +186,10 @@ def _parallel_batch_workspaces() -> dict[str, dict[str, str | bool]]:
                 # a running Review/UTest must not inherit stale Code authority.
                 "codeAllowed": (
                     stage in {"none", "implement"}
+                    and batch.get("status") not in {"retry_pending", "blocked", "failed", "cancelled", "merged", "ready_to_candidate"}
                     and review.get("status") != "running"
                     and test.get("status") != "running"
-                    and (stage == "implement" or implement.get("status") != "passed")
+                    and implement.get("status") not in {"passed", "skipped", "deferred", "needs_triage"}
                 ),
                 "stage": stage,
             }
@@ -388,6 +400,62 @@ def _production_compile_argv(tokens: list[str]) -> bool:
     return False
 
 
+def _batch_block_reason(
+    payload: dict[str, Any], tool_input: dict[str, Any],
+    batch: dict[str, str | bool], invocation: tuple[list[str], str] | None,
+    compile_only: bool, matching_runs: list[dict[str, str]],
+) -> str:
+    all_workspaces = _code_workspaces(active_only=False)
+    bound_runs = [
+        run for runs in all_workspaces.values() for run in runs
+        if run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"]
+    ]
+    matching_bound_runs = [
+        run for run in matching_runs
+        if run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"]
+    ]
+    failures: list[str] = []
+    if invocation is None:
+        failures.append("COMMAND_FORM_UNSUPPORTED")
+    elif not compile_only:
+        failures.append("VALIDATION_GOALS_NOT_ALLOWED_IN_CODE")
+    if batch["codeAllowed"] is not True:
+        if batch["batchStatus"] in {"retry_pending", "blocked", "failed", "cancelled", "merged", "ready_to_candidate"}:
+            failures.append("BATCH_NOT_EXECUTABLE")
+        if batch["stage"] not in {"none", "implement"}:
+            failures.append("BATCH_STAGE_NOT_CODE_OR_REPAIR")
+        elif batch["reviewStatus"] == "running" or batch["testStatus"] == "running":
+            failures.append("CODE_STAGE_STATE_INCONSISTENT")
+        elif batch["implementStatus"] in {"passed", "skipped", "deferred", "needs_triage"}:
+            failures.append("IMPLEMENTATION_ALREADY_FINISHED")
+    if not matching_bound_runs:
+        if matching_runs:
+            failures.append("TASK_BATCH_BINDING_MISMATCH")
+        elif not bound_runs:
+            failures.append("ACTIVE_TASK_RUN_MISSING")
+        elif any(run["status"] in ACTIVE_CODE_RUN_STATUSES for run in bound_runs):
+            failures.append("TASK_WORKSPACE_MISMATCH")
+        else:
+            failures.append("TASK_RUN_INACTIVE")
+    runs = {run["identity"]: run for run in [*matching_runs, *bound_runs]}
+    feature_dir = _feature_dir()
+    details = {
+        "guardVersion": GUARD_VERSION,
+        "failedChecks": failures,
+        "featureDir": str(feature_dir) if feature_dir else None,
+        "batch": batch,
+        "commandKind": "production_compile" if compile_only else "validation" if invocation else "unsupported_shell_form",
+        "executionCwd": _execution_directory(payload, tool_input, invocation[1] if invocation else ""),
+        "taskRuns": list(runs.values()),
+    }
+    return (
+        "BATCH_STAGE_VALIDATION_FORBIDDEN: Batch {identity} 当前阶段为 {stage}；"
+        "未通过检查：{checks}。none 仅表示阶段指针未登记，不单独禁止 Code 纯编译。"
+        "活动 TASK 必须匹配当前 Batch/run 与实际编译目录；Review 禁止验证，其他验证由运行中的 UTest 执行。"
+        "\nGUARD_DIAGNOSTICS: {details}"
+    ).format(**batch, checks=", ".join(failures), details=json.dumps(details, ensure_ascii=False))
+
+
 def guard(payload: dict[str, Any]) -> str | None:
     """Return a blocking reason unless validation is authorized by UTest."""
     tool_name = str(payload.get("tool_name") or payload.get("toolName") or "").lower()
@@ -419,11 +487,7 @@ def guard(payload: dict[str, Any]) -> str | None:
             for run in matching_runs
         ):
             return None
-        return (
-            "BATCH_STAGE_VALIDATION_FORBIDDEN: Batch {identity} 当前阶段为 {stage}；"
-            "环境查询允许执行；生产纯编译仅允许在当前 Batch 绑定的活动 Code/修复 task 中执行；"
-            "Review 禁止验证，其余构建、typecheck、lint、测试和 E2E 仅允许在 Review 已通过且 test 阶段正在运行时执行。"
-        ).format(**batch)
+        return _batch_block_reason(payload, tool_input, batch, invocation, compile_only, matching_runs)
     if compile_only and matching_runs:
         return None
     if matching_runs:

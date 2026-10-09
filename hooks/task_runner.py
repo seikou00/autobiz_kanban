@@ -36,6 +36,7 @@ from hooks.plan_writer import (  # noqa: E402
     set_task_execution_status,
 )
 from hooks.parallel_runtime import load_manifest, renew_lease  # noqa: E402
+from hooks.parallel_batch_stage import begin_implementation  # noqa: E402
 from hooks.parallel_batch_scheduler import (  # noqa: E402
     assert_batch_worktree_isolated,
 )
@@ -147,6 +148,19 @@ def _active_parallel_batch_runs(feature_dir: Path, parallel_run_id: str, batch_i
         ):
             active.append(f"{item.get('taskId', path.parent.name)}:{item.get('runId', path.stem)}")
     return sorted(active)
+
+
+def _begin_parallel_implementation(workspace: Path, feature: str, parallel_run_id: str | None, batch_id: str) -> None:
+    if parallel_run_id is None:
+        return
+    try:
+        begin_implementation(workspace, feature, parallel_run_id, batch_id)
+    except ValueError as exc:
+        raise TaskRunnerError(
+            str(exc), batchId=batch_id, parallelRunId=parallel_run_id,
+            errorCategory="batch_stage_authority_failure",
+            requiredAction="inspect_batch_stage_before_start_or_resume",
+        ) from exc
 
 
 def recover_interrupted_parallel_runs(
@@ -1011,6 +1025,7 @@ def _start_task_unlocked(
         )
     repository_state = _repository_state(repositories)
 
+    _begin_parallel_implementation(workspace, feature, parallel_run_id, batch_id)
     run_id = _new_run_id()
     state = {
         "version": 2,
@@ -1220,6 +1235,7 @@ def _finish_implementation_unlocked(
     if state.get("status") in {"done", "failed", "evidence_written", "validation_running"}:
         raise TaskRunnerError(f"task_run_not_implementation_finishable:{state.get('status')}")
 
+    _begin_parallel_implementation(workspace, feature, parallel_run_id, batch_id)
     file_changes, final_repositories = _repository_changes(state, repositories)
     repair_context = state.get("repairContext")
     repair_context = repair_context if isinstance(repair_context, dict) else None
@@ -1672,7 +1688,7 @@ def _resume_task_unlocked(
     workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
-    _, batch_id, task = _load_plan_and_task(feature_dir, task_id)
+    _, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=parallel_run_id is None)
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("status") != "aborted":
         raise TaskRunnerError(f"task_run_cannot_resume:{state.get('status')}")
@@ -1723,6 +1739,7 @@ def _resume_task_unlocked(
             requiredAction="finish_or_abort_active_run_before_resume",
             activeRuns=active,
         )
+    _begin_parallel_implementation(workspace, feature, parallel_run_id, batch_id)
     result = set_task_execution_status(
         workspace,
         feature,
