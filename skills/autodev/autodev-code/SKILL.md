@@ -2,10 +2,18 @@
 name: autodev-code
 description: 进行代码实现。
 version: v1.7.08041
-allowed-tools: execute task_output read_file grep glob write_file edit_file
+allowed-tools: execute task_output read_file grep glob write_file edit_file request_user_input
 ---
 
 # /autodev-code — 代码执行
+
+## Code 入口：先获取看板 ID
+
+进入 Code 先取得 `taskCardId`，拿到有效 ID 后再进行准入检查、写入 `code_in_progress`、捕获基线并调用 launcher。
+
+- 缺少 ID 时调用 `request_user_input`：“请填写本次 Code 提交使用的看板 ID（例如 Z990692-294）。”通过工具的自由文本输入收集 ID。
+- 去除首尾空白后，ID 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`；无效时请用户重新填写，不得猜测。
+- 已提供有效 ID 时直接复用。Workflow 启动后以及恢复同一 Run 时，使用 manifest 中保存的 ID，不再询问。ID 通过 `--task-card-id` 传入并由插件保存，本 Run 的提交统一使用 `<看板ID> #comment <提交说明>`。
 
 ## 前端 Route 闸门（按 Task 在 Agent 内执行）
 
@@ -136,7 +144,7 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_p
 
 ### Code 启动准备
 
-首次为当前 Feature 启动 Code Session 前，如果还没有基线，先对计划声明的每个生产代码 workspace 执行一次独立回退脚本的基线捕获；同一 Session 后续批次不得重复捕获：
+完成入口的看板 ID 获取后，首次为当前 Feature 启动 Code Session 前，如果还没有基线，先对计划声明的每个生产代码 workspace 执行一次独立回退脚本的基线捕获；同一 Session 后续批次不得重复捕获：
 ```bash
 python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
   --capture-code-session \
@@ -319,11 +327,7 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。每个可写 Batch 先由插件调用 `worktree_manager.py provision`，从对应物理 Git 根的冻结提交创建并登记原生 linked Git worktree；平台 `agent()` 只负责在该明确路径中运行实现，不提供也不承担 Worktree 隔离。插件负责 Worktree 的创建、校验、提交、合并和清理。不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
 
-### 看板 ID 提交上下文
-
-首次启动固定 Workflow 前，`taskCardId` 必须作为已确定的启动参数传入；若用户尚未提供有效 ID，此时可以且只应调用一次 `request_user_input` 向用户索取看板 ID。校验 ID 仅由字母、数字、`.`、`_`、`-` 组成；无效时仍停留在启动前，不创建 Workflow。拿到有效 ID 后，插件将它写入 `.parallel-runs/<runId>/manifest.json` 并用于本次 Run 的全部提交。Workflow 启动后以及恢复同一 Run 时，直接使用 manifest 中已保存的 ID，不再询问、回查平台或比较新旧 ID。向用户说明所有插件托管提交将使用：`<看板ID> #comment <提交说明>`。
-
-先调用 launcher：
+使用 Code 入口已取得的看板 ID 调用 launcher，不在此处再次提问：
 
 ```bash
 workflow_workspace="$(pwd)"
@@ -332,7 +336,7 @@ launcher_result=$(python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" \
   --plugin-path "${pluginPath}" \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --workflow-workspace "${workflow_workspace}" \
-  --task-card-id "<用户已选择的看板ID>" \
+  --task-card-id "<入口已取得或同一 Run 已保存的看板ID>" \
   --json)
 ```
 

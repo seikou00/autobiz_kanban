@@ -836,8 +836,11 @@ def test_skill_integration():
         ("前端 Route 闸门（按 Task 在 Agent 内执行）", "按 Task 执行 Route 闸门"),
         ("taskContract.uiRequired=true", "Task UI 机器事实"),
         ("固定 Code Workflow 启动后禁止调用 `request_user_input`", "Code 阶段无用户确认边界"),
-        ("首次启动固定 Workflow 前", "启动前看板 ID 询问边界"),
-        ("只应调用一次 `request_user_input` 向用户索取看板 ID", "启动前看板 ID 获取"),
+        ("拿到有效 ID 后再进行准入检查", "启动前看板 ID 询问边界"),
+        ("## Code 入口：先获取看板 ID", "Code 入口看板 ID 获取"),
+        ("请填写本次 Code 提交使用的看板 ID", "直接填写看板 ID"),
+        ("缺少 ID 时调用 `request_user_input`", "工具获取看板 ID"),
+        ("通过工具的自由文本输入收集 ID", "自由文本填写看板 ID"),
         ("Workflow 启动后以及恢复同一 Run 时", "启动后不再询问看板 ID"),
     ]
 
@@ -848,6 +851,15 @@ def test_skill_integration():
         else:
             print(f"✗ 缺少 {description}")
             all_passed = False
+
+    card_start = content.find("## Code 入口：先获取看板 ID")
+    route_start = content.find("## 前端 Route 闸门")
+    if not (0 <= card_start < route_start):
+        print("✗ 看板 ID 获取未处于 Code 第一项")
+        all_passed = False
+    if "工具不支持时直接在对话中等待回复" in content:
+        print("✗ 看板 ID 获取仍会退回普通对话")
+        all_passed = False
 
     forbidden_confirmation_rules = [
         "使用任何 `request_user_input` 前",

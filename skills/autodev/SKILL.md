@@ -28,7 +28,9 @@ prd_done → specs → design → plan → [detail design] → code → cicd
 
 ## Code 阶段
 
-进入 `/autodev-code` 后，全局 checkpoint 只保持 `code_in_progress`，直到固定
+进入 `/autodev-code` 后，先执行其“Code 入口：先获取看板 ID”：缺少有效 ID 时直接让用户填写，已提供或恢复同一 Run 时复用；拿到有效 ID 后才进行准入检查、推进 checkpoint、捕获基线和启动 Workflow。
+
+编码开始后，全局 checkpoint 只保持 `code_in_progress`，直到固定
 Workflow 已完成所有交付 Batch、B-E2E 与证据聚合，再推进到 `code_done`。
 
 - `task_runner start` 仅授权当前实现 TASK 的生产代码写入；已 implemented 的
