@@ -165,7 +165,7 @@ def test_fixed_workflow_entrypoint():
         "record-test-failure",
         'testStatus:\\"source_repair_required\\"',
         "UTEST_STAGE_TIMEOUT_SECONDS",
-        "--stage-timeout",
+        "timeoutMs: utestStageTimeout * 1000",
         "executionOutcome=command_timeout/stage_deadline_exceeded",
         "--purpose review",
         "parallel_git_index_lock_busy",
@@ -186,9 +186,10 @@ def test_fixed_workflow_entrypoint():
         "const WORKFLOW_AUTONOMY_PREFIX",
         "const CODE_STAGE_EXECUTION_BOUNDARY",
         "禁止创建、修改或删除测试源码",
-        "禁止自行执行任何构建、编译、打包、typecheck、lint、测试、E2E",
+        "除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E",
         "不得以“验证实现”为由绕过该阶段",
-        "所有测试资产和所有可执行验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行",
+        "所有测试资产和行为验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行",
+        "CODE_STAGE_COMPILE_COMMAND_GUIDANCE",
         "function workflowAgent",
     ]
     missing = [check for check in checks if check not in content]
@@ -240,7 +241,7 @@ def test_fixed_workflow_entrypoint():
     if "repository_coordinator" in launcher or "coordinatorManaged" in content:
         print("✗ 多仓库路径仍会拆分为 coordinator 子 Workflow")
         return False
-    if "await parallel(lifecycleJobs)" not in content:
+    if "await parallel(Array.from({ length: poolSize }" not in content:
         print("✗ 固定 Workflow 未在内部并行启动 Batch agent")
         return False
     route_start = content.find("start-route-run")
@@ -761,6 +762,7 @@ const vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const context = {
   MAX_EMPTY_AGENT_RESPONSE_RETRIES: 2,
+  pluginPath: "/test/plugin",
   usableString: value => typeof value === "string" && value.trim().length > 0,
 };
 let calls = 0;
