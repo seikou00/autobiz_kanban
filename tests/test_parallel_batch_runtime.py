@@ -877,7 +877,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(sealed["success"], sealed)
             self.assertEqual(
                 _git(tree, "log", "-1", "--format=%s", sealed["commitSha"]),
-                "Z990692-294 #comment 实现 alpha B001",
+                "Z990692-294 #comment cmbdevcalw提交 Code：实现 deliver behavior",
             )
             committed_files = _git(tree, "show", "--format=", "--name-only", sealed["commitSha"]).splitlines()
             self.assertIn("delivery.txt", committed_files)
@@ -1008,7 +1008,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertFalse((repo / "delivered.txt").exists())
             self.assertEqual(
                 _git(repo, "log", "-1", "--format=%s"),
-                f"Z990692-294 #comment 回滚工作流 alpha {delivered_sha}",
+                f"Z990692-294 #comment cmbdevcalw提交 回滚工作流 alpha {delivered_sha}",
             )
 
     def test_scheduler_does_not_bind_a_run_to_the_workflow_workspace(self) -> None:
@@ -1555,7 +1555,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertIn("?? .cmbdevclaw/", _git(repo, "status", "--porcelain"))
             self.assertEqual(
                 _git(repo, "show", "-s", "--format=%s", "HEAD"),
-                "Z990692-294 #comment 初始化 alpha 工作流基线",
+                "Z990692-294 #comment cmbdevcalw提交 初始化 alpha 工作流基线",
             )
             self.assertNotIn(".cmbdevclaw/setup-state.json", _git(repo, "show", "--format=", "--name-only", "HEAD"))
             manifest = load_manifest(workspace, "alpha", scheduled["runId"])

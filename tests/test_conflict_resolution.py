@@ -99,7 +99,7 @@ class AutoMergeTest(unittest.TestCase):
             self.assertEqual(_git(repo, "status", "--porcelain").stdout, "")
             self.assertEqual(
                 _git(repo, "log", "-1", "--format=%s").stdout.strip(),
-                "Z990692-294 #comment 解决冲突 B001, B002",
+                "Z990692-294 #comment cmbdevcalw提交 解决冲突 B001, B002",
             )
 
 

@@ -157,9 +157,17 @@ provisioned.
    handling. Each Merge Train candidate contains exactly one `--batch-id`; its
    `--wave` value is only a unique candidate-record sequence.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
-   invokes `worktree_manager.py seal --purpose review` to create a
+   invokes `worktree_manager.py seal --purpose review --commit-stage code
+   --commit-summary "<actual feature summary>"` to create a
    Review draft. The draft is
    released as `sealed` for the following read-only Review.
+   The commit starts with `<card> #comment cmbdevcalw提交 Code：` and its
+   body contains only the assigned TASK IDs, titles and Plan goals. Review
+   creates no commit. Production rework seals with `--purpose review
+   --commit-stage rework`; ordinary interrupted implementation stays Code.
+   UTest seals with `--commit-stage utest`, including failure-path test-asset
+   seals. Rework and UTest summaries describe actual changes without TASK
+   bodies; no-change seals reuse the existing SHA. See `docs/code-commit-messages.md`.
 4. `parallelBatchPipeline.validationOwnership` assigns every test intent to
    its delivery Batch except `e2e_test`, which belongs to final B-E2E.  The
    delivery UTest agent generates and runs its own tests in the native

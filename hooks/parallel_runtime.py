@@ -26,6 +26,7 @@ from hooks.plan_json import (
     PlanBundle,
     load_plan_bundle,
     normalize_status,
+    task_contract_sha256,
 )
 
 
@@ -376,6 +377,11 @@ def create_manifest(
             # workflow must consume these IDs from the scheduler response; it
             # must not rediscover or invent them from the artifact workspace.
             "taskIds": task_ids,
+            "taskContractDigests": {
+                str(task["id"]): task_contract_sha256(task)
+                for task in batch.get("tasks", [])
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            },
             "deliveryKind": entry.get("deliveryKind"),
             "atomicGroupId": entry.get("atomicGroupId"),
             "batchRationale": entry.get("batchRationale"),

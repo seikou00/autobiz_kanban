@@ -27,8 +27,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.parallel_runtime import append_event, global_worktrees_root, lease_path, load_manifest, renew_lease, run_dir, run_lock, save_manifest
+from hooks.parallel_runtime import (
+    append_event, global_worktrees_root, lease_path, load_manifest, plan_digest,
+    renew_lease, run_dir, run_lock, save_manifest,
+)
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
+from hooks.json_writer_common import feature_dir
+from hooks.plan_json import load_plan_bundle, task_contract_sha256
 from hooks.plan_write_ownership import is_test_asset_path
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
@@ -750,6 +755,61 @@ def _unstage_platform_runtime(worktree: Path) -> dict[str, Any] | None:
     return None
 
 
+def _batch_commit_stage(batch: dict[str, Any]) -> str:
+    """Identify delivery commits from durable stages, not seal purpose/attempts."""
+    states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+    review = states.get("review") if isinstance(states.get("review"), dict) else {}
+    test = states.get("test") if isinstance(states.get("test"), dict) else {}
+    active_stage = batch.get("activeStage")
+    if review.get("status") == "running" or active_stage == "review":
+        raise CommitMessageError("parallel_commit_review_is_read_only")
+    if test.get("status") == "running" or active_stage == "test":
+        if test.get("status") != "running" or review.get("status") != "passed":
+            raise CommitMessageError("parallel_commit_utest_not_ready")
+        return "utest"
+    for state in (review, test):
+        failure = state.get("failure")
+        if (
+            isinstance(failure, dict) and failure.get("type") == "implementation"
+            and failure.get("nextStage") == "implement"
+        ):
+            return "rework"
+    return "code"
+
+
+def _code_commit_tasks(
+    artifact_workspace: Path,
+    feature: str,
+    manifest: dict[str, Any],
+    batch_id: str,
+    batch: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Read only this Run's bound task goals and reject a changed Plan."""
+    try:
+        bundle = load_plan_bundle(feature_dir(artifact_workspace, feature))
+    except (ValueError, OSError) as exc:
+        raise CommitMessageError(f"parallel_commit_plan_invalid:{exc}") from exc
+    plan_batch = bundle.batches.get(batch_id, {})
+    task_index = {task["id"]: task for task in plan_batch.get("tasks", [])}
+    task_ids = batch.get("taskIds")
+    if (
+        not isinstance(task_ids, list)
+        or not task_ids
+        or any(not isinstance(task_id, str) for task_id in task_ids)
+        or len(set(task_ids)) != len(task_ids) or set(task_ids) != set(task_index)
+    ):
+        raise CommitMessageError(f"parallel_commit_task_binding_mismatch:{batch_id}")
+    expected_contracts = batch.get("taskContractDigests")
+    if isinstance(expected_contracts, dict):
+        current_contracts = {task_id: task_contract_sha256(task) for task_id, task in task_index.items()}
+        if expected_contracts != current_contracts:
+            raise CommitMessageError("parallel_commit_plan_changed")
+    elif manifest.get("planDigest") != plan_digest(bundle):
+        # Old manifests have no task contracts: only accept an unchanged Plan.
+        raise CommitMessageError("parallel_commit_plan_changed")
+    return [task_index[task_id] for task_id in task_ids]
+
+
 def seal_parallel_batch(
     artifact_workspace: Path,
     feature: str,
@@ -759,6 +819,8 @@ def seal_parallel_batch(
     owner_token: str,
     *,
     purpose: str = "implementation",
+    commit_stage: str | None = None,
+    commit_summary: str | None = None,
 ) -> dict[str, Any]:
     """Commit a Batch worktree for Review or after UTest changes."""
     if purpose not in {"review", "implementation"}:
@@ -805,6 +867,16 @@ def seal_parallel_batch(
             return {"success": False, "error": f"parallel_worktree_invalid:{batch_id}"}
         if current_git_branch(worktree) != batch.get("branchName"):
             return {"success": False, "error": f"parallel_worktree_branch_mismatch:{batch_id}"}
+        try:
+            actual_commit_stage = _batch_commit_stage(batch)
+            if commit_stage is not None and commit_stage != actual_commit_stage:
+                raise CommitMessageError(
+                    f"parallel_commit_stage_mismatch:expected={actual_commit_stage}:actual={commit_stage}"
+                )
+            if actual_commit_stage == "utest" and review_draft:
+                raise CommitMessageError("parallel_commit_utest_seal_purpose_invalid")
+        except CommitMessageError as exc:
+            return {"success": False, "error": str(exc)}
         runtime_error = _unstage_platform_runtime(worktree)
         if runtime_error:
             return runtime_error
@@ -824,13 +896,7 @@ def seal_parallel_batch(
         if status.returncode != 0:
             return {"success": False, "error": f"parallel_worktree_status_failed:{status.stderr.strip()}"}
         changed = [line[3:] for line in status.stdout.splitlines() if len(line) > 3]
-        stage_states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
-        is_utest_reseal = (
-            isinstance(stage_states.get("test"), dict)
-            and stage_states["test"].get("status") == "running"
-            and isinstance(stage_states.get("review"), dict)
-            and stage_states["review"].get("status") == "passed"
-        )
+        is_utest_reseal = actual_commit_stage == "utest"
         if is_utest_reseal:
             non_test_changes = [path for path in changed if not is_test_asset_path(path)]
             if non_test_changes:
@@ -843,6 +909,24 @@ def seal_parallel_batch(
         if forbidden:
             return {"success": False, "error": "parallel_batch_artifact_changes_forbidden", "files": forbidden}
         if changed:
+            try:
+                commit_tasks = (
+                    _code_commit_tasks(artifact_workspace, feature, manifest, batch_id, batch)
+                    if actual_commit_stage == "code" else None
+                )
+                summary = commit_summary
+                if summary is None:
+                    if actual_commit_stage == "code":
+                        summary = "实现 " + "、".join(task["title"] for task in commit_tasks)
+                    elif actual_commit_stage == "rework":
+                        summary = f"修复 {feature} {batch_id} 实现问题"
+                    else:
+                        summary = f"补充或修复 {feature} {batch_id} 的测试"
+                commit_message = build_commit_message(
+                    task_card_id, summary, stage=actual_commit_stage, tasks=commit_tasks,
+                )
+            except CommitMessageError as exc:
+                return {"success": False, "error": str(exc)}
             staged, lock_failure, lock_recovery = _git_with_index_lock_retry(
                 worktree,
                 "add",
@@ -861,7 +945,7 @@ def seal_parallel_batch(
                 worktree,
                 "commit",
                 "-m",
-                build_commit_message(task_card_id, f"实现 {feature} {batch_id}"),
+                commit_message,
                 "--",
                 ".",
                 f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
@@ -884,6 +968,7 @@ def seal_parallel_batch(
             "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
             "changedFiles": list(changed),
             "purpose": seal_purpose,
+            "commitStage": actual_commit_stage,
             "indexLockRecoveries": index_lock_recoveries,
         }
         save_manifest(artifact_workspace, feature, run_id, manifest)
@@ -895,6 +980,7 @@ def seal_parallel_batch(
         "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
         "changedFiles": changed,
         "purpose": seal_purpose,
+        "commitStage": actual_commit_stage,
         "indexLockRecoveries": index_lock_recoveries,
     }
 
@@ -1031,6 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
     seal.add_argument("--batch-id", required=True)
     seal.add_argument("--owner-token", required=True)
     seal.add_argument("--purpose", choices=("review", "implementation"), default="implementation")
+    seal.add_argument("--commit-stage", choices=("code", "rework", "utest"))
+    seal.add_argument("--commit-summary")
     listed = commands.add_parser("list")
     listed.add_argument("--repo", required=True)
     args = parser.parse_args(argv)
@@ -1046,6 +1134,8 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.repo) if args.repo else None,
             args.owner_token,
             purpose=args.purpose,
+            commit_stage=args.commit_stage,
+            commit_summary=args.commit_summary,
         )
     else:
         result = list_worktrees(Path(args.repo))

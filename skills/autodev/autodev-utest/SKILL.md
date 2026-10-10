@@ -20,6 +20,8 @@ python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --f
 
 Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创建测试。本阶段使用路由脚本生成的 assignment 内容，生成或补齐单测，运行真实测试命令，归因失败，生成 `UNIT_TEST_REPORT.md` 与 `UNIT_TEST_RESULT.json`。
 
+固定 Code Workflow 中，成功或失败时封存测试资产均携带 `--commit-stage utest --commit-summary "<本次新增或修复测试的中文说明>"`。提交格式为 `<看板ID> #comment cmbdevcalw提交 UTest：<说明>`，不附加 TASK，不自动宣称测试通过。生产问题回到 Rework，其提交也不附加 TASK；Review 只读、不创建提交。没有代码变更时复用已有 commitSha。详见 `docs/code-commit-messages.md`。
+
 调用脚本读取当前 Feature 状态：
 
 ```bash
