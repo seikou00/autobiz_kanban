@@ -3,7 +3,7 @@
 ## 生成约束
 
 1. 以实际代码为依据，只记录当前 Feature 新增或修改的接口。
-2. 不得根据 PRD、proposal、specs、design 或 PLAN 编造接口字段、SQL、错误码、枚举或内部逻辑。
+2. 不得根据 "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/"目录下的内容编造接口字段、SQL、错误码、枚举或内部逻辑。
 3. 接口入口、DTO / VO、Service 实现、Mapper / Repository、错误码 / 枚举都要尽量从代码中定位。
 4. 无法从代码确认的信息，写“代码中未确认”；已经检索但未发现的内容，写“代码中未发现……”。
 5. 入参、出参遇到复杂类型必须展开字段，不能只写 `List<XxxVO>`、`XxxDTO`、`Result<XxxVO>` 这类类型名。

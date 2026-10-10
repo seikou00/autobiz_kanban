@@ -1,0 +1,30 @@
+{
+  "allowedCheckpoints": ["plan_done","code_done", "cicd_in_progress", "cicd_done", "archived"],
+  "stages": {
+    "biz": {
+      "biz.prd": {
+        "PRD.md": "正式产品需求文档。",
+        "prd_original/**/*": "原始需求文档或参考材料。",
+        "sources/**/*": "外部资料原件或 Feature 固定快照。"
+      }
+    },
+    "dev": {
+      "dev.specs": {
+        "proposal.md": "行为规格总览。",
+        "specs/**/*.md": "行为规格明细。"
+      },
+      "dev.design": {
+        "design.md": "技术设计文档。"
+      },
+      "dev.plan": {
+        "PLAN.md": "开发执行计划。"
+      },
+      "dev.detail_design": {
+        "DETAIL_DESIGN.md": "文件级详细设计文档。"
+      },
+      "dev.code": {
+        "FEATURE_API_DETAIL.md": "当前 Feature 涉及接口的详细说明。"
+      }
+    }
+  }
+}

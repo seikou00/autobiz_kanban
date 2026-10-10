@@ -21,18 +21,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from artifact_sync import (  # noqa: E402
-    MAX_FILE_SIZE,
-    append_sync_hook_log,
-    batch_fingerprint,
-    mark_event_failed,
-    pending_event_ids,
-    prepare_reconcile_events,
-    read_status,
-    refresh_event_snapshot,
-    resolve_feature_dir,
-    sha256_file,
-    utc_now,
-    write_status,
+    CATALOG_STAGE, MAX_FILE_SIZE, append_sync_hook_log, artifact_object_key,
+    batch_fingerprint, catalog_needs_upload, config_digest, configured_nodes,
+    create_pending_event, load_sync_context, mark_event_failed, needs_upload,
+    pending_event_ids, prepare_reconcile_events, read_status, record_diagnostics,
+    resolve_feature_dir, scan_artifacts, sha256_file, utc_now, validate_path_component,
+    write_artifact_catalog, write_status,
 )
 from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa: E402
 
@@ -135,14 +129,10 @@ def preflight_errors(artifacts: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
-def start_attempt(feature_dir: Path, event_id: str) -> dict[str, Any] | None:
+def start_attempt(feature_dir: Path, event_id: str) -> dict[str, Any]:
     status = read_status(feature_dir)
-    event = status.get("events", {}).get(event_id)
-    if not isinstance(event, dict):
-        return None
-    event["status"] = "pending"
-    event["attempts"] = int(event.get("attempts", 0) or 0) + 1
-    event["updated_at"] = utc_now()
+    event = status["events"][event_id]
+    event.update(status="pending", attempts=int(event.get("attempts", 0) or 0) + 1, updated_at=utc_now())
     event.pop("last_error", None)
     write_status(feature_dir, status)
     return dict(event)
@@ -154,162 +144,164 @@ def fail_event(feature_dir: Path, event_id: str, message: str) -> int:
     return 1
 
 
-def complete_event(
-    feature_dir: Path,
-    *,
-    event_id: str,
-    event: dict[str, Any],
-    artifacts: list[dict[str, Any]],
-) -> None:
-    now = utc_now()
+def record_uploaded(feature_dir: Path, artifact: dict[str, Any], stage: str) -> None:
     status = read_status(feature_dir)
-    stored_event = status.get("events", {}).get(event_id)
-    if not isinstance(stored_event, dict):
-        return
-    stored_event.update(
-        {
-            "status": "success",
-            "fingerprint": batch_fingerprint(artifacts),
-            "artifacts": artifacts,
-            "updated_at": now,
-            "synced_at": now,
-        }
-    )
-    stored_event.pop("manifest", None)
-    stored_event.pop("last_error", None)
-
-    published = status["published_artifacts"]
-    for artifact in artifacts:
-        published[artifact["path"]] = {
-            "stage": event.get("source_stage", ""),
-            "sha256": artifact["sha256"],
-            "size": artifact["size"],
-            "object_key": f"{artifact['upload_path']}/{artifact['file_name']}",
-            "synced_at": now,
+    status["published_artifacts"][artifact["path"]] = {
+        "stage": stage, "sha256": artifact["sha256"], "size": artifact["size"],
+        "object_key": artifact_object_key(artifact), "synced_at": utc_now(),
+    }
+    if "content_digest" in artifact:
+        status["catalog"] = {
+            "content_digest": artifact["content_digest"],
+            "object_key": artifact_object_key(artifact), "synced_at": utc_now(),
         }
     write_status(feature_dir, status)
-    append_sync_hook_log(
-        feature_dir,
-        feature=str(event.get("feature", "")),
-        status="success",
-        event_id=event_id,
-        message=f"{event.get('source_stage', '')} 产物上传成功，共 {len(artifacts)} 个文件",
+
+
+def update_event_snapshot(feature_dir: Path, event_id: str, config: dict[str, Any], artifacts: list[dict[str, Any]]) -> None:
+    status = read_status(feature_dir)
+    status["events"][event_id].update(
+        config_digest=config_digest(config), config_snapshot=config,
+        artifacts=artifacts, fingerprint=batch_fingerprint(artifacts, config_digest(config)),
+        updated_at=utc_now(),
     )
+    write_status(feature_dir, status)
 
 
-def execute_event(workspace: Path, feature: str, event_id: str, project_code: str) -> int:
+def complete_event(feature_dir: Path, event_id: str, *, skipped_reason: str = "") -> None:
+    status = read_status(feature_dir)
+    event = status["events"][event_id]
+    event.update(status="skipped" if skipped_reason else "success", updated_at=utc_now(), synced_at=utc_now())
+    event.pop("last_error", None)
+    if skipped_reason:
+        event["skipped_reason"] = skipped_reason
+    write_status(feature_dir, status)
+    append_sync_hook_log(feature_dir, feature=event["feature"], event_id=event_id,
+                         status=event["status"], message=skipped_reason or f"{event['source_stage']} 同步完成")
+
+
+def execute_event(
+    workspace: Path, feature: str, event_id: str, project_code: str,
+    *, config: dict[str, Any] | None = None,
+) -> int:
+    if config is None:
+        return execute_many(workspace, feature, [event_id], project_code)
+    load_sync_context(workspace, feature)
     feature_dir = resolve_feature_dir(workspace, feature)
     if feature_dir is None:
-        print(f"Feature 目录不存在: {feature}", file=sys.stderr)
-        return 1
-
+        raise ValueError(f"Feature 目录不存在: {feature}")
+    stored = read_status(feature_dir)["events"].get(event_id)
+    if not isinstance(stored, dict) or stored.get("feature") != feature:
+        raise ValueError(f"同步事件不存在或 Feature 不匹配: {event_id}")
     event = start_attempt(feature_dir, event_id)
-    if event is None:
-        print(f"同步事件不存在: {event_id}", file=sys.stderr)
-        return 1
-
+    stage = event.get("source_stage", "")
+    if event.get("kind") != "catalog" and stage not in configured_nodes(config):
+        message = f"节点已从同步配置移除，跳过: {stage}"
+        complete_event(feature_dir, event_id, skipped_reason=message)
+        print(message)
+        return 0
     try:
-        artifacts, missing = refresh_event_snapshot(
-            workspace=workspace,
-            feature_dir=feature_dir,
-            project_code=project_code,
-            event=event,
-        )
-    except Exception as exc:
-        return fail_event(feature_dir, event_id, f"无法刷新同步产物清单: {exc}")
-
-    if missing:
-        append_sync_hook_log(
-            feature_dir,
-            feature=feature,
-            status="missing",
-            event_id=event_id,
-            message="部分产物缺失，仅同步已存在产物: " + ", ".join(missing),
-        )
-        if not artifacts:
-            return fail_event(feature_dir, event_id, f"缺少待上传产物: {', '.join(missing)}")
-    errors = preflight_errors(artifacts)
-    if errors:
-        return fail_event(feature_dir, event_id, "\n".join(errors))
-
-    for artifact in artifacts:
-        ok, error = upload_file(artifact)
-        if not ok:
-            return fail_event(feature_dir, event_id, error)
-
-    complete_event(
-        feature_dir,
-        event_id=event_id,
-        event=event,
-        artifacts=artifacts,
-    )
+        selected, diagnostics = scan_artifacts(feature_dir, feature=feature, project_code=project_code, config=config)
+        status = read_status(feature_dir)
+        if event.get("kind") == "catalog":
+            artifact = write_artifact_catalog(feature_dir, feature=feature, project_code=project_code,
+                                              selected=selected, status=status)
+            artifacts = [artifact] if catalog_needs_upload(artifact, status) else []
+        else:
+            record_diagnostics(feature_dir, feature, [item for item in diagnostics if item["stage"] == stage])
+            artifacts = [item for item in selected.values() if item["stage"] == stage and needs_upload(item, status)]
+        update_event_snapshot(feature_dir, event_id, config, artifacts)
+        errors = []
+        for artifact in artifacts:
+            # Preflight each file immediately before sending; one failure does not
+            # discard successful siblings or prevent their durable publication.
+            checks = preflight_errors([artifact])
+            if checks:
+                errors.extend(checks)
+                continue
+            ok, error = upload_file(artifact)
+            if not ok:
+                errors.append(error)
+                continue
+            record_uploaded(feature_dir, artifact, stage)
+        if errors:
+            return fail_event(feature_dir, event_id, "\n".join(errors))
+    except (OSError, ValueError) as exc:
+        return fail_event(feature_dir, event_id, f"产物同步失败: {exc}")
+    complete_event(feature_dir, event_id)
     print(f"artifact sync success: event_id={event_id} files={len(artifacts)}")
     return 0
 
 
 def execute_many(workspace: Path, feature: str, event_ids: list[str], project_code: str) -> int:
-    failures = 0
+    _, config = load_sync_context(workspace, feature)
+    feature_dir = resolve_feature_dir(workspace, feature)
+    if feature_dir is None:
+        raise ValueError(f"Feature 目录不存在: {feature}")
+    status = read_status(feature_dir)
+    event_ids = list(dict.fromkeys(event_ids))
     for event_id in event_ids:
-        failures += int(execute_event(workspace, feature, event_id, project_code) != 0)
-    return 0 if failures == 0 else 1
+        event = status["events"].get(event_id)
+        if not isinstance(event, dict) or event.get("feature") != feature:
+            raise ValueError(f"同步事件不存在或 Feature 不匹配: {event_id}")
+    if not event_ids:
+        return 0
+    file_events = [key for key in event_ids if status["events"][key].get("kind") != "catalog"]
+    catalog_events = [key for key in event_ids if status["events"][key].get("kind") == "catalog"]
+    # Persist the catalog obligation before uploading files so a crash is retryable.
+    if file_events and not catalog_events:
+        selected, _ = scan_artifacts(feature_dir, feature=feature, project_code=project_code, config=config)
+        catalog = write_artifact_catalog(feature_dir, feature=feature, project_code=project_code,
+                                         selected=selected, status=status)
+        catalog_events.append(create_pending_event(feature_dir, feature=feature, source_stage=CATALOG_STAGE,
+                                                    config=config, artifacts=[catalog], kind="catalog"))
+    failures = 0
+    for event_id in file_events + catalog_events:
+        failures += int(execute_event(workspace, feature, event_id, project_code, config=config) != 0)
+    return 1 if failures else 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Upload AutobizDevOps Feature artifacts")
+    parser = argparse.ArgumentParser(description="Upload configured AutobizDevOps Feature artifacts")
     parser.add_argument("--feature", "-f", help="feature name; defaults to FEATURE_ID")
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--sync", action="store_true", help="sync completed and previously published stages, including first-time uploads")
-    action.add_argument("--event-id", help="execute one synchronization event")
-    action.add_argument(
-        "--retry-failed",
-        "--drain-outbox",
-        dest="retry_failed",
-        action="store_true",
-        help="retry pending and failed events (--drain-outbox is a compatibility alias)",
-    )
-    action.add_argument("--reconcile", action="store_true", help="scan published stages and upload changed artifacts")
-    parser.add_argument("--prepare-only", action="store_true", help="prepare local events and catalog without uploading (with --sync or --reconcile)")
+    action.add_argument("--check", action="store_true", help="read-only admission and Feature directory check")
+    action.add_argument("--sync", "--reconcile", dest="sync", action="store_true", help="sync configured artifacts (--reconcile is an alias)")
+    action.add_argument("--event-id", help="execute one event and refresh the published catalog")
+    action.add_argument("--retry-failed", "--drain-outbox", dest="retry_failed", action="store_true", help="retry pending/failed events once")
+    parser.add_argument("--prepare-only", action="store_true", help="prepare events and the published catalog without uploading")
     args = parser.parse_args(argv)
-    if args.prepare_only and not (args.sync or args.reconcile):
+    if args.prepare_only and not args.sync:
         parser.error("--prepare-only requires --sync or --reconcile")
-
     try:
         workspace = get_plugin_output_workspace()
         feature = resolve_env_feature(args.feature, required=True)
-    except ValueError as exc:
+        project_code = str(os.environ.get("PROJECT_CODE") or "").strip()
+        validate_path_component(project_code, "PROJECT_CODE")
+        record, config = load_sync_context(workspace, feature)
+        feature_dir = resolve_feature_dir(workspace, feature)
+        if feature_dir is None:
+            raise ValueError(f"Feature 目录不存在: {feature}")
+        # Validate every configured path before changing any sync state.
+        scan_artifacts(feature_dir, feature=feature, project_code=project_code, config=config)
+        if args.check:
+            print(json.dumps({"feature": feature, "checkpoint": record["checkpoint"],
+                              "feature_dir": str(feature_dir)}, ensure_ascii=False))
+            return 0
+        if args.event_id:
+            return execute_many(workspace, feature, [args.event_id], project_code)
+        if args.retry_failed:
+            return execute_many(workspace, feature, pending_event_ids(feature_dir), project_code)
+        _, event_ids = prepare_reconcile_events(workspace=workspace, feature=feature, project_code=project_code)
+        if args.prepare_only:
+            print(json.dumps({"feature": feature, "event_ids": event_ids, "uploaded": False}, ensure_ascii=False))
+            return 0
+        if not event_ids:
+            print("产物和目录均无变化，无需上传。")
+        return execute_many(workspace, feature, event_ids, project_code)
+    except (OSError, ValueError) as exc:
         print(f"产物同步失败: {exc}", file=sys.stderr)
         return 1
-
-    project_code = str(os.environ.get("PROJECT_CODE") or "").strip()
-    if not project_code:
-        print("产物同步失败: PROJECT_CODE 未设置", file=sys.stderr)
-        return 1
-    feature_dir = resolve_feature_dir(workspace, feature)
-    if feature_dir is None:
-        print(f"产物同步失败: Feature 目录不存在: {feature}", file=sys.stderr)
-        return 1
-
-    if args.event_id:
-        return execute_event(workspace, feature, args.event_id, project_code)
-    if args.retry_failed:
-        return execute_many(workspace, feature, pending_event_ids(feature_dir), project_code)
-
-    try:
-        _, event_ids = prepare_reconcile_events(
-            workspace=workspace,
-            feature=feature,
-            project_code=project_code,
-            include_completed=args.sync,
-        )
-    except Exception as exc:
-        print(f"产物同步准备失败: {exc}", file=sys.stderr)
-        return 1
-    if args.prepare_only:
-        print(json.dumps({"feature": feature, "event_ids": event_ids, "uploaded": False}, ensure_ascii=False))
-        return 0
-    if not event_ids:
-        print("产物无变化或尚无已完成阶段，无需上传。")
-    return execute_many(workspace, feature, event_ids, project_code)
 
 
 if __name__ == "__main__":

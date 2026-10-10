@@ -6,13 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import tempfile
-import time
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
@@ -20,15 +18,8 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from board_core.contracts import (  # noqa: E402
-    ArtifactSpec,
-    SkillContract,
-    load_record_workflow_contracts,
-)
-from board_core.state import find_feature_dir  # noqa: E402
-from board_core.state_store import load_state_json_records_result  # noqa: E402
-
-
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "artifact-sync.json"
+CATALOG_STAGE = "artifact_catalog"
 STATUS_FILE_NAME = "sync-status.json"
 CATALOG_FILE_NAME = "ARTIFACT_CATALOG.json"
 CATALOG_SCHEMA_VERSION = "autobizdevops.artifact-catalog.v1"
@@ -41,18 +32,8 @@ LEGACY_SYNC_DIR_NAME = "artifact-sync"
 LEGACY_OUTBOX_FILE_NAME = "outbox.ndjson"
 LEGACY_MANIFESTS_DIR_NAME = "manifests"
 MAX_FILE_SIZE = 5 * 1024 * 1024
-SYNC_PROCESS_TIMEOUT_SECONDS = 60
-UPLOAD_GROUPS = frozenset({"Biz", "Dev"})
-WORKFLOW_RECORD_FIELDS = (
-    "workflowProfile",
-    "workflowDecisions",
-    "workflowTemplate",
-    "workflowNodes",
-    "workflowSkippedNodes",
-)
 IGNORED_PRD_ORIGINAL_NAMES = frozenset({".DS_Store", "Thumbs.db"})
 IGNORED_PRD_ORIGINAL_SUFFIXES = frozenset({".tmp", ".swp", ".swo", ".part"})
-RETIRED_ARTIFACT_PATHS = frozenset({"PRD_DISCUSS.md"})
 LEGACY_STAGE_ALIASES = {"biz.discuss": "biz.prd"}
 
 
@@ -68,54 +49,16 @@ def default_status() -> dict[str, Any]:
     }
 
 
-def _migrate_workflow_record_nodes(record: dict[str, Any]) -> bool:
-    changed = False
-    nodes = record.get("workflowNodes")
-    if isinstance(nodes, list):
-        migrated_nodes: list[Any] = []
-        for node_id in nodes:
-            migrated = LEGACY_STAGE_ALIASES.get(node_id, node_id) if isinstance(node_id, str) else node_id
-            if migrated not in migrated_nodes:
-                migrated_nodes.append(migrated)
-        if migrated_nodes != nodes:
-            record["workflowNodes"] = migrated_nodes
-            changed = True
-
-    skipped = record.get("workflowSkippedNodes")
-    if isinstance(skipped, list):
-        migrated_skipped = [node_id for node_id in skipped if node_id != "biz.discuss"]
-        if migrated_skipped != skipped:
-            record["workflowSkippedNodes"] = migrated_skipped
-            changed = True
-    return changed
-
-
 def migrate_legacy_status(data: dict[str, Any]) -> bool:
-    """Move retryable Biz sync state to the merged biz.prd contract."""
+    """Map old retryable node IDs without changing publication history."""
     changed = False
-    published = data.get("published_artifacts", {})
-    for path in RETIRED_ARTIFACT_PATHS:
-        if path in published:
-            published.pop(path, None)
-            changed = True
-    for artifact in published.values():
-        if not isinstance(artifact, dict):
-            continue
-        stage = artifact.get("stage")
-        if stage in LEGACY_STAGE_ALIASES:
-            artifact["stage"] = LEGACY_STAGE_ALIASES[stage]
-            changed = True
-
     for event in data.get("events", {}).values():
-        if not isinstance(event, dict) or event.get("status") not in {"pending", "failed"}:
+        if (not isinstance(event, dict) or event.get("status") not in {"pending", "failed"}
+                or "config_snapshot" in event):
             continue
         stage = event.get("source_stage")
         if stage in LEGACY_STAGE_ALIASES:
             event["source_stage"] = LEGACY_STAGE_ALIASES[stage]
-            event["source_skill"] = "autobiz-requirement-discuss"
-            changed = True
-        workflow_record = event.get("workflow_record")
-        if isinstance(workflow_record, dict) and _migrate_workflow_record_nodes(workflow_record):
             changed = True
     return changed
 
@@ -221,7 +164,7 @@ def append_sync_hook_log(
 ) -> None:
     record = {
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "source": "hook",
+        "source": "skill",
         "sessionId": os.environ.get("SESSION_ID", ""),
         "pluginId": "AUTOBIZDEVOPS-PLUGIN",
         "featureId": feature,
@@ -252,7 +195,11 @@ def has_glob(path: str) -> bool:
 
 
 def relative_artifact_path(feature_dir: Path, path: Path) -> str:
-    return path.resolve(strict=False).relative_to(feature_dir.resolve(strict=False)).as_posix()
+    try:
+        path.resolve().relative_to(feature_dir.resolve())
+        return path.absolute().relative_to(feature_dir.absolute()).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"产物路径越界: {path}") from exc
 
 
 def object_directory(project_code: str, feature: str, relative_path: str) -> str:
@@ -267,13 +214,11 @@ def snapshot_file_artifact(
     *,
     project_code: str,
     feature: str,
-    required: bool = False,
 ) -> dict[str, Any]:
     relative_path = relative_artifact_path(feature_dir, path)
     return {
         "path": relative_path,
         "local_path": str(path),
-        "required": required,
         "size": path.stat().st_size,
         "sha256": sha256_file(path),
         "upload_path": object_directory(project_code, feature, relative_path),
@@ -281,182 +226,114 @@ def snapshot_file_artifact(
     }
 
 
-def expand_artifact_spec(feature_dir: Path, spec: ArtifactSpec) -> tuple[list[Path], list[str]]:
-    if has_glob(spec.path):
-        files = sorted(path for path in feature_dir.glob(spec.path) if path.is_file())
-        if spec.required and not files:
-            return [], [spec.path]
-        return files, []
-
-    path = feature_dir / spec.path
-    if path.is_file():
-        return [path], []
-    return [], [spec.path] if spec.required else []
-
-
-def snapshot_contract_outputs(
-    feature_dir: Path,
-    *,
-    project_code: str,
-    feature: str,
-    contract: SkillContract,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    artifacts: list[dict[str, Any]] = []
-    missing: list[str] = []
-
-    for spec in contract.outputs:
-        files, missing_paths = expand_artifact_spec(feature_dir, spec)
-        missing.extend(missing_paths)
-        for path in files:
-            artifacts.append(
-                snapshot_file_artifact(
-                    feature_dir,
-                    path,
-                    project_code=project_code,
-                    feature=feature,
-                    required=spec.required,
-                )
-            )
-
-    artifacts.sort(key=lambda item: item["path"])
-    return artifacts, sorted(set(missing))
-
-
 CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
     "PRD.md": {
         "category": "requirement",
         "lifecycle": "final",
-        "description": "正式产品需求文档。",
     },
     "source-context.json": {
         "category": "requirement_source",
         "lifecycle": "final",
-        "description": "外部资料原文与稳定要求索引。",
     },
     "UI_CONTEXT.json": {
         "category": "ui_context",
         "lifecycle": "final",
-        "description": "UI 范围机器事实源。",
     },
     "proposal.md": {
         "category": "behavior_proposal",
         "lifecycle": "final",
-        "description": "行为规格总览。",
     },
     "design.md": {
         "category": "technical_design",
         "lifecycle": "process",
-        "description": "技术设计文档。",
     },
     ".design-contract.lock.json": {
         "category": "technical_design_contract",
         "lifecycle": "process",
-        "description": "由技术设计阶段锁定的 Plan 契约快照。",
     },
     "PLAN.md": {
         "category": "implementation_plan",
         "lifecycle": "process",
-        "description": "开发执行计划。",
     },
     "plan.json": {
         "category": "implementation_plan",
         "lifecycle": "final",
-        "description": "开发计划机器事实源。",
     },
     "SMOKE_TEST_PLAN.json": {
         "category": "smoke_test_plan",
         "lifecycle": "process",
-        "description": "旁路冒烟测试计划。",
     },
     "SMOKE_RESULT.json": {
         "category": "smoke_result",
         "lifecycle": "evidence",
-        "description": "旁路冒烟执行结果。",
     },
     "DETAIL_DESIGN.md": {
         "category": "technical_detail",
         "lifecycle": "process",
-        "description": "详细设计文档。",
     },
     "SPECS_REVIEW.md": {
         "category": "review_report",
         "lifecycle": "evidence",
-        "description": "行为规格回检结论。",
     },
     "REQUIREMENTS_EVAL.md": {
         "category": "review_report",
         "lifecycle": "evidence",
-        "description": "需求实现评审报告。",
     },
     "UNIT_TEST_REPORT.md": {
         "category": "unit_test_report",
         "lifecycle": "evidence",
-        "description": "单元测试报告。",
     },
     "UNIT_TEST_RESULT.json": {
         "category": "unit_test_result",
         "lifecycle": "evidence",
-        "description": "结构化单元测试结果。",
     },
     "test-output.log": {
         "category": "log",
         "lifecycle": "log",
-        "description": "单元测试原始运行日志。",
     },
     "E2E_TEST_CASES.yaml": {
         "category": "e2e_cases",
         "lifecycle": "evidence",
-        "description": "E2E 测试用例。",
     },
     "E2E_REPORT.md": {
         "category": "e2e_report",
         "lifecycle": "evidence",
-        "description": "E2E 测试报告。",
     },
     "E2E_RESULT.json": {
         "category": "e2e_result",
         "lifecycle": "evidence",
-        "description": "结构化 E2E 测试结果。",
     },
     "E2E_QUALITY_SCAN.json": {
         "category": "e2e_quality_scan",
         "lifecycle": "evidence",
-        "description": "E2E 假绿质量门禁与输入哈希。",
     },
     "e2e-run.log": {
         "category": "log",
         "lifecycle": "log",
-        "description": "E2E 原始运行日志。",
     },
     "VERIFY_REPORT.md": {
         "category": "verify_report",
         "lifecycle": "final",
-        "description": "验收汇总报告。",
     },
     "VERIFY_DECISION.json": {
         "category": "verify_decision",
         "lifecycle": "final",
-        "description": "结构化验收决策。",
     },
     "FIX_REQUEST.json": {
         "category": "fix_request",
         "lifecycle": "process",
-        "description": "结构化修复回流请求。",
     },
     "evidence/EVIDENCE.jsonl": {
         "category": "evidence_stream",
         "lifecycle": "evidence",
-        "description": "证据事实流。",
     },
     "FEATURE_API_DETAIL.md": {
         "category": "api_detail",
         "lifecycle": "final",
-        "description": "当前 Feature 涉及接口的详细说明。",
     },
     CATALOG_FILE_NAME: {
         "category": "artifact_catalog",
         "lifecycle": "system",
-        "description": "Feature 产物清单。",
     },
 }
 
@@ -478,25 +355,21 @@ def catalog_metadata_for_path(relative_path: str) -> dict[str, Any]:
         return {
             "category": "behavior_spec",
             "lifecycle": "final",
-            "description": "行为规格明细。",
         }
     if relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/"):
         return {
             "category": "source_reference",
             "lifecycle": "reference",
-            "description": "原始需求文档或参考材料快照。",
         }
     if relative_path.startswith(f"{SOURCE_SNAPSHOT_DIR_NAME}/"):
         return {
             "category": "requirement_source_snapshot",
             "lifecycle": "reference",
-            "description": "外部资料原件或 Feature 固定快照。",
         }
     if relative_path.startswith("e2e-diagnostics/"):
         return {
             "category": "e2e_diagnostic",
             "lifecycle": "evidence",
-            "description": "E2E trace、截图、网络、控制台或机器报告诊断。",
         }
     return dict(
         CATALOG_EXACT_METADATA.get(
@@ -504,1054 +377,296 @@ def catalog_metadata_for_path(relative_path: str) -> dict[str, Any]:
             {
                 "category": "artifact",
                 "lifecycle": "process",
-                "description": "Feature 产物。",
             },
         )
     )
 
 
-def catalog_entry(
-    *,
-    path: str,
-    stage: str,
-    upload_status: str,
-    size: int | None = None,
-    sha256: str | None = None,
-    status_reason: str = "",
-) -> dict[str, Any]:
-    metadata = catalog_metadata_for_path(path)
-    entry: dict[str, Any] = {
-        "path": path,
-        "stage": stage,
-        "source": catalog_source_for_path(path),
-        "category": metadata["category"],
-        "lifecycle": metadata["lifecycle"],
-        "upload_status": upload_status,
-        "description": metadata["description"],
-    }
-    if size is not None:
-        entry["size"] = size
-    if sha256:
-        entry["sha256"] = sha256
-    if status_reason:
-        entry["status_reason"] = status_reason
-    return entry
 
-
-def ignored_prd_original_file(path: Path) -> bool:
-    return (
-        path.name in IGNORED_PRD_ORIGINAL_NAMES
-        or path.name.startswith("~$")
-        or path.name.startswith(".")
-        or path.suffix in IGNORED_PRD_ORIGINAL_SUFFIXES
-    )
-
-
-def collect_prd_original_artifacts(
-    feature_dir: Path,
-    *,
-    project_code: str,
-    feature: str,
-    status: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    artifacts: list[dict[str, Any]] = []
-    side_entries: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for directory_name in (PRD_ORIGINAL_DIR_NAME, SOURCE_SNAPSHOT_DIR_NAME):
-        source_dir = feature_dir / directory_name
-        if not source_dir.is_dir():
-            continue
-        for path in sorted(source_dir.rglob("*")):
-            if not path.is_file() or ignored_prd_original_file(path):
-                continue
-            relative_path = relative_artifact_path(feature_dir, path)
-            seen.add(relative_path)
-            size = path.stat().st_size
-            if size > MAX_FILE_SIZE:
-                side_entries.append(
-                    catalog_entry(
-                        path=relative_path,
-                        stage="biz.prd",
-                        upload_status="skipped",
-                        size=size,
-                        status_reason="file_size_exceeds_5mb",
-                    )
-                )
-                continue
-            artifacts.append(
-                snapshot_file_artifact(
-                    feature_dir,
-                    path,
-                    project_code=project_code,
-                    feature=feature,
-                    required=False,
-                )
-            )
-
-    for relative_path in sorted(status.get("published_artifacts", {})):
-        if not isinstance(relative_path, str) or not relative_path.startswith(
-            (f"{PRD_ORIGINAL_DIR_NAME}/", f"{SOURCE_SNAPSHOT_DIR_NAME}/")
-        ):
-            continue
-        if relative_path in seen:
-            continue
-        if not (feature_dir / relative_path).is_file():
-            side_entries.append(
-                catalog_entry(
-                    path=relative_path,
-                    stage="biz.prd",
-                    upload_status="missing",
-                    status_reason="file_not_found",
-                )
-            )
-    return sorted(artifacts, key=lambda item: item["path"]), side_entries
-
-
-def collect_optional_verify_artifacts(
-    feature_dir: Path,
-    *,
-    project_code: str,
-    feature: str,
-    status: dict[str, Any],
-    include_missing: bool,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    artifacts: list[dict[str, Any]] = []
-    side_entries: list[dict[str, Any]] = []
-    published = status.get("published_artifacts", {})
-    for relative_path in OPTIONAL_VERIFY_ARTIFACTS:
-        path = feature_dir / relative_path
-        if path.is_file():
-            size = path.stat().st_size
-            if size > MAX_FILE_SIZE:
-                side_entries.append(
-                    catalog_entry(
-                        path=relative_path,
-                        stage="dev.code",
-                        upload_status="skipped",
-                        size=size,
-                        status_reason="file_size_exceeds_5mb",
-                    )
-                )
-                continue
-            artifacts.append(
-                snapshot_file_artifact(
-                    feature_dir,
-                    path,
-                    project_code=project_code,
-                    feature=feature,
-                    required=False,
-                )
-            )
-            continue
-        if include_missing or relative_path in published:
-            side_entries.append(
-                catalog_entry(
-                    path=relative_path,
-                    stage="dev.code",
-                    upload_status="missing",
-                    status_reason="file_not_found",
-                )
-            )
-    return sorted(artifacts, key=lambda item: item["path"]), side_entries
-
-
-def collect_sidecar_artifacts(
-    feature_dir: Path,
-    *,
-    project_code: str,
-    feature: str,
-    stage_id: str,
-    status: dict[str, Any],
-    include_unpublished_missing: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if stage_id == "biz.prd":
-        return collect_prd_original_artifacts(
-            feature_dir,
-            project_code=project_code,
-            feature=feature,
-            status=status,
-        )
-    if stage_id == "dev.code":
-        return collect_optional_verify_artifacts(
-            feature_dir,
-            project_code=project_code,
-            feature=feature,
-            status=status,
-            include_missing=include_unpublished_missing,
-        )
-    return [], []
-
-
-def split_oversized_artifacts(
-    artifacts: list[dict[str, Any]],
-    *,
-    stage: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    uploadable: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for artifact in artifacts:
-        size = int(artifact.get("size", 0) or 0)
-        relative_path = str(artifact.get("path") or "")
-        if relative_path and size > MAX_FILE_SIZE:
-            skipped.append(
-                catalog_entry(
-                    path=relative_path,
-                    stage=stage,
-                    upload_status="skipped",
-                    size=size,
-                    sha256=str(artifact.get("sha256") or ""),
-                    status_reason="file_size_exceeds_5mb",
-                )
-            )
-            continue
-        uploadable.append(artifact)
-    return uploadable, skipped
-
-
-def merge_catalog_entries(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        path = str(entry.get("path", ""))
-        if not path or path == CATALOG_FILE_NAME:
-            continue
-        merged[path] = dict(entry)
-    return [merged[path] for path in sorted(merged)]
-
-
-def catalog_entries_from_published(feature_dir: Path, status: dict[str, Any]) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    for relative_path, published in status.get("published_artifacts", {}).items():
-        if (
-            not isinstance(relative_path, str)
-            or relative_path == CATALOG_FILE_NAME
-            or relative_path in RETIRED_ARTIFACT_PATHS
-        ):
-            continue
-        if not isinstance(published, dict):
-            continue
-        path = feature_dir / relative_path
-        stage = str(published.get("stage") or "")
-        if path.is_file():
-            size = path.stat().st_size
-            try:
-                current_hash = sha256_file(path)
-            except OSError:
-                current_hash = ""
-            if (
-                current_hash
-                and current_hash == published.get("sha256")
-                and size == published.get("size")
-            ):
-                entries.append(
-                    catalog_entry(
-                        path=relative_path,
-                        stage=stage,
-                        upload_status="unchanged",
-                        size=size,
-                        sha256=current_hash,
-                    )
-                )
-            else:
-                entries.append(
-                    catalog_entry(
-                        path=relative_path,
-                        stage=stage,
-                        upload_status="uploaded",
-                        size=size,
-                        sha256=current_hash or None,
-                    )
-                )
-            continue
-        entries.append(
-            catalog_entry(
-                path=relative_path,
-                stage=stage,
-                upload_status="missing",
-                status_reason="file_not_found",
-            )
-        )
-    return entries
-
-
-def write_artifact_catalog(
-    feature_dir: Path,
-    *,
-    feature: str,
-    status: dict[str, Any],
-    current_stage: str,
-    current_artifacts: list[dict[str, Any]],
-    current_missing: list[str],
-    side_entries: list[dict[str, Any]],
-    project_code: str,
-) -> dict[str, Any]:
-    entries: list[dict[str, Any]] = catalog_entries_from_published(feature_dir, status)
-    for artifact in current_artifacts:
-        relative_path = str(artifact.get("path") or "")
-        if not relative_path or relative_path == CATALOG_FILE_NAME:
-            continue
-        entries.append(
-            catalog_entry(
-                path=relative_path,
-                stage=current_stage,
-                upload_status="uploaded",
-                size=int(artifact.get("size", 0)),
-                sha256=str(artifact.get("sha256") or ""),
-            )
-        )
-    for missing_path in current_missing:
-        entries.append(
-            catalog_entry(
-                path=missing_path,
-                stage=current_stage,
-                upload_status="missing",
-                status_reason="file_not_found",
-            )
-        )
-    entries.extend(side_entries)
-
-    payload = {
-        "schema_version": CATALOG_SCHEMA_VERSION,
-        "feature_id": feature,
-        "generated_at": utc_now(),
-        "artifacts": merge_catalog_entries(entries),
-    }
-    atomic_write_json(feature_dir / CATALOG_FILE_NAME, payload)
-    return snapshot_file_artifact(
-        feature_dir,
-        feature_dir / CATALOG_FILE_NAME,
-        project_code=project_code,
-        feature=feature,
-        required=False,
-    )
-
-
-def order_upload_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(artifacts, key=lambda item: (item.get("path") == CATALOG_FILE_NAME, str(item.get("path", ""))))
-
-
-def snapshot_sync_candidates(
-    feature_dir: Path,
-    *,
-    project_code: str,
-    feature: str,
-    contract: SkillContract,
-    status: dict[str, Any],
-    include_unpublished_missing: bool = False,
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
-    artifacts, missing = snapshot_contract_outputs(
-        feature_dir,
-        project_code=project_code,
-        feature=feature,
-        contract=contract,
-    )
-    sidecar_artifacts, side_entries = collect_sidecar_artifacts(
-        feature_dir,
-        project_code=project_code,
-        feature=feature,
-        stage_id=contract.node_id,
-        status=status,
-        include_unpublished_missing=include_unpublished_missing,
-    )
-    artifacts.extend(sidecar_artifacts)
-    artifacts, oversized_entries = split_oversized_artifacts(artifacts, stage=contract.node_id)
-    side_entries.extend(oversized_entries)
-    return sorted(artifacts, key=lambda item: item["path"]), missing, side_entries
-
-
-def snapshot_event_artifacts(
-    feature_dir: Path,
-    *,
-    project_code: str,
-    feature: str,
-    contract: SkillContract,
-    status: dict[str, Any],
-    include_unpublished_missing: bool = False,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    artifacts, missing, side_entries = snapshot_sync_candidates(
-        feature_dir,
-        project_code=project_code,
-        feature=feature,
-        contract=contract,
-        status=status,
-        include_unpublished_missing=include_unpublished_missing,
-    )
-    catalog = write_artifact_catalog(
-        feature_dir,
-        feature=feature,
-        status=status,
-        current_stage=contract.node_id,
-        current_artifacts=artifacts,
-        current_missing=missing,
-        side_entries=side_entries,
-        project_code=project_code,
-    )
-    artifacts.append(catalog)
-    return order_upload_artifacts(artifacts), missing
-
-
-def batch_fingerprint(artifacts: Iterable[dict[str, Any]]) -> str:
-    rows = [
-        {
-            "path": item.get("path", ""),
-            "sha256": item.get("sha256", ""),
-            "size": item.get("size", 0),
-        }
-        for item in artifacts
-    ]
-    encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+def json_digest(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def contract_by_node_id(contracts: Any, node_id: str) -> SkillContract | None:
-    for contract in contracts.skill_contracts.values():
-        if contract.node_id == node_id:
-            return contract
-    return None
+def configured_nodes(config: dict[str, Any]) -> dict[str, dict[str, str]]:
+    return {node: paths for nodes in config["stages"].values() for node, paths in nodes.items()}
 
 
-def contract_for_checkpoint(contracts: Any, checkpoint: str | None) -> SkillContract | None:
-    if not checkpoint:
-        return None
-    for contract in contracts.skill_contracts.values():
-        if checkpoint in contract.checkpoints:
-            return contract
-    return None
+def config_digest(config: dict[str, Any]) -> str:
+    # Order determines ownership when multiple patterns match the same path.
+    return json_digest({
+        "allowedCheckpoints": sorted(config["allowedCheckpoints"]),
+        "stages": [(group, [(node, list(paths.items())) for node, paths in nodes.items()])
+                   for group, nodes in config["stages"].items()],
+    })
 
 
-def ordered_contract_node_ids_for_group(contracts: Any, group: str) -> list[str]:
-    node_ids: list[str] = []
-    for node in contracts.nodes:
-        if not isinstance(node, dict):
-            continue
-        node_id = node.get("id")
-        if not isinstance(node_id, str) or not node_id:
-            continue
-        contract = contract_by_node_id(contracts, node_id)
-        if contract is not None and contract.group == group:
-            node_ids.append(node_id)
-    return node_ids
-
-
-def is_group_terminal_done_checkpoint(
-    contracts: Any,
-    contract: SkillContract,
-    checkpoint: str | None,
-) -> bool:
-    if contract.group not in UPLOAD_GROUPS:
-        return False
-    if not checkpoint or checkpoint not in contract.checkpoints or not checkpoint.endswith("_done"):
-        return False
-    node_ids = ordered_contract_node_ids_for_group(contracts, contract.group)
-    return bool(node_ids) and node_ids[-1] == contract.node_id
-
-
-def terminal_group_done_contract_for_checkpoint(
-    contracts: Any,
-    checkpoint: str | None,
-) -> SkillContract | None:
-    contract = contract_for_checkpoint(contracts, checkpoint)
-    if contract is None:
-        return None
-    if not is_group_terminal_done_checkpoint(contracts, contract, checkpoint):
-        return None
-    return contract
-
-
-def ordered_workflow_contracts(contracts: Any) -> list[SkillContract]:
-    result: list[SkillContract] = []
-    for node in contracts.nodes:
-        if not isinstance(node, dict):
-            continue
-        node_id = node.get("id")
-        if not isinstance(node_id, str) or not node_id:
-            continue
-        contract = contract_by_node_id(contracts, node_id)
-        if contract is not None:
-            result.append(contract)
-    return result
-
-
-def checkpoint_with_suffix(contract: SkillContract, suffix: str) -> str | None:
-    return next((checkpoint for checkpoint in contract.checkpoints if checkpoint.endswith(suffix)), None)
-
-
-def inferred_previous_checkpoint(contracts: Any, current_checkpoint: str | None) -> str | None:
-    """Infer the transition source from the persisted post-update workflow state."""
-    if not current_checkpoint:
-        return None
-
-    current_contract = contract_for_checkpoint(contracts, current_checkpoint)
-    if current_contract is None:
-        return None
-
-    if current_checkpoint.endswith("_done"):
-        return checkpoint_with_suffix(current_contract, "_in_progress")
-
-    if not (current_checkpoint.endswith("_in_progress") or current_checkpoint == "archived"):
-        return None
-
-    ordered = ordered_workflow_contracts(contracts)
+def load_config() -> dict[str, Any]:
     try:
-        current_index = next(
-            index for index, contract in enumerate(ordered) if contract.node_id == current_contract.node_id
-        )
-    except StopIteration:
-        return None
-    if current_index == 0:
-        return None
-    return checkpoint_with_suffix(ordered[current_index - 1], "_done")
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"无法读取产物同步配置 {CONFIG_PATH}: {exc}") from exc
+    if not isinstance(config, dict) or set(config) != {"allowedCheckpoints", "stages"}:
+        raise ValueError("同步配置必须包含 allowedCheckpoints 和 stages")
+    allowed = config["allowedCheckpoints"]
+    if not isinstance(allowed, list) or not allowed or any(not isinstance(cp, str) or not cp.strip() for cp in allowed):
+        raise ValueError("allowedCheckpoints 必须是非空 checkpoint 字符串列表")
+    stages = config["stages"]
+    if not isinstance(stages, dict) or set(stages) != {"biz", "dev"}:
+        raise ValueError("stages 必须包含 biz 和 dev 对象")
+    seen = set()
+    for group, nodes in stages.items():
+        if not isinstance(nodes, dict):
+            raise ValueError(f"stages.{group} 必须是对象")
+        for node, paths in nodes.items():
+            if not node.startswith(group + ".") or node in seen or not isinstance(paths, dict):
+                raise ValueError(f"非法或重复的 nodeId: {node}")
+            seen.add(node)
+            for pattern, description in paths.items():
+                parts = PurePosixPath(pattern).parts
+                if (not pattern or pattern.startswith("/") or "\\" in pattern or ":" in pattern
+                        or ".." in parts or pattern == "." or "\x00" in pattern):
+                    raise ValueError(f"产物路径必须位于 Feature 目录内: {pattern}")
+                if pattern in {CATALOG_FILE_NAME, STATUS_FILE_NAME, "hooks.ndjson"}:
+                    raise ValueError(f"同步运行时文件不能作为输入产物: {pattern}")
+                if not isinstance(description, str) or not description.strip():
+                    raise ValueError(f"产物简述不能为空: {pattern}")
+    return config
 
 
-def workflow_record_snapshot(record: dict[str, Any]) -> dict[str, Any]:
-    snapshot = {
-        field: record[field]
-        for field in WORKFLOW_RECORD_FIELDS
-        if field in record and record[field] not in (None, [], {})
-    }
-    snapshot.setdefault("workflowProfile", str(record.get("workflowProfile") or "standard"))
-    snapshot.setdefault("workflowDecisions", {})
-    snapshot.setdefault("workflowTemplate", str(record.get("workflowTemplate") or "standard"))
-    return json.loads(json.dumps(snapshot, ensure_ascii=False))
+def validate_path_component(value: str, label: str) -> None:
+    if not value or value in {".", ".."} or any(c in value for c in "/\\\x00"):
+        raise ValueError(f"{label} 不是合法目录名: {value}")
 
 
 def current_feature_record(workspace: Path, feature: str) -> dict[str, Any]:
-    result = load_state_json_records_result(workspace)
-    if not result.exists:
-        raise ValueError(f"state.json 不存在: {workspace / '.autobizdevops' / 'state.json'}")
-    if result.fatal_errors:
-        raise ValueError("\n".join(result.fatal_errors))
-    record = result.records.get(feature)
-    if record is None and result.record_errors.get(feature):
-        raise ValueError("\n".join(result.record_errors[feature]))
+    validate_path_component(feature, "Feature")
+    path = workspace / ".autobizdevops" / "state.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"无法读取 state.json: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("state.json 顶层必须是对象")
+    records = payload.get("features", payload)
+    if not isinstance(records, dict):
+        raise ValueError("state.json.features 必须是对象")
+    record = records.get(feature)
+    if isinstance(record, str):
+        record = {"checkpoint": record}
     if not isinstance(record, dict):
-        raise ValueError(f"Feature 状态记录不存在: {feature}")
-    return dict(record)
+        raise ValueError(f"Feature 状态记录不存在或非法: {feature}")
+    if record.get("feature", feature) != feature:
+        raise ValueError(f"Feature key 与记录 feature 不一致: {feature}")
+    if not isinstance(record.get("checkpoint"), str) or not record["checkpoint"].strip():
+        raise ValueError(f"Feature checkpoint 不能为空: {feature}")
+    return dict(record, feature=feature, checkpoint=record["checkpoint"].strip())
 
 
 def resolve_feature_dir(workspace: Path, feature: str) -> Path | None:
-    """Resolve the active Feature, or its state-selected archived iteration."""
-    active = workspace / ".autobizdevops" / "features" / feature
+    record = current_feature_record(workspace, feature)
+    base = workspace / ".autobizdevops"
+    active = base / "features" / feature
     if active.is_dir():
         return active
-    try:
-        record = current_feature_record(workspace, feature)
-    except ValueError:
-        return find_feature_dir(workspace, feature)
+    archive = base / "archive"
     iteration = str(record.get("iteration") or "").strip()
-    if record.get("checkpoint") == "archived" and iteration and iteration != "-":
-        archived = workspace / ".autobizdevops" / "archive" / f"{feature}-iter{iteration}"
-        if archived.is_dir():
-            return archived
-    return find_feature_dir(workspace, feature)
-
-
-def legacy_event_workflow_record(event: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "workflowProfile": str(event.get("workflow_profile") or "standard"),
-        "workflowDecisions": event.get("workflow_decisions") or {},
-        "workflowTemplate": "standard",
-    }
-
-
-def event_workflow_record(event: dict[str, Any]) -> dict[str, Any]:
-    record = event.get("workflow_record")
-    if isinstance(record, dict):
-        return workflow_record_snapshot(record)
-    return legacy_event_workflow_record(event)
-
-
-def load_contracts(workspace: Path, record: dict[str, Any]) -> Any:
-    return load_record_workflow_contracts(ROOT, record, workspace=workspace)
-
-
-def tracked_stage_ids(status: dict[str, Any]) -> set[str]:
-    result: set[str] = set()
-    for event in status.get("events", {}).values():
-        if not isinstance(event, dict) or event.get("status") not in {"pending", "failed", "success"}:
-            continue
-        stage = event.get("source_stage")
-        if isinstance(stage, str) and stage:
-            result.add(stage)
-    for artifact in status.get("published_artifacts", {}).values():
-        if not isinstance(artifact, dict):
-            continue
-        stage = artifact.get("stage")
-        if isinstance(stage, str) and stage:
-            result.add(stage)
-    return result
-
-
-def stage_needs_upload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> bool:
-    published = status.get("published_artifacts", {})
-    for artifact in artifacts:
-        previous = published.get(artifact["path"])
-        if not isinstance(previous, dict):
-            return True
-        if previous.get("sha256") != artifact["sha256"] or previous.get("size") != artifact["size"]:
-            return True
-    return False
-
-
-def duplicate_retryable_event(
-    status: dict[str, Any],
-    *,
-    source_stage: str,
-    fingerprint: str,
-) -> str | None:
-    for event_id, event in status.get("events", {}).items():
-        if not isinstance(event, dict):
-            continue
-        if event.get("source_stage") != source_stage or event.get("fingerprint") != fingerprint:
-            continue
-        if event.get("status") in {"pending", "failed"}:
-            return str(event_id)
+    if record["checkpoint"] == "archived" and iteration not in {"", "-", "—"}:
+        validate_path_component(iteration, "iteration")
+        selected = archive / f"{feature}-iter{iteration}"
+        return selected if selected.is_dir() else None
+    exact = archive / feature
+    if exact.is_dir():
+        return exact
+    if archive.is_dir():
+        return next((p for p in sorted(archive.iterdir()) if p.is_dir() and p.name.startswith(f"{feature}-iter")), None)
     return None
 
 
-def new_event_id(source_stage: str) -> str:
-    safe_stage = source_stage.replace(".", "-").replace("/", "-")
-    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
-    return f"{timestamp}-{safe_stage}-{uuid.uuid4().hex[:8]}"
+def load_sync_context(workspace: Path, feature: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    config = load_config()
+    record = current_feature_record(workspace, feature)
+    if record["checkpoint"] not in config["allowedCheckpoints"]:
+        raise ValueError(f"当前 checkpoint {record['checkpoint']} 不允许产物同步；允许值: "
+                         + ", ".join(config["allowedCheckpoints"]))
+    return record, config
+
+
+def ignored_artifact(relative_path: str, *, globbed: bool) -> bool:
+    parts = PurePosixPath(relative_path).parts
+    return any(part in IGNORED_PRD_ORIGINAL_NAMES or part.startswith("~$")
+               or Path(part).suffix.lower() in IGNORED_PRD_ORIGINAL_SUFFIXES
+               or (globbed and part.startswith(".")) for part in parts)
+
+
+def scan_artifacts(
+    feature_dir: Path, *, feature: str, project_code: str, config: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    selected: dict[str, dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
+    for node, paths in configured_nodes(config).items():
+        for pattern, description in paths.items():
+            # Also reject an escaping symlink in a fixed prefix of a glob.
+            relative_artifact_path(feature_dir, feature_dir / pattern)
+            globbed = has_glob(pattern)
+            matches = sorted(feature_dir.glob(pattern)) if globbed else [feature_dir / pattern]
+            files = []
+            for path in matches:
+                relative = relative_artifact_path(feature_dir, path)
+                if relative in {CATALOG_FILE_NAME, STATUS_FILE_NAME, "hooks.ndjson"}:
+                    continue
+                if path.is_file() and not ignored_artifact(relative, globbed=globbed):
+                    files.append(path)
+            if not files:
+                diagnostics.append({"path": pattern, "stage": node, "reason": "file_not_found"})
+            for path in files:
+                relative = relative_artifact_path(feature_dir, path)
+                try:
+                    size = path.stat().st_size
+                    if size > MAX_FILE_SIZE:
+                        selected.pop(relative, None)
+                        diagnostics.append({"path": relative, "stage": node, "size": size,
+                                            "reason": "file_size_exceeds_5mb"})
+                        continue
+                    artifact = snapshot_file_artifact(feature_dir, path, project_code=project_code, feature=feature)
+                except OSError as exc:
+                    selected.pop(relative, None)
+                    diagnostics.append({"path": relative, "stage": node, "reason": "file_unreadable", "error": str(exc)})
+                    continue
+                selected[relative] = dict(artifact, stage=node, description=description)
+    return dict(sorted(selected.items())), diagnostics
+
+
+def artifact_object_key(artifact: dict[str, Any]) -> str:
+    return f"{artifact['upload_path']}/{artifact['file_name']}"
+
+
+def needs_upload(artifact: dict[str, Any], status: dict[str, Any]) -> bool:
+    previous = status["published_artifacts"].get(artifact["path"])
+    return not isinstance(previous, dict) or any((
+        previous.get("sha256") != artifact["sha256"],
+        previous.get("size") != artifact["size"],
+        previous.get("object_key") != artifact_object_key(artifact),
+    ))
+
+
+def catalog_content(feature: str, selected: dict[str, dict[str, Any]], status: dict[str, Any]) -> dict[str, Any]:
+    entries = []
+    for path, artifact in selected.items():
+        published = status["published_artifacts"].get(path)
+        if (not isinstance(published, dict) or not published.get("sha256")
+                or not isinstance(published.get("size"), int)
+                or not 0 <= published["size"] <= MAX_FILE_SIZE
+                or published.get("object_key") != artifact_object_key(artifact)):
+            continue
+        metadata = catalog_metadata_for_path(path)
+        entries.append({
+            "path": path, "stage": artifact["stage"], "source": catalog_source_for_path(path),
+            **metadata, "upload_status": "uploaded", "description": artifact["description"],
+            # If an update failed, these still describe the last uploaded version.
+            "size": published["size"], "sha256": published["sha256"],
+        })
+    return {"schema_version": CATALOG_SCHEMA_VERSION, "feature_id": feature, "artifacts": entries}
+
+
+def write_artifact_catalog(
+    feature_dir: Path, *, feature: str, project_code: str,
+    selected: dict[str, dict[str, Any]], status: dict[str, Any],
+) -> dict[str, Any]:
+    content = catalog_content(feature, selected, status)
+    path = feature_dir / CATALOG_FILE_NAME
+    relative_artifact_path(feature_dir, path)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        existing = None
+    if not isinstance(existing, dict) or {k: v for k, v in existing.items() if k != "generated_at"} != content:
+        atomic_write_json(path, dict(content, generated_at=utc_now()))
+    artifact = snapshot_file_artifact(feature_dir, path, project_code=project_code, feature=feature)
+    return dict(artifact, content_digest=json_digest(content))
+
+
+def catalog_needs_upload(artifact: dict[str, Any], status: dict[str, Any]) -> bool:
+    previous = status.get("catalog", {})
+    return (previous.get("content_digest") != artifact["content_digest"]
+            or previous.get("object_key") != artifact_object_key(artifact))
+
+
+def batch_fingerprint(artifacts: Iterable[dict[str, Any]], digest: str = "") -> str:
+    return json_digest({"config_digest": digest, "artifacts": [
+        {key: item.get(key) for key in ("path", "sha256", "size", "upload_path", "file_name", "stage", "description", "content_digest")}
+        for item in artifacts
+    ]})
 
 
 def create_pending_event(
-    feature_dir: Path,
-    *,
-    feature: str,
-    trigger_checkpoint: str,
-    contract: SkillContract,
-    workflow_record: dict[str, Any],
-    artifacts: list[dict[str, Any]],
-    skipped_artifacts: list[dict[str, Any]] | None = None,
+    feature_dir: Path, *, feature: str, source_stage: str, config: dict[str, Any],
+    artifacts: list[dict[str, Any]], kind: str = "artifacts",
 ) -> str:
     status = read_status(feature_dir)
-    fingerprint = batch_fingerprint(artifacts)
-    duplicate = duplicate_retryable_event(
-        status,
-        source_stage=contract.node_id,
-        fingerprint=fingerprint,
-    )
-    if duplicate:
-        return duplicate
-
-    event_id = new_event_id(contract.node_id)
-    now = utc_now()
-    record_snapshot = workflow_record_snapshot(workflow_record)
-    event = {
-        "event_id": event_id,
-        "feature": feature,
-        "trigger_checkpoint": trigger_checkpoint,
-        "source_stage": contract.node_id,
-        "source_skill": contract.skill,
-        "workflow_record": record_snapshot,
-        # Legacy fields remain for older tooling and existing status readers.
-        "workflow_profile": record_snapshot.get("workflowProfile", "standard"),
-        "workflow_decisions": record_snapshot.get("workflowDecisions", {}),
-        "fingerprint": fingerprint,
-        "status": "pending",
-        "attempts": 0,
-        "created_at": now,
-        "updated_at": now,
+    digest = config_digest(config)
+    fingerprint = batch_fingerprint(artifacts, digest)
+    for event_id, event in status["events"].items():
+        if (isinstance(event, dict) and event.get("status") in {"pending", "failed"}
+                and event.get("source_stage") == source_stage and event.get("kind", "artifacts") == kind):
+            event.update(artifacts=artifacts, fingerprint=fingerprint, config_digest=digest, config_snapshot=config)
+            write_status(feature_dir, status)
+            return event_id
+    event_id = f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
+    status["events"][event_id] = {
+        "event_id": event_id, "feature": feature, "source_stage": source_stage, "kind": kind,
+        "config_digest": digest, "config_snapshot": config, "fingerprint": fingerprint,
+        "status": "pending", "attempts": 0, "created_at": utc_now(), "updated_at": utc_now(),
         "artifacts": artifacts,
     }
-    skipped = [
-        dict(item)
-        for item in (skipped_artifacts or [])
-        if item.get("upload_status") == "skipped"
-    ]
-    if skipped:
-        event["skipped_artifacts"] = skipped
-    status["events"][event_id] = dict(event)
     write_status(feature_dir, status)
     return event_id
 
 
-def mark_event_failed(
-    feature_dir: Path,
-    event_id: str,
-    error: str,
-    *,
-    increment_attempts: bool = False,
-) -> None:
-    status = read_status(feature_dir)
-    event = status.get("events", {}).get(event_id)
-    if not isinstance(event, dict):
-        return
-    event["status"] = "failed"
-    event["last_error"] = error
-    event["updated_at"] = utc_now()
-    if increment_attempts:
-        event["attempts"] = int(event.get("attempts", 0) or 0) + 1
-    write_status(feature_dir, status)
-    append_sync_hook_log(
-        feature_dir,
-        feature=str(event.get("feature", "")),
-        status="failed",
-        event_id=event_id,
-        message=error,
-    )
-
-
-def event_by_id(feature_dir: Path, event_id: str) -> dict[str, Any] | None:
-    event = read_status(feature_dir).get("events", {}).get(event_id)
-    return dict(event) if isinstance(event, dict) else None
-
-
 def pending_event_ids(feature_dir: Path) -> list[str]:
     status = read_status(feature_dir)
-    rows: list[tuple[str, str]] = []
-    for event_id, event in status.get("events", {}).items():
-        if not isinstance(event, dict) or event.get("status") not in {"pending", "failed"}:
-            continue
-        rows.append((str(event.get("created_at", "")), str(event_id)))
-    return [event_id for _, event_id in sorted(rows)]
+    return [event_id for event_id, event in status["events"].items()
+            if isinstance(event, dict) and event.get("status") in {"pending", "failed"}]
 
 
-def refresh_event_snapshot(
-    *,
-    workspace: Path,
-    feature_dir: Path,
-    project_code: str,
-    event: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    record = event_workflow_record(event)
-    contracts = load_contracts(workspace, record)
-    contract = contract_by_node_id(contracts, str(event.get("source_stage", "")))
-    if contract is None or contract.group not in UPLOAD_GROUPS:
-        raise ValueError(f"同步阶段不存在或不可上传: {event.get('source_stage', '')}")
-    return snapshot_event_artifacts(
-        feature_dir,
-        project_code=project_code,
-        feature=str(event.get("feature", "")),
-        contract=contract,
-        status=read_status(feature_dir),
-        include_unpublished_missing=True,
-    )
-
-
-def latest_stage_context(
-    workspace: Path,
-    status: dict[str, Any],
-    stage_id: str,
-) -> tuple[SkillContract, dict[str, Any]] | None:
-    rows = [
-        event
-        for event in status.get("events", {}).values()
-        if isinstance(event, dict)
-        and event.get("source_stage") == stage_id
-        and event.get("status") in {"pending", "failed", "success"}
-    ]
-    for event in sorted(rows, key=lambda item: str(item.get("updated_at", "")), reverse=True):
-        record = event_workflow_record(event)
-        try:
-            contract = contract_by_node_id(load_contracts(workspace, record), stage_id)
-        except Exception:
-            continue
-        if contract is not None:
-            return contract, record
-    return None
-
-
-def is_direct_publish_transition(old_checkpoint: str | None, new_checkpoint: str | None) -> bool:
-    if not old_checkpoint or not new_checkpoint:
-        return False
-    if new_checkpoint == "archived":
-        return old_checkpoint.endswith("_done")
-    return old_checkpoint.endswith("_done") and new_checkpoint.endswith("_in_progress")
-
-
-def prepare_checkpoint_sync_events(
-    *,
-    workspace: Path,
-    feature: str,
-    old_checkpoint: str | None,
-    new_checkpoint: str | None,
-    workflow_profile: str = "standard",
-    workflow_decisions: dict[str, str] | None = None,
-    project_code: str,
-) -> tuple[Path | None, list[str]]:
-    del workflow_profile, workflow_decisions  # Compatibility with the previous internal API.
-    if not new_checkpoint or new_checkpoint == old_checkpoint:
-        return None, []
-
-    feature_dir = resolve_feature_dir(workspace, feature)
-    if feature_dir is None:
-        return None, []
-
-    record = current_feature_record(workspace, feature)
-    contracts = load_contracts(workspace, record)
+def mark_event_failed(feature_dir: Path, event_id: str, error: str) -> None:
     status = read_status(feature_dir)
-    contexts: dict[str, tuple[SkillContract, dict[str, Any]]] = {}
+    event = status["events"][event_id]
+    event.update(status="failed", last_error=error, updated_at=utc_now())
+    write_status(feature_dir, status)
+    append_sync_hook_log(feature_dir, feature=event["feature"], status="failed", message=error, event_id=event_id)
 
-    # Reconcile successful publications and retry pending/failed publications.
-    for stage_id in sorted(tracked_stage_ids(status)):
-        contract = contract_by_node_id(contracts, stage_id)
-        if contract is not None:
-            contexts[stage_id] = (contract, record)
-            continue
-        fallback = latest_stage_context(workspace, status, stage_id)
-        if fallback is not None:
-            contexts[stage_id] = fallback
 
-    direct_contract: SkillContract | None = None
-    if is_direct_publish_transition(old_checkpoint, new_checkpoint):
-        direct_contract = contract_for_checkpoint(contracts, old_checkpoint)
-        if direct_contract is not None:
-            contexts[direct_contract.node_id] = (direct_contract, record)
-    if direct_contract is None:
-        direct_contract = terminal_group_done_contract_for_checkpoint(contracts, new_checkpoint)
-        if direct_contract is not None:
-            contexts[direct_contract.node_id] = (direct_contract, record)
-
-    event_ids: list[str] = []
-    unchanged: list[str] = []
-    for stage_id in sorted(contexts):
-        contract, contract_record = contexts[stage_id]
-        if contract.group not in UPLOAD_GROUPS or not contract.outputs:
-            continue
-        status = read_status(feature_dir)
-        artifacts, missing, side_entries = snapshot_sync_candidates(
-            feature_dir,
-            project_code=project_code,
-            feature=feature,
-            contract=contract,
-            status=status,
-            include_unpublished_missing=(
-                direct_contract is not None
-                and contract.node_id == direct_contract.node_id
-                and contract.node_id == "dev.code"
-            ),
-        )
-        if not artifacts and not missing and not side_entries:
-            continue
-        if not missing and not side_entries and not stage_needs_upload(status, artifacts):
-            unchanged.append(stage_id)
-            continue
-        artifacts, missing = snapshot_event_artifacts(
-            feature_dir,
-            project_code=project_code,
-            feature=feature,
-            contract=contract,
-            status=status,
-            include_unpublished_missing=(
-                direct_contract is not None
-                and contract.node_id == direct_contract.node_id
-                and contract.node_id == "dev.code"
-            ),
-        )
-        if not artifacts:
-            continue
-        if missing:
-            append_sync_hook_log(
-                feature_dir,
-                feature=feature,
-                status="missing",
-                message=f"{contract.node_id} 部分产物缺失，仅同步已存在产物: " + ", ".join(missing),
-            )
-        event_id = create_pending_event(
-            feature_dir,
-            feature=feature,
-            trigger_checkpoint=new_checkpoint,
-            contract=contract,
-            workflow_record=contract_record,
-            artifacts=artifacts,
-            skipped_artifacts=side_entries,
-        )
-        if event_id not in event_ids:
-            event_ids.append(event_id)
-        status = read_status(feature_dir)
-
-    if unchanged:
-        append_sync_hook_log(
-            feature_dir,
-            feature=feature,
-            status="unchanged",
-            message="产物 Hash 未变化，跳过上传: " + ", ".join(unchanged),
-        )
-    return feature_dir, event_ids
+def record_diagnostics(feature_dir: Path, feature: str, diagnostics: list[dict[str, Any]]) -> None:
+    for item in diagnostics:
+        append_sync_hook_log(feature_dir, feature=feature, status="skipped",
+                             message=f"{item['path']}: {item['reason']}")
+    if diagnostics:
+        print("跳过产物: " + json.dumps(diagnostics, ensure_ascii=False), file=sys.stderr)
 
 
 def prepare_reconcile_events(
-    *,
-    workspace: Path,
-    feature: str,
-    project_code: str,
-    include_completed: bool = False,
-) -> tuple[Path | None, list[str]]:
+    *, workspace: Path, feature: str, project_code: str, include_completed: bool = True,
+) -> tuple[Path, list[str]]:
+    # include_completed is retained for callers of the old reconciliation API.
+    _, config = load_sync_context(workspace, feature)
     feature_dir = resolve_feature_dir(workspace, feature)
     if feature_dir is None:
-        return None, []
-    record = current_feature_record(workspace, feature)
-    contracts = load_contracts(workspace, record)
+        raise ValueError(f"Feature 目录不存在: {feature}")
+    selected, diagnostics = scan_artifacts(feature_dir, feature=feature, project_code=project_code, config=config)
     status = read_status(feature_dir)
-    event_ids: list[str] = []
-
-    stage_ids = tracked_stage_ids(status)
-    if include_completed:
-        stage_ids.update(completed_stage_ids(contracts, record))
-
-    for stage_id in sorted(stage_ids):
-        contract = contract_by_node_id(contracts, stage_id)
-        contract_record = record
-        if contract is None:
-            fallback = latest_stage_context(workspace, status, stage_id)
-            if fallback is None:
-                continue
-            contract, contract_record = fallback
-        if contract.group not in UPLOAD_GROUPS or not contract.outputs:
-            continue
-        include_missing_api = include_completed and contract.node_id == "dev.code"
-        status = read_status(feature_dir)
-        artifacts, missing, side_entries = snapshot_sync_candidates(
-            feature_dir,
-            project_code=project_code,
-            feature=feature,
-            contract=contract,
-            status=status,
-            include_unpublished_missing=include_missing_api,
-        )
-        if not artifacts and not missing and not side_entries:
-            continue
-        if not missing and not side_entries and not stage_needs_upload(status, artifacts):
-            continue
-        artifacts, missing = snapshot_event_artifacts(
-            feature_dir,
-            project_code=project_code,
-            feature=feature,
-            contract=contract,
-            status=status,
-            include_unpublished_missing=include_missing_api,
-        )
-        if not artifacts:
-            continue
-        if missing:
-            append_sync_hook_log(
-                feature_dir,
-                feature=feature,
-                status="missing",
-                message=f"{contract.node_id} 部分产物缺失，仅同步已存在产物: " + ", ".join(missing),
-            )
-        event_id = create_pending_event(
-            feature_dir,
-            feature=feature,
-            trigger_checkpoint="manual_sync" if include_completed else "manual_reconcile",
-            contract=contract,
-            workflow_record=contract_record,
-            artifacts=artifacts,
-            skipped_artifacts=side_entries,
-        )
+    record_diagnostics(feature_dir, feature, diagnostics)
+    event_ids = pending_event_ids(feature_dir)
+    for node in configured_nodes(config):
+        changed = [artifact for artifact in selected.values() if artifact["stage"] == node and needs_upload(artifact, status)]
+        if changed:
+            event_id = create_pending_event(feature_dir, feature=feature, source_stage=node, config=config, artifacts=changed)
+            if event_id not in event_ids:
+                event_ids.append(event_id)
+    catalog = write_artifact_catalog(feature_dir, feature=feature, project_code=project_code, selected=selected, status=status)
+    if event_ids or catalog_needs_upload(catalog, status):
+        event_id = create_pending_event(feature_dir, feature=feature, source_stage=CATALOG_STAGE,
+                                        config=config, artifacts=[catalog], kind="catalog")
         if event_id not in event_ids:
             event_ids.append(event_id)
-        status = read_status(feature_dir)
     return feature_dir, event_ids
-
-
-def completed_stage_ids(contracts: Any, record: dict[str, Any]) -> set[str]:
-    """Discover first-time publications without advancing the workflow."""
-    checkpoint = str(record.get("checkpoint") or "").strip()
-    ordered = ordered_workflow_contracts(contracts)
-    if checkpoint == "archived":
-        completed = ordered
-    else:
-        current = contract_for_checkpoint(contracts, checkpoint)
-        if current is None:
-            raise ValueError(f"无法确定产物同步阶段: checkpoint={checkpoint}")
-        current_index = ordered.index(current)
-        completed = ordered[:current_index + int(checkpoint.endswith("_done"))]
-    return {
-        contract.node_id
-        for contract in completed
-        if contract.group in UPLOAD_GROUPS and contract.outputs
-    }
-
-
-def prepare_current_checkpoint_sync_events(
-    *,
-    workspace: Path,
-    feature: str,
-    project_code: str,
-) -> tuple[Path | None, list[str]]:
-    """Plan synchronization from the checkpoint already persisted in state.json."""
-    record = current_feature_record(workspace, feature)
-    current_checkpoint = str(record.get("checkpoint") or "").strip()
-    contracts = load_contracts(workspace, record)
-    previous_checkpoint = inferred_previous_checkpoint(contracts, current_checkpoint)
-    if previous_checkpoint is None:
-        return prepare_reconcile_events(
-            workspace=workspace,
-            feature=feature,
-            project_code=project_code,
-        )
-    return prepare_checkpoint_sync_events(
-        workspace=workspace,
-        feature=feature,
-        old_checkpoint=previous_checkpoint,
-        new_checkpoint=current_checkpoint,
-        project_code=project_code,
-    )
-
-
-def run_sync_subprocesses(
-    *,
-    feature_dir: Path,
-    feature: str,
-    event_ids: list[str],
-    timeout_seconds: int = SYNC_PROCESS_TIMEOUT_SECONDS,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    script = Path(__file__).resolve().with_name("sync_artifacts.py")
-    for event_id in event_ids:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            mark_event_failed(feature_dir, event_id, "产物上传超时: 总等待时间超过 60 秒")
-            continue
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-X",
-                    "utf8",
-                    str(script),
-                    "--feature",
-                    feature,
-                    "--event-id",
-                    event_id,
-                ],
-                text=True,
-                capture_output=True,
-                timeout=remaining,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            mark_event_failed(feature_dir, event_id, "产物上传超时: 总等待时间超过 60 秒")
-            continue
-        except OSError as exc:
-            mark_event_failed(feature_dir, event_id, f"无法启动产物上传脚本: {exc}")
-            continue
-
-        current = event_by_id(feature_dir, event_id)
-        if result.returncode != 0 and current and current.get("status") == "pending":
-            detail = (result.stderr or result.stdout or "").strip()
-            mark_event_failed(feature_dir, event_id, detail or f"产物上传脚本退出码 {result.returncode}")
-
-
-def schedule_current_checkpoint_sync_best_effort(
-    *,
-    workspace: Path,
-    feature: str,
-) -> None:
-    project_code = str(os.environ.get("PROJECT_CODE") or "").strip()
-    if not project_code:
-        return
-    feature_dir, event_ids = prepare_current_checkpoint_sync_events(
-        workspace=workspace,
-        feature=feature,
-        project_code=project_code,
-    )
-    if feature_dir is None or not event_ids:
-        return
-    run_sync_subprocesses(
-        feature_dir=feature_dir,
-        feature=feature,
-        event_ids=event_ids,
-    )
