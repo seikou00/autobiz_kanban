@@ -372,6 +372,16 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
     _refresh_parallel_pipeline(feature_dir)
 
 
+def _record_compile_fixture(workspace: Path, code: Path, state: dict, *, task_id: str = "T001") -> None:
+    """Simulate a completed external compiler for non-compilation runtime tests."""
+    attempt = task_runner_module.prepare_compile(workspace, "alpha", task_id, code, state["runId"],
+                                                 argv=["mvn", "compile"], execution_cwd=code)
+    output = workspace.parent / "simulated-compile.log"
+    output.write_text("Simulated compiler output for TASK runtime fixture\n", encoding="utf-8")
+    task_runner_module.record_compile(workspace, "alpha", task_id, code, state["runId"],
+                                     attempt_id=attempt["attemptId"], exit_code=0, log_exit_code=0, output_file=output)
+
+
 class TaskRunnerTest(unittest.TestCase):
     def test_review_only_plan_finishes_implementation_and_merges_without_batch_compile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -383,6 +393,7 @@ class TaskRunnerTest(unittest.TestCase):
 
             started = _start(workspace, code)
             (code / "implemented.txt").write_text("review-only implementation\n", encoding="utf-8")
+            _record_compile_fixture(workspace, code, started)
             finished = _run(
                 "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
@@ -450,6 +461,7 @@ class TaskRunnerTest(unittest.TestCase):
             delivered = code / "src" / "T000" / "delivered.py"
             delivered.parent.mkdir(parents=True)
             delivered.write_text("delivered = True\n", encoding="utf-8")
+            _record_compile_fixture(workspace, code, predecessor_payload, task_id="T000")
             predecessor_finished = _run(
                 "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T000", "--code-workspace", str(code),

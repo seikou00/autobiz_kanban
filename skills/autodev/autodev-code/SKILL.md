@@ -207,8 +207,24 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：交付 `goal` 与 `acceptanceCriteria` 指向的业务范围；`implementationPoints` 是方向指导，可按真实仓库调整内部结构、算法和局部步骤，保持已确认行为/公开契约并记录有意义的偏差；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。`testPoints` 用于检查实现是否覆盖测试关注的边界，不等于在 Code 阶段写测试。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 读取 `testPoints` 与 `verificationIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。该规则适用于主 Agent、cowork/协作 Agent 和 Workflow worker。后端 TASK 写完生产代码后、执行 `finish-implementation` 前，必须在对应业务 Worktree 中通过 Bash 执行项目的生产代码编译命令；只运行编译，不运行测试、打包、typecheck 或 lint。先从项目文档及构建配置确认 compile-only 命令，记录实际命令和完整输出；编译失败时读取输出定位根因、修复生产代码并重新编译，直到通过。无法确定 compile-only 命令或编译环境故障时，不得假报通过或完成 TASK，保留错误输出并按流程报告失败。前端 TASK 不新增此编译门槛。批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
-   - 并行 Batch 的 `task_runner.py start`、`start-task-repair`、`resume` 在成功返回前自动完成准备登记并把 `implement` 登记为运行中；不需要 Agent 手工修改阶段 JSON。旧 Run 的 `activeStage=none` 本身不阻止当前 Batch/run 绑定正确的活动 TASK 纯编译。被 guard 拦截时读取 `GUARD_DIAGNOSTICS.failedChecks`、`executionCwd` 与 `taskRuns`，区分命令形式、TASK 状态、Batch 绑定和 workspace 匹配问题；不要仅凭 `none` 判断 Code 不在运行。
-   - 默认直接使用执行终端 PATH 中的 `mvn`；不要求查找 `mvn.exe` 或先读取 Maven 启动脚本。执行工具的 `cwd/workdir` 指向当前 TASK 的业务模块，也可用 `cd "<模块目录>" && mvn clean compile -DskipTests`。为保留完整输出和实际退出码，推荐前台 Bash 执行 `set -o pipefail && mvn clean compile -DskipTests 2>&1 | tee "<编译日志>"`；只有命令不存在或启动失败才检查环境。`mvn -v` 等查询可以直接执行，无需切到中立目录。
+   - 并行 Batch 的 `task_runner.py start`、`start-task-repair`、`resume` 在成功返回前自动完成准备登记并把 `implement` 登记为运行中；不需要 Agent 手工修改阶段 JSON。旧 Run 的 `activeStage=none` 本身不阻止当前 Batch/run 绑定正确的活动 TASK 纯编译。被 guard 拦截时必须向用户展示 `GUARD_DIAGNOSTICS.failures` 中每项具体 `code/reason/line/statement`，连同 `executionCwd`、`taskRuns`、`guardVersion` 和 `guardPath`，区分命令形式、TASK 状态、Batch 绑定和 workspace 匹配问题；不能只报告“被拦截”，不能盲目删除 `-o` 重试，也不要仅凭 `none` 判断 Code 不在运行。工具自身的 cwd 拒绝应单独说明。
+   - 默认直接使用终端 PATH 中的 `mvn`，只有命令不存在或启动失败才检查安装。guard 按实际程序和目标判断，支持 `mvn/mvn.cmd/mvnw/mvnw.cmd`、`-q/-o/-D`、字面量环境赋值/`export`、目录切换、多行语句、输出管道和退出码记录，不要求固定某一行命令。工具相对 `cwd/workdir` 必须基于其真实绝对 `workspaceRoot`；也可在同一次执行中使用 `cd "<模块目录>" && ...` 或 `cd "<模块目录>" || exit "$?"`，不要假设前一次工具调用中的 cd 会保留。
+   - 后端生产源码写完后，在 Bash 编译前调用同一个 `task_runner.py prepare-compile`：传完整的 TASK/workspace/parallel-run-id/lease-token/workspace-ref 绑定，以及 `--run-id <当前 TASK 真实 runId>`、`--execution-cwd "<模块绝对目录>"`，在 `--` 后传实际 compile-only argv。保存返回的真实 `attemptId`。该入口只冻结编译命令和源码快照，不启动编译，不要求 Plan 固定编译命令。
+   - 用前台 Bash 在该模块执行同一 argv，临时完整日志放在业务工作树之外已存在的目录。立即保存整个管道状态，避免后续 echo/printf 覆盖编译失败：
+
+     ```bash
+     export MAVEN_OPTS="-Dfile.encoding=UTF-8"
+     cd "<模块绝对目录>" || exit "$?"
+     set -o pipefail
+     mvn compile -o 2>&1 | tee "<临时完整日志>"
+     compile_status=("${PIPESTATUS[@]}")
+     printf 'MAVEN_EXIT=%s LOG_EXIT=%s\n' "${compile_status[0]}" "${compile_status[1]}"
+     exit "$((compile_status[0] != 0 ? compile_status[0] : compile_status[1]))"
+     ```
+
+   - 独立调用 `task_runner.py record-compile`，继续传同一完整绑定和 TASK runId，并传 `--attempt-id <真实 attemptId>`、`--exit-code <实际 compiler 退出码>`、`--log-exit-code <实际 tee 退出码>`、`--output-file "<临时完整日志>"`。它只登记已有输出，不执行编译，不写 UTest 结果；`ok=true` 只代表登记成功，必须检查 `passed/exitCode/logExitCode`。登记失败保留输出并只重试登记，不自动重跑编译；成功登记后完整日志已保存到 Feature 的 `.compile-logs/`。
+   - 后端 `finish-implementation` 要求当前 TASK/run 的最新编译结果成功、完整日志存在且哈希匹配、源码快照仍一致。编译后生产文件再次变化必须重新 prepare/compile/record；旧 TASK/run 的成功不能复用。已有未完成旧 Run 也必须补齐当前编译结果，不能因为没有结果字段就假报通过。前端和非 code 执行模式不增加此门槛。
+
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 7. **实现差异协议**：固定 Code Workflow 内不得为以下差异发起用户确认或创建阻断。`EVD` / design 与代码现实不符，或必须偏离 `API` / `DATA` / `D` 形态时，始终采用不违反 `REQ` / `SCN` 的最小兼容实现并在非阻断 Evidence 中记录差异。行为契约存在歧义时，按明确的 `REQ` / `SCN`、再按 Plan、最后按现有工程模式确定实现；TASK 状态由 runner 负责流转，不得手工置「失败」。
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不生成或执行测试命令，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：

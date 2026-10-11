@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import uuid
@@ -28,6 +29,7 @@ from hooks.plan_json import (  # noqa: E402
     normalize_status,
     task_contract_sha256,
     task_execution_mode,
+    task_execution_lane,
     task_workspace_roots,
 )
 from hooks.plan_writer import (  # noqa: E402
@@ -55,6 +57,9 @@ from hooks.task_run_integrity import (  # noqa: E402
     task_run_integrity_error,
     task_run_integrity_sha256,
 )
+from hooks.code_execution_guard import _production_compile_argv, _maven_arguments  # noqa: E402
+
+
 class TaskRunnerError(ValueError):
     def __init__(self, message: str, **details: Any) -> None:
         super().__init__(message)
@@ -1035,6 +1040,7 @@ def _start_task_unlocked(
         "taskId": task_id,
         "taskContractSha256": task_contract_sha256(task),
         "executionMode": execution_mode,
+        "productionCompileRequired": task_execution_lane(task) == "backend" and execution_mode == "code",
         "status": "started",
         "codeWorkspace": str(next(iter(repositories.values()))),
         "requestedCodeWorkspaces": [item["requestedPath"] for item in scope_workspaces],
@@ -1111,6 +1117,166 @@ def _validate_supporting_files(repositories: RepositoryMap, supporting_files: li
     return normalized
 
 
+def _compile_source_digest(repositories: RepositoryMap) -> str:
+    snapshots = {
+        name: {path: digest for path, digest in _git_snapshot(repo).items()
+               if not _is_transient_validation_path(path)}
+        for name, repo in repositories.items()
+    }
+    return hashlib.sha256(json.dumps(snapshots, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _compile_context(workspace: Path, feature: str, task_id: str, code_workspace: Path | list[Path],
+                     run_id: str, parallel_run_id: str | None, lease_token: str | None,
+                     workspace_ref: str | None) -> tuple[Path, dict[str, Any], RepositoryMap, dict[str, Any]]:
+    feature_dir = _feature_dir(workspace, feature)
+    _, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
+    path, state = _load_run(feature_dir, task_id, run_id)
+    if state.get("status") not in {"started", "in_progress"} or state.get("executionMode") != "code":
+        raise TaskRunnerError("compile_task_run_inactive", reason=f"TASK run 状态为 {state.get('status')}、executionMode={state.get('executionMode')}，不能登记生产编译")
+    if state.get("parallelRunId") != parallel_run_id or state.get("batchId") != batch_id:
+        raise TaskRunnerError("compile_task_batch_binding_mismatch", reason="编译结果必须属于当前 TASK 的同一 Batch/run")
+    if state.get("taskContractSha256") != task_contract_sha256(task):
+        raise TaskRunnerError("task_contract_changed_after_start", reason="TASK 契约在启动后发生变化，旧编译尝试不能继续使用")
+    requested = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    repositories = _resolve_repositories(requested, workspace_ref)
+    _assert_repositories_match(state, repositories)
+    _assert_requested_workspaces_match(state, requested, repositories)
+    _begin_parallel_implementation(workspace, feature, parallel_run_id, batch_id)
+    return path, state, repositories, task
+
+
+def prepare_compile(workspace: Path, feature: str, task_id: str, code_workspace: Path | list[Path],
+                    run_id: str, *, argv: list[str], execution_cwd: Path,
+                    parallel_run_id: str | None = None, lease_token: str | None = None,
+                    workspace_ref: str | None = None) -> dict[str, Any]:
+    """Bind a forthcoming direct Bash compilation to its source snapshot."""
+    with _task_run_lock(_feature_dir(workspace, feature)):
+        path, state, repositories, _ = _compile_context(workspace, feature, task_id, code_workspace, run_id,
+                                                       parallel_run_id, lease_token, workspace_ref)
+        if not argv or not all(isinstance(arg, str) and arg for arg in argv) or not _production_compile_argv(argv):
+            raise TaskRunnerError("compile_command_not_production_only", reason=f"生产编译命令不得包含测试、打包或动态目标；实际 argv={argv}")
+        cwd = execution_cwd.expanduser().resolve()
+        if not cwd.is_dir() or not any(cwd.is_relative_to(repo) for repo in repositories.values()):
+            raise TaskRunnerError("compile_workspace_mismatch", reason=f"实际编译目录 {cwd} 不在当前 TASK 的业务工作区内")
+        if argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"}:
+            _, files, _ = _maven_arguments(argv)
+            for file in files:
+                target = (cwd / file).resolve()
+                if not any(target.is_relative_to(repo) for repo in repositories.values()):
+                    raise TaskRunnerError("compile_build_file_workspace_mismatch", reason=f"Maven 构建文件 {target} 超出当前 TASK 的业务工作区")
+        attempt = {
+            "attemptId": "compile-" + uuid.uuid4().hex,
+            "taskId": task_id, "runId": run_id, "parallelRunId": parallel_run_id,
+            "batchId": state["batchId"], "taskContractSha256": state["taskContractSha256"],
+            "argv": list(argv), "executionCwd": str(cwd), "status": "prepared",
+            "sourceDigest": _compile_source_digest(repositories), "preparedAt": _utc_now(),
+        }
+        state.setdefault("compileAttempts", []).append(attempt)
+        state["latestCompileAttemptId"] = attempt["attemptId"]
+        state["integritySha256"] = task_run_integrity_sha256(state)
+        _save_run(path, state)
+        return dict(attempt)
+
+
+def _save_compile_log(feature_dir: Path, relative_path: str, content: bytes) -> None:
+    try:
+        full_log = feature_dir / relative_path
+        full_log.parent.mkdir(parents=True, exist_ok=True)
+        temporary_log = full_log.with_suffix(".log.tmp")
+        temporary_log.write_bytes(content)
+        temporary_log.replace(full_log)
+    except OSError as exc:
+        raise TaskRunnerError("compile_log_storage_failed", reason=f"无法持久保存完整编译日志：{exc}；保留原输出，只重试登记") from exc
+
+
+def record_compile(workspace: Path, feature: str, task_id: str, code_workspace: Path | list[Path],
+                   run_id: str, *, attempt_id: str, exit_code: int, log_exit_code: int, output_file: Path,
+                   parallel_run_id: str | None = None, lease_token: str | None = None,
+                   workspace_ref: str | None = None) -> dict[str, Any]:
+    """Record an existing Bash result; never launches Maven or any compiler."""
+    with _task_run_lock(_feature_dir(workspace, feature)):
+        feature_dir = _feature_dir(workspace, feature)
+        path, state, repositories, task = _compile_context(workspace, feature, task_id, code_workspace, run_id,
+                                                          parallel_run_id, lease_token, workspace_ref)
+        attempts = state.get("compileAttempts", [])
+        attempt = next((item for item in attempts if item.get("attemptId") == attempt_id), None)
+        if attempt is None or state.get("latestCompileAttemptId") != attempt_id:
+            raise TaskRunnerError("compile_attempt_not_current", reason="编译结果必须引用当前 TASK/run 最新的 prepare-compile attemptId")
+        if attempt.get("sourceDigest") != _compile_source_digest(repositories):
+            raise TaskRunnerError("compile_sources_changed", reason="生产文件在准备编译后发生变化，请保留日志并对最新代码重新编译")
+        if not 0 <= exit_code <= 255 or not 0 <= log_exit_code <= 255:
+            raise TaskRunnerError("compile_exit_code_invalid", reason="Bash 退出码必须在 0 到 255 之间")
+        try:
+            output_bytes = output_file.expanduser().resolve().read_bytes()
+        except OSError as exc:
+            raise TaskRunnerError("compile_output_unavailable", reason=f"无法读取实际编译日志：{exc}；保留日志并重试登记，不要自动重跑编译") from exc
+        output_digest = hashlib.sha256(output_bytes).hexdigest()
+        if attempt.get("status") == "recorded":
+            if (attempt.get("exitCode"), attempt.get("logExitCode"), attempt.get("outputSha256")) != (exit_code, log_exit_code, output_digest):
+                raise TaskRunnerError("compile_result_conflict", reason="该编译尝试已登记，不能用不同退出码或日志覆盖")
+            _save_compile_log(feature_dir, attempt["logPath"], output_bytes)
+            return dict(attempt)
+        result = {
+            **attempt, "status": "recorded", "exitCode": exit_code, "logExitCode": log_exit_code,
+            "passed": exit_code == 0 and log_exit_code == 0,
+            "outputSha256": output_digest, "outputBytes": len(output_bytes),
+            "logPath": f".compile-logs/{attempt_id}.log",
+        }
+        existing = next((record for record in read_records(stream_path(feature_dir))
+                         if record.get("action") == "production_compile" and record.get("taskId") == task_id
+                         and record.get("runId") == run_id and record.get("compile", {}).get("attemptId") == attempt_id), None)
+        if existing:
+            stored = existing["compile"]
+            if (stored.get("exitCode"), stored.get("logExitCode"), stored.get("outputSha256")) != (exit_code, log_exit_code, output_digest):
+                raise TaskRunnerError("compile_result_conflict", reason="Evidence 中已有不同的编译结果，不能覆盖")
+            evidence = existing
+        # Check an existing result before writing; a conflicting retry must not
+        # overwrite the full log referenced by durable Evidence.
+        _save_compile_log(feature_dir, result["logPath"], output_bytes)
+        if not existing:
+            try:
+                evidence = append_evidence(feature_dir, {
+                    "featureId": feature, "checkpoint": "code_in_progress", "nodeId": "dev.code",
+                    "skill": "autodev-code", "taskId": task_id, "runId": run_id,
+                    "action": "production_compile", "summary": f"{task_id} production compile {'passed' if result['passed'] else 'failed'}",
+                    "compile": result, "specRefs": task.get("specRefs", []),
+                })
+            except EvidenceStoreError as exc:
+                raise TaskRunnerError("compile_evidence_registration_failed", reason=f"编译已执行，但结果登记失败：{exc}；保留输出，只重试 record-compile") from exc
+        result["evidenceId"] = evidence["evidenceId"]
+        attempt.update(result)
+        state["integritySha256"] = task_run_integrity_sha256(state)
+        _save_run(path, state)
+        return dict(attempt)
+
+
+def _assert_compile_passed(feature_dir: Path, task: dict[str, Any], state: dict[str, Any], repositories: RepositoryMap) -> None:
+    if task_execution_lane(task) != "backend" or state.get("executionMode") != "code":
+        return
+    attempt = next((item for item in state.get("compileAttempts", [])
+                    if item.get("attemptId") == state.get("latestCompileAttemptId")), None)
+    if not attempt or attempt.get("status") != "recorded":
+        raise TaskRunnerError("production_compile_result_missing", reason="后端 TASK 完成前必须执行生产编译并用 prepare-compile/record-compile 登记真实结果", requiredAction="compile_and_record_current_task")
+    if attempt.get("exitCode") != 0 or attempt.get("logExitCode") != 0:
+        raise TaskRunnerError("production_compile_failed", reason=f"生产编译或日志写入失败：Maven/compiler exit={attempt.get('exitCode')}，log exit={attempt.get('logExitCode')}，Evidence={attempt.get('evidenceId')}")
+    if attempt.get("sourceDigest") != _compile_source_digest(repositories):
+        raise TaskRunnerError("production_compile_result_stale", reason="编译通过后业务文件又发生变化，必须对当前生产代码重新编译")
+    evidence = next((record for record in read_records(stream_path(feature_dir))
+                     if record.get("evidenceId") == attempt.get("evidenceId") and record.get("action") == "production_compile"
+                     and record.get("taskId") == task.get("id") and record.get("runId") == state.get("runId")), None)
+    if not evidence or evidence.get("compile", {}).get("sourceDigest") != attempt.get("sourceDigest") or evidence.get("compile", {}).get("exitCode") != 0 or evidence.get("compile", {}).get("logExitCode") != 0:
+        raise TaskRunnerError("production_compile_evidence_missing", reason="当前 TASK/run 编译成功记录缺少匹配的持久 Evidence，不能完成实现")
+    logged = evidence["compile"]
+    try:
+        log_content = (feature_dir / logged["logPath"]).read_bytes()
+    except (OSError, KeyError) as exc:
+        raise TaskRunnerError("production_compile_log_missing", reason="编译 Evidence 的完整日志不可读取，不能完成实现") from exc
+    if hashlib.sha256(log_content).hexdigest() != logged.get("outputSha256"):
+        raise TaskRunnerError("production_compile_log_changed", reason="编译日志内容与 Evidence 哈希不一致，不能完成实现")
+
+
 def _implementation_record(
     *,
     feature: str,
@@ -1123,6 +1289,7 @@ def _implementation_record(
     no_change_why: str | None,
     repair_context: dict[str, Any] | None,
     prior_evidence_id: str | None = None,
+    compile_evidence_id: str | None = None,
 ) -> dict[str, Any]:
     changed_files = _changed_files(file_changes)
     no_code_change = completion_mode == "verified_existing"
@@ -1153,6 +1320,8 @@ def _implementation_record(
         record["repairContext"] = dict(repair_context)
     if isinstance(prior_evidence_id, str):
         record["priorEvidenceId"] = prior_evidence_id
+    if isinstance(compile_evidence_id, str):
+        record["productionCompileEvidenceId"] = compile_evidence_id
     return record
 
 
@@ -1356,6 +1525,7 @@ def _finish_implementation_unlocked(
             )
         completion_mode = "verified_existing"
 
+    _assert_compile_passed(feature_dir, task, state, repositories)
     state.update({
         "status": "implementation_recording",
         "completionMode": completion_mode,
@@ -1412,6 +1582,8 @@ def _finish_implementation_unlocked(
                     no_change_why=no_code_change_why,
                     repair_context=repair_context,
                     prior_evidence_id=prior_evidence_id,
+                    compile_evidence_id=next((item.get("evidenceId") for item in state.get("compileAttempts", [])
+                                             if item.get("attemptId") == state.get("latestCompileAttemptId")), None),
                 ),
             )
         except EvidenceStoreError as exc:
@@ -1990,6 +2162,37 @@ def _cmd_finish_implementation(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _cmd_prepare_compile(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        argv = args.argv[1:] if args.argv and args.argv[0] == "--" else args.argv
+        attempt = prepare_compile(workspace, feature, args.task_id, code_workspace, args.run_id,
+                                  argv=argv, execution_cwd=Path(args.execution_cwd),
+                                  parallel_run_id=args.parallel_run_id, lease_token=args.lease_token,
+                                  workspace_ref=args.workspace_ref)
+        return _emit(True, **attempt)
+    except (TaskRunnerError, ValueError) as exc:
+        return _emit_error(exc)
+    except OSError as exc:
+        return _emit(False, error="compile_preparation_storage_failed", reason=f"无法保存编译准备状态：{exc}；编译尚未启动，请检查存储后重试准备")
+
+
+def _cmd_record_compile(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        attempt = record_compile(workspace, feature, args.task_id, code_workspace, args.run_id,
+                                attempt_id=args.attempt_id, exit_code=args.exit_code,
+                                log_exit_code=args.log_exit_code, output_file=Path(args.output_file),
+                                parallel_run_id=args.parallel_run_id, lease_token=args.lease_token,
+                                workspace_ref=args.workspace_ref)
+        # Registration succeeded even when the actual compiler exited nonzero.
+        return _emit(True, **attempt)
+    except (TaskRunnerError, ValueError) as exc:
+        return _emit_error(exc)
+    except OSError as exc:
+        return _emit(False, error="compile_result_storage_failed", reason=f"编译已执行，但保存登记状态失败：{exc}；保留原日志，只重试 record-compile")
+
+
 def _cmd_start_task_repair(args: argparse.Namespace) -> int:
     """处理 start-task-repair 子命令"""
     try:
@@ -2045,16 +2248,41 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _compile_inspection(state: dict[str, Any], task: dict[str, Any] | None) -> dict[str, Any]:
+    attempt = next((item for item in state.get("compileAttempts", [])
+                    if item.get("attemptId") == state.get("latestCompileAttemptId")), None)
+    required = task_execution_lane(task) == "backend" and state.get("executionMode") == "code" if task is not None else state.get("productionCompileRequired")
+    summary: dict[str, Any] = {"required": required, "status": "unknown" if required is None else "missing" if required else "not_required"}
+    if attempt:
+        summary.update({key: attempt.get(key) for key in
+                        ("attemptId", "executionCwd", "argv", "exitCode", "logExitCode", "evidenceId", "logPath")})
+        summary["status"] = "prepared" if attempt.get("status") != "recorded" else "passed" if attempt.get("passed") else "failed"
+        try:
+            repositories = {item["id"]: Path(item["path"]) for item in _state_repositories(state)}
+            summary["sourceFresh"] = attempt.get("sourceDigest") == _compile_source_digest(repositories)
+            if not summary["sourceFresh"]:
+                summary["status"] = "stale"
+        except (TaskRunnerError, OSError, ValueError, KeyError) as exc:
+            summary["sourceFresh"] = None
+            summary["sourceCheckReason"] = str(exc)
+    return {**state, "productionCompileRequired": required, "compileSummary": summary}
+
+
 def _cmd_inspect(args: argparse.Namespace) -> int:
     try:
         workspace, feature, _ = _resolve(args)
         feature_dir = _feature_dir(workspace, feature)
+        try:
+            _, _, task = _load_plan_and_task(feature_dir, args.task_id, require_active_batch=False)
+        except ValueError:
+            task = None  # Inspect must remain usable to diagnose a broken Plan.
         if args.run_id:
             _, state = _load_run(feature_dir, args.task_id, args.run_id)
-            return _emit(True, run=state)
+            return _emit(True, run=_compile_inspection(state, task))
         runs = []
         for path in sorted(_runs_dir(feature_dir, args.task_id).glob("*.json")):
-            runs.append(json.loads(path.read_text(encoding="utf-8")))
+            state = json.loads(path.read_text(encoding="utf-8"))
+            runs.append(_compile_inspection(state, task))
         return _emit(True, runs=runs)
     except (TaskRunnerError, ValueError, json.JSONDecodeError) as exc:
         return _emit_error(exc)
@@ -2085,6 +2313,20 @@ def main(argv: list[str] | None = None) -> int:
     finish_implementation_parser.add_argument("--supporting-file", action="append")
     finish_implementation_parser.add_argument("--repair-mode", action="store_true")
     finish_implementation_parser.set_defaults(func=_cmd_finish_implementation)
+
+    prepare = subparsers.add_parser("prepare-compile", help="Bind a direct Bash compile to current sources; does not execute it")
+    common(prepare, needs_run=True)
+    prepare.add_argument("--execution-cwd", required=True)
+    prepare.add_argument("argv", nargs=argparse.REMAINDER)
+    prepare.set_defaults(func=_cmd_prepare_compile)
+
+    record = subparsers.add_parser("record-compile", help="Record an existing Bash compiler result without rerunning it")
+    common(record, needs_run=True)
+    record.add_argument("--attempt-id", required=True)
+    record.add_argument("--exit-code", type=int, required=True)
+    record.add_argument("--log-exit-code", type=int, required=True)
+    record.add_argument("--output-file", required=True)
+    record.set_defaults(func=_cmd_record_compile)
 
     task_repair = subparsers.add_parser("start-task-repair")
     common(task_repair)

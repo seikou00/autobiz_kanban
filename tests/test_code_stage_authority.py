@@ -14,7 +14,7 @@ from hooks.parallel_batch_scheduler import create_run, mark_batch
 from hooks.parallel_batch_stage import complete_stage, fail_stage, finalize_implementation, start_stage
 from hooks.parallel_evidence_aggregate import _evidence_errors
 from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease, save_manifest
-from hooks.task_runner import TaskRunnerError, abort_task, finish_implementation, resume_task, start_task, start_task_repair
+from hooks.task_runner import TaskRunnerError, abort_task, finish_implementation, prepare_compile, record_compile, resume_task, start_task, start_task_repair
 from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
 from tests.test_task_runner import _configure_defer_to_test_stages, _run, _workspace
 
@@ -57,6 +57,18 @@ class CodeStageAuthorityTest(unittest.TestCase):
             return guard({"tool_name": "execute", "tool_input": {"command": command, "cwd": str(self.worktree)}})
 
     def _finish(self, state: dict, *, repair: bool = False) -> dict:
+        attempt = prepare_compile(
+            self.workspace, "alpha", "T001", self.worktree, state["runId"],
+            argv=["mvn", "compile"], execution_cwd=self.worktree,
+            parallel_run_id=self.parallel_id, lease_token=self.token, workspace_ref="default",
+        )
+        log = self.workspace.parent / "simulated-compile.log"
+        log.write_text("Simulated compiler output for runtime authorization fixture\n", encoding="utf-8")
+        record_compile(
+            self.workspace, "alpha", "T001", self.worktree, state["runId"],
+            attempt_id=attempt["attemptId"], exit_code=0, log_exit_code=0, output_file=log,
+            parallel_run_id=self.parallel_id, lease_token=self.token, workspace_ref="default",
+        )
         ok, finished = finish_implementation(
             self.workspace, "alpha", "T001", self.worktree, state["runId"],
             no_code_change_why=None, supporting_files=[], repair_mode=repair,

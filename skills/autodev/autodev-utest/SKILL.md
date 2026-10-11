@@ -238,12 +238,14 @@ set -o pipefail
 UTEST_LOG="${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log"
 printf '\n=== DIRECT BASH COMPILE ===\ncwd: %s\ncommand: %s\n' "$PWD" '<真实 compile-only 命令>' | tee -a "$UTEST_LOG"
 <真实 compile-only 命令> 2>&1 | tee -a "$UTEST_LOG"
-compile_exit=${PIPESTATUS[0]}
+compile_status=("${PIPESTATUS[@]}")
+compile_exit=${compile_status[0]}
+compile_log_exit=${compile_status[1]}
 printf 'compile_exit_code: %s\n=== END DIRECT BASH COMPILE ===\n' "$compile_exit" | tee -a "$UTEST_LOG"
-exit "$compile_exit"
+exit "$((compile_exit != 0 ? compile_exit : compile_log_exit))"
 ```
 
-从真实项目构建配置选择 compile-only 或 test-compile 目标；不要运行 package/build/check 等会混入打包或行为测试的复合目标。将精确命令、cwd、退出码和结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`。编译失败必须读取这次 Bash 输出并归因，不得用精确测试通过覆盖失败；生产源码问题按 `source_fix_request` 流程返回实现阶段修复。
+从真实项目构建配置选择 compile-only 或 test-compile 目标；不要运行 package/build/check 等会混入打包或行为测试的复合目标。管道后必须立即保存整个 `PIPESTATUS`，同时检查编译退出码和 tee 日志写入退出码；日志写入失败不能报告完整验证成功。将精确命令、cwd、两个退出码和结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`。编译失败必须读取这次 Bash 输出并归因，不得用精确测试通过覆盖失败；生产源码问题按 `source_fix_request` 流程返回实现阶段修复。
 
 ### 生成结果与报告
 
