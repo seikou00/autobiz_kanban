@@ -27,8 +27,10 @@ allowed-tools: execute task_output read_file grep glob write_file edit_file requ
 1. 前端 Task 在其 Agent 内解析并记录 route：
 
 ```bash
-python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --start-route-run --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --task-id "<当前 TASK_ID>" --start-route-run --json
 ```
+
+必须用 `--task-id`（或 `--batch-id`）声明作用域：固定并行模式按 scheduler manifest 调度、不写 `plan.json` 的 `activeBatchId`，缺少作用域时 resolver 无法把 required VIS 归属到具体 Task，会把它 Capability 的 required VIS 误判为当前 Task 缺失；作用域确实无法确定时，resolver 只校验未完成 Plan Task 实际引用的 source，不再用全局 `visualSources` 做 required 校验。
 
 active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRefs`，由 resolver 从 Feature 内 `frontend-html/VIS-xxx/` 读取；不要用本轮 `--html-file` 替换 required VIS。只有没有 active Plan 绑定的兼容迁移场景，才允许追加 `--html-file`。
 
@@ -36,6 +38,7 @@ active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRe
    - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md`
    - `route=standard-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md`
    - `route=spec-driven-ui`：当前 active UI Task 的 `visualSourceRefs=[]`，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。其他 Capability 的 required VIS 缺失不影响该 Task。
+   - resolver 因 **required VIS 路径不可读**而兜底：`route=spec-driven-ui`，证据里 `requiredVisualSourceMissing` 非空且 `requiredVisualSourceFallbackRoute=spec-driven-ui`（未提供、在线原型/设计链接、归档文件丢失都属此类）。此时按 `spec-driven-ui` 实现，不读取 route SKILL / parser，不因缺少该视觉输入阻断 Code；但该缺口必须保留在证据与统一回检结论中，并在可用时补齐归档。
    - `route=none`：`UI_CONTEXT.json` 标记 `uiRequired=false`，不得写前端业务代码。
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
 
@@ -101,7 +104,7 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 3. 技术边界以 `design.md` 与 `plan.json` 为实现依据。
 4. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位、文案内容和交互线索，不得覆盖 UI_CONTEXT/specs/design/plan.json。
 5. PRD / specs / plan.json 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
-6. 如果当前 active UI Task 引用了 required VIS，但 resolver 报 `required_visual_source_missing` 或摘要不一致，先修复/重新归档该 VIS，不能降级为 `spec-driven-ui`，也不能用另一个 HTML 临时替代。
+6. 如果当前 active UI Task 引用了 required VIS，但该 VIS 的 `path` 不可读（未提供、在线原型/设计链接、归档文件丢失），resolver 会兜底为 `spec-driven-ui` 并在证据里记录 `requiredVisualSourceMissing`；按兜底路线实现，不得用另一个 HTML 临时替代，也不得把该缺口当作已满足。只有 `required_visual_source_not_archived`、`required_visual_source_digest_mismatch`、`required_visual_source_bundle_digest_mismatch` 仍会报错：那三类说明已声明的输入被放错位置或内容被改动，必须先修复/重新归档该 VIS，不能降级为 `spec-driven-ui`。
 
 路径边界：上述产物均指 feature 产物目录中的文件，不是业务代码仓库 cwd 下的同名路径；执行具体 task 时必须通过 `hooks/code_task_context.py` 解析并读取对应片段，包括 `resolvedSpecRefs`、`resolvedDesignRefs` 与已投影的 `resolvedSourceRefs`。后端 Task (`taskContract.uiRequired=false`) 不得因 Feature 存在 UI 产物而启动 Route resolver。
 

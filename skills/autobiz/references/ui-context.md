@@ -149,9 +149,12 @@ The writer stores the entry under `frontend-html/VIS-xxx/`, records content
 and bundle SHA-256 values, and later stages must use the generated `VIS-xxx`.
 
 High-fidelity HTML that is known but not yet provided may be recorded as a
-traceable required source. Its referenced UI Task cannot pass the Code
-high-fidelity gate until the file is archived. Do not silently downgrade a
-required source:
+traceable required source. While its file is missing, the referencing UI Task
+runs on the `spec-driven-ui` fallback instead of blocking Code: the resolver
+records the gap in `requiredVisualSourceMissing` and sets
+`requiredVisualSourceFallbackRoute=spec-driven-ui`, so the missing input stays
+visible in the evidence and in the unified frontend re-check instead of being
+silently treated as satisfied. Archive the file as soon as it is available:
 
 ```json
 {
