@@ -13,7 +13,8 @@ allowed-tools: execute task_output read_file grep glob write_file edit_file requ
 
 - 缺少 ID 时调用 `request_user_input`：“请填写本次 Code 提交使用的看板 ID（例如 Z990692-294）。”通过工具的自由文本输入收集 ID。
 - 去除首尾空白后，ID 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`；无效时请用户重新填写，不得猜测。
-- 已提供有效 ID 时直接复用。Workflow 启动后以及恢复同一 Run 时，使用 manifest 中保存的 ID，不再询问。ID 通过 `--task-card-id` 传入并由插件保存，本 Run 的提交统一使用 `<看板ID> #comment <提交说明>`。
+- 已提供有效 ID 时直接复用。Workflow 启动后以及恢复同一 Run 时，使用 manifest 中保存的 ID，不再询问。ID 通过 `--task-card-id` 传入并由插件保存，本 Run 的提交统一使用 `<看板ID> #comment cmbdevcalw提交 <提交说明>`。
+- Code 封存携带 `--commit-stage code --commit-summary "<实际实现的中文功能说明>"`，插件只在正文附加当前 Batch 的 TASK 编号、标题和任务目标。Review/UTest 打回的生产修复使用 `--commit-stage rework`，摘要说明具体修复的问题，不带 TASK；普通中断恢复仍用 Code。`--purpose review` 是送审封存用途，不是 Review 提交。Review 只读、不创建提交，UTest 测试资产封存使用 `--commit-stage utest`，不带 TASK。详见 `docs/code-commit-messages.md`。
 
 ## 前端 Route 闸门（按 Task 在 Agent 内执行）
 

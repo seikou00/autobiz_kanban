@@ -8,7 +8,7 @@
 
 本项目面向企业软件研发中需求理解易偏差、设计与实现易脱节、并行开发易冲突、AI 生成结果难验证等问题，构建覆盖 Biz（需求）、Dev（开发）、Ops（交付）的 AI 研发流程插件。项目采用“宿主平台承载模型与工具能力、插件编排研发流程、结构化契约约束任务执行、运行证据支撑交付判断”的技术架构，将需求澄清、行为规格、技术设计、任务拆解、编码、评审、测试、CI/CD 对接和归档纳入统一流程。
 
-![图1：总体技术架构与实现边界](/Users/seikou/Documents/GitHub/autobiz_kanban/output/pdf/autobiz-technical-architecture.png)
+![图1：总体技术架构与实现边界](/Users/seikou/Documents/GitHub/autobiz_kanban/output/pdf/autobiz-technical-architecture.png![]())
 
 图 1 展示系统组件及其归属，各部分职责如下：
 

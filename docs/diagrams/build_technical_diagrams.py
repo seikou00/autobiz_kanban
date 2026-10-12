@@ -67,15 +67,24 @@ def page(title, subtitle, index):
     text(958, 71, f'代码依据 0461924   |   {index} / 2', 11, MUTED)
 
 
-def component_row(y, label, items, height=90, fill='#F3F7FC'):
-    box(60, y, 1080, height, fill, '#D9E3EF')
-    text(78, y+33, label, 17, BLUE, True)
+def component_row(y, label, items, height=90, divider=True):
+    """Render a group inside one continuous plugin boundary.
+
+    The group labels and cards are separated with subtle rules only.  The
+    surrounding plugin boundary remains the sole container, preventing the
+    component view from being visually read as several disconnected boxes.
+    """
+    if divider:
+        c.setStrokeColor(HexColor('#DCE5EF'))
+        c.setLineWidth(0.8)
+        c.line(60, H-y, 1140, H-y)
+    text(78, y+34, label, 17, BLUE, True)
     n = len(items)
     gap = 12
     width = (922-(n-1)*gap)/n
     for i, (title, lines) in enumerate(items):
         x = 204+i*(width+gap)
-        box(x, y+10, width, height-20, '#FFFFFF', '#DCE5EF', 7)
+        box(x, y+10, width, height-20, '#F8FAFD', '#E3EAF2', 7)
         text(x+13, y+34, title, 15, INK, True)
         for j, line in enumerate(lines):
             text(x+13, y+56+j*18, line, 12, MUTED)
@@ -91,12 +100,12 @@ path([(600, 168), (600, 194)])
 box(40, 195, 1120, 476, '#FFFFFF', '#95ACC7', 13)
 text(60, 222, '插件实现边界', 18, BLUE, True)
 text(241, 222, '组件视图  |  Python 运行内核 + JavaScript 工作流 + 配置与文件产物', 13, MUTED)
-component_row(237, '接入与适配', [
+component_row(244, '接入与适配', [
     ('插件声明与入口', ['plugin.json / 状态查询']),
     ('技能与角色配置', ['Skills / 角色职责与协议']),
     ('工具调用钩子', ['Hooks / 上下文与行为检查']),
     ('外部服务接入', ['MCP 配置 / 交付适配']),
-], 80)
+], 80, divider=False)
 component_row(329, '编排与控制', [
     ('流程编译与状态管理', ['节点配置 / 标准与精简路线', '阶段迁移 / 统一状态更新']),
     ('契约与执行约束', ['规格引用 / 设计锁 / 任务范围', '产物校验 / 写入检查']),
@@ -112,7 +121,7 @@ component_row(547, '状态与产物', [
     ('需求与设计', ['PRD / specs / 设计锁']),
     ('运行与证据', ['manifest / JSONL / 日志']),
     ('知识与来源', ['上下文 / 来源记录 / 快照']),
-], 100, '#F2F8F6')
+], 100)
 
 path([(600, 673), (600, 710)])
 text(615, 698, '工具访问与交付对接', 12, MUTED)
