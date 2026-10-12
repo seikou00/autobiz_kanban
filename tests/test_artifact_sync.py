@@ -6,6 +6,8 @@ import copy
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,7 +19,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from hooks import artifact_sync as sync, sync_artifacts as cli
+SCRIPTS = ROOT / "skills/autobizdevops-artifact-sync/scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import artifact_sync_utils as sync
+import sync_artifacts as cli
 
 CATALOG = sync.CATALOG_FILE_NAME
 DEFAULT_CONFIG = json.loads(sync.CONFIG_PATH.read_text(encoding="utf-8"))
@@ -39,6 +45,17 @@ class ArtifactSyncTest(unittest.TestCase):
         self.state_path = self.workspace / ".autobizdevops/state.json"
         self.set_checkpoint("code_done")
         self.config = copy.deepcopy(DEFAULT_CONFIG)
+        # Exercise optional inputs and gate failures independently of the shipped
+        # configuration, which users may simplify without changing the runtime.
+        self.config["allowedCheckpoints"] = ["code_done", "cicd_in_progress", "cicd_done", "archived"]
+        additions = {
+            ("biz", "biz.prd"): {"UI_CONTEXT.json": "UI 范围。"},
+            ("dev", "dev.specs"): {"UI_CONTEXT.json": "UI 范围。"},
+            ("dev", "dev.design"): {".design-contract.lock.json": "设计契约。"},
+            ("dev", "dev.plan"): {"plan.json": "开发计划机器事实源。"},
+        }
+        for (group, node), paths in additions.items():
+            self.config["stages"][group][node].update(paths)
         self.config_path = self.root / "artifact-sync.json"
         self.save_config()
         config_patch = patch.object(sync, "CONFIG_PATH", self.config_path)
@@ -274,7 +291,7 @@ class ArtifactSyncTest(unittest.TestCase):
         status = self.status()
         self.assertNotIn("catalog", status)
         self.assertIn("proposal.md", status["published_artifacts"])
-        failed_ids = sync.pending_event_ids(self.feature_dir)
+        failed_ids = [key for key, event in status["events"].items() if event["status"] in {"pending", "failed"}]
         self.assertEqual(len(failed_ids), 1)
         self.assertEqual(status["events"][failed_ids[0]]["kind"], "catalog")
         self.failures.clear()
@@ -396,7 +413,7 @@ class ArtifactSyncTest(unittest.TestCase):
     def test_direct_preparation_also_checks_admission(self):
         self.set_checkpoint("code_in_progress")
         with self.assertRaisesRegex(ValueError, "code_done"):
-            sync.prepare_reconcile_events(workspace=self.workspace, feature="alpha", project_code="P001")
+            sync.SyncSession(self.workspace, "alpha", "P001").prepare()
         self.assertFalse((self.feature_dir / sync.STATUS_FILE_NAME).exists())
 
     def test_workflow_and_checkpoint_changes_do_not_change_scope(self):
@@ -513,7 +530,7 @@ class ArtifactSyncTest(unittest.TestCase):
         path = self.feature_dir / "proposal.md"
         artifact = sync.snapshot_file_artifact(self.feature_dir, path, project_code="P001", feature="alpha")
         self.write_artifact("proposal.md", "new bytes")
-        self.assertTrue(any("同步快照不一致" in e for e in cli.preflight_errors([artifact])))
+        self.assertIn("同步快照不一致", sync.preflight_error(artifact))
 
     def test_legacy_directory_status_migration(self):
         legacy = self.feature_dir / "artifact-sync"
@@ -532,10 +549,10 @@ class ArtifactSyncTest(unittest.TestCase):
         self.assertEqual(self.status()["events"]["old"]["source_stage"], "biz.prd")
         self.assertFalse(legacy.exists())
 
-    def test_new_and_legacy_entrypoints_work_without_board_package_from_other_cwd(self):
+    def test_skill_entrypoint_works_without_board_or_hook_entrypoints_from_other_cwd(self):
         plugin = self.root / "isolated-plugin"
-        files = ["hooks/artifact_sync.py", "hooks/sync_artifacts.py", "hooks/paths.py",
-                 "skills/autobizdevops-artifact-sync/scripts/artifact_sync.py",
+        files = ["hooks/paths.py",
+                 "skills/autobizdevops-artifact-sync/scripts/artifact_sync_utils.py",
                  "skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py",
                  "skills/autobizdevops-artifact-sync/config/artifact-sync.json"]
         for name in files:
@@ -544,7 +561,7 @@ class ArtifactSyncTest(unittest.TestCase):
             shutil.copyfile(ROOT / name, target)
         environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         environment.pop("PYTHONPATH", None)
-        for entry in ("hooks/sync_artifacts.py", "skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py"):
+        for entry in ("skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py",):
             for args in (["--check"], ["--sync", "--prepare-only"]):
                 result = subprocess.run([sys.executable, "-B", str(plugin / entry), *args], cwd=self.root,
                                         env=environment, capture_output=True, text=True)
@@ -554,10 +571,12 @@ class ArtifactSyncTest(unittest.TestCase):
 
     def test_hook_is_not_registered_and_other_hooks_remain(self):
         config = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
-        commands = [h["command"] for registration in config["PostToolUse"]
-                    if registration.get("matcher") == "execute" for h in registration.get("hooks", [])]
-        self.assertFalse(any("artifact_sync" in c for c in commands))
+        commands = [h["command"] for registrations in config.values() for registration in registrations
+                    for h in registration.get("hooks", [])]
+        self.assertFalse(any("artifact_sync" in c or "sync_artifacts" in c for c in commands))
         self.assertTrue(any("verified_digest_guard.py" in c for c in commands))
+        for name in ("artifact_sync.py", "sync_artifacts.py", "artifact_sync_execute_hook.py"):
+            self.assertFalse((ROOT / "hooks" / name).exists())
 
     def test_config_can_include_previously_retired_path_without_losing_history(self):
         self.config["stages"] = {"biz": {"biz.discuss": {"PRD_DISCUSS.md": "配置选择的文档。"}}, "dev": {}}
@@ -612,6 +631,134 @@ class ArtifactSyncTest(unittest.TestCase):
         self.run_cli("--retry-failed")
         self.assertEqual(self.uploaded, [CATALOG])
         self.assertEqual(self.entries()["proposal.md"]["description"], "重试后发布的新简述。")
+
+    def test_invocation_reuses_context_and_does_not_rescan_per_node(self):
+        with patch.object(sync, "load_config", wraps=sync.load_config) as config, \
+                patch.object(sync, "current_feature_record", wraps=sync.current_feature_record) as record, \
+                patch.object(sync, "read_status", wraps=sync.read_status) as status, \
+                patch.object(sync, "scan_artifacts", wraps=sync.scan_artifacts) as scan:
+            self.run_cli("--sync")
+        self.assertEqual(config.call_count, 1)
+        self.assertEqual(record.call_count, 1)
+        self.assertEqual(status.call_count, 1)
+        self.assertEqual(scan.call_count, 2)  # Input scan and final catalog eligibility.
+
+    def test_prepare_scans_once_and_does_not_repeat_missing_diagnostics(self):
+        (self.feature_dir / "FEATURE_API_DETAIL.md").unlink()
+        with patch.object(sync, "scan_artifacts", wraps=sync.scan_artifacts) as scan:
+            self.run_cli("--sync", "--prepare-only")
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(self.stderr.getvalue().count("FEATURE_API_DETAIL.md"), 1)
+        self.assertEqual(self.uploaded, [])
+
+    def test_catalog_rechecks_files_that_disappear_or_grow_during_upload(self):
+        def mutate_after_upload(artifact):
+            result = self.upload(artifact)
+            if artifact["path"] == "proposal.md":
+                (self.feature_dir / "proposal.md").unlink()
+            elif artifact["path"] == "PLAN.md":
+                self.oversized("PLAN.md")
+            return result
+        with patch.object(cli, "upload_file", side_effect=mutate_after_upload):
+            self.run_cli("--sync")
+        for path in ("proposal.md", "PLAN.md"):
+            self.assertIn(path, self.status()["published_artifacts"])
+            self.assertNotIn(path, self.entries())
+
+    def test_preflight_rejects_file_changed_after_initial_scan_and_retry_refreshes_it(self):
+        def mutate_later_file(artifact):
+            if artifact["path"] == "PRD.md":
+                self.write_artifact("proposal.md", "changed during upload")
+            return self.upload(artifact)
+        with patch.object(cli, "upload_file", side_effect=mutate_later_file):
+            self.run_cli("--sync", expected=1)
+        self.assertNotIn("proposal.md", self.uploaded)
+        self.assertNotIn("proposal.md", self.entries())
+        self.assertIn("同步快照不一致", self.stderr.getvalue())
+        self.reset_uploads()
+        self.run_cli("--retry-failed")
+        self.assertEqual(self.uploaded, ["proposal.md", CATALOG])
+
+    def test_interruption_keeps_uploaded_files_and_pending_catalog_for_retry(self):
+        def interrupt_after_first_file(artifact):
+            if self.uploaded:
+                raise KeyboardInterrupt()
+            return self.upload(artifact)
+        with patch.object(cli, "upload_file", side_effect=interrupt_after_first_file):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_cli("--sync")
+        first = self.uploaded[0]
+        self.assertIn(first, self.status()["published_artifacts"])
+        self.assertTrue(any(e.get("kind") == "catalog" and e["status"] == "pending"
+                            for e in self.status()["events"].values()))
+        self.reset_uploads()
+        self.run_cli("--retry-failed")
+        self.assertNotIn(first, self.uploaded)
+        self.assertEqual(self.uploaded[-1], CATALOG)
+
+    def test_shipped_configuration_controls_checkpoint_and_scope(self):
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
+        self.save_config()
+        self.set_checkpoint(self.config["allowedCheckpoints"][0])
+        self.run_cli("--sync")
+        expected = {SAMPLES.get(p, p) for paths in sync.configured_nodes(self.config).values() for p in paths}
+        self.assertEqual(set(self.uploaded), expected | {CATALOG})
+
+    def test_skill_documented_commands_execute_with_their_actual_arguments(self):
+        document = (SCRIPTS.parent / "SKILL.md").read_text(encoding="utf-8")
+        commands = re.findall(r"```bash\n(.*?)```", document, re.DOTALL)
+        self.assertTrue(commands)
+        for command in commands:
+            expanded = command.replace("${pluginPath}", str(ROOT)).replace("${feature}", "alpha")
+            words = shlex.split(expanded.replace("\\\n", " "))
+            self.assertEqual(words[:3], ["python", "-X", "utf8"])
+            self.assertEqual(Path(words[3]), SCRIPTS / "sync_artifacts.py")
+            args = words[4:]
+            if "--prepare-only" in args:
+                self.write_artifact("proposal.md", "pending change from documented preparation")
+            before = self.files()
+            upload_count = len(self.uploaded)
+            self.run_cli(*args)
+            if "--check" in args:
+                self.assertEqual(self.files(), before)
+                self.assertEqual(json.loads(self.stdout.getvalue())["feature"], "alpha")
+            if "--check" in args or "--prepare-only" in args:
+                self.assertEqual(len(self.uploaded), upload_count)
+        self.assertEqual(self.entries()["proposal.md"]["sha256"], sync.sha256_file(self.feature_dir / "proposal.md"))
+        self.assertTrue(all(e["status"] == "success" for e in self.status()["events"].values()))
+
+    def test_explicit_feature_must_match_environment(self):
+        before = self.files()
+        self.run_cli("--feature", "different", "--check", expected=1)
+        self.assertIn("--feature 与 FEATURE_ID 不一致", self.stderr.getvalue())
+        with patch.dict(os.environ, {"FEATURE_ID": ""}):
+            self.run_cli("--feature", "alpha", "--check", expected=1)
+            self.assertIn("FEATURE_ID 未设置", self.stderr.getvalue())
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.uploaded, [])
+
+    def test_required_environment_and_legacy_project_directory_fallback(self):
+        before = self.files()
+        for name in ("PLUGIN_WORKSPACE", "PROJECT_CODE"):
+            with patch.dict(os.environ, {name: ""}):
+                self.run_cli("--check", expected=1)
+                self.assertIn(name, self.stderr.getvalue())
+        with patch.dict(os.environ, {"PROJECT_DIR": "", "PROJECT_CODE": "demo"}):
+            self.run_cli("--feature", "alpha", "--check")
+            self.assertEqual(Path(json.loads(self.stdout.getvalue())["feature_dir"]), self.feature_dir.resolve())
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.uploaded, [])
+
+    def test_invalid_argument_combinations_stop_before_any_side_effect(self):
+        before = self.files()
+        for args in ([], ["--check", "--sync"], ["--check", "--prepare-only"],
+                     ["--retry-failed", "--prepare-only"], ["--sync", "--workspace", str(self.workspace)]):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main(args)
+                self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.uploaded, [])
 
 
 if __name__ == "__main__":

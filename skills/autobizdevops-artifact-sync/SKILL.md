@@ -1,4 +1,4 @@
-~~~~---
+---
 name: autobizdevops-artifact-sync
 description: 按实际代码生成或更新 FEATURE_API_DETAIL.md，并同步产物、补传变化和重试失败上传。
 ---
@@ -18,7 +18,7 @@ python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_ar
 
 ## 生成接口交付文档
 
-准入通过后，常规同步先检查并生成或更新 Feature 产物目录下的 `FEATURE_API_DETAIL.md`，再上传。仅补传失败事件时复用现有文档。
+准入通过后，常规同步先检查并生成或更新 `--check` 返回的 `feature_dir` 下的 `FEATURE_API_DETAIL.md`，再上传。仅检查、准备同步清单或补传失败事件时复用现有文档。
 
 读取 [接口文档生成规则与模板](references/feature-api-detail.md)。保留文件名 `FEATURE_API_DETAIL.md`。
 
@@ -30,7 +30,7 @@ python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_ar
 
 ## 同步产物
 
-首次同步和后续增量同步都使用同一入口；
+首次同步和后续增量同步都使用同一入口：
 
 ```bash
 python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py" \

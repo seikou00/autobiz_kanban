@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan Feature artifact synchronization and maintain durable local state."""
+"""产物同步工具模块：配置、产物扫描、目录与状态管理，供 sync_artifacts.py 调用。"""
 
 from __future__ import annotations
 
@@ -11,12 +11,8 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "artifact-sync.json"
 CATALOG_STAGE = "artifact_catalog"
@@ -25,15 +21,15 @@ CATALOG_FILE_NAME = "ARTIFACT_CATALOG.json"
 CATALOG_SCHEMA_VERSION = "autobizdevops.artifact-catalog.v1"
 PRD_ORIGINAL_DIR_NAME = "prd_original"
 SOURCE_SNAPSHOT_DIR_NAME = "sources"
-OPTIONAL_VERIFY_ARTIFACTS = (
+EXTRA_CATALOG_PATHS = (
     "FEATURE_API_DETAIL.md",
 )
 LEGACY_SYNC_DIR_NAME = "artifact-sync"
 LEGACY_OUTBOX_FILE_NAME = "outbox.ndjson"
 LEGACY_MANIFESTS_DIR_NAME = "manifests"
 MAX_FILE_SIZE = 5 * 1024 * 1024
-IGNORED_PRD_ORIGINAL_NAMES = frozenset({".DS_Store", "Thumbs.db"})
-IGNORED_PRD_ORIGINAL_SUFFIXES = frozenset({".tmp", ".swp", ".swo", ".part"})
+IGNORED_ARTIFACT_NAMES = frozenset({".DS_Store", "Thumbs.db"})
+IGNORED_ARTIFACT_SUFFIXES = frozenset({".tmp", ".swp", ".swo", ".part"})
 LEGACY_STAGE_ALIASES = {"biz.discuss": "biz.prd"}
 
 
@@ -63,22 +59,10 @@ def migrate_legacy_status(data: dict[str, Any]) -> bool:
     return changed
 
 
-def status_path(feature_dir: Path) -> Path:
-    return feature_dir / STATUS_FILE_NAME
-
-
-def legacy_sync_dir(feature_dir: Path) -> Path:
-    return feature_dir / LEGACY_SYNC_DIR_NAME
-
-
-def legacy_status_path(feature_dir: Path) -> Path:
-    return legacy_sync_dir(feature_dir) / STATUS_FILE_NAME
-
-
 def cleanup_legacy_sync_files(feature_dir: Path) -> None:
-    legacy_dir = legacy_sync_dir(feature_dir)
+    legacy_dir = feature_dir / LEGACY_SYNC_DIR_NAME
     for path in (
-        legacy_status_path(feature_dir),
+        feature_dir / LEGACY_SYNC_DIR_NAME / STATUS_FILE_NAME,
         legacy_dir / LEGACY_OUTBOX_FILE_NAME,
     ):
         try:
@@ -104,8 +88,8 @@ def cleanup_legacy_sync_files(feature_dir: Path) -> None:
 
 
 def read_status(feature_dir: Path) -> dict[str, Any]:
-    path = status_path(feature_dir)
-    legacy_path = legacy_status_path(feature_dir)
+    path = feature_dir / STATUS_FILE_NAME
+    legacy_path = feature_dir / LEGACY_SYNC_DIR_NAME / STATUS_FILE_NAME
     migrated = False
     if not path.is_file():
         if not legacy_path.is_file():
@@ -127,7 +111,7 @@ def read_status(feature_dir: Path) -> dict[str, Any]:
         data["events"] = {}
     migrated = migrate_legacy_status(data) or migrated
     if migrated:
-        atomic_write_json(status_path(feature_dir), data)
+        atomic_write_json(feature_dir / STATUS_FILE_NAME, data)
     cleanup_legacy_sync_files(feature_dir)
     return data
 
@@ -151,10 +135,10 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def write_status(feature_dir: Path, payload: dict[str, Any]) -> None:
-    atomic_write_json(status_path(feature_dir), payload)
+    atomic_write_json(feature_dir / STATUS_FILE_NAME, payload)
 
 
-def append_sync_hook_log(
+def append_sync_log(
     feature_dir: Path,
     *,
     feature: str,
@@ -226,161 +210,57 @@ def snapshot_file_artifact(
     }
 
 
-CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
-    "PRD.md": {
-        "category": "requirement",
-        "lifecycle": "final",
-    },
-    "source-context.json": {
-        "category": "requirement_source",
-        "lifecycle": "final",
-    },
-    "UI_CONTEXT.json": {
-        "category": "ui_context",
-        "lifecycle": "final",
-    },
-    "proposal.md": {
-        "category": "behavior_proposal",
-        "lifecycle": "final",
-    },
-    "design.md": {
-        "category": "technical_design",
-        "lifecycle": "process",
-    },
-    ".design-contract.lock.json": {
-        "category": "technical_design_contract",
-        "lifecycle": "process",
-    },
-    "PLAN.md": {
-        "category": "implementation_plan",
-        "lifecycle": "process",
-    },
-    "plan.json": {
-        "category": "implementation_plan",
-        "lifecycle": "final",
-    },
-    "SMOKE_TEST_PLAN.json": {
-        "category": "smoke_test_plan",
-        "lifecycle": "process",
-    },
-    "SMOKE_RESULT.json": {
-        "category": "smoke_result",
-        "lifecycle": "evidence",
-    },
-    "DETAIL_DESIGN.md": {
-        "category": "technical_detail",
-        "lifecycle": "process",
-    },
-    "SPECS_REVIEW.md": {
-        "category": "review_report",
-        "lifecycle": "evidence",
-    },
-    "REQUIREMENTS_EVAL.md": {
-        "category": "review_report",
-        "lifecycle": "evidence",
-    },
-    "UNIT_TEST_REPORT.md": {
-        "category": "unit_test_report",
-        "lifecycle": "evidence",
-    },
-    "UNIT_TEST_RESULT.json": {
-        "category": "unit_test_result",
-        "lifecycle": "evidence",
-    },
-    "test-output.log": {
-        "category": "log",
-        "lifecycle": "log",
-    },
-    "E2E_TEST_CASES.yaml": {
-        "category": "e2e_cases",
-        "lifecycle": "evidence",
-    },
-    "E2E_REPORT.md": {
-        "category": "e2e_report",
-        "lifecycle": "evidence",
-    },
-    "E2E_RESULT.json": {
-        "category": "e2e_result",
-        "lifecycle": "evidence",
-    },
-    "E2E_QUALITY_SCAN.json": {
-        "category": "e2e_quality_scan",
-        "lifecycle": "evidence",
-    },
-    "e2e-run.log": {
-        "category": "log",
-        "lifecycle": "log",
-    },
-    "VERIFY_REPORT.md": {
-        "category": "verify_report",
-        "lifecycle": "final",
-    },
-    "VERIFY_DECISION.json": {
-        "category": "verify_decision",
-        "lifecycle": "final",
-    },
-    "FIX_REQUEST.json": {
-        "category": "fix_request",
-        "lifecycle": "process",
-    },
-    "evidence/EVIDENCE.jsonl": {
-        "category": "evidence_stream",
-        "lifecycle": "evidence",
-    },
-    "FEATURE_API_DETAIL.md": {
-        "category": "api_detail",
-        "lifecycle": "final",
-    },
-    CATALOG_FILE_NAME: {
-        "category": "artifact_catalog",
-        "lifecycle": "system",
-    },
+CATALOG_EXACT_METADATA = {
+    "PRD.md": ("requirement", "final"),
+    "source-context.json": ("requirement_source", "final"),
+    "UI_CONTEXT.json": ("ui_context", "final"),
+    "proposal.md": ("behavior_proposal", "final"),
+    "design.md": ("technical_design", "process"),
+    ".design-contract.lock.json": ("technical_design_contract", "process"),
+    "PLAN.md": ("implementation_plan", "process"),
+    "plan.json": ("implementation_plan", "final"),
+    "SMOKE_TEST_PLAN.json": ("smoke_test_plan", "process"),
+    "SMOKE_RESULT.json": ("smoke_result", "evidence"),
+    "DETAIL_DESIGN.md": ("technical_detail", "process"),
+    "SPECS_REVIEW.md": ("review_report", "evidence"),
+    "REQUIREMENTS_EVAL.md": ("review_report", "evidence"),
+    "UNIT_TEST_REPORT.md": ("unit_test_report", "evidence"),
+    "UNIT_TEST_RESULT.json": ("unit_test_result", "evidence"),
+    "test-output.log": ("log", "log"),
+    "E2E_TEST_CASES.yaml": ("e2e_cases", "evidence"),
+    "E2E_REPORT.md": ("e2e_report", "evidence"),
+    "E2E_RESULT.json": ("e2e_result", "evidence"),
+    "E2E_QUALITY_SCAN.json": ("e2e_quality_scan", "evidence"),
+    "e2e-run.log": ("log", "log"),
+    "VERIFY_REPORT.md": ("verify_report", "final"),
+    "VERIFY_DECISION.json": ("verify_decision", "final"),
+    "FIX_REQUEST.json": ("fix_request", "process"),
+    "evidence/EVIDENCE.jsonl": ("evidence_stream", "evidence"),
+    "FEATURE_API_DETAIL.md": ("api_detail", "final"),
 }
 
 
 def catalog_source_for_path(relative_path: str) -> str:
-    if relative_path == CATALOG_FILE_NAME:
-        return "hook_generated"
     if (
         relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/")
         or relative_path.startswith(f"{SOURCE_SNAPSHOT_DIR_NAME}/")
-        or relative_path in OPTIONAL_VERIFY_ARTIFACTS
+        or relative_path in EXTRA_CATALOG_PATHS
     ):
         return "extra"
     return "workflow"
 
 
-def catalog_metadata_for_path(relative_path: str) -> dict[str, Any]:
+def catalog_metadata_for_path(relative_path: str) -> dict[str, str]:
+    category, lifecycle = CATALOG_EXACT_METADATA.get(relative_path, ("artifact", "process"))
     if relative_path.startswith("specs/") and relative_path.endswith(".md"):
-        return {
-            "category": "behavior_spec",
-            "lifecycle": "final",
-        }
-    if relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/"):
-        return {
-            "category": "source_reference",
-            "lifecycle": "reference",
-        }
-    if relative_path.startswith(f"{SOURCE_SNAPSHOT_DIR_NAME}/"):
-        return {
-            "category": "requirement_source_snapshot",
-            "lifecycle": "reference",
-        }
-    if relative_path.startswith("e2e-diagnostics/"):
-        return {
-            "category": "e2e_diagnostic",
-            "lifecycle": "evidence",
-        }
-    return dict(
-        CATALOG_EXACT_METADATA.get(
-            relative_path,
-            {
-                "category": "artifact",
-                "lifecycle": "process",
-            },
-        )
-    )
-
+        category, lifecycle = "behavior_spec", "final"
+    elif relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/"):
+        category, lifecycle = "source_reference", "reference"
+    elif relative_path.startswith(f"{SOURCE_SNAPSHOT_DIR_NAME}/"):
+        category, lifecycle = "requirement_source_snapshot", "reference"
+    elif relative_path.startswith("e2e-diagnostics/"):
+        category, lifecycle = "e2e_diagnostic", "evidence"
+    return {"category": category, "lifecycle": lifecycle}
 
 
 def json_digest(value: Any) -> str:
@@ -463,8 +343,7 @@ def current_feature_record(workspace: Path, feature: str) -> dict[str, Any]:
     return dict(record, feature=feature, checkpoint=record["checkpoint"].strip())
 
 
-def resolve_feature_dir(workspace: Path, feature: str) -> Path | None:
-    record = current_feature_record(workspace, feature)
+def resolve_feature_dir(workspace: Path, feature: str, record: dict[str, Any]) -> Path | None:
     base = workspace / ".autobizdevops"
     active = base / "features" / feature
     if active.is_dir():
@@ -483,19 +362,10 @@ def resolve_feature_dir(workspace: Path, feature: str) -> Path | None:
     return None
 
 
-def load_sync_context(workspace: Path, feature: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    config = load_config()
-    record = current_feature_record(workspace, feature)
-    if record["checkpoint"] not in config["allowedCheckpoints"]:
-        raise ValueError(f"当前 checkpoint {record['checkpoint']} 不允许产物同步；允许值: "
-                         + ", ".join(config["allowedCheckpoints"]))
-    return record, config
-
-
 def ignored_artifact(relative_path: str, *, globbed: bool) -> bool:
     parts = PurePosixPath(relative_path).parts
-    return any(part in IGNORED_PRD_ORIGINAL_NAMES or part.startswith("~$")
-               or Path(part).suffix.lower() in IGNORED_PRD_ORIGINAL_SUFFIXES
+    return any(part in IGNORED_ARTIFACT_NAMES or part.startswith("~$")
+               or Path(part).suffix.lower() in IGNORED_ARTIFACT_SUFFIXES
                or (globbed and part.startswith(".")) for part in parts)
 
 
@@ -599,74 +469,188 @@ def batch_fingerprint(artifacts: Iterable[dict[str, Any]], digest: str = "") -> 
     ]})
 
 
-def create_pending_event(
-    feature_dir: Path, *, feature: str, source_stage: str, config: dict[str, Any],
-    artifacts: list[dict[str, Any]], kind: str = "artifacts",
-) -> str:
-    status = read_status(feature_dir)
-    digest = config_digest(config)
-    fingerprint = batch_fingerprint(artifacts, digest)
-    for event_id, event in status["events"].items():
-        if (isinstance(event, dict) and event.get("status") in {"pending", "failed"}
-                and event.get("source_stage") == source_stage and event.get("kind", "artifacts") == kind):
-            event.update(artifacts=artifacts, fingerprint=fingerprint, config_digest=digest, config_snapshot=config)
-            write_status(feature_dir, status)
-            return event_id
-    event_id = f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
-    status["events"][event_id] = {
-        "event_id": event_id, "feature": feature, "source_stage": source_stage, "kind": kind,
-        "config_digest": digest, "config_snapshot": config, "fingerprint": fingerprint,
-        "status": "pending", "attempts": 0, "created_at": utc_now(), "updated_at": utc_now(),
-        "artifacts": artifacts,
-    }
-    write_status(feature_dir, status)
-    return event_id
+def preflight_error(artifact: dict[str, Any]) -> str:
+    """Check the current file immediately before uploading its prepared snapshot."""
+    path = Path(artifact["local_path"])
+    name = artifact["path"]
+    try:
+        if not path.is_file():
+            return f"上传文件不存在: {name}"
+        size = path.stat().st_size
+        if size > MAX_FILE_SIZE:
+            return f"文件超过 5 MiB 限制: {name} size={size} limit={MAX_FILE_SIZE}"
+        if size != artifact.get("size") or sha256_file(path) != artifact.get("sha256"):
+            return f"文件大小或 Hash 与同步快照不一致: {name}"
+    except OSError as exc:
+        return f"上传文件不可读: {name}: {exc}"
+    return ""
 
 
-def pending_event_ids(feature_dir: Path) -> list[str]:
-    status = read_status(feature_dir)
-    return [event_id for event_id, event in status["events"].items()
-            if isinstance(event, dict) and event.get("status") in {"pending", "failed"}]
+class SyncSession:
+    """One admitted invocation, sharing its config, file scan and durable state."""
 
+    def __init__(self, workspace: Path, feature: str, project_code: str):
+        validate_path_component(project_code, "PROJECT_CODE")
+        self.config = load_config()
+        record = current_feature_record(workspace, feature)
+        self.checkpoint = record["checkpoint"]
+        if self.checkpoint not in self.config["allowedCheckpoints"]:
+            raise ValueError(f"当前 checkpoint {self.checkpoint} 不允许产物同步；允许值: "
+                             + ", ".join(self.config["allowedCheckpoints"]))
+        self.feature_dir = resolve_feature_dir(workspace, feature, record)
+        if self.feature_dir is None:
+            raise ValueError(f"Feature 目录不存在: {feature}")
+        self.feature, self.project_code = feature, project_code
+        self.nodes = configured_nodes(self.config)
+        self.config_digest = config_digest(self.config)
+        self.selected, self.diagnostics = self.scan()
+        # --check must never migrate or write synchronization state.
+        self._status: dict[str, Any] | None = None
+        self._diagnostics_reported = False
 
-def mark_event_failed(feature_dir: Path, event_id: str, error: str) -> None:
-    status = read_status(feature_dir)
-    event = status["events"][event_id]
-    event.update(status="failed", last_error=error, updated_at=utc_now())
-    write_status(feature_dir, status)
-    append_sync_hook_log(feature_dir, feature=event["feature"], status="failed", message=error, event_id=event_id)
+    @property
+    def status(self) -> dict[str, Any]:
+        if self._status is None:
+            self._status = read_status(self.feature_dir)
+        return self._status
 
+    def save(self) -> None:
+        write_status(self.feature_dir, self.status)
 
-def record_diagnostics(feature_dir: Path, feature: str, diagnostics: list[dict[str, Any]]) -> None:
-    for item in diagnostics:
-        append_sync_hook_log(feature_dir, feature=feature, status="skipped",
-                             message=f"{item['path']}: {item['reason']}")
-    if diagnostics:
-        print("跳过产物: " + json.dumps(diagnostics, ensure_ascii=False), file=sys.stderr)
+    def scan(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+        return scan_artifacts(self.feature_dir, feature=self.feature,
+                              project_code=self.project_code, config=self.config)
 
+    def catalog(self) -> dict[str, Any]:
+        return write_artifact_catalog(self.feature_dir, feature=self.feature,
+                                      project_code=self.project_code, selected=self.selected, status=self.status)
 
-def prepare_reconcile_events(
-    *, workspace: Path, feature: str, project_code: str, include_completed: bool = True,
-) -> tuple[Path, list[str]]:
-    # include_completed is retained for callers of the old reconciliation API.
-    _, config = load_sync_context(workspace, feature)
-    feature_dir = resolve_feature_dir(workspace, feature)
-    if feature_dir is None:
-        raise ValueError(f"Feature 目录不存在: {feature}")
-    selected, diagnostics = scan_artifacts(feature_dir, feature=feature, project_code=project_code, config=config)
-    status = read_status(feature_dir)
-    record_diagnostics(feature_dir, feature, diagnostics)
-    event_ids = pending_event_ids(feature_dir)
-    for node in configured_nodes(config):
-        changed = [artifact for artifact in selected.values() if artifact["stage"] == node and needs_upload(artifact, status)]
-        if changed:
-            event_id = create_pending_event(feature_dir, feature=feature, source_stage=node, config=config, artifacts=changed)
-            if event_id not in event_ids:
-                event_ids.append(event_id)
-    catalog = write_artifact_catalog(feature_dir, feature=feature, project_code=project_code, selected=selected, status=status)
-    if event_ids or catalog_needs_upload(catalog, status):
-        event_id = create_pending_event(feature_dir, feature=feature, source_stage=CATALOG_STAGE,
-                                        config=config, artifacts=[catalog], kind="catalog")
-        if event_id not in event_ids:
-            event_ids.append(event_id)
-    return feature_dir, event_ids
+    def report_diagnostics(self) -> None:
+        if self._diagnostics_reported:
+            return
+        self._diagnostics_reported = True
+        for item in self.diagnostics:
+            append_sync_log(self.feature_dir, feature=self.feature, status="skipped",
+                            message=f"{item['path']}: {item['reason']}")
+        if self.diagnostics:
+            print("跳过产物: " + json.dumps(self.diagnostics, ensure_ascii=False), file=sys.stderr)
+
+    def pending_event_ids(self) -> list[str]:
+        return [key for key, event in self.status["events"].items()
+                if isinstance(event, dict) and event.get("status") in {"pending", "failed"}]
+
+    def changed_artifacts(self, stage: str) -> list[dict[str, Any]]:
+        return [item for item in self.selected.values()
+                if item["stage"] == stage and needs_upload(item, self.status)]
+
+    def set_snapshot(self, event: dict[str, Any], artifacts: list[dict[str, Any]]) -> None:
+        event.update(config_digest=self.config_digest, config_snapshot=self.config,
+                     artifacts=artifacts, fingerprint=batch_fingerprint(artifacts, self.config_digest),
+                     updated_at=utc_now())
+
+    def queue_event(self, stage: str, artifacts: list[dict[str, Any]], *, kind: str = "artifacts") -> str:
+        events = self.status["events"]
+        event_id = next((key for key in self.pending_event_ids()
+                         if events[key].get("source_stage") == stage
+                         and events[key].get("kind", "artifacts") == kind), None)
+        if event_id is None:
+            event_id = f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
+            events[event_id] = {
+                "event_id": event_id, "feature": self.feature, "source_stage": stage, "kind": kind,
+                "status": "pending", "attempts": 0, "created_at": utc_now(),
+            }
+        self.set_snapshot(events[event_id], artifacts)
+        self.save()
+        return event_id
+
+    def prepare(self) -> list[str]:
+        self.report_diagnostics()
+        event_ids = self.pending_event_ids()
+        for node in self.nodes:
+            changed = self.changed_artifacts(node)
+            if changed:
+                event_ids.append(self.queue_event(node, changed))
+        catalog = self.catalog()
+        if event_ids or catalog_needs_upload(catalog, self.status):
+            event_ids.append(self.queue_event(CATALOG_STAGE, [catalog], kind="catalog"))
+        return list(dict.fromkeys(event_ids))
+
+    def record_uploaded(self, artifact: dict[str, Any], stage: str) -> None:
+        self.status["published_artifacts"][artifact["path"]] = {
+            "stage": stage, "sha256": artifact["sha256"], "size": artifact["size"],
+            "object_key": artifact_object_key(artifact), "synced_at": utc_now(),
+        }
+        if "content_digest" in artifact:
+            self.status["catalog"] = {
+                "content_digest": artifact["content_digest"],
+                "object_key": artifact_object_key(artifact), "synced_at": utc_now(),
+            }
+        self.save()
+
+    def finish_event(self, event_id: str, *, error: str = "", skipped: str = "") -> int:
+        event = self.status["events"][event_id]
+        event.update(status="failed" if error else "skipped" if skipped else "success", updated_at=utc_now())
+        if error:
+            event["last_error"] = error
+            print(error, file=sys.stderr)
+        elif skipped:
+            event["skipped_reason"] = skipped
+            print(skipped)
+        else:
+            event["synced_at"] = utc_now()
+            print(f"artifact sync success: event_id={event_id} files={len(event['artifacts'])}")
+        self.save()
+        append_sync_log(self.feature_dir, feature=self.feature, event_id=event_id, status=event["status"],
+                        message=error or skipped or f"{event['source_stage']} 同步完成")
+        return int(bool(error))
+
+    def execute_event(self, event_id: str, upload: Callable[[dict[str, Any]], tuple[bool, str]]) -> int:
+        event = self.status["events"][event_id]
+        event.update(status="pending", attempts=int(event.get("attempts", 0) or 0) + 1, updated_at=utc_now())
+        for field in ("last_error", "skipped_reason", "synced_at"):
+            event.pop(field, None)
+        self.save()
+        stage = event.get("source_stage", "")
+        is_catalog = event.get("kind") == "catalog"
+        if not is_catalog and stage not in self.nodes:
+            return self.finish_event(event_id, skipped=f"节点已从同步配置移除，跳过: {stage}")
+        try:
+            if is_catalog:
+                # Files may disappear or exceed the limit during upload. Recheck
+                # eligibility once at the end, not once for every node event.
+                self.selected, _ = self.scan()
+                catalog = self.catalog()
+                artifacts = [catalog] if catalog_needs_upload(catalog, self.status) else []
+            else:
+                artifacts = self.changed_artifacts(stage)
+            self.set_snapshot(event, artifacts)
+            self.save()
+            errors = []
+            for artifact in artifacts:
+                error = preflight_error(artifact)
+                if not error:
+                    ok, error = upload(artifact)
+                    if ok:
+                        self.record_uploaded(artifact, stage)
+                        continue
+                    error = error or f"上传失败: {artifact['path']}"
+                errors.append(error)
+            return self.finish_event(event_id, error="\n".join(errors))
+        except (OSError, ValueError) as exc:
+            return self.finish_event(event_id, error=f"产物同步失败: {exc}")
+
+    def execute(self, event_ids: list[str], upload: Callable[[dict[str, Any]], tuple[bool, str]]) -> int:
+        events = self.status["events"]
+        file_events, catalog_events = [], []
+        for event_id in dict.fromkeys(event_ids):
+            event = events.get(event_id)
+            if not isinstance(event, dict) or event.get("feature") != self.feature:
+                raise ValueError(f"同步事件不存在或 Feature 不匹配: {event_id}")
+            (catalog_events if event.get("kind") == "catalog" else file_events).append(event_id)
+        self.report_diagnostics()
+        # Persist the catalog obligation before the first upload, including a
+        # single-event retry, so an interruption cannot lose the catalog update.
+        if file_events and not catalog_events:
+            catalog_events.append(self.queue_event(CATALOG_STAGE, [self.catalog()], kind="catalog"))
+        failures = sum(self.execute_event(key, upload) for key in file_events + catalog_events)
+        return int(bool(failures))
