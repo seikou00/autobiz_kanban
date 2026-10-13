@@ -82,7 +82,7 @@
           "onBlock": {
             "reason": "命令不符合当前 Batch 阶段的验证权限",
             "systemMessage": "环境版本/帮助查询允许执行；当前 Batch 绑定的活动 Code/修复 task 允许生产纯编译；Review 禁止验证；其余构建、测试、typecheck、lint、E2E 仅由 Review 通过后的运行中 UTest 阶段执行。",
-            "additionalContext": "生产纯编译支持 cwd/workdir 或 cd 前缀、输出重定向及 head/tail/tee 管道；默认直接使用 PATH 中的 mvn。task_runner 启动/恢复 TASK 时自动登记 implement；旧 Run 的 none 本身不阻止绑定正确的活动 TASK 纯编译。被拦截时读取 GUARD_DIAGNOSTICS.failedChecks、executionCwd 与 taskRuns，对照 task_runner inspect 检查具体失败条件。不得附加 test/package/verify、其他验证命令或后台进程，不得切换中立目录绕过 guard 或直接修改运行状态。后端生产编译通过后再 finish-implementation。"
+            "additionalContext": "guard 按真实命令和目标判断，支持 export/环境赋值、cd、多行、tee 和退出码记录，不要求固定命令字符串。被拦截时必须展示 GUARD_DIAGNOSTICS.failures 中每项 code、reason、line、statement，连同 executionCwd、taskRuns、guardVersion 和 guardPath；不能只说 guard rejected，更不能盲目删除 -o 重试。相对 cwd 需要工具真实的 workspaceRoot；执行工具自身的 cwd 限制另行报告。后端按 prepare-compile → 直接 Bash 编译并立即保存 PIPESTATUS → record-compile → finish-implementation 完成；记录成功不代表编译通过，检查 passed/exitCode/logExitCode，登记失败保留日志只重试登记。TASK/Batch/run 绑定和阶段规则仍然生效；不得附加 test/package/verify、额外验证、动态执行或后台进程，不得切换中立目录绕过 guard 或手改 Runtime。"
           },
           "persistAfterInterrupt": true
         },

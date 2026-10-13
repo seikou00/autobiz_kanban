@@ -698,6 +698,7 @@ const stagePath = joinPath(pluginPath, "hooks/parallel_batch_stage.py");
 const utestRouterPath = joinPath(pluginPath, "hooks/utest_assignment_router.py");
 const utestCommandPath = joinPath(pluginPath, "hooks/run_utest_command.py");
 const utestEnvironmentPath = joinPath(pluginPath, "hooks/inspect_test_environment.py");
+const utestRuntimePath = joinPath(pluginPath, "hooks/utest_runtime.py");
 const utestSourceBugPath = joinPath(pluginPath, "hooks/validate_utest_source_bug.py");
 const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 // Every child below runs after the caller has supplied the task-card ID and
@@ -754,7 +755,7 @@ const codeWorkspaceArgs = Object.entries(codeWorkspaces)
 // Keep this exact boundary in both implementation prompts, including cowork.
 const CODE_STAGE_EXECUTION_BOUNDARY = "本 Code 执行规则适用于主 Agent、cowork/协作 Agent 以及实现修复 Agent。Code 阶段和修复阶段只允许生产源码、生产配置、迁移和公开接口的最小实现，以及本 Prompt 明确列出的 lease、scheduler、route resolver、task_runner、worktree seal/release 命令。可以只读既有测试理解契约，但在 task_runner.py finish-implementation 成功前，禁止创建、修改或删除测试源码（包括 src/test、test、tests、__tests__）、fixture/mock、测试环境或测试配置。后端 lane 的每个 TASK 在实现或修复生产代码后、finish-implementation 前，必须使用 Bash 在该 TASK 的业务 Worktree 执行项目文档/构建配置指定的 production-only compile 命令；只编译生产代码，不得连带运行测试、打包、typecheck 或 lint。记录精确命令和完整输出；失败时根据真实输出定位根因、修复生产代码并重编，直到通过；编译命令或环境无法使用时保留真实错误并返回失败，禁止假报通过或完成。前端 lane 不执行此新增编译门槛。除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E 或 TASK validation 命令，也禁止为此启动后台进程。包括但不限于 mvn/mvnw（package、verify、test）、Gradle/gradlew（build、assemble、check、test）、npm/pnpm/yarn（build、typecheck、lint、test）、npx/vite/webpack/tsc/vue-tsc/eslint、jest、vitest、pytest；Maven/Gradle 等只允许使用对应的生产 compile-only 目标，不得使用会触发测试或打包的复合目标。所有测试资产和行为验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行；不得以“验证实现”为由绕过该阶段。\n";
 
-const CODE_STAGE_COMPILE_COMMAND_GUIDANCE = "编译和环境查询使用前台 Bash；优先将执行工具的 cwd/workdir 设置为当前 TASK 的业务模块目录，也可使用 cd \"<模块目录>\" && <纯编译命令>。guard 支持输出重定向及 head/tail/tee 管道；必须保留完整输出和真实编译退出码，推荐 set -o pipefail && <纯编译命令> 2>&1 | tee \"<编译日志>\"，不要仅凭 tail/head 的最后几行判断通过。默认直接使用执行终端 PATH 中的 mvn，不要求定位 mvn.exe、读取启动脚本或使用绝对路径；只有命令不存在或启动失败时才检查环境。允许 mvn -v/--version/--help 等环境查询；禁止附加 test/package/verify 等目标、其他验证命令或后台进程。若 guard 拦截，先用 task_runner.py inspect 核对真实 run 状态、parallelRunId、batchId 和 codeWorkspace；task_runner start/start-task-repair/resume 成功前会自动登记运行中的 implement。旧 Run 的 activeStage 即使为 none，绑定正确的活动 TASK 仍允许纯编译；被拦截时以 GUARD_DIAGNOSTICS.failedChecks 为准，不要把 none 当作失败原因。不得切换中立目录绕过 guard，也不得直接修改运行状态 JSON。\n";
+const CODE_STAGE_COMPILE_COMMAND_GUIDANCE = "编译和环境查询使用前台 Bash。guard 按实际程序、目标和 TASK/Batch 绑定检查，不要求固定某行命令；支持字面量 export/环境赋值、cd、分行/分号/&&、输出重定向和 head/tail/tee，以及 PIPESTATUS 保存、echo/printf 和 exit。mvn 的 -q/-o/-D 参数不是拦截理由。使用当前 TASK 的业务模块 cwd/workdir；相对 cwd 必须由工具提供真实绝对 workspaceRoot，不能猜执行工具根目录；也可在同一次执行中使用 cd \"<模块目录>\" && ... 或 cd \"<模块目录>\" || exit \"$?\"。默认使用 PATH 中的 mvn，允许 mvn -v/--version/--help，不要求查找 mvn.exe；只有命令不存在或启动失败才检查安装。后端 TASK 的生产源码写完后，先用同一个 task_runner.py prepare-compile 登记：携带全部已有 TASK/workspace/parallel-run-id/lease-token/workspace-ref 参数、--run-id <当前 TASK 的真实 runId>、--execution-cwd \"<实际模块绝对目录>\"，在 -- 后传实际 compile-only argv；保存返回的 attemptId。prepare-compile 只冻结源码和命令，不执行编译。随后单独用 Bash 执行同一 argv，2>&1 | tee 到工作树之外已存在的临时日志目录；管道后立即保存 compile_status=(\"${PIPESTATUS[@]}\")，用 printf 输出两个退出码，最后 exit \"$((compile_status[0] != 0 ? compile_status[0] : compile_status[1]))\"。不能只追加 echo EXIT 后把工具成功当成编译通过。再独立调用 task_runner.py record-compile，携带同一 TASK/run 参数、--attempt-id <真实 attemptId>、--exit-code <实际编译退出码>、--log-exit-code <实际 tee 退出码>、--output-file \"<临时完整日志>\"；它只登记，不执行编译。record-compile 的 ok 只表示登记成功，必须读取 passed/exitCode/logExitCode；编译失败时依据实际日志修复生产代码，重新 prepare 和编译。登记失败保留输出，只重试登记，不能自动重跑编译。finish-implementation 检查当前后端 TASK/run 最新成功 Evidence 和源码快照；编译后又修改代码必须重新编译，前端不新增编译门槛。若 guard 拦截，必须展示 GUARD_DIAGNOSTICS.failures 中具体 code/reason/line/statement 和 executionCwd、taskRuns；先修复该具体原因，不得盲目删除 -o 或反复试命令。GUARD_DIAGNOSTICS.guardVersion/guardPath 用于核对 Windows 实际加载的插件；工具自身 cwd 拒绝和插件 guard 拒绝分别报告。task_runner start/start-task-repair/resume 自动登记 implement，旧 Run 的 activeStage=none 本身不禁止绑定正确的活动 TASK 纯编译。禁止 test/package/verify 等非生产编译目标、额外验证命令、动态执行和后台进程；不得切中立目录绕过 guard 或直接修改 Runtime JSON。\n";
 
 function taskWorkspacePath(batchId, batchWorktree, componentRoots) {
   if (!usableString(batchWorktree)) {
@@ -1452,8 +1453,10 @@ async function runBatchUtestAndSeal(batchResult, retryFailure = null) {
     retryInstruction +
     "范围护栏：除本 Batch worktree、上述 TASK 的 router 原文、本提示给出的插件命令，以及本次 runner 返回的 logPath/evidenceLogPath（仅失败后只读本 target 的命令段）外，不得访问任何路径。禁止运行 git worktree list、find、grep -R、全仓库 rg/glob，禁止按 B00*、测试目录或 .autobizdevops 目录枚举其他 Batch；不得 cd 到本 Batch worktree 外。测试文件必须是本 worktree 下、与当前 TASK assignment 对应的仓库根相对路径。已有测试资产先按 assignment 运行并复用，只有当前 TASK 的测试/fixture/mock/测试配置失败时才可修改；不得为寻找测试而扫描仓库。\n" +
     "这是 Code Review 之后的测试阶段：Review 只审业务生产代码；现在由你生成/补齐测试源码、fixture/mock/测试环境配置并运行测试。测试代码必须留在当前 Worktree，并会随本 Batch 再次封存后合并；禁止把测试拆成独立 Batch。\n" +
-    "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + " --lease-guard，保存 lease.ownerToken；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 router 与环境检查。若 status=environment_target_ambiguous，只能依据 TASK 与 inspector 返回的候选路径选择；选定时以 --task-id 和 --environment-target TASK_ID=ENVIRONMENT_TARGET_ID 重跑该 TASK 的环境检查，无法确定时按 environment 阻断收口，不得修改 Plan 或初始化全部候选。status 仍非 ready 时仅可修已选环境的测试配置/fixture/mock/helper 一次并重新检查；外部依赖、JDK、权限、网络或第二次失败立即按步骤 7 收口。禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process。\n" +
-    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints、testPoints 与全部 AC，排除 nonGoals。每个 target 初次只能执行一次真实、精确的测试 argv，并直接在 Bash 执行；不得让 Python runner 启动 Maven/Gradle/Node 测试进程。将合并输出通过 tee 写入临时文件，立即捕获测试进程退出码，再调用 python \"" + utestCommandPath + "\" --kind test --record-only --exit-code <BASH_EXIT_CODE> --output-file <临时输出文件> --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> -- <与 Bash 完全相同的真实测试 argv>。runner 只验证绑定、登记 Bash 的真实退出码/输出并写 Evidence/target；不得重跑测试。只有 runner 成功登记后删除临时输出文件；登记失败时保留输出文件，禁止重新执行测试。不得运行宽泛命令。若 failureClassification=test_failure 且根因位于测试资产，可修一次并只重跑同一精确命令一次。若 failureClassification=source_compile，或正常退出的失败证据经 validate_utest_source_bug 证明为 source_bug，立即停止：禁止换 runner、执行第二个测试文件或继续搜索绕过方案。\n" +
+    "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + " --lease-guard，保存 lease.ownerToken；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 router 与环境检查。若 status=environment_target_ambiguous，只能依据 TASK 与 inspector 返回的候选路径选择；选定时以 --task-id 和 --environment-target TASK_ID=ENVIRONMENT_TARGET_ID 重跑该 TASK 的环境检查，无法确定时按 environment 阻断收口，不得修改 Plan 或初始化全部候选。status 非 ready 或所选 preset 缺能力时，可在当前 test 阶段补齐已选模块的测试配置/fixture/mock/helper，以及 pom.xml 的 test scope 依赖和必要 Surefire/Failsafe 配置一次并重新检查；测试依赖写入不要求重开生产 TASK，guard 和 seal 按实际 XML 差异授权，保留生产依赖、parent/BOM、共享属性、profiles；外部依赖、JDK、权限、网络或第二次失败立即按步骤 7 收口。禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process。\n" +
+    "5) 对每个 TASK 执行 python \"" + utestRuntimePath + "\" prepare --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --batch-worktree \"" + batchWorktree + "\" --task-id <TASK_ID> --owner-token <真实token> --stage-timeout " + utestStageTimeout + "。复用返回 preset、环境和预算；JUnit/Mockito 配合，保留既有 JUnit。缺测试依赖用相同绑定参数的 apply-pom --content-file <临时完整POM>，无需 task_runner start。执行前确有证据才 select 一次，执行后冻结策略。静态链路无法隔离记 testability_gap；mapper/H2 不替代 service 授权覆盖。禁止本地 Maven 仓库递归扫描；查类用 lookup-class --classpath-file <当前模块已有snapshot> --class-name <完整包名> 和同一绑定参数。Maven tree/build-classpath/resolve/effective-pom 统一用 run_utest_command --kind setup，带 run-id、batch-id、stage-timeout，成功/失败缓存复用。未知或缺离线依赖不反复换版本；仅外部环境变化才 refresh-diagnostics。\n" +
+    "首次命令期限为 600 秒，Runtime 的总期限/计数不因恢复或续 lease 重置。prepare/preflight 返回 blocked 后立即按步骤 7/8 记录 deferred、封存有效测试资产、释放 lease；不得继续读插件源码寻找放行路径。文件落地后执行 python \"" + utestRuntimePath + "\" preflight --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --batch-worktree \"" + batchWorktree + "\" --task-id <TASK_ID> --owner-token <真实token> --stage-timeout " + utestStageTimeout + " --command-timeout " + utestCommandTimeout + " --test-file <文件> -- <精确argv>；原样执行返回 bashCommand。生成脚本属于 Runtime：只执行，不手改；它重新校验执行绑定、限制子进程、捕获 PIPESTATUS/tee 状态并通过 record-only 登记。零/未知实际用例数不得 PASS。test_bug/source_repair 受控重跑用对应 retry-kind，绝不直接重放旧脚本。awaiting_record 仅补记原输出。\n" +
+    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 Plan V2 的 testPoints、verificationIntent 与 writer 绑定的 AC；implementationPoints 只定位行为，nonGoals 不是 V2 必需输入。每个 target 初次只能执行一次真实、精确的测试 argv，并直接在 Bash 执行；不得让 Python runner 启动 Maven/Gradle/Node 测试进程。将合并输出通过 tee 写入临时文件，立即捕获测试进程退出码，再调用 python \"" + utestCommandPath + "\" --kind test --record-only --exit-code <BASH_EXIT_CODE> --output-file <临时输出文件> --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> -- <与 Bash 完全相同的真实测试 argv>。runner 只验证绑定、登记 Bash 的真实退出码/输出并写 Evidence/target；不得重跑测试。只有 runner 成功登记后删除临时输出文件；登记失败时保留输出文件，禁止重新执行测试。不得运行宽泛命令。若 failureClassification=test_failure 且根因位于测试资产，可修一次并只重跑同一精确命令一次。若 failureClassification=source_compile，或正常退出的失败证据经 validate_utest_source_bug 证明为 source_bug，立即停止：禁止换 runner、执行第二个测试文件或继续搜索绕过方案。\n" +
     "7) 每次失败都保留真实 runner 输出与 Evidence。先只读本次 runner 返回的 evidenceLogPath；若内容截断导致根因缺失，再只读 logPath 中本 target 的本次命令段。第一次 source_compile/source_bug 时，先按步骤 8 的封存命令 seal 新增测试资产（同样使用 --commit-stage utest 和本次测试变更摘要），再执行 python \"" + stagePath + "\" fail --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --failure-type implementation --message \"<targetId、commandId、evidenceId、test-output.log、明确 file:line 编译根因>\"；释放 lease 后返回 testStatus:\"source_repair_required\" 和 testFailure。Workflow 会在同一 Worktree 受控修生产代码、重新 Review，并且只重跑这个原命令。若该受控重跑仍为 source_compile/source_bug，或 timeout、外部 environment 或耗尽一次测试资产修复，按步骤 8 的同一封存命令 seal 后执行 record-test-failure（failure-type implementation、environment 或 test_definition）并返回 testStatus:\"timed_out\" 或 \"deferred\"；该 issue 会随交付保留，但不阻断后续 gate、候选合并与最终 B-E2E。\n" +
     "8) 全部 UTest 通过后，执行 python \"" + worktreeManagerPath + "\" --json seal --commit-stage utest --commit-summary \"<根据本次实际测试变更填写中文说明，不写测试通过>\" --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 取得新的 commitSha；再执行 python \"" + stagePath + "\" complete --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --metadata-json <包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>；最后以 final-status sealed 释放 lease。\n" +
     "成功只返回 {batchId,status:\"success\",testStatus:\"passed\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。source repair 或受控 deferred 也必须返回 status:\"success\"，但必须带 testStatus 与 testFailure={message,targetId,commandId,evidenceId,testFile,argv,command}；不得手工 git add/commit、merge、rebase 或删除 Worktree。";
@@ -1679,6 +1682,42 @@ async function continueRecoveredDelivery(recovery) {
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 
+async function resolveMergeCandidate(repositoryRef, wave, label, executionPhase) {
+  const bindingArgs = `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}`;
+  const prepared = unwrap(await workflowAgent(
+    `准备既有 Merge Train 候选的冲突解决：执行 python -X utf8 "${mergeTrainPath}" prepare-resolution ${bindingArgs} --attempt-id "${label}"。` +
+    `使用 execute 的默认合法工作区，不把工具 cwd/workdir 切换到候选；候选目录由插件内部处理。只执行这个插件命令并返回 stdout JSON；失败时返回原始结果，不得自行解决、暂存或提交，不得创建候选或修改 main。`,
+    { label, phase: executionPhase }
+  ));
+  if (!prepared || hasFailureSignal(prepared) || prepared.success !== true) return prepared;
+  if (prepared.status === "built") return prepared; // Reconcile an already completed handoff.
+  if (!["resolution_required", "ready_to_complete"].includes(prepared.status)) {
+    return { success: false, status: "needs_resolution", error: "candidate_resolution_prepare_invalid", worktreePath: prepared.worktreePath };
+  }
+  if (prepared.status === "resolution_required") {
+    if (!absolutePath(prepared.worktreePath) || !Array.isArray(prepared.conflictedFiles) || !prepared.conflictedFiles.length) {
+      return { success: false, status: "needs_resolution", error: "candidate_resolution_scope_missing" };
+    }
+    const edited = unwrap(await workflowAgent(
+      `解决已授权的 Merge Train 冲突。候选 Worktree=${JSON.stringify(prepared.worktreePath)}；允许修改的冲突文件=${JSON.stringify(prepared.conflictedFiles)}。` +
+      `只在该候选中读取理解双方业务意图，并编辑这些冲突文件，保留双方应有逻辑、移除冲突标记。不得创建新 Worktree、修改 main 或其他 Batch。` +
+      `本步骤只负责文件内容，不执行 git add、git commit、git merge --continue 或任何其他写入 Git 操作，不通过 Python/脚本包装这些操作。` +
+      `编辑完成后立即返回 {"success":true,"status":"resolved"}，交还 Workflow，由下一步插件完成暂存和 merge commit。` +
+      `文件写入被拦截或无法解决时，返回 {"success":false,"status":"needs_resolution","error":<具体原因>}；不要修改插件源码或尝试其他提交命令。`,
+      { label: `${label}-edit`, phase: executionPhase }
+    ));
+    if (!edited || edited.success !== true || edited.status !== "resolved" || hasFailureSignal(edited)) {
+      return { success: false, status: "needs_resolution", error: edited || "candidate_resolution_empty", worktreePath: prepared.worktreePath, conflictedFiles: prepared.conflictedFiles };
+    }
+  }
+  // The model has returned. This separate plugin operation owns all Git writes.
+  return unwrap(await workflowAgent(
+    `模型已交还冲突文件。执行 python -X utf8 "${mergeTrainPath}" complete-resolution ${bindingArgs}。` +
+    `插件负责检查、暂存、非交互 merge commit 和候选 SHA 登记。使用 execute 的默认合法工作区，不把工具 cwd/workdir 切换到候选。只执行这个命令并返回 stdout JSON；失败时原样返回，禁止自行 git add/commit/merge、包装替代命令或修改文件。`,
+    { label: `${label}-commit`, phase: executionPhase }
+  ));
+}
+
 async function validateAndPromoteBatch(batchId, candidateSequence) {
   const repositoryRef = (batchWorkspaces[batchId] || {}).workspaceRef;
   if (!usableString(repositoryRef)) throw new Error(`scheduler did not provide repository for ${batchId}`);
@@ -1705,12 +1744,8 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
         // A candidate's conflict markers are tied to this exact base SHA.
         // Resolve and promote it now, before other same-repository deliveries
         // can advance main and make the retained conflict context stale.
-        const resolved = unwrap(await workflowAgent(
-          `立即修复刚产生的 Merge Train 冲突候选。执行 python -X utf8 "${mergeTrainPath}" resolve-candidate ` +
-          `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
-          `只能处理该既有候选 Worktree；成功时返回 status="built"，随后本 Workflow 会立即推广。不得创建新候选、修改 main 或继续其他 Batch。只返回 JSON。`,
-          { label: `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, phase: "候选验证" }
-        ));
+        const resolved = await resolveMergeCandidate(repositoryRef, wave,
+          `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, "候选验证");
         if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
           recordUnresolved({
             kind: "merge_candidate",
@@ -2575,12 +2610,8 @@ async function attemptFinalCandidateRepair(record) {
     ? record.batchIds
     : (record.batchId ? [record.batchId] : []);
   try {
-    const resolved = unwrap(await workflowAgent(
-      `所有独立 Batch 已排空。对保留的 Merge Train 候选作最后一次受控自动恢复：执行 python -X utf8 "${mergeTrainPath}" resolve-candidate ` +
-      `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${record.repositoryRef}" --wave ${record.wave}。` +
-      `只可处理该既有候选；不得创建新 Worktree、修改 main 或继续其他 Batch。无法自动解决时保留候选和冲突上下文。只返回 JSON。`,
-      { label: `final-repair-candidate-${record.repositoryRef}-${record.wave}`, phase: "最终修复与报告" }
-    ));
+    const resolved = await resolveMergeCandidate(record.repositoryRef, record.wave,
+      `final-repair-candidate-${record.repositoryRef}-${record.wave}`, "最终修复与报告");
     if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
       finalRepairResults.push({
         kind: "resolve_candidate",

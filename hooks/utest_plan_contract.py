@@ -393,6 +393,8 @@ def result_for_evidence(record):
     result = str(validation.get("result", "")).strip().lower()
     exit_code = validation.get("exitCode")
     if result == "pass" and exit_code == 0:
+        if "testsExecuted" in validation and (not isinstance(validation["testsExecuted"], int) or validation["testsExecuted"] <= 0):
+            return "BLOCKED"
         return "PASS"
     if result == "fail" and isinstance(exit_code, int) and exit_code != 0:
         return "FAIL"

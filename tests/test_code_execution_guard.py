@@ -252,7 +252,7 @@ class CodeExecutionGuardTest(unittest.TestCase):
                     path.write_text(json.dumps({**original, field: value}), encoding="utf-8")
                     reason = self._execute("mvn compile", cwd=str(self.code_worktree))
                     details = json.loads(reason.split("GUARD_DIAGNOSTICS: ", 1)[1])
-                    self.assertEqual(details["guardVersion"], "code-stage-v2")
+                    self.assertEqual(details["guardVersion"], "code-stage-v3")
                     self.assertIn(check, details["failedChecks"])
                     self.assertEqual(details["commandKind"], "production_compile")
                     self.assertEqual(details["batch"]["stage"], "none")
@@ -356,6 +356,140 @@ class CodeExecutionGuardTest(unittest.TestCase):
                     self.assertEqual(expected, result.returncode, result.stderr)
                     if expected:
                         self.assertIn('BATCH_STAGE_VALIDATION_FORBIDDEN', result.stdout)
+
+    def test_original_compile_and_normal_status_wrappers_are_allowed(self) -> None:
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="implement")
+        commands = [
+            'export MAVEN_OPTS="-Dfile.encoding=UTF-8" && set -o pipefail && mvn -q compile -o 2>&1 | tee /d/temp/ee_test/compile_t002.log; echo "EXIT=${PIPESTATUS[0]}"',
+            'MAVEN_OPTS="-Dfile.encoding=UTF-8" mvn.cmd compile -o',
+            'env MAVEN_OPTS="-Dfile.encoding=UTF-8" mvnw.cmd compile',
+            'MODULE="module"\ncd "$MODULE" || exit "$?"\nset -o pipefail\nmvn -D file.encoding=UTF-8 --activate-profiles production -T 2 compile | tee compile.log\ncompile_status=("${PIPESTATUS[@]}")\nprintf "EXIT=%s\\n" "${compile_status[0]}"\nexit "$((compile_status[0] != 0 ? compile_status[0] : compile_status[1]))"',
+            'mvn -v; mvn compile; compile_exit=${PIPESTATUS[0]}; echo "$compile_exit"; exit "$compile_exit"',
+            'mvn clean compile && mvn compile',
+            'bash -lc "mvn compile -o"',
+            'pwd && ls -la && mvn -v && mvn compile',
+        ]
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertIsNone(self._execute(command, cwd=str(self.code_worktree)))
+
+    def test_specific_reasons_and_locations_without_environment_secrets(self) -> None:
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="implement")
+        cases = [
+            ('export SECRET_TOKEN="private-value"\nmvn compile && mvn test', '目标', 2),
+            ('mvn compile | sh', '管道程序 sh', 1),
+            ('mvn compile $UNKNOWN_GOALS', 'UNKNOWN_GOALS', 1),
+            ('mvn compile &', '后台执行', 1),
+            ('mvn compile $(mvn test)', '命令替换', 1),
+            ('mvn compile >', '重定向缺少目标', 1),
+            ('cd module; mvn compile', 'cd 后必须', 1),
+            ('mvn -f compile', '目标', 1),
+            ('mvn compile -f', '缺少参数值', 1),
+            ("echo preparing\nbash -lc 'mvn compile\nmvn test'", '目标', 3),
+        ]
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            for command, expected, line in cases:
+                with self.subTest(command=command):
+                    reason = self._execute(command, cwd=str(self.code_worktree))
+                    self.assertIn(expected, reason)
+                    self.assertNotIn('private-value', reason)
+                    details = json.loads(reason.split('GUARD_DIAGNOSTICS: ', 1)[1])
+                    self.assertTrue(all(item.get('reason') for item in details['failures']))
+                    self.assertTrue(any(item.get('line') == line for item in details['failures']))
+                    self.assertEqual(details['guardPath'], str((ROOT / 'hooks/code_execution_guard.py').resolve()))
+
+    def test_relative_tool_cwd_requires_explicit_workspace_root(self) -> None:
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertIsNone(self._execute('mvn compile', cwd='module', workspaceRoot=str(self.code_worktree)))
+            self.assertIn('EXECUTION_CWD_UNRESOLVED', self._execute('mvn compile', cwd='module'))
+
+    def test_build_file_cannot_compile_another_workspace(self) -> None:
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            reason = self._execute('mvn compile -f "../B001/pom.xml"', cwd=str(self.code_worktree))
+        self.assertIn('BUILD_FILE_WORKSPACE_MISMATCH', reason)
+        self.assertIn('超出当前授权工作区', reason)
+
+    def test_echoing_maven_does_not_authorize_a_validation_command(self) -> None:
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertIsNone(self._execute('echo "mvn test"', cwd=str(self.code_worktree)))
+            self.assertIn('Code 仅允许生产编译', self._execute('echo "mvn"; npm test', cwd=str(self.code_worktree)))
+
+    def test_trusted_compile_writer_checks_its_own_argv(self) -> None:
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            command = f'python -X utf8 "{ROOT / "hooks/task_runner.py"}" prepare-compile --task-id T007 -- mvn compile'
+            self.assertIsNone(self._execute(command, cwd=str(self.code_worktree)))
+            self.assertIn('Code 仅允许生产编译', self._execute(command.replace(str(ROOT), '/other/plugin'), cwd=str(self.code_worktree)))
+
+    def test_every_existing_batch_rejection_has_a_concrete_reason(self) -> None:
+        self._write_parallel_batch(review_status="running", test_status="pending", active_stage="review")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            reason = self._execute('mvn compile', cwd=str(self.code_worktree))
+        details = json.loads(reason.split('GUARD_DIAGNOSTICS: ', 1)[1])
+        self.assertTrue(all(item.get('reason') for item in details['failures']))
+        self.assertIn('当前阶段为 review', reason)
+
+    def test_failed_and_chain_cannot_hide_the_directory_of_a_later_validation(self) -> None:
+        other = self.root / 'other'
+        other.mkdir()
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="implement")
+        commands = [
+            f'mvn compile && cd "{other}" && echo done; mvn test',
+            f'MODULE="{self.code_worktree}" || MODULE="{other}"; cd "$MODULE" && mvn test',
+            f'mvn compile && MODULE="{other}"; cd "$MODULE" && mvn test',
+        ]
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertIsNotNone(self._execute(command, cwd=str(self.code_worktree)))
+
+    def test_word_splitting_and_arithmetic_strings_cannot_hide_extra_commands(self) -> None:
+        commands = [
+            'FILE="pom.xml test"; mvn compile -f $FILE',
+            "STATUS='array[$(mvn test)]'; mvn compile; exit \"$((STATUS))\"",
+            "STATUS='${PIPESTATUS[0]} array[$(mvn test)]'; mvn compile; exit \"$((STATUS))\"",
+            "STATUS='array[$(mvn test)]'; RESULT=$((STATUS)); mvn compile",
+            "STATUS='array[$(mvn test)]'; mvn compile && STATUS=0; exit \"$((STATUS))\"",
+            "STATUS='array[$(mvn test)]'; mvn compile; echo \"$[STATUS]\"",
+            'mvn compile -f pom*',
+        ]
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertIsNotNone(self._execute(command, cwd=str(self.code_worktree)))
+
+    def test_symlink_build_file_cannot_escape_authorized_workspace(self) -> None:
+        other = self.root / "outside"
+        other.mkdir()
+        try:
+            (self.code_worktree / "linked-module").symlink_to(other, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            reason = self._execute('mvn compile -f linked-module/pom.xml', cwd=str(self.code_worktree))
+        self.assertIn('BUILD_FILE_WORKSPACE_MISMATCH', reason)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX case-sensitive path behavior')
+    def test_posix_path_case_is_not_folded_into_another_workspace(self) -> None:
+        other = self.root / "worktrees" / "b005"
+        if other.exists():
+            self.skipTest('filesystem is case-insensitive')
+        other.mkdir()
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertIsNone(self._execute('mvn test', cwd=str(other)))
+
+    def test_case_insensitive_filesystem_alias_keeps_the_same_guard_authority(self) -> None:
+        alias = self.root / "worktrees" / "b005"
+        if not alias.exists():
+            self.skipTest('filesystem is case-sensitive')
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertIn('Code 仅允许生产编译', self._execute('mvn test', cwd=str(alias)))
+
+    def test_executable_recognition_is_not_a_raw_substring_check(self) -> None:
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertIn('Code 仅允许生产编译', self._execute("m'v'n test", cwd=str(self.code_worktree)))
+            self.assertIn('Code 仅允许生产编译', self._execute('TOOL="m""v""n"; "$TOOL" test', cwd=str(self.code_worktree)))
+            self.assertIsNone(self._execute("m'v'n compile", cwd=str(self.code_worktree)))
 
 
 if __name__ == "__main__":

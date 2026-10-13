@@ -35,6 +35,7 @@ from hooks.commit_message import CommitMessageError, build_commit_message, norma
 from hooks.json_writer_common import feature_dir
 from hooks.plan_json import load_plan_bundle, task_contract_sha256
 from hooks.plan_write_ownership import is_test_asset_path
+from hooks.utest_test_environment import validate_worktree_pom
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -884,6 +885,7 @@ def seal_parallel_batch(
             worktree,
             "status",
             "--porcelain",
+            "-z",
             "--untracked-files=all",
             "--",
             ".",
@@ -895,10 +897,31 @@ def seal_parallel_batch(
             index_lock_recoveries.append(lock_recovery)
         if status.returncode != 0:
             return {"success": False, "error": f"parallel_worktree_status_failed:{status.stderr.strip()}"}
-        changed = [line[3:] for line in status.stdout.splitlines() if len(line) > 3]
+        # -z preserves Unicode/spaces without Git's quoted-path escaping.
+        # Rename/copy records contain an additional original path.
+        entries = status.stdout.split("\0")
+        changed, cursor = [], 0
+        while cursor < len(entries):
+            line = entries[cursor]
+            cursor += 1
+            if len(line) <= 3:
+                continue
+            changed.append(line[3:])
+            if "R" in line[:2] or "C" in line[:2]:
+                if cursor < len(entries) and entries[cursor]:
+                    changed.append(entries[cursor])
+                cursor += 1
         is_utest_reseal = actual_commit_stage == "utest"
         if is_utest_reseal:
-            non_test_changes = [path for path in changed if not is_test_asset_path(path)]
+            non_test_changes = []
+            for path in changed:
+                if is_test_asset_path(path):
+                    continue
+                if Path(path).name == "pom.xml":
+                    validation = validate_worktree_pom(worktree, path)
+                    if validation["allowed"]:
+                        continue
+                non_test_changes.append(path)
             if non_test_changes:
                 return {
                     "success": False,

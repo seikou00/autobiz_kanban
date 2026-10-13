@@ -17,6 +17,7 @@ function harness() {
     leasePath: "/plugin/lease.py", stagePath: "/plugin/stage.py",
     schedulerPath: "/plugin/scheduler.py", worktreeManagerPath: "/plugin/worktree_manager.py",
     routeResolverPath: "/plugin/route.py", utestCommandPath: "/plugin/utest.py",
+    utestRuntimePath: "/plugin/utest_runtime.py",
     usableString: value => typeof value === "string" && value.trim().length > 0,
     batchTaskWorkspace: (_batchId, worktree) => worktree,
     unwrap: value => value, requireSuccess: value => value,

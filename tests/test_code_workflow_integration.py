@@ -190,6 +190,11 @@ def test_fixed_workflow_entrypoint():
         "不得以“验证实现”为由绕过该阶段",
         "所有测试资产和行为验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行",
         "CODE_STAGE_COMPILE_COMMAND_GUIDANCE",
+        "prepare-compile",
+        "record-compile",
+        "GUARD_DIAGNOSTICS.failures",
+        "compile_status",
+        "--log-exit-code",
         "function workflowAgent",
     ]
     missing = [check for check in checks if check not in content]

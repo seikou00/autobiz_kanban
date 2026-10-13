@@ -17,26 +17,24 @@ import json
 import os
 import posixpath
 import re
-import shlex
 import sys
 from pathlib import Path
 from typing import Any
 
 
 ACTIVE_CODE_RUN_STATUSES = frozenset({"started", "in_progress", "implementation_recording"})
-GUARD_VERSION = "code-stage-v2"
+GUARD_VERSION = "code-stage-v3"
 
-# Preserve quoted shell operators until after control-flow/redirection parsing.
-# This is a bounded command recognizer, not a general shell interpreter.
-SHELL_TOKEN_RE = re.compile(
-    r'''(?:[^\s;&|<>()'"\\]+|\\[^\n]|"(?:\\.|[^"\\])*"|'[^']*')+|[;&|<>()]+|\n+'''
-)
+try:
+    from hooks.code_shell_analysis import analyze_script, normalize_path, absolute_path, executable, Invocation
+except ImportError:  # Direct hook execution from the plugin hooks directory.
+    from code_shell_analysis import analyze_script, normalize_path, absolute_path, executable, Invocation
 
 # Keep this focused on executable validation entrypoints rather than generic
 # commands such as git or package-manager inspection.
 FORBIDDEN_COMMAND_RE = re.compile(
     r"(?:"
-    r"(?<![\w.-])(?:mvn|mvnw(?:\.cmd)?|gradle|gradlew(?:\.bat)?)(?![\w.-])"
+    r"(?<![\w.-])(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|gradle(?:\.bat)?|gradlew(?:\.bat)?)(?![\w.-])"
     r"|(?<![\w.-])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:(?:run|exec)\s+)?(?:build|compile|typecheck|lint|test|check)(?![\w.-])"
     r"|(?<![\w.-])(?:npx\s+)?(?:vite|webpack|tsc|vue-tsc|eslint|jest|vitest|pytest)(?![\w.-])"
     r"|(?<![\w.-])go\s+(?:build|test|vet)(?![\w.-])"
@@ -86,12 +84,7 @@ def _feature_dir() -> Path | None:
 def _normalize_path(raw: Any) -> str:
     if not isinstance(raw, str):
         return ""
-    path = raw.strip().strip('"').strip("'").replace("\\", "/")
-    if not path:
-        return ""
-    # Git Bash and Windows may describe the same worktree using /d/... or D:/...
-    path = re.sub(r"^/([a-zA-Z])/(?=.)", r"\1:/", path)
-    return posixpath.normpath(path).casefold()
+    return normalize_path(raw.strip().strip('"').strip("'"))
 
 
 def _code_workspaces(*, active_only: bool = True) -> dict[str, list[dict[str, str]]]:
@@ -196,157 +189,51 @@ def _parallel_batch_workspaces() -> dict[str, dict[str, str | bool]]:
     return batches_by_workspace
 
 
-def _command_workspace_matches(
-    payload: dict[str, Any], tool_input: dict[str, Any], command: str, workspace: str
-) -> bool:
-    invocation = _shell_invocation(command)
-    if invocation is not None:
-        directory = _execution_directory(payload, tool_input, invocation[1])
-        return directory == workspace or directory.startswith(workspace + "/")
-    # Unrecognized commands still need blocking coverage. This fallback is
-    # never used to grant the compile/query exception.
-    normalized_command = command.replace("\\", "/").casefold()
-    if workspace in normalized_command:
-        return True
-    for candidate in (
-        tool_input.get("cwd"),
-        tool_input.get("workdir"),
-        tool_input.get("workingDirectory"),
-        payload.get("cwd"),
-        payload.get("workdir"),
-    ):
-        normalized = _normalize_path(candidate)
-        if normalized == workspace or normalized.startswith(workspace + "/"):
-            return True
-    return False
-
-
 def _executable(token: str) -> str:
-    return token.replace("\\", "/").rsplit("/", 1)[-1].casefold().removesuffix(".cmd").removesuffix(".bat")
+    return executable(token)
 
 
-def _shell_words(command: str) -> list[str] | None:
-    if any(marker in command for marker in ("$(", "`", "<(", ">(")):
-        return None
-    words: list[str] = []
-    end = 0
-    for match in SHELL_TOKEN_RE.finditer(command):
-        if command[end:match.start()].strip(" \t\r"):
-            return None
-        words.append("\n" if match.group().startswith("\n") else match.group())
-        end = match.end()
-    return words if not command[end:].strip(" \t\r") else None
-
-
-def _word(raw: str) -> str:
-    return shlex.split(raw)[0]
-
-
-def _without_output_redirects(words: list[str]) -> list[str] | None:
-    result: list[str] = []
-    index = 0
-    while index < len(words):
-        token = words[index]
-        if token in {"1", "2"} and index + 1 < len(words) and words[index + 1] in {">", ">>", ">&"}:
-            index += 1
-            token = words[index]
-        if token in {">", ">>", ">&", "&>"}:
-            if index + 1 >= len(words):
-                return None
-            target = words[index + 1]
-            if target in {"|", ">", ">>", ">&", "&>"} or (token == ">&" and target not in {"1", "2"}):
-                return None
-            index += 2
-            continue
-        result.append(_word(token))
-        index += 1
-    return result
-
-
-def _output_filter(argv: list[str]) -> bool:
-    if not argv:
-        return False
-    executable = _executable(argv[0])
-    if executable in {"head", "tail"}:
-        args = argv[1:]
-        return not args or (
-            len(args) == 1 and re.fullmatch(r"-(?:\d+|[nc][+-]?\d+)", args[0]) is not None
-        ) or (
-            len(args) == 2 and args[0] in {"-n", "-c"}
-            and re.fullmatch(r"[+-]?\d+", args[1]) is not None
-        )
-    if executable == "tee":
-        return all(not arg.startswith("-") or arg in {"-a", "--append", "-i", "--ignore-interrupts", "--"} for arg in argv[1:])
-    return False
-
-
-def _shell_invocation(command: str, depth: int = 0) -> tuple[list[str], str] | None:
-    """Extract one foreground invocation, optional cd, and output-only pipes."""
-    if depth > 3:
-        return None
-    words = _shell_words(command)
-    if not words:
-        return None
-    try:
-        directory = ""
-        while words:
-            if len(words) >= 4 and [_word(word) for word in words[:3]] == ["set", "-o", "pipefail"] and words[3] in {"&&", ";", "\n"}:
-                words = words[4:]
-            elif _word(words[0]) == "cd":
-                path_index = 2 if len(words) > 1 and words[1] == "--" else 1
-                if len(words) <= path_index + 1 or words[path_index + 1] != "&&":
-                    return None
-                path = _normalize_path(_word(words[path_index]))
-                if not path or "$" in path:
-                    return None
-                directory = path if _absolute_directory(path) else posixpath.join(directory, path)
-                words = words[path_index + 2:]
-            else:
-                break
-        if not words:
-            return None
-        if _executable(_word(words[0])) in {"bash", "sh", "zsh"}:
-            if len(words) != 3 or words[1] not in {"-c", "-lc", "-cl"}:
-                return None
-            inner = _shell_invocation(_word(words[2]), depth + 1)
-            if inner is None:
-                return None
-            inner_directory = inner[1]
-            return inner[0], inner_directory if _absolute_directory(inner_directory) else posixpath.join(directory, inner_directory)
-        pipelines: list[list[str]] = [[]]
-        for word in words:
-            if word == "|":
-                pipelines.append([])
-            elif word and all(char in ";&|<>()\n" for char in word) and word not in {">", ">>", ">&", "&>"}:
-                return None
-            else:
-                pipelines[-1].append(word)
-        argv = [_without_output_redirects(segment) for segment in pipelines]
-        if not argv[0] or any(not segment or not _output_filter(segment) for segment in argv[1:]):
-            return None
-        return argv[0], directory
-    except (ValueError, IndexError):
-        return None
-
-
-def _absolute_directory(path: str) -> bool:
-    return path.startswith("/") or re.match(r"^[a-z]:/", path) is not None
-
-
-def _execution_directory(payload: dict[str, Any], tool_input: dict[str, Any], cd: str) -> str:
+def _execution_directory(payload: dict[str, Any], tool_input: dict[str, Any], cd: str = "") -> str:
     cwd = next((value for value in (
         tool_input.get("cwd"), tool_input.get("workdir"), tool_input.get("workingDirectory"),
         payload.get("cwd"), payload.get("workdir"),
     ) if isinstance(value, str) and value.strip()), "")
     base = _normalize_path(cwd)
+    root = next((value for value in (
+        tool_input.get("workspaceRoot"), tool_input.get("workspace_root"),
+        payload.get("workspaceRoot"), payload.get("workspace_root"),
+    ) if isinstance(value, str) and value.strip()), "")
+    if not absolute_path(base) and root:
+        base = _normalize_path(posixpath.join(_normalize_path(root), base))
     if cd:
-        return _normalize_path(cd if _absolute_directory(cd) else posixpath.join(base, cd))
+        return _normalize_path(cd if absolute_path(cd) else posixpath.join(base, cd))
     return base
+
+
+def _within(directory: str, workspace: str) -> bool:
+    if not directory or not workspace:
+        return False
+    if directory == workspace or directory.startswith(workspace + "/"):
+        return True
+    # macOS can use a case-insensitive filesystem while POSIX spelling remains
+    # case-sensitive. Compare real filesystem identities when paths are local.
+    if directory.startswith("/") and workspace.startswith("/"):
+        root = Path(workspace)
+        candidate = Path(directory)
+        for ancestor in (candidate, *candidate.parents):
+            try:
+                if ancestor.samefile(root):
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def _is_environment_query(argv: list[str]) -> bool:
     executable = _executable(argv[0])
     lookup_args = argv[1:]
+    if executable in {"pwd", "ls", "dir"}:
+        return True
     if executable in {"command", "type"}:
         if not lookup_args or lookup_args[0] not in {"-v", "-a"}:
             return False
@@ -362,8 +249,40 @@ def _is_environment_query(argv: list[str]) -> bool:
 
 
 def _is_backend_production_compile(command: str) -> bool:
-    invocation = _shell_invocation(command)
-    return invocation is not None and _production_compile_argv(invocation[0])
+    analysis = analyze_script(command, "")
+    return not analysis.issues and bool(analysis.invocations) and all(
+        _production_compile_argv(invocation.argv) for invocation in analysis.invocations
+    )
+
+
+def _maven_arguments(argv: list[str]) -> tuple[list[str], list[str], str | None]:
+    goals: list[str] = []
+    files: list[str] = []
+    values = {"-f", "--file", "-pl", "--projects", "-P", "--activate-profiles", "-D", "--define",
+              "-s", "--settings", "-gs", "--global-settings", "-t", "--toolchains", "-gt", "--global-toolchains",
+              "-T", "--threads", "-rf", "--resume-from", "-l", "--log-file"}
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if "$" in token:
+            return goals, files, "Maven 参数包含无法确定的运行时变量"
+        if token in values:
+            if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                return goals, files, f"Maven 选项 {token} 缺少参数值"
+            if token in {"-f", "--file"}:
+                files.append(argv[index + 1])
+            index += 2
+            continue
+        if token.startswith("--file=") or token.startswith("-f="):
+            files.append(token.split("=", 1)[1])
+        elif token.startswith("-f") and len(token) > 2:
+            files.append(token[2:])
+        elif not token.startswith("-"):
+            goals.append(token)
+        index += 1
+    if any(not path or "$" in path for path in files):
+        return goals, files, "Maven -f/--file 必须指定明确的构建文件"
+    return goals, files, None
 
 
 def _production_compile_argv(tokens: list[str]) -> bool:
@@ -371,19 +290,8 @@ def _production_compile_argv(tokens: list[str]) -> bool:
         return False
     executable = _executable(tokens[0])
     if executable in {"mvn", "mvnw"}:
-        goals: set[str] = set()
-        skip_next = False
-        value_options = {"-f", "--file", "-pl", "--projects", "-P", "--define", "-s", "--settings", "-t", "--toolchains"}
-        for token in tokens[1:]:
-            if skip_next:
-                skip_next = False
-                continue
-            if token in value_options:
-                skip_next = True
-                continue
-            if not token.startswith("-"):
-                goals.add(token)
-        return not skip_next and "compile" in goals and goals <= {"compile", "clean"}
+        goals, _, error = _maven_arguments(tokens)
+        return error is None and "compile" in goals and set(goals) <= {"compile", "clean"}
     if executable in {"gradle", "gradlew"}:
         tasks = {token.rsplit(":", 1)[-1] for token in tokens[1:] if not token.startswith("-")}
         return bool(tasks) and tasks <= {
@@ -400,103 +308,134 @@ def _production_compile_argv(tokens: list[str]) -> bool:
     return False
 
 
-def _batch_block_reason(
-    payload: dict[str, Any], tool_input: dict[str, Any],
-    batch: dict[str, str | bool], invocation: tuple[list[str], str] | None,
-    compile_only: bool, matching_runs: list[dict[str, str]],
-) -> str:
-    all_workspaces = _code_workspaces(active_only=False)
-    bound_runs = [
-        run for runs in all_workspaces.values() for run in runs
-        if run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"]
-    ]
-    matching_bound_runs = [
-        run for run in matching_runs
-        if run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"]
-    ]
-    failures: list[str] = []
-    if invocation is None:
-        failures.append("COMMAND_FORM_UNSUPPORTED")
-    elif not compile_only:
-        failures.append("VALIDATION_GOALS_NOT_ALLOWED_IN_CODE")
-    if batch["codeAllowed"] is not True:
-        if batch["batchStatus"] in {"retry_pending", "blocked", "failed", "cancelled", "merged", "ready_to_candidate"}:
-            failures.append("BATCH_NOT_EXECUTABLE")
-        if batch["stage"] not in {"none", "implement"}:
-            failures.append("BATCH_STAGE_NOT_CODE_OR_REPAIR")
-        elif batch["reviewStatus"] == "running" or batch["testStatus"] == "running":
-            failures.append("CODE_STAGE_STATE_INCONSISTENT")
-        elif batch["implementStatus"] in {"passed", "skipped", "deferred", "needs_triage"}:
-            failures.append("IMPLEMENTATION_ALREADY_FINISHED")
-    if not matching_bound_runs:
-        if matching_runs:
-            failures.append("TASK_BATCH_BINDING_MISMATCH")
-        elif not bound_runs:
-            failures.append("ACTIVE_TASK_RUN_MISSING")
-        elif any(run["status"] in ACTIVE_CODE_RUN_STATUSES for run in bound_runs):
-            failures.append("TASK_WORKSPACE_MISMATCH")
-        else:
-            failures.append("TASK_RUN_INACTIVE")
-    runs = {run["identity"]: run for run in [*matching_runs, *bound_runs]}
-    feature_dir = _feature_dir()
-    details = {
-        "guardVersion": GUARD_VERSION,
-        "failedChecks": failures,
-        "featureDir": str(feature_dir) if feature_dir else None,
-        "batch": batch,
-        "commandKind": "production_compile" if compile_only else "validation" if invocation else "unsupported_shell_form",
-        "executionCwd": _execution_directory(payload, tool_input, invocation[1] if invocation else ""),
-        "taskRuns": list(runs.values()),
+def _command_issue(invocation: Invocation) -> dict[str, Any] | None:
+    argv = invocation.argv
+    if _is_environment_query(argv) or _production_compile_argv(argv):
+        return None
+    goals: list[str] = []
+    error = None
+    if _executable(argv[0]) in {"mvn", "mvnw"}:
+        goals, _, error = _maven_arguments(argv)
+    return {
+        "code": "VALIDATION_GOALS_NOT_ALLOWED_IN_CODE",
+        "reason": error or f"Code 仅允许生产编译；实际程序 {_executable(argv[0])}、Maven 目标 {goals} 不属于生产 compile-only 或环境查询",
+        "line": invocation.line, "statementIndex": invocation.statement_index,
+        "statement": invocation.statement, "executable": _executable(argv[0]), "goals": goals,
     }
-    return (
-        "BATCH_STAGE_VALIDATION_FORBIDDEN: Batch {identity} 当前阶段为 {stage}；"
-        "未通过检查：{checks}。none 仅表示阶段指针未登记，不单独禁止 Code 纯编译。"
-        "活动 TASK 必须匹配当前 Batch/run 与实际编译目录；Review 禁止验证，其他验证由运行中的 UTest 执行。"
-        "\nGUARD_DIAGNOSTICS: {details}"
-    ).format(**batch, checks=", ".join(failures), details=json.dumps(details, ensure_ascii=False))
+
+
+def _is_compile_writer(argv: list[str]) -> bool:
+    """The trusted writer checks its own TASK/lease/stage and compile argv."""
+    if _executable(argv[0]) not in {"python", "python3", "python.exe", "python3.exe"}:
+        return False
+    args = argv[1:]
+    if args[:2] == ["-X", "utf8"]:
+        args = args[2:]
+    if len(args) < 2:
+        return False
+    script = Path(args[0]).expanduser().resolve()
+    return script == Path(__file__).resolve().with_name("task_runner.py") and args[1] in {"prepare-compile", "record-compile"}
+
+
+def _block_reason(prefix: str, failures: list[dict[str, Any]], directory: str,
+                  batch: dict[str, Any] | None, runs: list[dict[str, str]], command_kind: str,
+                  tool_input: dict[str, Any]) -> str:
+    codes = list(dict.fromkeys(failure["code"] for failure in failures))
+    details = {
+        "guardVersion": GUARD_VERSION, "guardPath": str(Path(__file__).resolve()),
+        "failedChecks": codes, "failures": failures,
+        "featureDir": str(_feature_dir()) if _feature_dir() else None,
+        "batch": batch, "commandKind": command_kind, "executionCwd": directory,
+        "toolCwd": tool_input.get("cwd") or tool_input.get("workdir") or tool_input.get("workingDirectory"),
+        "taskRuns": list({run["identity"]: run for run in runs}.values()),
+    }
+    explanations = "；".join(
+        f'{failure["code"]}: ' + (f'第 {failure["line"]} 行，' if failure.get("line") else "") + failure["reason"]
+        for failure in failures
+    )
+    return f"{prefix}: {explanations}\nGUARD_DIAGNOSTICS: " + json.dumps(details, ensure_ascii=False)
 
 
 def guard(payload: dict[str, Any]) -> str | None:
-    """Return a blocking reason unless validation is authorized by UTest."""
+    """Authorize every executable statement, with a concrete reason on rejection."""
     tool_name = str(payload.get("tool_name") or payload.get("toolName") or "").lower()
     if tool_name not in {"execute", "bash", "shell"}:
         return None
     tool_input = _tool_input(payload)
     command = _command(payload, tool_input)
-    if not command or not FORBIDDEN_COMMAND_RE.search(command):
+    if not command:
         return None
-    invocation = _shell_invocation(command)
-    if invocation is not None and _is_environment_query(invocation[0]):
+    base = _execution_directory(payload, tool_input)
+    analysis = analyze_script(command, base)
+    if not FORBIDDEN_COMMAND_RE.search(command) and not any(FORBIDDEN_COMMAND_RE.search(" ".join(inv.argv)) for inv in analysis.invocations):
         return None
-    compile_only = invocation is not None and _production_compile_argv(invocation[0])
     active = _active_code_workspaces()
-    matching_runs = [
-        run for workspace, runs in active.items()
-        if _command_workspace_matches(payload, tool_input, command, workspace)
-        for run in runs
-    ]
     batches = _parallel_batch_workspaces()
-    for workspace in sorted(batches, key=len, reverse=True):
-        batch = batches[workspace]
-        if not _command_workspace_matches(payload, tool_input, command, workspace):
+    all_runs = _code_workspaces(active_only=False)
+    # Lexical failures must not escape the guard because their cd could not be parsed.
+    fallback_directories = [base]
+    for workspace in [*batches, *active]:
+        if workspace in _normalize_path(command):
+            fallback_directories.append(workspace)
+    scopes = [(inv.cwd, inv) for inv in analysis.invocations]
+    if analysis.issues:
+        scopes += [(directory, None) for directory in fallback_directories]
+    for directory, invocation in scopes:
+        if invocation and (_is_environment_query(invocation.argv) or _is_compile_writer(invocation.argv)):
             continue
-        if batch["testRunning"] is True:
-            return None
-        if compile_only and batch["codeAllowed"] is True and any(
-            run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"]
-            for run in matching_runs
-        ):
-            return None
-        return _batch_block_reason(payload, tool_input, batch, invocation, compile_only, matching_runs)
-    if compile_only and matching_runs:
-        return None
-    if matching_runs:
-        return (
-            "CODE_EXECUTION_VALIDATION_FORBIDDEN: 活动 Code task run {} 的 worktree 禁止执行构建、编译、"
-            "typecheck、lint、测试或 E2E 命令（环境查询和后端 production-only compile 除外）；"
-            "纯编译支持 cd、输出重定向及 head/tail/tee 管道，不允许附加其他命令或后台执行；"
-            "其余验证由 Review 通过后的 UTest 阶段运行。"
-        ).format(matching_runs[0]["identity"])
+        matching_runs = [run for workspace, runs in active.items() if _within(directory, workspace) for run in runs]
+        batch = next((batches[workspace] for workspace in sorted(batches, key=len, reverse=True) if _within(directory, workspace)), None)
+        if not batch and not matching_runs:
+            # A relative tool cwd without its root cannot be compared to absolute runtime paths.
+            if not absolute_path(directory) and (active or batches):
+                failure = {"code": "EXECUTION_CWD_UNRESOLVED", "reason": "执行目录是相对路径，但工具未提供绝对 workspaceRoot；无法核对 TASK 绑定，请提供实际 workspaceRoot 或明确的 cd 目录"}
+                return _block_reason("CODE_EXECUTION_VALIDATION_FORBIDDEN", [failure], directory, None,
+                                     [run for runs in active.values() for run in runs], "unresolved_directory", tool_input)
+            continue  # Preserve authorization boundaries of unrelated workspaces.
+        if batch and batch["testRunning"] is True:
+            continue
+        failures = list(analysis.issues)
+        compile_only = bool(invocation and _production_compile_argv(invocation.argv))
+        if invocation:
+            command_issue = _command_issue(invocation)
+            if command_issue:
+                failures.append(command_issue)
+            if _executable(invocation.argv[0]) in {"mvn", "mvnw"}:
+                _, files, _ = _maven_arguments(invocation.argv)
+                roots = [workspace for workspace in active if _within(directory, workspace)]
+                if batch:
+                    roots = [workspace for workspace, value in batches.items() if value == batch]
+                for file in files:
+                    target = _normalize_path(file if absolute_path(_normalize_path(file)) else posixpath.join(directory, file))
+                    if not any(_within(target, root) for root in roots):
+                        failures.append({"code": "BUILD_FILE_WORKSPACE_MISMATCH", "reason": f"Maven 构建文件 {target} 超出当前授权工作区 {roots}", "line": invocation.line, "statementIndex": invocation.statement_index})
+        bound_runs: list[dict[str, str]] = []
+        if batch:
+            bound_runs = [run for runs in all_runs.values() for run in runs
+                          if run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"]]
+            if batch["codeAllowed"] is not True:
+                if batch["batchStatus"] in {"retry_pending", "blocked", "failed", "cancelled", "merged", "ready_to_candidate"}:
+                    failures.append({"code": "BATCH_NOT_EXECUTABLE", "reason": f'Batch {batch["identity"]} 状态为 {batch["batchStatus"]}'})
+                if batch["stage"] not in {"none", "implement"}:
+                    failures.append({"code": "BATCH_STAGE_NOT_CODE_OR_REPAIR", "reason": f'当前阶段为 {batch["stage"]}；生产编译只允许活动 Code/修复，其他验证要求 Review passed 且 test running'})
+                elif batch["reviewStatus"] == "running" or batch["testStatus"] == "running":
+                    failures.append({"code": "CODE_STAGE_STATE_INCONSISTENT", "reason": f'阶段指针为 {batch["stage"]}，但 review={batch["reviewStatus"]}、test={batch["testStatus"]}'})
+                elif batch["implementStatus"] in {"passed", "skipped", "deferred", "needs_triage"}:
+                    failures.append({"code": "IMPLEMENTATION_ALREADY_FINISHED", "reason": f'实现阶段已结束，implement={batch["implementStatus"]}，不能继承旧 TASK 编译权限'})
+            if not any(run["parallelRunId"] == batch["runId"] and run["batchId"] == batch["batchId"] for run in matching_runs):
+                if matching_runs:
+                    code, reason = "TASK_BATCH_BINDING_MISMATCH", f'执行目录的 TASK 不属于 Batch/run {batch["identity"]}'
+                elif not bound_runs:
+                    code, reason = "ACTIVE_TASK_RUN_MISSING", f'Batch/run {batch["identity"]} 没有登记 TASK run'
+                elif any(run["status"] in ACTIVE_CODE_RUN_STATUSES for run in bound_runs):
+                    code, reason = "TASK_WORKSPACE_MISMATCH", f'实际执行目录 {directory} 不匹配当前 Batch/run 活动 TASK 的工作区'
+                else:
+                    code, reason = "TASK_RUN_INACTIVE", "当前 Batch/run 的 TASK 已结束或中止，不能继续使用其编译权限"
+                failures.append({"code": code, "reason": reason})
+        if failures:
+            return _block_reason("BATCH_STAGE_VALIDATION_FORBIDDEN" if batch else "CODE_EXECUTION_VALIDATION_FORBIDDEN",
+                                 failures, directory, batch, [*matching_runs, *bound_runs],
+                                 "production_compile" if compile_only else "validation" if invocation else "unsupported_shell_form", tool_input)
     return None
 
 
