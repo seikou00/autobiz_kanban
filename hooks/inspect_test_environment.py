@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from hooks.json_writer_common import WriterError, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.utest_plan_contract import UTestPlanContractError, load_utest_plan  # noqa: E402
 from hooks.utest_blocked_writer import BLOCKING_STATUSES, record_utest_block  # noqa: E402
+from hooks.utest_presets import declared_java_capabilities  # noqa: E402
 from hooks.utest_workspace_binding import (  # noqa: E402
     UTestWorkspaceBindingError,
     path_within,
@@ -132,9 +133,10 @@ def _inspect_spring(root, framework):
 
     if pom.is_file():
         content = _read_text(pom)
+        result["capabilities"] = declared_java_capabilities(root)
         result["runner"] = "maven"
         result["packageManager"] = "maven"
-        has_test_environment = any(
+        has_test_environment = result["capabilities"]["junit"] or any(
             marker in content
             for marker in ("spring-boot-starter-test", "junit-jupiter", "junit-vintage")
         )

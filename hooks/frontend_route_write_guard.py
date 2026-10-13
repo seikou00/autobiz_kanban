@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -30,6 +31,7 @@ from resolve_frontend_html_route import (  # noqa: E402
 )
 from hooks.task_run_integrity import strict_task_run_integrity_error  # noqa: E402
 from hooks.plan_write_ownership import is_test_asset_path  # noqa: E402
+from hooks.utest_test_environment import prospective_content, validate_worktree_pom  # noqa: E402
 from ui_context import UIContextError, load_ui_context  # noqa: E402
 
 
@@ -325,6 +327,7 @@ def _test_write_owner(
     workspace: Path,
     feature: str,
     target_path: Path,
+    *, test_environment: bool = False,
 ) -> tuple[str, Path, dict, str] | None:
     """Find the deepest runtime Worktree that owns a test-asset write."""
 
@@ -336,8 +339,13 @@ def _test_write_owner(
             if not _path_within(target_path, worktree):
                 continue
             relative = target_path.resolve(strict=False).relative_to(worktree)
-            if is_test_asset_path(relative.as_posix()):
-                matches.append((batch_id, worktree, batch, stage))
+            if is_test_asset_path(relative.as_posix()) or (test_environment and relative.name == "pom.xml"):
+                owner_batch = batch
+                if test_environment:
+                    lease = read_json(manifest_path.parent / "leases" / (batch_id + ".json"))
+                    owner_batch = dict(batch, testEnvironmentLeaseValid=isinstance(lease, dict) and
+                                       isinstance(lease.get("expiresEpoch"), (int, float)) and lease["expiresEpoch"] > time.time())
+                matches.append((batch_id, worktree, owner_batch, stage))
     if not matches:
         return None
     depth = max(len(worktree.parts) for _, worktree, _, _ in matches)
@@ -345,10 +353,11 @@ def _test_write_owner(
     return deepest[0] if len(deepest) == 1 else None
 
 
-def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Path) -> int:
+def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Path,
+                              test_environment: bool = False, content: str | None = None) -> int:
     """Authorize test writes only during their owning Batch test substage."""
 
-    owner = _test_write_owner(workspace, feature, target_path)
+    owner = _test_write_owner(workspace, feature, target_path, test_environment=test_environment)
     if owner is None:
         return block(
             f"test asset write is outside an active Batch Worktree: {target_path}",
@@ -370,7 +379,13 @@ def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Pat
                 f"test asset write requires review=passed for Batch {batch_id}",
                 system_message="UTest 只能在当前 Batch 的生产代码 Review 通过后执行。",
             )
-    del worktree
+    if test_environment:
+        if not batch.get("testEnvironmentLeaseValid"):
+            return block("test_environment_lease_invalid", system_message="POM 测试环境写入要求当前 Batch 的有效 lease；无需启动生产 TASK。")
+        result = validate_worktree_pom(worktree, target_path.relative_to(worktree), after=content)
+        if not result["allowed"]:
+            return block(result["reason"] + ": " + result.get("detail", ""),
+                         system_message="test 阶段允许修改 POM 的测试依赖和测试插件；生产依赖、parent/BOM 和共享属性变更须回实现阶段。")
     return 0
 
 
@@ -447,6 +462,22 @@ def main() -> int:
         return 0
 
     for target_path in candidate_paths:
+        # A mixed Maven manifest has semantic test ownership. Never globally
+        # mark every pom.xml as a test asset, including during Code/Review.
+        if target_path.name == "pom.xml":
+            owner = _test_write_owner(workspace, feature, target_path, test_environment=True)
+            if owner is not None:
+                states = owner[2].get("stageStates", {})
+                if states.get(owner[3], {}).get("status") == "running":
+                    try:
+                        content = prospective_content(target_path, payload.get("tool_input", {}))
+                    except (ValueError, OSError) as exc:
+                        return block(str(exc), system_message="POM 测试环境修改需提供完整内容或精确替换；也可使用 utest_runtime.py apply-pom。")
+                    result = validate_test_asset_write(workspace, feature, target_path=target_path,
+                                                       test_environment=True, content=content)
+                    if result:
+                        return result
+                    continue
         # A unified Code checkpoint spans implementation, review, UTest and
         # final E2E.  Test assets therefore need their own runtime-stage
         # authorization before extension-based production-code checks.

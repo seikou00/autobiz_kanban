@@ -11,6 +11,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import os
+import signal
+import shlex
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -29,6 +32,8 @@ from hooks.run_utest_command import (  # noqa: E402
 from hooks.utest_assignment_router import build_assignments  # noqa: E402
 from hooks.unit_test_result_writer import ensure_plan_result  # noqa: E402
 from hooks.utest_plan_contract import canonical_task_digest, validate_result_against_plan  # noqa: E402
+from hooks.utest_plan_contract import command_executes_tests
+from hooks.utest_workspace_binding import resolve_task_workspace, select_task_execution_target, UTestWorkspaceBindingError
 from hooks.validate_utest_source_bug import (  # noqa: E402
     SourceBugValidationError,
     validate_claim,
@@ -138,6 +143,28 @@ class RunUTestCommandTest(unittest.TestCase):
             "timeout": 10,
         }
         values.update(overrides)
+        if not values.get("record_only"):
+            raw = Path(self.temporary.name) / ("bash-output-" + str(time.time_ns()) + ".log")
+            raw.write_text("", encoding="utf-8")
+            values.update(record_only=True, recorded_exit_code=0, recorded_output_file=str(raw))
+            if command_executes_tests({"argv": values["argv"]}) and values["test_files"]:
+                try:
+                    binding = resolve_task_workspace(self.workspace, "alpha", self.task["id"], values.get("environment_target_id"), code_workspace=values.get("code_workspace"))
+                    target = select_task_execution_target(binding, values["test_files"])
+                except UTestWorkspaceBindingError as exc:
+                    raise UTestCommandError(str(exc)) from exc
+                shell = shlex.join(values["argv"]) + ' 2>&1 | tee ' + shlex.quote(str(raw)) + '; statuses=("${PIPESTATUS[@]}"); exit "${statuses[0]}"'
+                process = subprocess.Popen(["bash", "-o", "pipefail", "-c", shell], cwd=target["executionRoot"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                try:
+                    process.communicate(timeout=values["timeout"])
+                    values["recorded_exit_code"] = process.returncode
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                    values["recorded_exit_code"] = 124
+                    Path(str(raw) + '.timeout').write_text('command_timeout')
+                    with raw.open('a') as handle:
+                        handle.write('已终止整个进程组\n')
         return execute_utest_command(**values)
 
     def _records(self):
@@ -425,7 +452,7 @@ class RunUTestCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         output_file = Path(self.temporary.name) / "test-output.txt"
-        output_file.write_text("recorded test output\n", encoding="utf-8")
+        output_file.write_text("Ran 1 test in 0.001s\nOK\n", encoding="utf-8")
 
         result = self._execute(
             record_only=True,
@@ -575,10 +602,14 @@ class RunUTestCommandTest(unittest.TestCase):
         )
 
     def test_cli_test_accepts_rendered_binding_and_generated_command(self):
+        output = Path(self.temporary.name) / 'cli-output.log'
+        result = subprocess.run(['bash', '-c', shlex.join([sys.executable, '-m', 'unittest', 'test_sample'])], cwd=self.repo, capture_output=True, text=True)
+        output.write_text(result.stdout + result.stderr)
         exit_code = main(
             [
                 "--kind",
                 "test",
+                "--record-only", "--exit-code", str(result.returncode), "--output-file", str(output),
                 "--workspace",
                 str(self.workspace),
                 "--feature",

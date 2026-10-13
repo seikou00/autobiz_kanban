@@ -232,8 +232,17 @@ def validate_record(record: dict[str, Any]) -> list[str]:
             if result not in VALIDATION_RESULTS:
                 errors.append("validation.result_invalid")
             if isinstance(exit_code, int) and result:
-                if exit_code == 0 and result != "pass":
+                blocked_utest = (
+                    result == "blocked" and record.get("batchStage") == "test"
+                    and record.get("skill") == "autodev-utest"
+                    and ((validation.get("executionOutcome") == "no_tests_executed" and validation.get("testsExecuted") == 0)
+                         or (validation.get("executionOutcome") == "test_execution_unverified" and validation.get("testsExecuted") is None)
+                         or (validation.get("executionOutcome") == "output_capture_failed" and validation.get("logExitCode", 0) != 0))
+                )
+                if exit_code == 0 and result != "pass" and not blocked_utest:
                     errors.append("validation.result_exitCode_mismatch")
+                if result == "pass" and "testsExecuted" in validation and (not isinstance(validation["testsExecuted"], int) or validation["testsExecuted"] <= 0):
+                    errors.append("validation.test_execution_not_proven")
                 if exit_code != 0 and result == "pass":
                     errors.append("validation.result_exitCode_mismatch")
             output_tail_path = validation.get("outputTailPath")
