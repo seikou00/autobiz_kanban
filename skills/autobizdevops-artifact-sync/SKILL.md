@@ -1,11 +1,9 @@
 ---
 name: autobizdevops-artifact-sync
-description: 在 Feature 到达 code_done 或后续阶段后，按实际代码生成或更新 FEATURE_API_DETAIL.md，并同步产物、补传变化和重试失败上传。用户要求产物同步、补传、重传或整理接口交付文档时使用。
+description: 按实际代码生成或更新 FEATURE_API_DETAIL.md，并同步产物、补传变化和重试失败上传。
 ---
 
 # /autobizdevops-artifact-sync - 产物同步
-
-由用户调用本技能，执行 Feature 接口文档生成与产物上传；不依赖 checkpoint 变化，也不推进 checkpoint。
 
 ## 确定同步上下文
 
@@ -20,11 +18,11 @@ python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_ar
 
 ## 生成接口交付文档
 
-准入通过后，常规同步先检查并生成或更新 Feature 产物目录下的 `FEATURE_API_DETAIL.md`，再上传。仅补传失败事件时复用现有文档。
+准入通过后，常规同步先检查并生成或更新 `--check` 返回的 `feature_dir` 下的 `FEATURE_API_DETAIL.md`，再上传。仅检查、准备同步清单或补传失败事件时复用现有文档。
 
 读取 [接口文档生成规则与模板](references/feature-api-detail.md)。保留文件名 `FEATURE_API_DETAIL.md`。
 
-- 用 `plan.json` 的 `codeWorkspaces`、当前 Feature 的 implementation evidence、Batch manifest 与 Git 变更确定仓库和实现范围。文档以当前 Feature 实际交付的代码为依据，不能把整个仓库或其他 Feature 的接口算入本次交付。
+- 用 `plan.json` 的 `codeWorkspaces`、当前 Feature 的 implementation evidence、Batch manifest 与 Git 变更（commit中带有“cmbdevclaw提交”的提交）确定仓库和实现范围。文档以当前 Feature 实际交付的代码为依据，不能把整个仓库或其他 Feature 的接口算入本次交付。
 - 读取接口入口、请求/响应类型、返回包装、Service、Mapper/Repository、错误码与枚举；多仓库代码依据同时注明 `workspaceRef` 和仓库相对路径。记录可确认的提交或变更范围，便于判断旧文档是否需要更新。
 - 需求和设计只用于定位范围，不能据此编造接口字段或实现逻辑。按模板展开复杂字段，给出真实 SQL/查询构造片段和调用顺序。
 - 无法确认的信息标为“代码中未确认”；检索后不存在的内容标为“代码中未发现”。确认没有接口变更时，在文档中说明并列出检查范围。
@@ -32,7 +30,7 @@ python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_ar
 
 ## 同步产物
 
-首次同步和后续增量同步都使用同一入口；checkpoint 保持不变时也可以再次调用：
+首次同步和后续增量同步都使用同一入口：
 
 ```bash
 python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py" \
@@ -48,7 +46,7 @@ python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_ar
   --feature "${feature}" --sync --prepare-only
 ```
 
-该命令会准备本地 pending 事件和基于已有上传成功记录的目录，不发起网络上传。查看待上传文件应读取事件中的 `artifacts`；目录不包含尚未上传的文件。
+该命令会准备本地 pending 事件和基于已有上传成功记录的目录，不发起网络上传。查看待上传文件应读取事件中的 `artifacts`。
 
 ## 失败恢复与结果
 

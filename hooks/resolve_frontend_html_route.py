@@ -200,7 +200,24 @@ def _existing_visual_source_paths(workspace: Path, fd: Path, visual_sources: lis
     return existing_paths(paths)
 
 
-def validate_required_visual_sources(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> None:
+def _unreadable_required_visual_sources(
+    workspace: Path,
+    fd: Path,
+    visual_sources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return required visual sources whose path is not a readable file.
+
+    A required source that is merely unreadable -- not provided yet, an online
+    prototype/design link, or an archived file that disappeared -- no longer
+    blocks Code.  The caller falls back to ``spec-driven-ui`` and records the
+    missing source, so the outcome is visible instead of silent.
+
+    Defects that prove the declared input itself is corrupt or misplaced still
+    raise, because a fallback there would hide a real integrity problem:
+    a malformed reference, a summary that is not archived under
+    ``frontend-html/``, or a content/bundle digest mismatch.
+    """
+    gaps: list[dict[str, Any]] = []
     for source in visual_sources:
         if source.get("required") is not True:
             continue
@@ -210,7 +227,8 @@ def validate_required_visual_sources(workspace: Path, fd: Path, visual_sources: 
             raise FrontendRouteError(f"required_visual_source_invalid:{source_id}")
         path = _visual_source_candidate_path(workspace, fd, raw_path)
         if not path.is_file():
-            raise FrontendRouteError(f"required_visual_source_missing:{source_id}:{path}")
+            gaps.append({"sourceId": source_id, "path": str(path)})
+            continue
         expected_content = source.get("contentSha256")
         normalized_path = raw_path.replace("\\", "/").lstrip("./")
         if isinstance(expected_content, str) and not normalized_path.startswith("frontend-html/"):
@@ -222,6 +240,7 @@ def validate_required_visual_sources(workspace: Path, fd: Path, visual_sources: 
             archive_root = fd / "frontend-html" / source_id
             if not archive_root.is_dir() or visual_source_bundle_sha256(archive_root) != expected_bundle:
                 raise FrontendRouteError(f"required_visual_source_bundle_digest_mismatch:{source_id}")
+    return gaps
 
 
 def _missing_declared_html_paths(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> list[str]:
@@ -294,28 +313,177 @@ def _route_from_visual_sources(visual_sources: list[dict[str, Any]], html_source
     return ROUTE_SPEC_DRIVEN, ["UI_CONTEXT uiRequired without HTML visual source"]
 
 
-def _active_plan_ui_tasks(fd: Path) -> list[dict[str, Any]]:
+PLAN_TERMINAL_BATCH_STATUSES = {"done", "failed"}  # plan_json.BATCH_STATUSES 的终态
+PLAN_TERMINAL_TASK_RUN_STATUSES = {"implemented", "done", "failed", "aborted"}
+
+
+def _plan_batch_entries(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    batches = data.get("batches")
+    if not isinstance(batches, list):
+        return []
+    return [
+        entry
+        for entry in batches
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    ]
+
+
+def _plan_batch_entry(data: dict[str, Any] | None, batch_id: str) -> dict[str, Any] | None:
+    for entry in _plan_batch_entries(data):
+        if entry.get("id") == batch_id:
+            return entry
+    return None
+
+
+def _batch_is_unfinished(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    status = entry.get("status")
+    if not isinstance(status, str) or not status.strip():
+        return True
+    return status not in PLAN_TERMINAL_BATCH_STATUSES
+
+
+def _started_task_run_batch_ids(fd: Path) -> list[str]:
+    """Return Batches that currently own a started Task run.
+
+    The fixed parallel Code Workflow records the owning ``batchId`` on every
+    runner-owned Task run, which is the only durable scope signal left once the
+    root Plan deliberately clears ``activeBatchId``.
+    """
+    batch_ids: list[str] = []
+    for path in sorted((fd / ".task-runs").glob("T*/*.json")):
+        run = read_json(path)
+        if not isinstance(run, dict):
+            continue
+        if run.get("status") in PLAN_TERMINAL_TASK_RUN_STATUSES:
+            continue
+        batch_id = run.get("batchId")
+        if isinstance(batch_id, str) and batch_id.strip() and batch_id not in batch_ids:
+            batch_ids.append(batch_id)
+    return batch_ids
+
+
+def _task_owner_batch_id(
+    fd: Path,
+    data: dict[str, Any] | None,
+    task_id: str,
+) -> str | None:
+    """Locate the unfinished Batch that owns one Task locally.
+
+    Mirrors ``code_task_context.py``: parallel runs intentionally leave the
+    ``activeBatchId`` pointer empty, so the owner Batch is derived from the
+    unfinished Batches that actually list this Task.
+    """
+    owners = [
+        entry["id"]
+        for entry in _plan_batch_entries(data)
+        if _batch_is_unfinished(entry) and task_id in {str(value) for value in (entry.get("taskIds") or [])}
+    ]
+    if len(owners) == 1:
+        return owners[0]
+    if len(owners) > 1:
+        started = set(_started_task_run_batch_ids(fd))
+        running = [batch_id for batch_id in owners if batch_id in started]
+        if len(running) == 1:
+            return running[0]
+    return None
+
+
+def _resolve_batch_scope(
+    fd: Path,
+    data: dict[str, Any] | None,
+    *,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> tuple[str | None, str]:
+    """Resolve which Batch owns the frontend route decision.
+
+    ``activeBatchId`` alone is not a sufficient scope: fixed parallel Code runs
+    clear it on every Batch completion and drive execution from the scheduler
+    manifest.  An explicit scope, a locally inferred owner Batch, or the single
+    unfinished Batch therefore has to be accepted before any visual-source
+    requirement may be attributed to the current Task.
+    """
+    explicit_batch = batch_id.strip() if isinstance(batch_id, str) else ""
+    if explicit_batch:
+        if _plan_batch_entries(data) and _plan_batch_entry(data, explicit_batch) is None:
+            raise FrontendRouteError(f"batch_scope_unknown:{explicit_batch}")
+        return explicit_batch, "explicit-batch"
+
+    explicit_task = task_id.strip() if isinstance(task_id, str) else ""
+    if explicit_task:
+        owner = _task_owner_batch_id(fd, data, explicit_task)
+        if owner is None:
+            raise FrontendRouteError(f"task_scope_unknown:{explicit_task}")
+        return owner, "explicit-task"
+
+    active_batch = data.get("activeBatchId") if isinstance(data, dict) else None
+    if isinstance(active_batch, str) and active_batch.strip():
+        return active_batch, "activeBatchId"
+
+    unfinished = [
+        entry["id"] for entry in _plan_batch_entries(data) if _batch_is_unfinished(entry)
+    ]
+    started = [
+        candidate
+        for candidate in _started_task_run_batch_ids(fd)
+        if not unfinished or candidate in unfinished
+    ]
+    if len(started) == 1:
+        return started[0], "started-task-run"
+    if len(unfinished) == 1:
+        return unfinished[0], "single-unfinished-batch"
+    return None, "unresolved"
+
+
+def _plan_ui_scope(
+    fd: Path,
+    *,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """Return the UI Task scope for the current frontend route decision."""
     _, _, load_plan = _import_ui_context_helpers()
+    scope: dict[str, Any] = {
+        "batchId": None,
+        "source": "unresolved",
+        "tasksKnown": False,
+        "tasks": [],
+    }
     if load_plan is None:
-        return []
+        return scope
+
     path = fd / "plan.json"
-    if not path.is_file():
-        return []
+    data: dict[str, Any] | None = None
+    if path.is_file():
+        try:
+            data = load_plan(path)
+        except Exception:
+            data = None
+
+    scoped_batch, source = _resolve_batch_scope(
+        fd,
+        data,
+        batch_id=batch_id,
+        task_id=task_id,
+    )
+    scope["batchId"] = scoped_batch
+    scope["source"] = source
+    if not isinstance(scoped_batch, str):
+        return scope
+
     try:
-        data = load_plan(path)
+        batch = load_plan(fd / "plans" / scoped_batch / "plan.json")
     except Exception:
-        return []
-    active_batch = data.get("activeBatchId")
-    if not isinstance(active_batch, str):
-        return []
-    batch_path = fd / "plans" / active_batch / "plan.json"
-    try:
-        batch = load_plan(batch_path)
-    except Exception:
-        return []
+        return scope
     tasks = batch.get("tasks")
     if not isinstance(tasks, list):
-        return []
+        return scope
+    scope["tasksKnown"] = True
+
     result: list[dict[str, Any]] = []
     for task in tasks:
         if not isinstance(task, dict) or task.get("uiRequired") is not True:
@@ -336,15 +504,87 @@ def _active_plan_ui_tasks(fd: Path) -> list[dict[str, Any]]:
                 "route": route,
                 "visualSourceRefs": list(visual_source_refs),
             })
-    return result
+    scope["tasks"] = result
+    return scope
 
 
-def _plan_ui_routes(fd: Path) -> list[str]:
-    return [str(item["route"]) for item in _active_plan_ui_tasks(fd)]
+def _unfinished_plan_visual_source_refs(
+    fd: Path,
+    visual_sources_by_id: dict[str, dict[str, Any]],
+) -> set[str] | None:
+    """Visual sources referenced by unfinished Plan Tasks when the owner Batch is unknown.
+
+    ``None`` means the Plan carries no Batch scope at all, so the legacy
+    UI_CONTEXT-only behaviour is preserved.  Otherwise only sources that an
+    unfinished Task actually references stay in scope: a required source that no
+    unfinished Task binds must never block a ``spec-driven-ui`` Task.
+    """
+    _, _, load_plan = _import_ui_context_helpers()
+    if load_plan is None:
+        return None
+    path = fd / "plan.json"
+    if not path.is_file():
+        return None
+    try:
+        data = load_plan(path)
+    except Exception:
+        return None
+
+    entries = _plan_batch_entries(data)
+    if not entries:
+        return None
+
+    referenced: set[str] = set()
+    for entry in entries:
+        if not _batch_is_unfinished(entry):
+            continue
+        try:
+            batch = load_plan(fd / "plans" / entry["id"] / "plan.json")
+        except Exception:
+            continue
+        tasks = batch.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict) or task.get("uiRequired") is not True:
+                continue
+            ui_refs = task.get("uiRefs")
+            if not isinstance(ui_refs, dict):
+                continue
+            values = ui_refs.get("visualSourceRefs")
+            if isinstance(values, list):
+                referenced.update(str(value) for value in values if isinstance(value, str))
+    return {source_id for source_id in referenced if source_id in visual_sources_by_id}
 
 
-def _route_from_plan(fd: Path) -> tuple[str | None, list[str]]:
-    routes = _plan_ui_routes(fd)
+def _active_plan_ui_tasks(
+    fd: Path,
+    *,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> list[dict[str, Any]]:
+    return _plan_ui_scope(fd, batch_id=batch_id, task_id=task_id)["tasks"]
+
+
+def _plan_ui_routes(
+    fd: Path,
+    *,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> list[str]:
+    return [
+        str(item["route"])
+        for item in _active_plan_ui_tasks(fd, batch_id=batch_id, task_id=task_id)
+    ]
+
+
+def _route_from_plan(
+    fd: Path,
+    *,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> tuple[str | None, list[str]]:
+    routes = _plan_ui_routes(fd, batch_id=batch_id, task_id=task_id)
     if not routes:
         return None, []
     for route in (ROUTE_MISSING, ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_SPEC_DRIVEN):
@@ -468,6 +708,8 @@ def route_payload_from_ui_context(
     data: dict[str, Any],
     *,
     html_files: Iterable[str] = (),
+    batch_id: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     fd = feature_dir(workspace, feature)
     cli_html_sources = existing_paths(normalize_path(raw) for raw in html_files if raw.strip())
@@ -476,7 +718,8 @@ def route_payload_from_ui_context(
         for source in data.get("visualSources", [])
         if isinstance(source, dict)
     ] if isinstance(data.get("visualSources"), list) else []
-    active_ui_tasks = _active_plan_ui_tasks(fd)
+    scope = _plan_ui_scope(fd, batch_id=batch_id, task_id=task_id)
+    active_ui_tasks = scope["tasks"]
     visual_sources_by_id = {
         str(source.get("sourceId")): source
         for source in all_visual_sources
@@ -491,29 +734,60 @@ def route_payload_from_ui_context(
     unknown_source_ids = sorted(referenced_source_ids - set(visual_sources_by_id))
     if unknown_source_ids:
         raise FrontendRouteError("active_task_visual_source_unknown:" + ",".join(unknown_source_ids))
-    visual_sources = (
-        [visual_sources_by_id[source_id] for source_id in sorted(referenced_source_ids)]
-        if active_ui_tasks
-        else all_visual_sources
-    )
+    scope_reasons: list[str] = []
+    if active_ui_tasks:
+        visual_sources = [
+            visual_sources_by_id[source_id] for source_id in sorted(referenced_source_ids)
+        ]
+    elif isinstance(scope["batchId"], str):
+        if scope["tasksKnown"]:
+            # The owner Batch is known and binds no visual source.  Another
+            # Capability's required VIS must not block this Task.
+            visual_sources = []
+            scope_reasons.append(
+                f"batch {scope['batchId']} scope resolved via {scope['source']}; no bound required visual source"
+            )
+        else:
+            # The owner Batch is known but its Task list is unreadable, so no
+            # source can be attributed: keep the legacy global gate.
+            visual_sources = all_visual_sources
+            scope_reasons.append(
+                f"batch {scope['batchId']} plan is unreadable; validating all declared visual sources"
+            )
+    else:
+        unfinished_refs = _unfinished_plan_visual_source_refs(fd, visual_sources_by_id)
+        if unfinished_refs is None:
+            # No Plan Batch scope exists at all: keep the legacy UI_CONTEXT-only
+            # behaviour and validate every declared visual source.
+            visual_sources = all_visual_sources
+        else:
+            visual_sources = [
+                visual_sources_by_id[source_id] for source_id in sorted(unfinished_refs)
+            ]
+            scope_reasons.append(
+                "batch scope unresolved; validating only visual sources referenced by unfinished Plan tasks"
+            )
     active_routes = {str(task.get("route")) for task in active_ui_tasks}
     if len(active_routes) > 1:
         raise FrontendRouteError("mixed_active_ui_routes:" + ",".join(sorted(active_routes)))
-    validate_required_visual_sources(workspace, fd, visual_sources)
-    effective_cli_html_sources = [] if active_ui_tasks else cli_html_sources
+    missing_required_sources = _unreadable_required_visual_sources(workspace, fd, visual_sources)
+    ui_required = data.get("uiRequired") is True
+    # An unreadable required source also disqualifies a caller-supplied HTML
+    # file: the fallback must not be satisfied by a substitute artifact.
+    fallback_active = ui_required and bool(missing_required_sources)
+    effective_cli_html_sources = [] if (active_ui_tasks or fallback_active) else cli_html_sources
     html_sources = existing_paths([
         *effective_cli_html_sources,
         *_existing_visual_source_paths(workspace, fd, visual_sources),
     ])
     missing_html_sources = _missing_declared_html_paths(workspace, fd, visual_sources)
-    ui_required = data.get("uiRequired") is True
     route_missing_declared = False
 
     if not ui_required:
         route = ROUTE_NONE
         route_reasons = ["UI_CONTEXT uiRequired=false"]
     else:
-        plan_route, plan_reasons = _route_from_plan(fd)
+        plan_route, plan_reasons = _route_from_plan(fd, batch_id=batch_id, task_id=task_id)
         visual_route, visual_reasons = _route_from_visual_sources(visual_sources, html_sources)
         if visual_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING}:
             route = visual_route
@@ -538,6 +812,21 @@ def route_payload_from_ui_context(
                 "declared HTML visual source is missing; falling back to spec-driven-ui",
             ]
 
+    if fallback_active:
+        # A required visual source that cannot be read never stops Code: the
+        # route falls back to spec-driven-ui and the gap stays visible in the
+        # evidence instead of only in a failure log.
+        route_missing_declared = True
+        route = ROUTE_SPEC_DRIVEN
+        route_reasons = [
+            *route_reasons,
+            "required visual source is not readable: "
+            + ", ".join(
+                f"{item['sourceId']}({item['path']})" for item in missing_required_sources
+            )
+            + "; falling back to spec-driven-ui",
+        ]
+
     frontend_batches = _collect_frontend_batches(fd, visual_sources_by_id)
 
     payload: dict[str, Any] = {
@@ -553,8 +842,12 @@ def route_payload_from_ui_context(
             if isinstance(source.get("sourceId"), str)
         ],
         "htmlSourcePaths": [str(path) for path in html_sources],
-        "reasons": route_reasons,
+        "reasons": [*route_reasons, *scope_reasons],
         "docPaths": [],
+        "batchScope": {
+            "batchId": scope["batchId"],
+            "source": scope["source"],
+        },
         "taskSourceBindings": {
             str(task.get("taskId")): {
                 "route": task.get("route"),
@@ -579,6 +872,9 @@ def route_payload_from_ui_context(
     }
     if frontend_batches:
         payload["batches"] = frontend_batches
+    if fallback_active:
+        payload["requiredVisualSourceMissing"] = [dict(item) for item in missing_required_sources]
+        payload["requiredVisualSourceFallbackRoute"] = ROUTE_SPEC_DRIVEN
     if route_missing_declared or (missing_html_sources and not html_sources):
         payload["htmlSourceMissing"] = True
         payload["missingHtmlSourcePaths"] = missing_html_sources
@@ -661,10 +957,19 @@ def route_payload(
     feature: str,
     *,
     html_files: Iterable[str] = (),
+    batch_id: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     ui_context = _ui_context_payload(workspace, feature)
     if ui_context is not None:
-        return route_payload_from_ui_context(workspace, feature, ui_context, html_files=html_files)
+        return route_payload_from_ui_context(
+            workspace,
+            feature,
+            ui_context,
+            html_files=html_files,
+            batch_id=batch_id,
+            task_id=task_id,
+        )
 
     fd = feature_dir(workspace, feature)
     docs_text, docs = collect_doc_texts(fd)
@@ -735,8 +1040,16 @@ def resolve_frontend_route(
     html_files: Iterable[str] = (),
     write_evidence: bool = False,
     start_route_run: bool = False,
+    batch_id: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
-    payload = route_payload(workspace, feature, html_files=html_files)
+    payload = route_payload(
+        workspace,
+        feature,
+        html_files=html_files,
+        batch_id=batch_id,
+        task_id=task_id,
+    )
     if write_evidence:
         path = evidence_path(workspace, feature)
         if start_route_run:
@@ -813,6 +1126,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", help="project plugin workspace; defaults to plugin env")
     parser.add_argument("--feature", "-f", help="feature slug; defaults to FEATURE_ID")
     parser.add_argument("--html-file", action="append", default=[], help="HTML source path; may be repeated")
+    parser.add_argument(
+        "--batch-id",
+        help="owning Plan Batch id; required to attribute required VIS in fixed parallel mode",
+    )
+    parser.add_argument(
+        "--task-id",
+        help="current TASK id; the resolver derives its owning unfinished Batch from the Plan",
+    )
     parser.add_argument("--write-evidence", action="store_true")
     parser.add_argument("--start-route-run", action="store_true", help="start a fresh frontend route run")
     parser.add_argument(
@@ -847,9 +1168,19 @@ def main(argv: list[str] | None = None) -> int:
                 html_files=args.html_file,
                 write_evidence=args.write_evidence or args.start_route_run,
                 start_route_run=args.start_route_run,
+                batch_id=args.batch_id,
+                task_id=args.task_id,
             )
     except (FrontendRouteError, ValueError) as exc:
         print(f"frontend route resolve failed: {exc}", file=sys.stderr)
+        if isinstance(exc, FrontendRouteError) and str(exc).startswith(
+            ("task_scope_unknown:", "batch_scope_unknown:")
+        ):
+            print(
+                "hint: fixed parallel mode leaves activeBatchId empty; rerun with "
+                "--task-id <TASK_ID> or --batch-id <BATCH_ID> to scope the route decision.",
+                file=sys.stderr,
+            )
         return 1
 
     if args.json:

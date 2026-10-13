@@ -216,7 +216,7 @@ def protocol_next_step(feature: str, missing: list[str]) -> str:
     return "rerun frontend route protocol"
 
 
-def validate_frontend_write(workspace: Path, feature: str) -> int:
+def validate_frontend_write(workspace: Path, feature: str, *, target_path: Path | None = None) -> int:
     try:
         ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
     except UIContextError as exc:
@@ -227,10 +227,23 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     evidence_file = evidence_path(workspace, feature)
     evidence = read_json(evidence_file)
     if not evidence:
+        batch_id, task_id = _frontend_route_scope(workspace, feature, target_path)
         try:
-            resolved = resolve_frontend_route(workspace, feature, write_evidence=False)
+            resolved = resolve_frontend_route(
+                workspace,
+                feature,
+                write_evidence=False,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
         except FrontendRouteError as exc:
-            return block(f"UI_CONTEXT.json 非法，无法解析前端 route: {exc}")
+            return block(
+                f"UI_CONTEXT.json 与 Plan 作用域无法解析前端 route: {exc}",
+                system_message=(
+                    "前端 route 必须能在当前 Batch/TASK 作用域内解析："
+                    "固定并行模式不写 activeBatchId，请携带 --task-id 或 --batch-id 重跑 resolver。"
+                ),
+            )
         if resolved.get("source") == "UI_CONTEXT.json" and resolved.get("route") == ROUTE_NONE:
             return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
         if resolved.get("triggered"):
@@ -414,12 +427,9 @@ def validate_merge_resolution_write(workspace: Path, feature: str, target_path: 
     return 0
 
 
-def validate_code_task_run_write(
-    workspace: Path,
-    feature: str,
-    *,
-    target_path: Path | None = None,
-) -> int:
+def _active_task_runs(workspace: Path, feature: str) -> list[tuple[Path, dict]]:
+    """Return runner-owned Task runs that may still authorize a write."""
+
     target = feature_dir(workspace, feature)
     active_runs: list[tuple[Path, dict]] = []
     for path in (target / ".task-runs").glob("T*/*.json"):
@@ -429,6 +439,44 @@ def validate_code_task_run_write(
             and payload.get("status") not in {"implemented", "done", "failed", "aborted"}
         ):
             active_runs.append((path, payload))
+    return active_runs
+
+
+def _frontend_route_scope(
+    workspace: Path,
+    feature: str,
+    target_path: Path | None,
+) -> tuple[str | None, str | None]:
+    """Return the ``(batchId, taskId)`` that own one frontend write.
+
+    A fixed parallel Code run clears the root ``activeBatchId`` and drives
+    execution from the scheduler manifest, so the resolver cannot scope visual
+    sources from the Plan alone.  The owning Task run still records both ids and
+    is the only durable, per-write scope signal available here.
+    """
+
+    active_runs = _active_task_runs(workspace, feature)
+    authorized = _active_runs_for_write_target(active_runs, target_path)
+    if len(authorized) != 1:
+        if len(active_runs) != 1:
+            return None, None
+        authorized = active_runs
+    run = authorized[0][1]
+    batch_id = run.get("batchId")
+    task_id = run.get("taskId")
+    return (
+        batch_id if isinstance(batch_id, str) and batch_id.strip() else None,
+        task_id if isinstance(task_id, str) and task_id.strip() else None,
+    )
+
+
+def validate_code_task_run_write(
+    workspace: Path,
+    feature: str,
+    *,
+    target_path: Path | None = None,
+) -> int:
+    active_runs = _active_task_runs(workspace, feature)
     authorized_runs = _active_runs_for_write_target(active_runs, target_path)
     if len(authorized_runs) != 1:
         location = f" for write target {target_path}" if target_path is not None else ""
@@ -517,7 +565,7 @@ def main() -> int:
                 return result
             continue
         if is_frontend_code_path(target_path):
-            result = validate_frontend_write(workspace, feature)
+            result = validate_frontend_write(workspace, feature, target_path=target_path)
             if result:
                 return result
         if is_business_code_path(target_path):
