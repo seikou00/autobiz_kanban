@@ -32,6 +32,7 @@ from resolve_frontend_html_route import (  # noqa: E402
 from hooks.task_run_integrity import strict_task_run_integrity_error  # noqa: E402
 from hooks.plan_write_ownership import is_test_asset_path  # noqa: E402
 from hooks.utest_test_environment import prospective_content, validate_worktree_pom  # noqa: E402
+from hooks.merge_resolution import resolution_write_error  # noqa: E402
 from ui_context import UIContextError, load_ui_context  # noqa: E402
 
 
@@ -389,6 +390,30 @@ def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Pat
     return 0
 
 
+def validate_merge_resolution_write(workspace: Path, feature: str, target_path: Path) -> int | None:
+    """Conflict edits belong to the candidate stage, not a completed TASK run."""
+    matches = []
+    for manifest_path in (feature_dir(workspace, feature) / ".parallel-runs").glob("*/manifest.json"):
+        manifest = read_json(manifest_path)
+        for record in (manifest.get("mergeTrains") or {}).values():
+            if not isinstance(record, dict) or not isinstance(record.get("worktreePath"), str):
+                continue
+            worktree = Path(record["worktreePath"]).resolve(strict=False)
+            if _path_within(target_path, worktree):
+                matches.append((worktree, manifest, record))
+    if not matches:
+        return None
+    deepest = max(len(item[0].parts) for item in matches)
+    owners = [item for item in matches if len(item[0].parts) == deepest]
+    if len(owners) != 1:
+        return block("candidate_resolution_owner_ambiguous")
+    _, manifest, record = owners[0]
+    error = resolution_write_error(manifest, record, target_path)
+    if error:
+        return block(error, system_message="冲突文件写入需由 prepare-resolution 授权当前候选；解决后交还插件 complete-resolution 提交。")
+    return 0
+
+
 def validate_code_task_run_write(
     workspace: Path,
     feature: str,
@@ -462,6 +487,11 @@ def main() -> int:
         return 0
 
     for target_path in candidate_paths:
+        resolution_result = validate_merge_resolution_write(workspace, feature, target_path)
+        if resolution_result is not None:
+            if resolution_result:
+                return resolution_result
+            continue
         # A mixed Maven manifest has semantic test ownership. Never globally
         # mark every pom.xml as a test asset, including during Code/Review.
         if target_path.name == "pom.xml":

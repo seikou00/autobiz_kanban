@@ -29,6 +29,10 @@ from hooks.parallel_runtime import append_event, load_manifest, mergeable_batche
 from hooks.parallel_repair import create_repair_batch
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
+from hooks.merge_resolution import (
+    PLATFORM_EXCLUDE, business_status, candidate_binding, git as resolution_git,
+    git_output, has_conflict_markers, merge_parents, outside_diff_digest, resolution_files,
+)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -226,6 +230,8 @@ def build_candidate(
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
         existing = _record(manifest, repository_ref, wave)
+        if existing and (existing.get("resolution") or {}).get("status") in {"running", "committing", "commit_failed"}:
+            raise ValueError("candidate_resolution_in_progress")
         commits = {batch_id: str(batches[batch_id].get("commitSha") or "") for batch_id in ids}
         if existing and existing.get("batchIds") == ids and existing.get("deliveryCommits") == commits and existing.get("status") in {"built", "verified"}:
             return {"success": True, "reused": True, **existing}
@@ -273,10 +279,13 @@ def build_candidate(
                 result = _git(path, "merge", "--no-ff", "-m", commit_message, source)
                 if result.returncode != 0:
                     # Detect if it's a conflict or other error
-                    conflict_detected = "CONFLICT" in result.stdout or "CONFLICT" in result.stderr
+                    unmerged = _git(path, "diff", "--name-only", "--diff-filter=U", "-z")
+                    conflict_detected = bool(unmerged.stdout) or "CONFLICT" in result.stdout or "CONFLICT" in result.stderr
                     if conflict_detected:
                         # Extract conflicted files
-                        conflicted_files = _extract_conflicted_files(result.stdout + result.stderr)
+                        conflicted_files = [name for name in unmerged.stdout.split("\0") if name] if unmerged.returncode == 0 else []
+                        if not conflicted_files:
+                            conflicted_files = _extract_conflicted_files(result.stdout + result.stderr)
                         # Read conflict markers from files
                         conflict_markers = _extract_conflict_markers(path, conflicted_files)
                         # Don't abort merge - preserve worktree for resolution
@@ -725,6 +734,158 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
     return {"success": bool(result.get("success")), "result": result, "environment": environment, "cleanupErrors": cleanup_errors}
 
 
+def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str, attempt_id: str = "") -> dict[str, Any]:
+    """Give the model a durable, candidate-specific permission to edit conflicts."""
+    lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
+    with FileLock(lock), run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        record = _record(manifest, repository_ref, wave)
+        if not record:
+            return {"success": False, "error": "candidate_record_missing"}
+        try:
+            path = candidate_binding(manifest, record)
+            if record.get("status") == "built" and record.get("resolutionMethod") == "model":
+                if (git_output(path, "rev-parse", "HEAD") != record.get("candidateSha")
+                        or business_status(path) or len(merge_parents(path)) != 1):
+                    raise ValueError("candidate_resolution_git_state_changed")
+                return {"success": True, **record, "reused": True}
+            if record.get("status") not in {"candidate_conflicted", "needs_resolution"}:
+                raise ValueError("candidate_not_in_conflicted_state")
+            previous = record.get("resolution") or {}
+            if previous.get("status") in {"committing", "commit_failed"}:
+                # Commit may already have succeeded before manifest registration.
+                # Let the plugin reconcile it; never ask the model to edit again.
+                return {"success": True, "status": "ready_to_complete", "worktreePath": str(path)}
+            context, error = _conflict_context_from_record(record, repository_ref, wave)
+            if error:
+                raise ValueError(error)
+            assert context is not None
+            config = (manifest.get("runtimeConfig") or {}).get("conflictResolution") or {}
+            maximum = config.get("maxAttempts", 2)
+            if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+                raise ValueError("candidate_resolution_max_attempts_invalid")
+            parents = merge_parents(path)
+            if len(parents) != 2:
+                raise ValueError("candidate_merge_not_in_progress")
+            unmerged = resolution_git(path, "diff", "--name-only", "--diff-filter=U", "-z")
+            if unmerged.returncode != 0:
+                raise ValueError("candidate_unmerged_check_failed")
+            unmerged_files = [name for name in unmerged.stdout.split("\0") if name]
+            files = resolution_files(path, previous.get("files") or sorted(set(context.conflicted_files + unmerged_files)))
+            outside = outside_diff_digest(path, files)
+            if previous and (previous.get("parents") != parents or previous.get("outsideDiffDigest") != outside):
+                raise ValueError("candidate_resolution_git_state_changed")
+            if attempt_id and previous.get("status") == "running" and previous.get("attemptId") == attempt_id:
+                # Empty-response retries repeat the same preparation command.
+                # They must not consume another model-edit attempt.
+                return {
+                    "success": True, "status": "resolution_required", "worktreePath": str(path),
+                    "conflictedFiles": files, "repositoryRef": repository_ref, "wave": wave,
+                    "attempts": context.attempts, "reused": True,
+                }
+            if context.attempts >= maximum:
+                if previous:
+                    previous["status"] = "exhausted"
+                    record["status"] = "needs_resolution"
+                    save_manifest(workspace, feature, run_id, manifest)
+                raise ValueError("max_resolution_attempts_exceeded")
+            message = build_commit_message(manifest.get("taskCardId"), f"解决冲突 {', '.join(context.batch_ids)}")
+            context.attempts += 1
+            record["conflictContext"]["attempts"] = context.attempts
+            record["resolution"] = {
+                "status": "running", "files": files, "parents": parents,
+                "outsideDiffDigest": outside, "commitMessage": message,
+                "attempt": context.attempts, "attemptId": attempt_id, "startedAt": utc_now(),
+            }
+            save_manifest(workspace, feature, run_id, manifest)
+            return {
+                "success": True, "status": "resolution_required", "worktreePath": str(path),
+                "conflictedFiles": files, "repositoryRef": repository_ref, "wave": wave,
+                "attempts": context.attempts,
+            }
+        except (OSError, ValueError) as exc:
+            return {"success": False, "status": "needs_resolution", "error": str(exc), "worktreePath": record.get("worktreePath")}
+
+
+def complete_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
+    """Stage model-resolved files and create the merge commit inside the plugin."""
+    lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
+    with FileLock(lock), run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        record = _record(manifest, repository_ref, wave)
+        if not record:
+            return {"success": False, "error": "candidate_record_missing"}
+        try:
+            path = candidate_binding(manifest, record)
+            if record.get("status") == "built" and record.get("resolutionMethod") == "model":
+                if (git_output(path, "rev-parse", "HEAD") != record.get("candidateSha")
+                        or business_status(path) or len(merge_parents(path)) != 1):
+                    raise ValueError("candidate_resolution_git_state_changed")
+                return {"success": True, **record, "reused": True}
+            resolution = record.get("resolution") or {}
+            if record.get("status") not in {"candidate_conflicted", "needs_resolution"} or resolution.get("status") not in {"running", "committing", "commit_failed"}:
+                raise ValueError("candidate_resolution_not_prepared")
+            files = resolution_files(path, resolution.get("files"))
+            parents = merge_parents(path)
+            if len(parents) == 1:
+                # Recover only the exact commit whose intent was saved before Git.
+                actual_parents = git_output(path, "show", "-s", "--format=%P", "HEAD").split()
+                tree = git_output(path, "rev-parse", "HEAD^{tree}")
+                message = git_output(path, "show", "-s", "--format=%B", "HEAD")
+                if (resolution.get("status") not in {"committing", "commit_failed"}
+                        or actual_parents != resolution.get("parents")
+                        or tree != resolution.get("treeSha") or message != resolution.get("commitMessage")):
+                    raise ValueError("candidate_resolution_commit_mismatch")
+            else:
+                if parents != resolution.get("parents"):
+                    raise ValueError("candidate_resolution_git_state_changed")
+                if outside_diff_digest(path, files) != resolution.get("outsideDiffDigest"):
+                    raise ValueError("candidate_resolution_out_of_scope_changes")
+                untracked = resolution_git(path, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", PLATFORM_EXCLUDE)
+                if untracked.returncode != 0 or untracked.stdout:
+                    raise ValueError("candidate_resolution_untracked_files")
+                markers = [name for name in files if has_conflict_markers(path / name)]
+                if markers:
+                    raise ValueError("candidate_conflict_markers_remain:" + ",".join(markers))
+                staged = resolution_git(path, "--literal-pathspecs", "add", "-A", "--", *files)
+                if staged.returncode != 0:
+                    raise ValueError("candidate_resolution_stage_failed:" + staged.stderr.strip())
+                unmerged = git_output(path, "diff", "--name-only", "--diff-filter=U")
+                if unmerged:
+                    raise ValueError("candidate_unmerged_files:" + unmerged)
+                if git_output(path, "diff", "--cached", "--name-only", "HEAD", "--", ".cmbdevclaw/"):
+                    raise ValueError("candidate_resolution_platform_files_staged")
+                resolution.update({"status": "committing", "treeSha": git_output(path, "write-tree"), "commitStartedAt": utc_now()})
+                save_manifest(workspace, feature, run_id, manifest)
+                committed = resolution_git(path, "commit", "--no-edit", "-m", resolution["commitMessage"])
+                if committed.returncode != 0:
+                    resolution.update({"status": "commit_failed", "error": committed.stderr.strip() or committed.stdout.strip()})
+                    save_manifest(workspace, feature, run_id, manifest)
+                    raise ValueError("candidate_resolution_commit_failed:" + resolution["error"])
+            if business_status(path) or len(merge_parents(path)) != 1:
+                raise ValueError("candidate_resolution_worktree_dirty")
+            candidate_sha = git_output(path, "rev-parse", "HEAD")
+            if (git_output(path, "show", "-s", "--format=%P", "HEAD").split() != resolution.get("parents")
+                    or git_output(path, "rev-parse", "HEAD^{tree}") != resolution.get("treeSha")):
+                raise ValueError("candidate_resolution_commit_mismatch")
+            for delivery_sha in (record.get("deliveryCommits") or {}).values():
+                if resolution_git(path, "merge-base", "--is-ancestor", delivery_sha, candidate_sha).returncode != 0:
+                    raise ValueError("candidate_resolution_delivery_missing:" + delivery_sha)
+            record.update({
+                "status": "built", "candidateSha": candidate_sha, "resolvedAt": utc_now(),
+                "resolutionMethod": "model", "resolutionAttempts": resolution["attempt"],
+                "changedFiles": git_output(path, "diff", "--name-only", f"{record['baseSha']}..{candidate_sha}").splitlines(),
+            })
+            resolution.update({"status": "completed", "commitSha": candidate_sha})
+            record.pop("conflictContext", None)
+            manifest["status"] = "running"
+            save_manifest(workspace, feature, run_id, manifest)
+            append_event(workspace, feature, run_id, "merge_train_conflict_resolved", repositoryRef=repository_ref, wave=wave, method="model", candidateSha=candidate_sha)
+            return {"success": True, **record}
+        except (OSError, ValueError) as exc:
+            return {"success": False, "status": "needs_resolution", "error": str(exc), "worktreePath": record.get("worktreePath")}
+
+
 def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
     """Attempt to resolve conflicts in a candidate_conflicted merge train candidate.
 
@@ -977,7 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate staged parallel Batch Merge Trains")
     sub = parser.add_subparsers(dest="command", required=True)
     promote_parser: argparse.ArgumentParser | None = None
-    for name in ("build-candidate", "verify-candidate", "promote-candidate", "recover-promoted-plan", "resolve-candidate", "resume-candidate", "discard-candidate"):
+    for name in ("build-candidate", "verify-candidate", "promote-candidate", "recover-promoted-plan", "prepare-resolution", "complete-resolution", "resolve-candidate", "resume-candidate", "discard-candidate"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -988,6 +1149,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--batch-id", action="append", dest="batch_ids", required=True)
         elif name == "promote-candidate":
             promote_parser = item
+        elif name == "prepare-resolution":
+            item.add_argument("--attempt-id", default="", help="stable identity for one Workflow resolution step")
     e2e_begin = sub.add_parser("begin-e2e")
     e2e_finish = sub.add_parser("finish-e2e")
     for item in (e2e_begin, e2e_finish):
@@ -1027,6 +1190,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "resolve-candidate":
             result = resolve_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
+        elif args.command == "prepare-resolution":
+            result = prepare_resolution(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref, attempt_id=args.attempt_id)
+        elif args.command == "complete-resolution":
+            result = complete_resolution(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "resume-candidate":
             result = resume_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "discard-candidate":

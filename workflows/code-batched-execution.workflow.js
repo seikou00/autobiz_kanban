@@ -1682,6 +1682,42 @@ async function continueRecoveredDelivery(recovery) {
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 
+async function resolveMergeCandidate(repositoryRef, wave, label, executionPhase) {
+  const bindingArgs = `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}`;
+  const prepared = unwrap(await workflowAgent(
+    `准备既有 Merge Train 候选的冲突解决：执行 python -X utf8 "${mergeTrainPath}" prepare-resolution ${bindingArgs} --attempt-id "${label}"。` +
+    `使用 execute 的默认合法工作区，不把工具 cwd/workdir 切换到候选；候选目录由插件内部处理。只执行这个插件命令并返回 stdout JSON；失败时返回原始结果，不得自行解决、暂存或提交，不得创建候选或修改 main。`,
+    { label, phase: executionPhase }
+  ));
+  if (!prepared || hasFailureSignal(prepared) || prepared.success !== true) return prepared;
+  if (prepared.status === "built") return prepared; // Reconcile an already completed handoff.
+  if (!["resolution_required", "ready_to_complete"].includes(prepared.status)) {
+    return { success: false, status: "needs_resolution", error: "candidate_resolution_prepare_invalid", worktreePath: prepared.worktreePath };
+  }
+  if (prepared.status === "resolution_required") {
+    if (!absolutePath(prepared.worktreePath) || !Array.isArray(prepared.conflictedFiles) || !prepared.conflictedFiles.length) {
+      return { success: false, status: "needs_resolution", error: "candidate_resolution_scope_missing" };
+    }
+    const edited = unwrap(await workflowAgent(
+      `解决已授权的 Merge Train 冲突。候选 Worktree=${JSON.stringify(prepared.worktreePath)}；允许修改的冲突文件=${JSON.stringify(prepared.conflictedFiles)}。` +
+      `只在该候选中读取理解双方业务意图，并编辑这些冲突文件，保留双方应有逻辑、移除冲突标记。不得创建新 Worktree、修改 main 或其他 Batch。` +
+      `本步骤只负责文件内容，不执行 git add、git commit、git merge --continue 或任何其他写入 Git 操作，不通过 Python/脚本包装这些操作。` +
+      `编辑完成后立即返回 {"success":true,"status":"resolved"}，交还 Workflow，由下一步插件完成暂存和 merge commit。` +
+      `文件写入被拦截或无法解决时，返回 {"success":false,"status":"needs_resolution","error":<具体原因>}；不要修改插件源码或尝试其他提交命令。`,
+      { label: `${label}-edit`, phase: executionPhase }
+    ));
+    if (!edited || edited.success !== true || edited.status !== "resolved" || hasFailureSignal(edited)) {
+      return { success: false, status: "needs_resolution", error: edited || "candidate_resolution_empty", worktreePath: prepared.worktreePath, conflictedFiles: prepared.conflictedFiles };
+    }
+  }
+  // The model has returned. This separate plugin operation owns all Git writes.
+  return unwrap(await workflowAgent(
+    `模型已交还冲突文件。执行 python -X utf8 "${mergeTrainPath}" complete-resolution ${bindingArgs}。` +
+    `插件负责检查、暂存、非交互 merge commit 和候选 SHA 登记。使用 execute 的默认合法工作区，不把工具 cwd/workdir 切换到候选。只执行这个命令并返回 stdout JSON；失败时原样返回，禁止自行 git add/commit/merge、包装替代命令或修改文件。`,
+    { label: `${label}-commit`, phase: executionPhase }
+  ));
+}
+
 async function validateAndPromoteBatch(batchId, candidateSequence) {
   const repositoryRef = (batchWorkspaces[batchId] || {}).workspaceRef;
   if (!usableString(repositoryRef)) throw new Error(`scheduler did not provide repository for ${batchId}`);
@@ -1708,12 +1744,8 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
         // A candidate's conflict markers are tied to this exact base SHA.
         // Resolve and promote it now, before other same-repository deliveries
         // can advance main and make the retained conflict context stale.
-        const resolved = unwrap(await workflowAgent(
-          `立即修复刚产生的 Merge Train 冲突候选。执行 python -X utf8 "${mergeTrainPath}" resolve-candidate ` +
-          `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
-          `只能处理该既有候选 Worktree；成功时返回 status="built"，随后本 Workflow 会立即推广。不得创建新候选、修改 main 或继续其他 Batch。只返回 JSON。`,
-          { label: `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, phase: "候选验证" }
-        ));
+        const resolved = await resolveMergeCandidate(repositoryRef, wave,
+          `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, "候选验证");
         if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
           recordUnresolved({
             kind: "merge_candidate",
@@ -2578,12 +2610,8 @@ async function attemptFinalCandidateRepair(record) {
     ? record.batchIds
     : (record.batchId ? [record.batchId] : []);
   try {
-    const resolved = unwrap(await workflowAgent(
-      `所有独立 Batch 已排空。对保留的 Merge Train 候选作最后一次受控自动恢复：执行 python -X utf8 "${mergeTrainPath}" resolve-candidate ` +
-      `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${record.repositoryRef}" --wave ${record.wave}。` +
-      `只可处理该既有候选；不得创建新 Worktree、修改 main 或继续其他 Batch。无法自动解决时保留候选和冲突上下文。只返回 JSON。`,
-      { label: `final-repair-candidate-${record.repositoryRef}-${record.wave}`, phase: "最终修复与报告" }
-    ));
+    const resolved = await resolveMergeCandidate(record.repositoryRef, record.wave,
+      `final-repair-candidate-${record.repositoryRef}-${record.wave}`, "最终修复与报告");
     if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
       finalRepairResults.push({
         kind: "resolve_candidate",

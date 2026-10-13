@@ -20,6 +20,7 @@ const promoted = { success: true, promoted: true, batchIds: ["B009"] };
 
 function harness(responses = []) {
   const calls = [];
+  const instructions = [];
   const records = [];
   const context = vm.createContext({
     batchWorkspaces: { B009: { workspaceRef: "default" } },
@@ -30,8 +31,9 @@ function harness(responses = []) {
     finalRepairResults: [], mergeResults: [],
     cleanupMergedWorktrees: async () => {},
     markBatchResolved: () => {}, markCandidateResolved: () => {},
-    workflowAgent: async (_instruction, options) => {
+    workflowAgent: async (instruction, options) => {
       calls.push(options.label);
+      instructions.push(instruction);
       assert.ok(responses.length, `Unexpected agent call: ${options.label}`);
       return responses.shift();
     },
@@ -44,10 +46,70 @@ function harness(responses = []) {
   }
   load("function normalizeStructuredOutput(", "const input = unwrap(args);");
   load("function mergedBatchIds(", "async function cleanupMergedWorktrees(");
-  load("async function validateAndPromoteBatch(", "async function promoteReadyBatch(");
+  load("async function resolveMergeCandidate(", "async function promoteReadyBatch(");
   load("async function attemptFinalCandidateRepair(", "async function runFinalRepairAndReport(");
-  return { context, calls, records };
+  return { context, calls, records, instructions };
 }
+
+const preparedResolution = {
+  success: true, status: "resolution_required", worktreePath: "/tmp/candidate",
+  conflictedFiles: ["src/app.js"],
+};
+
+test("model returns edited files before a separate plugin command commits and promotion starts", async () => {
+  const { context, calls, instructions } = harness([
+    wrap(conflicted, 1), wrap(preparedResolution),
+    { success: true, status: "resolved" }, wrap(built), wrap(promoted),
+  ]);
+  assert.equal((await context.validateAndPromoteBatch("B009", 9)).promoted, true);
+  assert.deepEqual(calls, [
+    "build-candidate-default-B009-9-1", "resolve-conflicted-candidate-default-B009-9",
+    "resolve-conflicted-candidate-default-B009-9-edit", "resolve-conflicted-candidate-default-B009-9-commit",
+    "promote-candidate-default-B009-9-1",
+  ]);
+  assert.match(instructions[1], /prepare-resolution/);
+  assert.match(instructions[2], /不执行 git add、git commit、git merge --continue/);
+  assert.match(instructions[2], /交还 Workflow/);
+  assert.match(instructions[3], /complete-resolution/);
+});
+
+test("editing failure prevents plugin commit and candidate promotion", async () => {
+  const { context, calls } = harness([
+    conflicted, preparedResolution, { success: false, status: "needs_resolution", error: "write rejected" },
+  ]);
+  await assert.rejects(context.validateAndPromoteBatch("B009", 9), /immediate_candidate_resolution_failed/);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(label => !label.endsWith("-commit")));
+});
+
+test("commit failure never asks the model for alternative Git commands", async () => {
+  const { context, calls } = harness([
+    conflicted, preparedResolution, { success: true, status: "resolved" },
+    wrap({ success: false, status: "needs_resolution", error: "hook rejected" }, 1),
+  ]);
+  await assert.rejects(context.validateAndPromoteBatch("B009", 9), /immediate_candidate_resolution_failed/);
+  assert.equal(calls.length, 4);
+  assert.ok(calls.at(-1).endsWith("-commit"));
+});
+
+test("final repair uses the same model-to-plugin handoff", async () => {
+  const { context, calls } = harness([
+    preparedResolution, { success: true, status: "resolved" }, built, promoted,
+  ]);
+  await context.attemptFinalCandidateRepair({ repositoryRef: "default", wave: 9, batchIds: ["B009"] });
+  assert.equal(context.finalRepairResults[0].status, "promoted");
+  assert.deepEqual(calls.slice(0, 3), [
+    "final-repair-candidate-default-9", "final-repair-candidate-default-9-edit", "final-repair-candidate-default-9-commit",
+  ]);
+});
+
+test("interrupted commit registration is reconciled without another model edit", async () => {
+  const { context, calls } = harness([
+    conflicted, { success: true, status: "ready_to_complete", worktreePath: "/tmp/candidate" }, built, promoted,
+  ]);
+  assert.equal((await context.validateAndPromoteBatch("B009", 9)).promoted, true);
+  assert.ok(calls.every(label => !label.endsWith("-edit")));
+});
 
 test("unwrap exposes command results through JSON, value and nested background envelopes", () => {
   const { context } = harness();

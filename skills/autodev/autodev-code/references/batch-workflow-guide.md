@@ -296,6 +296,15 @@ state.
   worktree and temporary branch before the scheduler may start a dependent
   Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.
+- Candidate conflicts use a model-to-plugin handoff: `prepare-resolution`
+  registers the exact candidate and conflict files; the conflict Agent edits
+  those files and returns `success=true,status=resolved`, without running Git
+  mutations. The Workflow then calls `complete-resolution`; the plugin stages
+  the files, creates a noninteractive merge commit with the run's task-card
+  message, and records the actual candidate SHA before promotion. Final repair
+  uses the same protocol. `ready_to_complete` skips model editing and reconciles
+  an interrupted plugin commit. Do not start a production TASK for conflict
+  edits, invoke `seal` for the merge, or try alternative commit commands.
 - Never delete `.parallel-runs/<runId>`, copy files out of an orphaned
   worktree, or manually merge a Batch branch. Those operations bypass delivery
   evidence and leave the run unrecoverable.
