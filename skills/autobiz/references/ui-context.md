@@ -11,17 +11,19 @@ is automatically generated in the same directory. This Markdown file:
 
 - When `uiRequired=true`, focuses on frontend developer concerns: pages, interactions, visual sources, and restoration paths
 - When `uiRequired=false`, shows the UI decision, decision source/status, and `notApplicableReason`, and omits empty frontend tables
-- Shows the relationship between capabilities, HTML resources, and restoration routes
+- Leads with a TASK / PAGE / UIX / VIS mapping table, including restoration routes and binding evidence from formal Plan `uiRefs`, capability `specRefs`, and interaction `pageId`
+- Splits rows by task, page, and capability; shared capability visuals are explicitly marked as capability scope rather than asserted as page-specific bindings
+- Before Plan exists, shows capability PAGE/UIX/VIS scope with `待Plan阶段关联`; after Plan exists, preserves unbound scope and unresolved ownership explicitly
 - Renders `capabilityId` values directly; it does not invent Chinese translations for capability names
 - Shows a visual source's formal Plan tasks as `T00X: task title` when `uiRefs.visualSourceRefs` binds them; before Plan exists it shows `待Plan阶段关联`
-- Includes a visual tree diagram mapping tasks → HTML → paths
-- Can be manually edited and synced back to JSON using `sync-from-md` command
+- Keeps visual-source and page-definition tables as supplementary detail, retaining interaction IDs
+- The generated mapping table is a read-only projection; `sync-from-md` only supports legacy list sections, not these generated tables or derived task bindings
 - Serves as a quick reference for frontend teams to review UI scope and implementation strategy
 
 **Synchronization**:
 - JSON → MD: automatic (on every JSON write)
-- Plan → MD: automatic (on every formal Plan write, to refresh exact task IDs and titles)
-- MD → JSON: manual (using `python -X utf8 hooks/ui_context_writer.py sync-from-md --feature <feature>`)
+- Plan → MD: automatic (on every formal Plan write, to refresh TASK/PAGE/UIX/VIS mappings)
+- Legacy MD list sections → JSON: manual (using `python -X utf8 hooks/ui_context_writer.py sync-from-md --feature <feature>`); edit generated mappings through the source JSON/Plan writers instead
 
 See `docs/ui-context-md-generation.md` for detailed documentation.
 
