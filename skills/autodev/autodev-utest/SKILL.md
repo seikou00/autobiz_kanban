@@ -60,8 +60,8 @@ Code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前
 测试工程师可修改：
 
 - 测试源码、fixture、mock、测试辅助代码。
-- 测试环境配置、依赖 manifest 与对应的单一锁文件。
-- 当前 feature 的生产源码，限失败测试锚定的最小范围。
+- 测试环境配置；当前模块 `pom.xml` 中测试需要的 `test` scope 依赖与必要 Surefire/Failsafe 配置。
+- POM 修改由当前 Batch 的 test 阶段授权，不要求重新启动已 implemented 的生产 TASK。写守卫与封存器按 XML 实际差异校验；保留生产依赖、parent/BOM、共享属性和 profiles。生产源码只能回实现修复阶段处理。
 
 修复超出 assignment 的仓库或 TASK 边界时返回 `source_fix_request`，不跨边界改动。
 
@@ -109,6 +109,16 @@ ${pluginPath}/skills/autodev/autodev-utest/reference/test-environment-profiles.m
 ```
 
 环境初始化只修改测试配置、manifest 与对应锁文件。按 profile 完成改动后用 `--kind setup` 执行安装或校验命令，再重新运行 inspector 并输出返回的 `status`；`status` 未变为 `ready` 前不进入测试生成与执行，不得用一条自拟的 `--kind setup` 命令通过环境检查。`conflict` / `unsupported` 不做猜测性初始化；环境目标有歧义时按上面的 runtime selector 重查，不要求把模块路径补写到 Plan。网络或安装授权被拒绝时分类为 `environment` 并阻断。
+
+### 一次准备与依赖诊断
+
+在 Workflow 给出的当前 run/Batch/worktree/lease 下，每个 TASK 先运行 `utest_runtime.py prepare`。通用参数为 `--workspace`、`--feature`、`--run-id`、`--batch-id`、`--batch-worktree`、`--task-id`、`--owner-token`；值只来自当前 Workflow。按返回 preset、模块能力和 `testPoints` 执行，JUnit 与 Mockito 配合使用，保留实际 JUnit 4/5。依赖声明不是解析成功的证明；基础环境 ready 但缺 preset 能力时也可补齐测试依赖一次。
+
+POM 修改可用 `apply-pom`、同一绑定参数和 `--content-file <worktree或系统临时目录中的完整POM内容>`；也可通过完整 write_file/精确 edit_file。二者与 seal 使用同一 XML 差异校验，允许测试所需依赖及必要测试插件，禁止改生产依赖、parent/BOM、共享属性、profiles。不得为获取权限重开生产 TASK。
+
+有实际证据时 `select --preset <ID> --reason <原因>` 允许执行前调整一次；执行后冻结。静态依赖读取 `reference/legacy-static-test-patterns.md`，只复用可验证的 inline/PowerMock/隔离 fixture 模板。无法隔离时返回 `testability_gap`，不得静态推导 source_bug；H2/mapper 测试不替代 Service 授权逻辑。
+
+Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan V2 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。Maven 只读诊断统一经 `run_utest_command.py --kind setup`，相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
 
 ## 测试域路由
 
@@ -158,11 +168,15 @@ python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framewo
 - plan 之外的补充测试记 P2，并写明补充理由；不得用它替代任何 plan 目标。
 - `promptContent` 缺 Batch plan 绝对路径、`outcome`、`implementationPoints`、`testPoints`、`verificationIntent` 或有效 `validationLocations` 时记 `contract_gap`。
 
-完整表输出后才进入生成测试与执行。
+由 Runtime 准备结果确认目标后进入生成与执行；报告表在收口时聚合，不额外生成长篇选型方案。
 
 ### 生成测试
 
 每个 UT target 都先落地测试文件，再执行为该测试生成的精确命令；没有落地测试文件的 target 不执行、不记 PASS。
+
+固定 Batch 流程必须在文件落地后运行 `utest_runtime.py preflight`，携带当前 Workflow run/Batch/worktree/lease/TASK 绑定、`--test-file <仓库根相对文件>`、`-- <精确 argv>`，然后执行返回的 `bashCommand`。Runtime 生成的 Bash 直接运行测试、监控子进程、立即捕获 PIPESTATUS/tee 状态并登记 Evidence；Python 不启动行为测试。`--retry-kind test_bug` 与受控生产修复后的 `--retry-kind source_repair` 各最多一次，argv/target 冻结。`awaiting_record` 只补记现有输出，不重跑。
+
+首次真实测试命令预算 600 秒，阶段总预算最多 1800 秒（Workflow 可收窄），命令最多 300 秒；预算包含探索和 setup，恢复/续 lease 不重置。Bash 开始执行前再次检查绑定与期限。零用例或无法证明用例实际执行为 BLOCKED；exit 0 不足以 PASS。到期或阻断仍须按 Workflow 封存有效测试资产、记录 issue 并释放 lease，不读插件源码寻找绕行路径。
 
 每个 UT target：
 
@@ -225,11 +239,11 @@ python -X utf8 "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "$
 
 主协调器收到 `source_fix_request` 后，在同一 Batch 原生 Worktree 的 implement repair 中做最小生产修复，重新编译和封存；随后必须重新执行生产代码 Review 和原 Batch/lane/workspace UTest，复用 UT target 并追加新 Evidence。
 
-同一个生产根因最多修复 3 次；仍失败时保留该 Batch 的测试证据与阻断记录，不改变全局 Code checkpoint。
+同一个生产根因最多受控修复一次；仍失败时保留该 Batch 的测试证据与阻断记录，不改变全局 Code checkpoint。
 
 ### 扩大验证
 
-所有 P0/P1 精确目标通过后，按 assignment 顺序用 Bash 重跑修改过的测试文件和受影响模块轻量测试，并对每次执行调用 `run_utest_command.py --record-only` 登记 target、Evidence 和结构化结果。
+所有 P0/P1 精确目标通过后，仅在新增改动、失败或未验证的影响范围确有需要时安排模块回归；不对已通过且未变化的目标重复执行。扩大验证必须保持 TASK/test-file/Evidence 映射和剩余预算，由协调器明确交付，不由单个 target 自行扩大范围。
 
 项目约定的生产编译或测试编译命令也使用 Bash 直接执行。不要把 compile-only 命令传给 `run_utest_command.py --kind setup`：这样能在执行现场直接看到编译器输出和退出码。通过 Bash 的 `tee` 把完整 stdout/stderr 同时显示并追加到 Feature 的 `test-output.log`，保留 pipeline 前一个进程的退出码：
 
@@ -238,12 +252,14 @@ set -o pipefail
 UTEST_LOG="${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log"
 printf '\n=== DIRECT BASH COMPILE ===\ncwd: %s\ncommand: %s\n' "$PWD" '<真实 compile-only 命令>' | tee -a "$UTEST_LOG"
 <真实 compile-only 命令> 2>&1 | tee -a "$UTEST_LOG"
-compile_exit=${PIPESTATUS[0]}
+compile_status=("${PIPESTATUS[@]}")
+compile_exit=${compile_status[0]}
+compile_log_exit=${compile_status[1]}
 printf 'compile_exit_code: %s\n=== END DIRECT BASH COMPILE ===\n' "$compile_exit" | tee -a "$UTEST_LOG"
-exit "$compile_exit"
+exit "$((compile_exit != 0 ? compile_exit : compile_log_exit))"
 ```
 
-从真实项目构建配置选择 compile-only 或 test-compile 目标；不要运行 package/build/check 等会混入打包或行为测试的复合目标。将精确命令、cwd、退出码和结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`。编译失败必须读取这次 Bash 输出并归因，不得用精确测试通过覆盖失败；生产源码问题按 `source_fix_request` 流程返回实现阶段修复。
+从真实项目构建配置选择 compile-only 或 test-compile 目标；不要运行 package/build/check 等会混入打包或行为测试的复合目标。管道后必须立即保存整个 `PIPESTATUS`，同时检查编译退出码和 tee 日志写入退出码；日志写入失败不能报告完整验证成功。将精确命令、cwd、两个退出码和结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`。编译失败必须读取这次 Bash 输出并归因，不得用精确测试通过覆盖失败；生产源码问题按 `source_fix_request` 流程返回实现阶段修复。
 
 ### 生成结果与报告
 

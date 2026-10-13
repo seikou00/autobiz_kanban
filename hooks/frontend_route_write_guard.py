@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -30,6 +31,8 @@ from resolve_frontend_html_route import (  # noqa: E402
 )
 from hooks.task_run_integrity import strict_task_run_integrity_error  # noqa: E402
 from hooks.plan_write_ownership import is_test_asset_path  # noqa: E402
+from hooks.utest_test_environment import prospective_content, validate_worktree_pom  # noqa: E402
+from hooks.merge_resolution import resolution_write_error  # noqa: E402
 from ui_context import UIContextError, load_ui_context  # noqa: E402
 
 
@@ -213,7 +216,7 @@ def protocol_next_step(feature: str, missing: list[str]) -> str:
     return "rerun frontend route protocol"
 
 
-def validate_frontend_write(workspace: Path, feature: str) -> int:
+def validate_frontend_write(workspace: Path, feature: str, *, target_path: Path | None = None) -> int:
     try:
         ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
     except UIContextError as exc:
@@ -224,10 +227,23 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     evidence_file = evidence_path(workspace, feature)
     evidence = read_json(evidence_file)
     if not evidence:
+        batch_id, task_id = _frontend_route_scope(workspace, feature, target_path)
         try:
-            resolved = resolve_frontend_route(workspace, feature, write_evidence=False)
+            resolved = resolve_frontend_route(
+                workspace,
+                feature,
+                write_evidence=False,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
         except FrontendRouteError as exc:
-            return block(f"UI_CONTEXT.json 非法，无法解析前端 route: {exc}")
+            return block(
+                f"UI_CONTEXT.json 与 Plan 作用域无法解析前端 route: {exc}",
+                system_message=(
+                    "前端 route 必须能在当前 Batch/TASK 作用域内解析："
+                    "固定并行模式不写 activeBatchId，请携带 --task-id 或 --batch-id 重跑 resolver。"
+                ),
+            )
         if resolved.get("source") == "UI_CONTEXT.json" and resolved.get("route") == ROUTE_NONE:
             return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
         if resolved.get("triggered"):
@@ -325,6 +341,7 @@ def _test_write_owner(
     workspace: Path,
     feature: str,
     target_path: Path,
+    *, test_environment: bool = False,
 ) -> tuple[str, Path, dict, str] | None:
     """Find the deepest runtime Worktree that owns a test-asset write."""
 
@@ -336,8 +353,13 @@ def _test_write_owner(
             if not _path_within(target_path, worktree):
                 continue
             relative = target_path.resolve(strict=False).relative_to(worktree)
-            if is_test_asset_path(relative.as_posix()):
-                matches.append((batch_id, worktree, batch, stage))
+            if is_test_asset_path(relative.as_posix()) or (test_environment and relative.name == "pom.xml"):
+                owner_batch = batch
+                if test_environment:
+                    lease = read_json(manifest_path.parent / "leases" / (batch_id + ".json"))
+                    owner_batch = dict(batch, testEnvironmentLeaseValid=isinstance(lease, dict) and
+                                       isinstance(lease.get("expiresEpoch"), (int, float)) and lease["expiresEpoch"] > time.time())
+                matches.append((batch_id, worktree, owner_batch, stage))
     if not matches:
         return None
     depth = max(len(worktree.parts) for _, worktree, _, _ in matches)
@@ -345,10 +367,11 @@ def _test_write_owner(
     return deepest[0] if len(deepest) == 1 else None
 
 
-def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Path) -> int:
+def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Path,
+                              test_environment: bool = False, content: str | None = None) -> int:
     """Authorize test writes only during their owning Batch test substage."""
 
-    owner = _test_write_owner(workspace, feature, target_path)
+    owner = _test_write_owner(workspace, feature, target_path, test_environment=test_environment)
     if owner is None:
         return block(
             f"test asset write is outside an active Batch Worktree: {target_path}",
@@ -370,16 +393,43 @@ def validate_test_asset_write(workspace: Path, feature: str, *, target_path: Pat
                 f"test asset write requires review=passed for Batch {batch_id}",
                 system_message="UTest 只能在当前 Batch 的生产代码 Review 通过后执行。",
             )
-    del worktree
+    if test_environment:
+        if not batch.get("testEnvironmentLeaseValid"):
+            return block("test_environment_lease_invalid", system_message="POM 测试环境写入要求当前 Batch 的有效 lease；无需启动生产 TASK。")
+        result = validate_worktree_pom(worktree, target_path.relative_to(worktree), after=content)
+        if not result["allowed"]:
+            return block(result["reason"] + ": " + result.get("detail", ""),
+                         system_message="test 阶段允许修改 POM 的测试依赖和测试插件；生产依赖、parent/BOM 和共享属性变更须回实现阶段。")
     return 0
 
 
-def validate_code_task_run_write(
-    workspace: Path,
-    feature: str,
-    *,
-    target_path: Path | None = None,
-) -> int:
+def validate_merge_resolution_write(workspace: Path, feature: str, target_path: Path) -> int | None:
+    """Conflict edits belong to the candidate stage, not a completed TASK run."""
+    matches = []
+    for manifest_path in (feature_dir(workspace, feature) / ".parallel-runs").glob("*/manifest.json"):
+        manifest = read_json(manifest_path)
+        for record in (manifest.get("mergeTrains") or {}).values():
+            if not isinstance(record, dict) or not isinstance(record.get("worktreePath"), str):
+                continue
+            worktree = Path(record["worktreePath"]).resolve(strict=False)
+            if _path_within(target_path, worktree):
+                matches.append((worktree, manifest, record))
+    if not matches:
+        return None
+    deepest = max(len(item[0].parts) for item in matches)
+    owners = [item for item in matches if len(item[0].parts) == deepest]
+    if len(owners) != 1:
+        return block("candidate_resolution_owner_ambiguous")
+    _, manifest, record = owners[0]
+    error = resolution_write_error(manifest, record, target_path)
+    if error:
+        return block(error, system_message="冲突文件写入需由 prepare-resolution 授权当前候选；解决后交还插件 complete-resolution 提交。")
+    return 0
+
+
+def _active_task_runs(workspace: Path, feature: str) -> list[tuple[Path, dict]]:
+    """Return runner-owned Task runs that may still authorize a write."""
+
     target = feature_dir(workspace, feature)
     active_runs: list[tuple[Path, dict]] = []
     for path in (target / ".task-runs").glob("T*/*.json"):
@@ -389,6 +439,44 @@ def validate_code_task_run_write(
             and payload.get("status") not in {"implemented", "done", "failed", "aborted"}
         ):
             active_runs.append((path, payload))
+    return active_runs
+
+
+def _frontend_route_scope(
+    workspace: Path,
+    feature: str,
+    target_path: Path | None,
+) -> tuple[str | None, str | None]:
+    """Return the ``(batchId, taskId)`` that own one frontend write.
+
+    A fixed parallel Code run clears the root ``activeBatchId`` and drives
+    execution from the scheduler manifest, so the resolver cannot scope visual
+    sources from the Plan alone.  The owning Task run still records both ids and
+    is the only durable, per-write scope signal available here.
+    """
+
+    active_runs = _active_task_runs(workspace, feature)
+    authorized = _active_runs_for_write_target(active_runs, target_path)
+    if len(authorized) != 1:
+        if len(active_runs) != 1:
+            return None, None
+        authorized = active_runs
+    run = authorized[0][1]
+    batch_id = run.get("batchId")
+    task_id = run.get("taskId")
+    return (
+        batch_id if isinstance(batch_id, str) and batch_id.strip() else None,
+        task_id if isinstance(task_id, str) and task_id.strip() else None,
+    )
+
+
+def validate_code_task_run_write(
+    workspace: Path,
+    feature: str,
+    *,
+    target_path: Path | None = None,
+) -> int:
+    active_runs = _active_task_runs(workspace, feature)
     authorized_runs = _active_runs_for_write_target(active_runs, target_path)
     if len(authorized_runs) != 1:
         location = f" for write target {target_path}" if target_path is not None else ""
@@ -447,6 +535,27 @@ def main() -> int:
         return 0
 
     for target_path in candidate_paths:
+        resolution_result = validate_merge_resolution_write(workspace, feature, target_path)
+        if resolution_result is not None:
+            if resolution_result:
+                return resolution_result
+            continue
+        # A mixed Maven manifest has semantic test ownership. Never globally
+        # mark every pom.xml as a test asset, including during Code/Review.
+        if target_path.name == "pom.xml":
+            owner = _test_write_owner(workspace, feature, target_path, test_environment=True)
+            if owner is not None:
+                states = owner[2].get("stageStates", {})
+                if states.get(owner[3], {}).get("status") == "running":
+                    try:
+                        content = prospective_content(target_path, payload.get("tool_input", {}))
+                    except (ValueError, OSError) as exc:
+                        return block(str(exc), system_message="POM 测试环境修改需提供完整内容或精确替换；也可使用 utest_runtime.py apply-pom。")
+                    result = validate_test_asset_write(workspace, feature, target_path=target_path,
+                                                       test_environment=True, content=content)
+                    if result:
+                        return result
+                    continue
         # A unified Code checkpoint spans implementation, review, UTest and
         # final E2E.  Test assets therefore need their own runtime-stage
         # authorization before extension-based production-code checks.
@@ -456,7 +565,7 @@ def main() -> int:
                 return result
             continue
         if is_frontend_code_path(target_path):
-            result = validate_frontend_write(workspace, feature)
+            result = validate_frontend_write(workspace, feature, target_path=target_path)
             if result:
                 return result
         if is_business_code_path(target_path):

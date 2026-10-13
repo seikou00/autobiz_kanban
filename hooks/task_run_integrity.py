@@ -34,6 +34,9 @@ TASK_RUN_OPTIONAL_INTEGRITY_FIELDS = (
     "repairContext",
     "executionMode",
     "parallelRunId",
+    "productionCompileRequired",
+    "compileAttempts",
+    "latestCompileAttemptId",
 )
 
 STRICT_TASK_RUN_STRING_FIELDS = (

@@ -45,83 +45,45 @@ python -X utf8 hooks/workflow_launcher.py analyze \
 # 工作流会：
 # 1. 并行执行所有依赖满足的 Batch
 # 2. 在 Merge Train 中检测冲突
-# 3. 自动解决追加式冲突
-# 4. 通知人工介入复杂冲突
+# 3. 模型解决候选中的冲突文件
+# 4. 模型返回后由插件暂存、创建 merge commit 并推广
 ```
 
 ## 处理冲突
 
-### 自动解决（无需操作）
+### 固定 Workflow 自动处理
 
-追加式冲突会自动解决：
+Workflow 先调用 `prepare-resolution`，登记当前候选和允许修改的冲突文件。
+模型只编辑这些文件，理解并保留双方业务意图，移除冲突标记后返回
+`success=true,status=resolved`。模型不执行暂存或提交。
 
-```python
-# B001 添加
-def new_method_a():
-    return "A"
+随后 Workflow 单独调用 `complete-resolution`，由插件在候选目录内暂存文件、
+非交互创建带 task-card 信息的 merge commit 并登记实际 SHA，再继续推广。
+插件命令使用工具默认合法工作区，候选路径由插件内部处理，无需将 execute
+的 `cwd/workdir` 切换到候选目录。
 
-# B002 添加
-def new_method_b():
-    return "B"
+### 保留候选的受控恢复
 
-# 自动合并为：
-def new_method_a():
-    return "A"
-
-def new_method_b():
-    return "B"
-```
-
-### 人工介入
-
-当收到通知时：
-
-```
-╔══════════════════════════════════════════════════════════════
-║ CONFLICT RESOLUTION REQUIRED
-╠══════════════════════════════════════════════════════════════
-║ Batches:  B003, B004
-║ Base SHA: abc12345
-║ Worktree: /path/to/.parallel-runs/cw-20260830-001/merge-trains/backend/wave-002
-║ 
-║ Conflicted files:
-║   - src/core.py
-║   - src/api.py
-║ 
-║ Next steps:
-║   1. cd /path/to/worktree
-║   2. Manually resolve conflicts
-║   3. git add <resolved_files>
-║   4. git commit
-║   5. Run: autobiz resume-merge-train --candidate candidate_wave2_backend
-╚══════════════════════════════════════════════════════════════
-```
-
-**操作步骤**:
+无法解决时保留 Worktree 和原始错误；独立 Batch 继续运行。
+需要手工编辑时也可使用同一插件交接协议，以下占位符须替换为真实路径和 ID：
 
 ```bash
-# 1. 进入 worktree
-cd /path/to/worktree
+# 1. 获取该候选的文件写入授权
+python -X utf8 "<pluginPath>/hooks/parallel_merge_train.py" prepare-resolution \
+  --workspace "<artifact-workspace>" --feature "<feature>" \
+  --run-id "<runId>" --repository-ref "<repositoryRef>" --wave 2
 
-# 2. 查看冲突
-git status
+# 2. 只编辑返回 worktreePath 中的 conflictedFiles，保留双方业务逻辑
+#    status=ready_to_complete 时跳过编辑，直接恢复插件提交登记
 
-# 3. 编辑冲突文件，保留双方业务逻辑
-vim src/core.py
-
-# 4. 标记为已解决
-git add src/core.py src/api.py
-
-# 5. 提交
-git commit -m "Resolve conflicts: preserve both B003 and B004 logic"
-
-# 6. 恢复验证流程
-python -X utf8 hooks/parallel_merge_train.py resume \
-  --workspace . \
-  --feature your-feature \
-  --run-id cw-20260830-001 \
-  --wave 2
+# 3. 交还插件完成 merge commit 和候选状态登记
+python -X utf8 "<pluginPath>/hooks/parallel_merge_train.py" complete-resolution \
+  --workspace "<artifact-workspace>" --feature "<feature>" \
+  --run-id "<runId>" --repository-ref "<repositoryRef>" --wave 2
 ```
+
+`resume-candidate` 仍用于登记人工已经完成的提交；固定 Workflow 使用上述
+模型编辑、插件提交协议。详见 [冲突处理指南](./workflow-conflict-handling-guide.md)。
 
 ## 切换回保守模式
 

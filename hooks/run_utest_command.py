@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import hashlib
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
-from hooks.json_writer_common import resolve_feature, resolve_workspace, shell_join  # noqa: E402
+from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace, shell_join  # noqa: E402
 from hooks.parallel_runtime import load_manifest  # noqa: E402
 from hooks.unit_test_result_writer import ensure_plan_result, record_execution  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
@@ -233,11 +235,17 @@ def _remaining_stage_seconds(workspace, feature, run_id, batch_id, stage_timeout
 def _failure_classification(exit_code, blocked, outcome, stdout, stderr):
     if outcome in {"command_timeout", "stage_deadline_exceeded"}:
         return "timeout"
+    if outcome in {"no_tests_executed", "test_execution_unverified"}:
+        return "test_failure"
     if blocked:
         return "environment"
     if exit_code == 0:
         return "passed"
     output = "\n".join((stdout or "", stderr or ""))
+    if any(marker in output for marker in ("Could not resolve dependencies", "Could not find artifact", "could not be resolved", "command not found")):
+        return "environment"
+    if re.search(r"maven-compiler-plugin[^\n]*(?::testCompile|default-testCompile)|\[ERROR\][^\n]*src[/\\]test[/\\]", output):
+        return "test_failure"
     compiler_markers = (
         "COMPILATION ERROR",
         "maven-compiler-plugin",
@@ -281,6 +289,47 @@ def _result_for(exit_code, blocked):
     return "FAIL", "fail"
 
 
+def observed_test_count(output, root, test_files, started_epoch=None):
+    """Use runner output or fresh, target-matching JUnit reports, never exit 0."""
+    maven = re.findall(r"Tests run:\s*(\d+)[^\n]*Skipped:\s*(\d+)", output)
+    if maven:
+        return max(0, int(maven[-1][0]) - int(maven[-1][1]))
+    jest = re.findall(r"\bTests:\s*([^\n]+)", output)
+    if jest:
+        return sum(int(count) for count in re.findall(r"(\d+)\s+(?:passed|failed)", jest[-1]))
+    skipped = re.findall(r"(?:OK|FAILED)\s*\([^\n]*skipped=(\d+)", output)
+    ran = re.findall(r"Ran\s+(\d+)\s+tests?", output)
+    if ran:
+        return max(0, int(ran[-1]) - (int(skipped[-1]) if skipped else 0))
+    patterns = (r"Tests run:\s*(\d+)",
+                r"\bTests\s+\d+\s+passed\s*\((\d+)\)", r"\b(\d+) passed(?:,| in|$)")
+    for pattern in patterns:
+        counts = re.findall(pattern, output)
+        if counts:
+            return int(counts[-1])
+    if re.search(r"no tests (?:ran|found)|no test files found", output, re.I):
+        return 0
+    if started_epoch is None:
+        return None
+    total, found = 0, False
+    names = {Path(path).stem for path in test_files}
+    for directory in (Path(root) / "target" / "surefire-reports", Path(root) / "target" / "failsafe-reports",
+                      Path(root) / "build" / "test-results" / "test"):
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("TEST-*.xml"):
+            if path.stat().st_mtime < started_epoch:
+                continue
+            try:
+                report = ET.fromstring(path.read_text(encoding="utf-8"))
+                if report.get("name", "").rsplit(".", 1)[-1] in names:
+                    total += max(0, int(report.get("tests", 0)) - int(report.get("skipped", 0)))
+                    found = True
+            except (ET.ParseError, ValueError):
+                continue
+    return total if found else None
+
+
 def execute_utest_command(
     *,
     workspace,
@@ -302,6 +351,9 @@ def execute_utest_command(
     record_only=False,
     recorded_exit_code=None,
     recorded_output_file=None,
+    execution_id=None,
+    log_exit_code=0,
+    refresh_diagnostics=False,
 ):
     selected_kind = kind or mode
     if selected_kind not in MODES:
@@ -407,6 +459,32 @@ def execute_utest_command(
 
     command = shell_join(command_argv)
     log_path = feature_dir / "test-output.log"
+    runtime_command = None
+    if execution_id:
+        if not record_only or not run_id or not batch_id:
+            raise UTestCommandError("execution-id requires record-only and Batch/run binding")
+        from hooks.utest_runtime import validate_runtime_execution
+        runtime_command = validate_runtime_execution(
+            artifact_workspace, resolved_feature, run_id, batch_id, execution_id, task_id,
+            command_argv, test_files, recorded_output_file, code_workspace,
+        )
+        if runtime_command.get("status") == "recorded":
+            return dict(runtime_command["response"], recordingReused=True)
+    diagnostic_path = None
+    diagnostic_goals = {"dependency:tree", "dependency:build-classpath", "dependency:resolve", "help:effective-pom"}
+    goals = [item for item in command_argv[1:] if ":" in item and not item.startswith("-")]
+    mutating_goals = {"clean", "compile", "test", "test-compile", "package", "verify", "install", "deploy", "integration-test"}
+    if (selected_kind == "setup" and Path(command_argv[0]).name.lower() in {"mvn", "mvnw", "mvn.cmd", "mvnw.cmd"}
+            and goals and all(item in diagnostic_goals for item in goals)
+            and not any(item in mutating_goals for item in command_argv[1:])):
+        from hooks.utest_runtime import fingerprint
+        digest = hashlib.sha256(json.dumps([str(command_cwd), fingerprint(command_cwd), command_argv]).encode()).hexdigest()
+        diagnostic_path = feature_dir / ".runtime" / "utest-diagnostics" / (digest + ".json")
+        if diagnostic_path.is_file() and not refresh_diagnostics:
+            cached = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+            output_files = [item.split("=", 1)[1] for item in command_argv if re.match(r"-D(?:mdep\.)?outputFile=", item)]
+            if cached["exitCode"] != 0 or all((Path(file) if Path(file).is_absolute() else command_cwd / file).is_file() for file in output_files):
+                return dict(cached, diagnosticReused=True)
     if record_only:
         if selected_kind != "test":
             raise UTestCommandError("--record-only 仅用于已由 Bash 执行的 test 命令。")
@@ -428,6 +506,16 @@ def execute_utest_command(
         stderr = ""
         blocked = False
         outcome = "recorded_bash_execution"
+        if exit_code in {126, 127}:
+            blocked, outcome = True, "command_error"
+        if exit_code == 124:
+            blocked, outcome = True, "command_timeout"
+        if Path(str(output_path) + ".timeout").is_file():
+            if exit_code != 124:
+                raise UTestCommandError("Bash timeout marker requires exit-code 124")
+            blocked, outcome = True, "command_timeout"
+        if log_exit_code != 0:
+            blocked, outcome = True, "output_capture_failed"
     else:
         remaining_stage_seconds = _remaining_stage_seconds(
             artifact_workspace,
@@ -459,12 +547,18 @@ def execute_utest_command(
         stdout,
         stderr,
     )
+    test_count = observed_test_count(stdout + "\n" + stderr, command_cwd, test_files or [],
+                                     runtime_command.get("startedEpoch") if runtime_command else None) if selected_kind == "test" else None
+    if selected_kind == "test" and (test_count == 0 or (exit_code == 0 and test_count is None)):
+        blocked, outcome = True, "test_execution_unverified" if test_count is None else "no_tests_executed"
     unit_result, evidence_result = _result_for(exit_code, blocked)
     response = {
-        "ok": exit_code == 0,
+        "ok": exit_code == 0 and not blocked,
         "kind": selected_kind,
         "result": unit_result,
         "exitCode": exit_code,
+        "logExitCode": log_exit_code,
+        "testsExecuted": test_count,
         "executionOutcome": outcome,
         "failureClassification": _failure_classification(
             exit_code, blocked, outcome, stdout, stderr
@@ -485,6 +579,8 @@ def execute_utest_command(
         "locationWarnings": list(workspace_context.get("locationWarnings", [])),
     }
     if selected_kind == "setup":
+        if diagnostic_path is not None:
+            atomic_write_json(diagnostic_path, response)
         return response
 
     output_tail = "\n".join(
@@ -516,19 +612,31 @@ def execute_utest_command(
             "required": authority["required"],
             "covers": list(authority["covers"]),
             "exitCode": exit_code,
+            "logExitCode": log_exit_code,
+            "testsExecuted": test_count,
+            "executionOutcome": outcome,
             "result": evidence_result,
             "testFiles": list(authority["testFiles"]),
         },
     }
-    try:
-        evidence = append_evidence(feature_dir, record, output_tail=output_tail)
-    except EvidenceStoreError as exc:
-        raise UTestCommandError(
-            "Evidence 写入失败：{}。修复：修复 evidence 索引/冻结状态后重跑同一命令。".format(
-                exc
+    if execution_id:
+        record["validation"]["executionId"] = execution_id
+    if runtime_command and runtime_command.get("pendingEvidenceId"):
+        if runtime_command["pendingOutputSha256"] != hashlib.sha256(output_tail.encode()).hexdigest():
+            raise UTestCommandError("utest_pending_output_changed: preserve the original captured output")
+        evidence_id = runtime_command["pendingEvidenceId"]
+    else:
+        try:
+            evidence = append_evidence(feature_dir, record, output_tail=output_tail)
+        except EvidenceStoreError as exc:
+            raise UTestCommandError(
+                "Evidence 写入失败：{}。修复：保留原始输出，仅补登记；不要重跑测试。".format(exc)
             )
-        )
-    evidence_id = str(evidence["evidenceId"])
+        evidence_id = str(evidence["evidenceId"])
+        if execution_id:
+            from hooks.utest_runtime import remember_pending_evidence
+            remember_pending_evidence(artifact_workspace, resolved_feature, run_id, batch_id,
+                                      execution_id, task_id, evidence_id, output_tail)
     try:
         writer_result = record_execution(
             artifact_workspace,
@@ -557,6 +665,10 @@ def execute_utest_command(
         response["targetId"] = writer_result.data["target"].get("targetId")
     response["resultPath"] = str(writer_result.path)
     response["resultChanged"] = writer_result.changed
+    if execution_id:
+        from hooks.utest_runtime import record_runtime_execution
+        record_runtime_execution(artifact_workspace, resolved_feature, run_id, batch_id,
+                                 execution_id, task_id, command_argv, test_files, recorded_output_file, response)
     return response
 
 
@@ -600,6 +712,9 @@ def main(argv=None):
     )
     parser.add_argument("--exit-code", type=int, help="--record-only 时 Bash 命令的退出码。")
     parser.add_argument("--output-file", help="--record-only 时包含 Bash 合并输出的临时文件。")
+    parser.add_argument("--execution-id", help="utest_runtime preflight 生成的执行 ID。")
+    parser.add_argument("--log-exit-code", type=int, default=0)
+    parser.add_argument("--refresh-diagnostics", action="store_true", help="仅外部依赖环境实际变化后刷新缓存。")
     parser.add_argument("--argv-json", "--command-json", dest="argv_json")
     parser.add_argument("command_argv", nargs=argparse.REMAINDER)
     try:
@@ -650,6 +765,9 @@ def main(argv=None):
             record_only=args.record_only,
             recorded_exit_code=args.exit_code,
             recorded_output_file=args.output_file,
+            execution_id=args.execution_id,
+            log_exit_code=args.log_exit_code,
+            refresh_diagnostics=args.refresh_diagnostics,
         )
     except UTestCommandError as exc:
         print("run_utest_command_failed: {}".format(exc), file=sys.stderr)

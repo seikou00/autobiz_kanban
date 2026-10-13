@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import sys
+import hashlib
 from pathlib import Path
 
 
@@ -17,6 +18,8 @@ PROTECTED_ROOT_FILES = {
     "FIX_REQUEST.json",
     "PLAN.md",
     "UNIT_TEST_RESULT.json",
+    "UTEST_ENVIRONMENT.json",
+    "UTEST_EXECUTION.json",
     "VERIFY_DECISION.json",
     "plan.json",
 }
@@ -75,6 +78,10 @@ def protected_path(raw_path):
     else:
         candidate = candidate.resolve(strict=False)
     candidate_parts = candidate.parts
+    if ".parallel-runs" in candidate_parts:
+        index = candidate_parts.index(".parallel-runs")
+        if len(candidate_parts) > index + 2 and candidate_parts[index + 2] == "utest":
+            return True
     if (
         candidate.name in PROTECTED_RUNTIME_FILES
         and ".runtime" in candidate_parts
@@ -130,9 +137,25 @@ def _words(command):
 
 def _mentions_protected_artifact(command):
     markers = PROTECTED_ROOT_FILES | PROTECTED_RUNTIME_FILES | PROTECTED_EVIDENCE_FILES | PROTECTED_STATE_FILES
-    return PROTECTED_DRAFT_MARKER in command.replace("\\", "/") or any(
+    normalized = command.replace("\\", "/")
+    return (".parallel-runs/" in normalized and "/utest/" in normalized) or PROTECTED_DRAFT_MARKER in normalized or any(
         marker in command for marker in markers
     )
+
+
+def _verified_utest_script(words):
+    if len(words) != 2 or Path(words[0]).name not in {"bash", "bash.exe"}:
+        return False
+    script = Path(words[1]).resolve()
+    if not re.fullmatch(r"execute-[0-9a-f]{20}\.sh", script.name) or not protected_path(str(script)):
+        return False
+    try:
+        state = json.loads((script.parent / "UTEST_EXECUTION.json").read_text(encoding="utf-8"))
+        digest = hashlib.sha256(script.read_bytes()).hexdigest()
+        return any(command.get("scriptPath") == str(script) and command.get("scriptSha256") == digest
+                   for task in state["tasks"].values() for command in task["commands"].values())
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 def _missing_context():
@@ -182,6 +205,8 @@ def guard(payload):
         if not command:
             return None
         words = _words(command)
+        if _verified_utest_script(words):
+            return None
         if "evidence_store" in command or any(
             Path(token).name == "evidence_store.py" for token in words
         ):

@@ -1,12 +1,24 @@
 # Test environment profiles
 
-Apply a profile only when `inspect_test_environment.py` returns `status=init_required`. Preserve the detected build tool, package manager, runner, manifest style, and matching lock file.
+Apply base initialization when the inspector returns `status=init_required`.
+An existing `ready` environment may still lack capabilities required by its
+selected preset: add the missing test dependency/configuration once, preserving
+the actual JUnit generation, build tool and production platform. Declarations
+must be confirmed by bounded dependency resolution and actual test execution.
+Test-stage POM changes use semantic authorization and are sealed with tests;
+they do not require reopening a production task.
 
 ## spring-maven-junit
 
 - Add `spring-boot-starter-test` with test scope to `pom.xml` through the existing dependency-management convention.
 - For the `security` domain, add `spring-security-test` when it is not already supplied by the project dependency graph.
 - Run tests with the repository's Maven wrapper when present, otherwise Maven.
+- Legacy JUnit 4 environments are valid. Use their compatible test libraries;
+  do not replace them with a Spring Boot starter/Jupiter solely for a template.
+- Static mocking requires an actual supported Mockito/maker/Byte Buddy combination;
+  PowerMock must reuse a validated legacy combination, not a version search.
+- Add H2 or another driver with test scope only for a matching database preset.
+  Preserve SQL dialect and service coverage; a mapper test is not a service test.
 
 ## spring-gradle-junit
 

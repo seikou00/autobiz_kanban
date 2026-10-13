@@ -214,6 +214,83 @@ def write_plan_route(
     )
 
 
+def write_parallel_plan(workspace: Path, batches: list[dict]) -> None:
+    """Write a root Plan and Batch plans for a fixed parallel Code run.
+
+    ``batches`` entries look like
+    ``{"batchId": "B009", "status": "todo", "taskId": "T105", "route": ..., "visualSourceRefs": []}``.
+    Parallel runs intentionally keep ``activeBatchId`` empty.
+    """
+
+    feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+    write_json(
+        feature_dir / "plan.json",
+        {
+            "featureId": "alpha",
+            "status": "in_progress",
+            "taskSetStatus": "finalized",
+            "activeBatchId": None,
+            "nextBatchId": None,
+            "batchPolicy": {"maxTasks": 3, "strategy": "spec_capability_execution_lane_topological"},
+            "batches": [
+                {
+                    "id": entry["batchId"],
+                    "path": f"plans/{entry['batchId']}/plan.json",
+                    "title": entry["batchId"],
+                    "specRoots": ["specs/cap/spec.md"],
+                    "executionLane": "frontend",
+                    "deps": [],
+                    "taskIds": [entry["taskId"]],
+                    "status": entry["status"],
+                }
+                for entry in batches
+            ],
+            "projectValidationCommands": [],
+            "projectCheckEvidenceIds": [],
+            "latestProjectCheckEvidenceId": None,
+        },
+    )
+    for entry in batches:
+        write_json(
+            feature_dir / "plans" / entry["batchId"] / "plan.json",
+            {
+                "featureId": "alpha",
+                "batchId": entry["batchId"],
+                "title": entry["batchId"],
+                "executionLane": "frontend",
+                "status": entry["status"],
+                "taskCount": 1,
+                "completedTaskCount": 0,
+                "completionEvidenceIds": [],
+                "startedAt": None,
+                "completedAt": None,
+                "tasks": [
+                    {
+                        "id": entry["taskId"],
+                        "title": entry["taskId"],
+                        "status": "done" if entry["status"] == "done" else "todo",
+                        "deps": [],
+                        "uiRequired": True,
+                        "uiRefs": {
+                            "pageRefs": ["PAGE-001"],
+                            "interactionRefs": ["UIX-001"],
+                            "visualSourceRefs": list(entry.get("visualSourceRefs") or []),
+                            "frontendRoute": entry["route"],
+                        },
+                        "specRefs": ["specs/cap/spec.md#REQ-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "expectedFiles": [],
+                        "evidenceIds": [],
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+
+
 def base_ui_context(*, ui_required: bool = True) -> dict:
     return {
         "version": 1,
@@ -592,7 +669,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertIn("position:absolute count=4", payload["reasons"])
         self.assertIn("plan.json route overridden by HTML/UI_CONTEXT evidence", payload["reasons"])
 
-    def test_required_plan_html_route_without_readable_html_blocks(self) -> None:
+    def test_required_plan_html_route_without_readable_html_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             context = base_ui_context(ui_required=True)
@@ -606,10 +683,17 @@ class FrontendRouteResolverTests(unittest.TestCase):
             write_ui_context(workspace, context)
             write_plan_route(workspace, ROUTE_ABSOLUTE)
 
-            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_missing:VIS-001"):
-                resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
-    def test_explicit_required_html_route_without_readable_html_blocks(self) -> None:
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["requiredVisualSourceFallbackRoute"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(
+            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
+        self.assertTrue(any("required visual source is not readable" in reason for reason in payload["reasons"]))
+
+    def test_explicit_required_html_route_without_readable_html_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             context = base_ui_context(ui_required=True)
@@ -624,8 +708,14 @@ class FrontendRouteResolverTests(unittest.TestCase):
             ]
             write_ui_context(workspace, context)
 
-            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_missing:VIS-001"):
-                resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["requiredVisualSourceFallbackRoute"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(
+            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
 
     def test_optional_missing_high_fidelity_fallback_allows_code_done_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -649,6 +739,31 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
         self.assertEqual(failures, 0)
 
+    def test_missing_html_fallback_keeps_its_original_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_MISSING,
+                "required": False,
+            }]
+            write_ui_context(workspace, context)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertTrue(payload["htmlSourceMissing"])
+        self.assertEqual(payload["htmlFallbackRoute"], ROUTE_SPEC_DRIVEN)
+        self.assertIn(
+            "declared HTML visual source is missing; falling back to spec-driven-ui",
+            payload["reasons"],
+        )
+        # The optional missing-html route must not be reported as a required gap.
+        self.assertNotIn("requiredVisualSourceMissing", payload)
+
     def test_direct_html_file_does_not_replace_missing_required_bound_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
@@ -666,8 +781,21 @@ class FrontendRouteResolverTests(unittest.TestCase):
             ]
             write_ui_context(workspace, context)
 
-            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_missing:VIS-001"):
-                resolve_frontend_route(workspace, "alpha", html_files=[str(html_path)], write_evidence=True)
+            payload = resolve_frontend_route(
+                workspace,
+                "alpha",
+                html_files=[str(html_path)],
+                write_evidence=True,
+            )
+
+        # The required bound source is unreadable, so the route falls back
+        # instead of adopting the unbound CLI HTML file.
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["htmlSourcePaths"], [])
+        self.assertEqual(
+            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
 
     def test_spec_driven_task_ignores_unrelated_required_high_fidelity_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -882,6 +1010,275 @@ class FrontendRouteResolverTests(unittest.TestCase):
             payload = mark_evidence(workspace, "alpha", mark="parser-read")
 
         self.assertTrue(payload["parserRead"])
+
+    def test_parallel_plan_without_active_batch_scopes_spec_driven_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            write_parallel_plan(workspace, [
+                {"batchId": "B008", "status": "done", "taskId": "T104", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B009", "status": "todo", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+
+            without_scope = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+            with_scope = resolve_frontend_route(workspace, "alpha", task_id="T105", write_evidence=False)
+
+        for payload in (without_scope, with_scope):
+            self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+            self.assertEqual(payload["visualSourceIds"], [])
+        self.assertEqual(without_scope["batchScope"], {"batchId": "B009", "source": "single-unfinished-batch"})
+        self.assertEqual(with_scope["batchScope"], {"batchId": "B009", "source": "explicit-task"})
+
+    def test_parallel_plan_skips_required_source_only_bound_by_finished_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            write_parallel_plan(workspace, [
+                {"batchId": "B006", "status": "done", "taskId": "T101", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B007", "status": "done", "taskId": "T102", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+                {"batchId": "B010", "status": "done", "taskId": "T106", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["batchScope"], {"batchId": "B009", "source": "single-unfinished-batch"})
+
+    def test_parallel_plan_falls_back_for_unfinished_task_referencing_missing_required_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            write_parallel_plan(workspace, [
+                {"batchId": "B007", "status": "in_progress", "taskId": "T107", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B009", "status": "done", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["requiredVisualSourceFallbackRoute"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(
+            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
+
+    def test_ambiguous_parallel_scope_validates_only_referenced_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            # Two unfinished Batches with different routes: the owner Batch cannot
+            # be inferred, so only actually referenced sources stay in scope.
+            write_parallel_plan(workspace, [
+                {"batchId": "B008", "status": "in_progress", "taskId": "T104", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["batchScope"], {"batchId": None, "source": "unresolved"})
+        self.assertEqual(payload["visualSourceIds"], [])
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+
+    def test_ambiguous_parallel_scope_falls_back_for_referenced_required_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            write_parallel_plan(workspace, [
+                {"batchId": "B008", "status": "in_progress", "taskId": "T104", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["batchScope"], {"batchId": None, "source": "unresolved"})
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(
+            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
+
+    def test_unreadable_batch_plan_keeps_hard_errors_in_the_global_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "frontend-html/VIS-001/index.html", "<main>before</main>")
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/VIS-001/index.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+                "contentSha256": hashlib.sha256(b"<main>after</main>").hexdigest(),
+            }]
+            write_ui_context(workspace, context)
+            # The owner Batch is named but its Batch plan is unreadable, so the
+            # scope stays unknown and every declared source stays checked: a
+            # digest mismatch must still be a hard error there.
+            write_json(
+                workspace / ".autobizdevops" / "features" / "alpha" / "plan.json",
+                {
+                    "featureId": "alpha",
+                    "status": "in_progress",
+                    "activeBatchId": None,
+                    "nextBatchId": None,
+                    "batches": [
+                        {
+                            "id": "B009",
+                            "path": "plans/B009/plan.json",
+                            "executionLane": "frontend",
+                            "deps": [],
+                            "taskIds": ["T105"],
+                            "status": "todo",
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                FrontendRouteError,
+                "required_visual_source_digest_mismatch:VIS-001",
+            ):
+                resolve_frontend_route(workspace, "alpha", task_id="T105", write_evidence=False)
+
+    def test_ui_required_false_ignores_unreadable_required_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=False)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "prototype_link",
+                "path": "https://doc.cmbchina.com/f/v?id=_41zy9B",
+                "route": ROUTE_MISSING,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_NONE)
+        self.assertNotIn("requiredVisualSourceMissing", payload)
+        self.assertNotIn("requiredVisualSourceFallbackRoute", payload)
+
+    @staticmethod
+    def _prototype_link_context() -> dict:
+        """UI_CONTEXT shape seen in the reported failure: an online prototype link."""
+
+        context = base_ui_context(ui_required=True)
+        context["visualSources"] = [{
+            "sourceId": "VIS-001",
+            "type": "prototype_link",
+            "path": "https://doc.cmbchina.com/f/v?id=_41zy9B",
+            "route": ROUTE_MISSING,
+            "required": True,
+        }]
+        return context
+
+    def test_prototype_link_required_is_scoped_out_for_spec_driven_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, self._prototype_link_context())
+            write_parallel_plan(workspace, [
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", task_id="T105", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["visualSourceIds"], [])
+        self.assertEqual(payload["batchScope"], {"batchId": "B009", "source": "explicit-task"})
+
+    def test_prototype_link_required_falls_back_for_the_task_referencing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, self._prototype_link_context())
+            write_parallel_plan(workspace, [
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_MISSING, "visualSourceRefs": ["VIS-001"]},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", task_id="T105", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["requiredVisualSourceFallbackRoute"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(
+            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
+        self.assertTrue(payload["htmlSourceMissing"])
+
+    def test_prototype_link_required_fallback_survives_write_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, self._prototype_link_context())
+            write_parallel_plan(workspace, [
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_MISSING, "visualSourceRefs": ["VIS-001"]},
+            ])
+
+            resolve_frontend_route(workspace, "alpha", task_id="T105", write_evidence=True, start_route_run=True)
+            stored = read_json(evidence_path(workspace, "alpha"))
+            result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(stored["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(
+            [item["sourceId"] for item in stored["requiredVisualSourceMissing"]],
+            ["VIS-001"],
+        )
+        self.assertEqual(result, 0)
+
+    def test_unbound_required_prototype_link_is_out_of_scope_without_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, self._prototype_link_context())
+            write_parallel_plan(workspace, [
+                {"batchId": "B008", "status": "done", "taskId": "T104", "route": ROUTE_MISSING, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=False)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["visualSourceIds"], [])
+        self.assertEqual(payload["batchScope"], {"batchId": "B009", "source": "single-unfinished-batch"})
 
 
 class FrontendRouteGateValidatorTests(unittest.TestCase):
@@ -1481,6 +1878,58 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
 
             result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
 
+        self.assertEqual(result, 0)
+
+    def test_parallel_frontend_write_is_authorized_after_scoped_route_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            worktree = root / "worktrees" / "B009"
+            worktree.mkdir(parents=True)
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            write_parallel_plan(workspace, [
+                {"batchId": "B008", "status": "in_progress", "taskId": "T104", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
+            ])
+            run = sealed_task_run()
+            run.update({
+                "parallelRunId": "parallel-1",
+                "batchId": "B009",
+                "taskId": "T105",
+                "codeWorkspace": str(worktree),
+                "requestedCodeWorkspaces": [str(worktree)],
+                "resolvedGitRoots": [str(worktree)],
+                "workspacePrefixes": [""],
+                "scopeWorkspaces": [{"repository": "code", "resolvedGitRoot": str(worktree)}],
+                "repositories": [{"id": "code", "path": str(worktree), "snapshot": {}}],
+            })
+            run["integritySha256"] = task_run_integrity_sha256(run)
+            write_task_run(workspace, run)
+
+            target = worktree / "src" / "App.tsx"
+            scope = frontend_route_write_guard._frontend_route_scope(workspace, "alpha", target)
+            resolve_frontend_route(
+                workspace,
+                "alpha",
+                task_id="T105",
+                write_evidence=True,
+                start_route_run=True,
+            )
+            result = frontend_route_write_guard.validate_frontend_write(
+                workspace,
+                "alpha",
+                target_path=target,
+            )
+
+        self.assertEqual(scope, ("B009", "T105"))
         self.assertEqual(result, 0)
 
 

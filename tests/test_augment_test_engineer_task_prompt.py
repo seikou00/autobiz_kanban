@@ -141,7 +141,8 @@ class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
         _, stdout, _ = self._augment()
         description = json.loads(stdout.getvalue())["updatedInput"]["description"]
 
-        self.assertIn("Do not edit dependency manifests, lock files, or production sources", description)
+        self.assertIn("may modify pom.xml", description)
+        self.assertIn("Preserve production dependencies", description)
         self.assertIn("machine-validated attestation", description)
         self.assertIn("static observation and exit 0 are invalid", description)
         self.assertIn("performs one controlled production repair", description)
@@ -216,7 +217,7 @@ class UTestRoleRegistrationTest(unittest.TestCase):
         registrations = [item for item in config["PreToolUse"] if item.get("matcher") == "task|Task"]
         commands = [hook.get("command") for hook in registrations[0]["hooks"]]
 
-        self.assertIn("python hooks/augment_test_engineer_task_prompt.py", commands)
+        self.assertIn("python -X utf8 hooks/augment_test_engineer_task_prompt.py", commands)
 
 
 if __name__ == "__main__":

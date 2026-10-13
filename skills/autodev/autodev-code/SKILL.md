@@ -28,8 +28,10 @@ allowed-tools: execute task_output read_file grep glob write_file edit_file requ
 1. 前端 Task 在其 Agent 内解析并记录 route：
 
 ```bash
-python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --start-route-run --json
+python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --task-id "<当前 TASK_ID>" --start-route-run --json
 ```
+
+必须用 `--task-id`（或 `--batch-id`）声明作用域：固定并行模式按 scheduler manifest 调度、不写 `plan.json` 的 `activeBatchId`，缺少作用域时 resolver 无法把 required VIS 归属到具体 Task，会把它 Capability 的 required VIS 误判为当前 Task 缺失；作用域确实无法确定时，resolver 只校验未完成 Plan Task 实际引用的 source，不再用全局 `visualSources` 做 required 校验。
 
 active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRefs`，由 resolver 从 Feature 内 `frontend-html/VIS-xxx/` 读取；不要用本轮 `--html-file` 替换 required VIS。只有没有 active Plan 绑定的兼容迁移场景，才允许追加 `--html-file`。
 
@@ -37,6 +39,7 @@ active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRe
    - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md`
    - `route=standard-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md`
    - `route=spec-driven-ui`：当前 active UI Task 的 `visualSourceRefs=[]`，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。其他 Capability 的 required VIS 缺失不影响该 Task。
+   - resolver 因 **required VIS 路径不可读**而兜底：`route=spec-driven-ui`，证据里 `requiredVisualSourceMissing` 非空且 `requiredVisualSourceFallbackRoute=spec-driven-ui`（未提供、在线原型/设计链接、归档文件丢失都属此类）。此时按 `spec-driven-ui` 实现，不读取 route SKILL / parser，不因缺少该视觉输入阻断 Code；但该缺口必须保留在证据与统一回检结论中，并在可用时补齐归档。
    - `route=none`：`UI_CONTEXT.json` 标记 `uiRequired=false`，不得写前端业务代码。
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
 
@@ -102,7 +105,7 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 3. 技术边界以 `design.md` 与 `plan.json` 为实现依据。
 4. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位、文案内容和交互线索，不得覆盖 UI_CONTEXT/specs/design/plan.json。
 5. PRD / specs / plan.json 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
-6. 如果当前 active UI Task 引用了 required VIS，但 resolver 报 `required_visual_source_missing` 或摘要不一致，先修复/重新归档该 VIS，不能降级为 `spec-driven-ui`，也不能用另一个 HTML 临时替代。
+6. 如果当前 active UI Task 引用了 required VIS，但该 VIS 的 `path` 不可读（未提供、在线原型/设计链接、归档文件丢失），resolver 会兜底为 `spec-driven-ui` 并在证据里记录 `requiredVisualSourceMissing`；按兜底路线实现，不得用另一个 HTML 临时替代，也不得把该缺口当作已满足。只有 `required_visual_source_not_archived`、`required_visual_source_digest_mismatch`、`required_visual_source_bundle_digest_mismatch` 仍会报错：那三类说明已声明的输入被放错位置或内容被改动，必须先修复/重新归档该 VIS，不能降级为 `spec-driven-ui`。
 
 路径边界：上述产物均指 feature 产物目录中的文件，不是业务代码仓库 cwd 下的同名路径；执行具体 task 时必须通过 `hooks/code_task_context.py` 解析并读取对应片段，包括 `resolvedSpecRefs`、`resolvedDesignRefs` 与已投影的 `resolvedSourceRefs`。后端 Task (`taskContract.uiRequired=false`) 不得因 Feature 存在 UI 产物而启动 Route resolver。
 
@@ -207,8 +210,24 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：交付 `goal` 与 `acceptanceCriteria` 指向的业务范围；`implementationPoints` 是方向指导，可按真实仓库调整内部结构、算法和局部步骤，保持已确认行为/公开契约并记录有意义的偏差；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。`testPoints` 用于检查实现是否覆盖测试关注的边界，不等于在 Code 阶段写测试。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 读取 `testPoints` 与 `verificationIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。该规则适用于主 Agent、cowork/协作 Agent 和 Workflow worker。后端 TASK 写完生产代码后、执行 `finish-implementation` 前，必须在对应业务 Worktree 中通过 Bash 执行项目的生产代码编译命令；只运行编译，不运行测试、打包、typecheck 或 lint。先从项目文档及构建配置确认 compile-only 命令，记录实际命令和完整输出；编译失败时读取输出定位根因、修复生产代码并重新编译，直到通过。无法确定 compile-only 命令或编译环境故障时，不得假报通过或完成 TASK，保留错误输出并按流程报告失败。前端 TASK 不新增此编译门槛。批次结束先草稿封存并完成 Review，Review 通过后进入 UTest。
-   - 并行 Batch 的 `task_runner.py start`、`start-task-repair`、`resume` 在成功返回前自动完成准备登记并把 `implement` 登记为运行中；不需要 Agent 手工修改阶段 JSON。旧 Run 的 `activeStage=none` 本身不阻止当前 Batch/run 绑定正确的活动 TASK 纯编译。被 guard 拦截时读取 `GUARD_DIAGNOSTICS.failedChecks`、`executionCwd` 与 `taskRuns`，区分命令形式、TASK 状态、Batch 绑定和 workspace 匹配问题；不要仅凭 `none` 判断 Code 不在运行。
-   - 默认直接使用执行终端 PATH 中的 `mvn`；不要求查找 `mvn.exe` 或先读取 Maven 启动脚本。执行工具的 `cwd/workdir` 指向当前 TASK 的业务模块，也可用 `cd "<模块目录>" && mvn clean compile -DskipTests`。为保留完整输出和实际退出码，推荐前台 Bash 执行 `set -o pipefail && mvn clean compile -DskipTests 2>&1 | tee "<编译日志>"`；只有命令不存在或启动失败才检查环境。`mvn -v` 等查询可以直接执行，无需切到中立目录。
+   - 并行 Batch 的 `task_runner.py start`、`start-task-repair`、`resume` 在成功返回前自动完成准备登记并把 `implement` 登记为运行中；不需要 Agent 手工修改阶段 JSON。旧 Run 的 `activeStage=none` 本身不阻止当前 Batch/run 绑定正确的活动 TASK 纯编译。被 guard 拦截时必须向用户展示 `GUARD_DIAGNOSTICS.failures` 中每项具体 `code/reason/line/statement`，连同 `executionCwd`、`taskRuns`、`guardVersion` 和 `guardPath`，区分命令形式、TASK 状态、Batch 绑定和 workspace 匹配问题；不能只报告“被拦截”，不能盲目删除 `-o` 重试，也不要仅凭 `none` 判断 Code 不在运行。工具自身的 cwd 拒绝应单独说明。
+   - 默认直接使用终端 PATH 中的 `mvn`，只有命令不存在或启动失败才检查安装。guard 按实际程序和目标判断，支持 `mvn/mvn.cmd/mvnw/mvnw.cmd`、`-q/-o/-D`、字面量环境赋值/`export`、目录切换、多行语句、输出管道和退出码记录，不要求固定某一行命令。工具相对 `cwd/workdir` 必须基于其真实绝对 `workspaceRoot`；也可在同一次执行中使用 `cd "<模块目录>" && ...` 或 `cd "<模块目录>" || exit "$?"`，不要假设前一次工具调用中的 cd 会保留。
+   - 后端生产源码写完后，在 Bash 编译前调用同一个 `task_runner.py prepare-compile`：传完整的 TASK/workspace/parallel-run-id/lease-token/workspace-ref 绑定，以及 `--run-id <当前 TASK 真实 runId>`、`--execution-cwd "<模块绝对目录>"`，在 `--` 后传实际 compile-only argv。保存返回的真实 `attemptId`。该入口只冻结编译命令和源码快照，不启动编译，不要求 Plan 固定编译命令。
+   - 用前台 Bash 在该模块执行同一 argv，临时完整日志放在业务工作树之外已存在的目录。立即保存整个管道状态，避免后续 echo/printf 覆盖编译失败：
+
+     ```bash
+     export MAVEN_OPTS="-Dfile.encoding=UTF-8"
+     cd "<模块绝对目录>" || exit "$?"
+     set -o pipefail
+     mvn compile -o 2>&1 | tee "<临时完整日志>"
+     compile_status=("${PIPESTATUS[@]}")
+     printf 'MAVEN_EXIT=%s LOG_EXIT=%s\n' "${compile_status[0]}" "${compile_status[1]}"
+     exit "$((compile_status[0] != 0 ? compile_status[0] : compile_status[1]))"
+     ```
+
+   - 独立调用 `task_runner.py record-compile`，继续传同一完整绑定和 TASK runId，并传 `--attempt-id <真实 attemptId>`、`--exit-code <实际 compiler 退出码>`、`--log-exit-code <实际 tee 退出码>`、`--output-file "<临时完整日志>"`。它只登记已有输出，不执行编译，不写 UTest 结果；`ok=true` 只代表登记成功，必须检查 `passed/exitCode/logExitCode`。登记失败保留输出并只重试登记，不自动重跑编译；成功登记后完整日志已保存到 Feature 的 `.compile-logs/`。
+   - 后端 `finish-implementation` 要求当前 TASK/run 的最新编译结果成功、完整日志存在且哈希匹配、源码快照仍一致。编译后生产文件再次变化必须重新 prepare/compile/record；旧 TASK/run 的成功不能复用。已有未完成旧 Run 也必须补齐当前编译结果，不能因为没有结果字段就假报通过。前端和非 code 执行模式不增加此门槛。
+
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 7. **实现差异协议**：固定 Code Workflow 内不得为以下差异发起用户确认或创建阻断。`EVD` / design 与代码现实不符，或必须偏离 `API` / `DATA` / `D` 形态时，始终采用不违反 `REQ` / `SCN` 的最小兼容实现并在非阻断 Evidence 中记录差异。行为契约存在歧义时，按明确的 `REQ` / `SCN`、再按 Plan、最后按现有工程模式确定实现；TASK 状态由 runner 负责流转，不得手工置「失败」。
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不生成或执行测试命令，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
@@ -359,6 +378,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 - scheduler 按剩余 `maxParallel` 槽位派发任务：`proto`、`global`、`integration` 阶段逐 Batch 串行；普通 `parallel` 阶段依据真实依赖、仓库绑定与调度策略选择任务；Plan v2 不预报写集，隔离工作树允许同仓库任务乐观并行，真实文件冲突交给 Merge Train。只要有槽位，就立即补充符合条件的任务，不等待不相关 Batch 完成。插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner。
 - `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。任何由真实失败测试锚定的 `source_bug`（无论 Review 或 UTest 首次发现）都必须回到同一 Batch 的受控 production repair，再重新 Review 并重跑原 UTest 命令；不得作为 deferred finding 推广。测试自身、fixture、mock、测试配置问题仅允许在 UTest 修复一次并重跑一次；外部 environment/timeout 必须保留 Evidence、阻断该 Batch，绝不带病合并。
 - 每个 `ready_to_candidate` Batch 都可立即由 `parallel_merge_train.py` 在独立临时候选 Worktree 合成并推广，不必等待同一安全波的其他 Batch 完成编码、Review 或 UTest。候选不执行额外测试：其前置条件就是该 Batch 的 Review、UTest（通过或失败已记录）和 re-seal 均已有证据。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
+- Merge Train 冲突由模型解决文件、插件完成提交：Workflow 先调用 `prepare-resolution` 登记候选及冲突文件写入授权，冲突 Agent 只编辑这些文件并返回 `success=true,status=resolved`，不运行 Git 写操作；Agent 返回后由 `complete-resolution` 精确暂存、非交互创建带 task-card 信息的 merge commit 并登记候选 SHA。即时恢复和最终恢复共用此协议；`ready_to_complete` 只恢复插件提交登记，不再次派发模型编辑。不要为冲突重启生产 TASK 或调用 `seal`。
 - 所有 delivery 合并后，B-E2E 是唯一的 post-merge 可执行验证，使用临时验证 Worktree；通过即清理，失败保留至修复。`parallel_evidence_aggregate.py`/`parallel_final_verify.py` 仅校验已有 evidence 的内容摘要，绝不重跑 Batch UTest 或 E2E。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
 - Workflow 只接受 launcher 返回的完整 `workflowArgs`；`feature`、`pluginPath`、artifact workspace 和每个 code workspace 都必须是非空、非 `undefined` 的绝对路径。Workflow host 仅为平台审计元数据，可为空或与业务仓库不同。任一代码路径无效时在创建 Batch agent 前阻断，禁止生成临时 workflow 或手工创建分支绕过插件 Worktree 管理器。
 
