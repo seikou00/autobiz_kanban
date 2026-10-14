@@ -110,6 +110,14 @@ Route 解析不属于 Code Session 的全局前置步骤。Batch Agent 必须先
 Agent 内完成 Route 解析、清单、parser（如适用）和 `FRONTEND_ROUTE.json`
 回检。这样同一批次中的后端 Task 不会被其他 Task 的 UI 产物阻塞。
 
+前端 TASK 的固定顺序是：Route 与 HTML / 项目资料只读准备 →
+`task_runner.py start` 成功并保存真实 `runId` → HTML 分析、产物生成、
+assets 处理 → parser / 页面实现 → `finish-implementation`。
+Route 清单完成不是 start 的前置条件；`prepare_html_analysis.py`、
+`.frontend/html-analysis` / `.frontend/html-input` 生成和资源复制都必须在
+start 成功后执行。修复/恢复先由 `start-task-repair` / `resume` 建立活动 run。
+start 失败不走脚本降级，保留原始错误并按既有 Batch 失败协议处理。
+
 The fixed script starts with scheduler `ensure` and then runs a merge-gated,
 dynamic-slot DAG. `ensure` creates the first durable run or reuses an active
 run only after validating every sealed native delivery. A `needs_resolution`

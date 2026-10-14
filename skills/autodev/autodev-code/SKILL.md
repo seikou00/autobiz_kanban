@@ -53,6 +53,10 @@ python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace 
 python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-created --json
 ```
 
+清单中的只读准备完成后，先按下文“执行单个任务”协议执行当前 TASK 的 `task_runner.py start`，确认成功并保存真实 `runId`，再继续执行会写入代码工作树的 Route 步骤。首次实现必须先 start；修复或恢复必须先由 `start-task-repair` / `resume` 成功建立同一 TASK 的活动 run。Route 清单完成和 parser 读取不是 start 的前置条件。
+
+start 前只允许读取 HTML、项目资料和源码、解析 Route、创建清单与确认脚本参数；不得运行 `prepare_html_analysis.py`，不得生成 `.frontend/html-analysis` / `.frontend/html-input`，不得复制或覆盖项目 assets。分析产物和资源写入也是工作树变更，必须发生在 start 成功后，不能当作只读探索。
+
 4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
    - `absolute-html` 只能由 `with-absolute-html/SKILL.md` 转交 `references/html-parser.md`
    - `standard-html` 只能由 `with-standard-html/SKILL.md` 转交 `references/standard-html-parser.md`
@@ -178,7 +182,7 @@ python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
 
 ###  执行单个任务
 
-**固定命令顺序：`code_task_context` → runtime ignore 检查 → 定点阅读当前 Task scope 与真实入口 → `start` → 修改生产代码。`code_task_context` 和 `task_runner start` 都必须在业务代码改动前执行；后者会固化 Git 快照与 Task 契约。**
+**固定命令顺序：`code_task_context` → runtime ignore 检查 → 定点阅读当前 Task scope 与真实入口（前端含 Route 只读准备）→ `start` 成功 → 前端 HTML 分析、产物生成与资源处理（如适用）→ 修改生产代码。`code_task_context` 和 `task_runner start` 都必须在上述工作树写入前执行；后者会固化 Git 快照与 Task 契约。**
 
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。启动前必须确保每个业务仓库都通过 `.gitignore` 或 `.git/info/exclude` 忽略 `.cmbdevclaw/large_tool_results/`；runner 只校验该契约，不会代写业务仓库。未命中 ignore 时先配置窄规则，再执行 start。
 
@@ -192,7 +196,7 @@ python -X utf8 "${pluginPath}/hooks/code_task_context.py" --feature "${feature}"
 
 必须读取当前 task 的 `workspaceRef`、`goal`、`implementationPoints`、`testPoints`、`acceptanceCriteria`、`validationBoundary`、`verificationIntent`、`specRefs` 与 `designRefs`。Plan 提供交付结果、主要实现方向和测试关注点；实现文件、方法、模块和具体步骤由当前 Agent 结合真实代码决定。缺少业务引用、仓库归属或要点时回到 `/autodev-plan`，不要把文件或方法尚未确定误判为计划缺失。
 3. 改代码前，只在当前 Task 的 `scope`、入口点和 1-hop 依赖内阅读生产代码，识别项目分层、命名、错误处理、校验与日志风格，形成简短修改映射（依据、拟改生产文件、复用模式）再动手。可以只读既有测试理解行为契约，但不得在 Code 阶段创建、修改或执行测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
-4. context 返回 `startAllowed=true` 后，在修改业务代码前启动任务运行并保存 Git 快照：
+4. context 返回 `startAllowed=true` 后，在执行任何会写入代码工作树的前端脚本、资源处理或业务代码修改前启动任务运行并保存 Git 快照：
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"

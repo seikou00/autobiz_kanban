@@ -12,11 +12,12 @@
 
 ## 默认流程
 
-1. 运行 `prepare_html_analysis.py`（必填参数 `--project-root` / `--task-stem` / `--html-file`，完整命令以 `SKILL.md §4` 为准）：
+1. 完成 HTML、项目资料与源码的只读准备，按 code 根技能的任务协议确认当前 TASK 已成功 `task_runner.py start` 并保存真实 `runId`；修复/恢复复用绑定正确的活动 run，不重复 start。start 前不得生成分析产物或复制项目 assets。
+2. 在 start 成功后运行 `prepare_html_analysis.py`（必填参数 `--project-root` / `--task-stem` / `--html-file`，完整命令以路线 `../../SKILL.md §4` 为准；已由上游生成产物时直接读取，不重复执行）：
    - `autodev-code` 技能根目录：
      ```
      python -X utf8 references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
-       --project-root . \
+       --project-root <CODE_WORKSPACE> \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
@@ -28,16 +29,16 @@
        --html-file <HTML_PATH>
      ```
    - 脚本阶段要单独写成 `write_todos`，不要并入页面模块清单。
-2. 先读 `.frontend/html-analysis/<task-stem>-checklist.md`，再按需读 `.frontend/html-analysis/<task-stem>.md`。
-3. 以原始 HTML 加紧凑 handoff 作为视觉契约。
-4. 产出组件槽位计划：
+3. 先读 `.frontend/html-analysis/<task-stem>-checklist.md`，再按需读 `.frontend/html-analysis/<task-stem>.md`。
+4. 以原始 HTML 加紧凑 handoff 作为视觉契约。
+5. 产出组件槽位计划：
    - 用户组件
    - 项目组件
    - 相似页面模式
    - UI 库原语
    - fidelity-only
-5. 一次只转换一个区域。
-6. 优先输出框架代码。
+6. 一次只转换一个区域。
+7. 优先输出框架代码。
 
 只有在以下情况才生成调试 HTML 或参考 HTML：
 
