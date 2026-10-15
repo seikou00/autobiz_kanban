@@ -20,7 +20,7 @@ from hooks.frontend_route_write_guard import main as write_guard
 from hooks.inspect_test_environment import inspect_environment
 from hooks.parallel_batch_stage import complete_stage, finalize_implementation, start_stage
 from hooks.parallel_runtime import run_lock
-from hooks.run_utest_command import execute_utest_command, observed_test_count, _failure_classification
+from hooks.run_utest_command import execute_utest_command, observed_test_count, _failure_classification, UTestCommandError
 from hooks.runtime_artifact_guard import guard as artifact_guard
 from hooks.utest_runtime import apply_pom, begin, choose, context, inspect_class, lookup, preflight, prepare, shell_quote, validate_exact_test_argv
 from hooks.utest_test_environment import validate_test_pom_change
@@ -319,18 +319,124 @@ class UTestOptimizationTest(unittest.TestCase):
         with patch('hooks.utest_runtime.zipfile.ZipFile', side_effect=AssertionError('must use negative cache')):
             self.assertTrue(lookup(self.args, self.ctx())['reused'])
 
+    def maven_setup(self, body="printf '%s\\n' \"$@\"\nexit 0\n", name='mvn'):
+        directory = self.a.worktree / "工具 Maven's bin"
+        directory.mkdir(exist_ok=True)
+        binary = directory / name
+        binary.write_text('#!/usr/bin/env bash\n' + body, encoding='utf-8')
+        binary.chmod(0o755)
+        self.args.argv = [str(binary), '-o', 'dependency:build-classpath', "-DoutputFile=classpath space's.txt"]
+        self.args.test_file = None
+        return binary
+
+    def run_setup(self, env=None):
+        prepared = preflight(self.args, self.ctx(), kind='setup')
+        executed = subprocess.run(prepared['bashCommand'], text=True, capture_output=True, timeout=15, env=env)
+        self.assertEqual(0, executed.returncode, executed.stdout + executed.stderr)
+        command = self.ctx()[-1]['tasks']['T001']['setupCommands'][prepared['executionId']]
+        return prepared, executed, command
+
+    def test_real_maven_setup_bash_handles_paths_output_cache_and_replay(self):
+        self.maven_setup("printf '%s\\n' \"$@\"\nprintf 'setup stderr\\n' >&2\nprintf 'classpath' > \"classpath space's.txt\"\n")
+        prepared, executed, command = self.run_setup()
+        self.assertIn("-DoutputFile=classpath space's.txt", executed.stdout)
+        self.assertIn('setup stderr', executed.stdout)
+        self.assertEqual('PASS', command['response']['result'])
+        self.assertIsNone(command['response']['testsExecuted'])
+        self.assertIsNone(command['response']['evidenceId'])
+        self.assertNotIn('firstCommandAt', self.ctx()[-1])
+        self.assertEqual({}, self.ctx()[-1]['tasks']['T001']['commands'])
+        self.assertFalse((self.a.workspace / '.autobizdevops' / 'features' / 'alpha' / 'UNIT_TEST_RESULT.json').exists())
+        cached = preflight(self.args, self.ctx(), kind='setup')
+        self.assertEqual('cached', cached['status'])
+        self.assertTrue(cached['diagnosticReused'])
+        self.assertNotIn('bashCommand', cached)
+        replay = subprocess.run(prepared['bashCommand'], capture_output=True, timeout=10)
+        self.assertNotEqual(0, replay.returncode)
+        (self.a.worktree / "classpath space's.txt").unlink()
+        replacement = preflight(self.args, self.ctx(), kind='setup')
+        self.assertEqual('prepared', replacement['status'])
+        self.assertIsNone(artifact_guard({'tool_name': 'execute', 'tool_input': {'command': 'bash ' + replacement['scriptPath']}}))
+
     def test_failed_maven_diagnostic_reused_until_environment_changes(self):
-        kwargs = dict(workspace=self.a.workspace, feature='alpha', kind='setup', task_id='T001',
-                      code_workspace=self.a.worktree, argv=['mvn', '-o', 'dependency:tree'])
-        with patch('hooks.run_utest_command._run', return_value=(1, '', 'missing Byte Buddy', False, 'exit_nonzero')) as run:
-            first = execute_utest_command(**kwargs)
-            second = execute_utest_command(**kwargs)
-            self.assertEqual(1, run.call_count)
-            self.assertTrue(second['diagnosticReused'])
-            self.assertEqual(first['exitCode'], second['exitCode'])
+        self.maven_setup("printf 'missing Byte Buddy\\n' >&2\nexit 1\n")
+        _, _, command = self.run_setup()
+        self.assertEqual(1, command['response']['exitCode'])
+        with patch('hooks.run_utest_command._run', side_effect=AssertionError('must not launch Maven')):
+            cached = preflight(self.args, self.ctx(), kind='setup')
+            self.assertEqual(1, cached['exitCode'])
+            self.assertEqual('cached', cached['status'])
             (self.a.worktree / 'pom.xml').write_text(POM.replace('</dependencies>', H2 + '</dependencies>'))
-            execute_utest_command(**kwargs)
-            self.assertEqual(2, run.call_count)
+            self.assertEqual('prepared', preflight(self.args, self.ctx(), kind='setup')['status'])
+
+    def test_setup_cache_uses_frozen_path_when_bash_translates_environment(self):
+        self.maven_setup("printf 'classpath' > \"classpath space's.txt\"\n")
+        self.run_setup(env=dict(os.environ, PATH=os.environ['PATH'] + os.pathsep + '/bash/runtime/path'))
+        self.assertEqual('cached', preflight(self.args, self.ctx(), kind='setup')['status'])
+        self.args.refresh_diagnostics = True
+        self.assertEqual('prepared', preflight(self.args, self.ctx(), kind='setup')['status'])
+
+    def test_setup_registration_failure_retains_output_and_does_not_rerun(self):
+        self.maven_setup()
+        prepared = preflight(self.args, self.ctx(), kind='setup')
+        self.args.kind = 'setup'
+        self.args.execution_id, self.args.attempt_number = prepared['executionId'], 1
+        begin(self.args, self.ctx())
+        output = Path(prepared['outputFile'])
+        output.write_text('setup original output\n')
+        self.addCleanup(lambda: output.unlink(missing_ok=True))
+        kwargs = dict(workspace=self.a.workspace, feature='alpha', kind='setup', task_id='T001',
+                      code_workspace=self.a.worktree, argv=self.args.argv, record_only=True,
+                      recorded_exit_code=0, recorded_output_file=str(output), run_id=self.a.parallel_id,
+                      batch_id='B001', execution_id=prepared['executionId'])
+        with patch('hooks.utest_runtime.record_runtime_execution', side_effect=OSError('registration unavailable')):
+            with self.assertRaises(OSError):
+                execute_utest_command(**kwargs)
+        self.assertTrue(output.is_file())
+        self.assertEqual('awaiting_record', preflight(self.args, self.ctx(), kind='setup')['status'])
+        with patch('hooks.run_utest_command._run', side_effect=AssertionError('must only register')):
+            result = execute_utest_command(**kwargs)
+            self.assertEqual(0, result['exitCode'])
+            self.assertTrue(execute_utest_command(**kwargs)['recordingReused'])
+        self.assertEqual(1, self.ctx()[-1]['tasks']['T001']['setupCommands'][prepared['executionId']]['attempts'])
+
+    def test_setup_timeout_records_real_result_without_test_evidence(self):
+        self.maven_setup("printf 'before hang\\n'\nsleep 20\n")
+        self.args.command_timeout = 1
+        _, executed, command = self.run_setup()
+        self.assertIn('before hang', executed.stdout)
+        self.assertEqual(124, command['response']['exitCode'])
+        self.assertEqual('command_timeout', command['response']['executionOutcome'])
+        self.assertIsNone(command['response']['evidenceId'])
+        self.assertNotIn('firstCommandAt', self.ctx()[-1])
+
+    def test_setup_preserves_first_test_deadline_and_does_not_freeze_test_selection(self):
+        self.maven_setup()
+        self.run_setup()
+        self.args.preset, self.args.reason = 'java-mockito', 'mock required collaborator'
+        choose(self.args, self.ctx())
+        self.write_test()
+        prepared = preflight(self.args, self.ctx())
+        executed = subprocess.run(prepared['bashCommand'], text=True, capture_output=True, timeout=15)
+        self.assertEqual(0, executed.returncode, executed.stdout + executed.stderr)
+        self.assertEqual(1, self.ctx()[-1]['tasks']['T001']['commands'][prepared['executionId']]['response']['testsExecuted'])
+
+    def test_native_maven_setup_is_rejected_for_all_launchers(self):
+        for launcher in ('mvn', './mvnw', 'mvn.cmd', 'mvnw.cmd', 'mvn.bat', 'mvn.exe', r'D:\Maven bin\mvn.cmd'):
+            with self.subTest(launcher=launcher), patch('hooks.run_utest_command._run', side_effect=AssertionError('must not launch')):
+                with self.assertRaisesRegex(UTestCommandError, 'Bash'):
+                    execute_utest_command(workspace=self.a.workspace, feature='alpha', kind='setup', task_id='T001',
+                                          code_workspace=self.a.worktree, argv=[launcher, '--version'])
+
+    def test_setup_cannot_run_behavior_tests_or_compile(self):
+        self.maven_setup()
+        self.args.argv = ['mvn', '-f', '../other/pom.xml', 'dependency:tree']
+        with self.assertRaisesRegex(ValueError, 'outside_selected_module'):
+            preflight(self.args, self.ctx(), kind='setup')
+        for goals in (['test'], ['test-compile'], ['compile'], ['package'], ['verify'], ['surefire:test'], ['compiler:testCompile']):
+            self.args.argv = ['mvn'] + goals
+            with self.assertRaisesRegex(ValueError, 'cannot_run_tests_or_compile'):
+                preflight(self.args, self.ctx(), kind='setup')
 
 
 if __name__ == '__main__':

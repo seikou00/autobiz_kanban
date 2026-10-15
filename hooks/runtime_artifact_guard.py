@@ -153,7 +153,8 @@ def _verified_utest_script(words):
         state = json.loads((script.parent / "UTEST_EXECUTION.json").read_text(encoding="utf-8"))
         digest = hashlib.sha256(script.read_bytes()).hexdigest()
         return any(command.get("scriptPath") == str(script) and command.get("scriptSha256") == digest
-                   for task in state["tasks"].values() for command in task["commands"].values())
+                   for task in state["tasks"].values() for group in ("commands", "setupCommands")
+                   for command in task.get(group, {}).values())
     except (OSError, ValueError, KeyError):
         return False
 

@@ -30,8 +30,12 @@ PENDING_TEST_COMMAND = "待生成测试命令"
 MAVEN_EXECUTABLES = {
     "mvn",
     "mvn.cmd",
+    "mvn.bat",
+    "mvn.exe",
     "mvnw",
     "mvnw.cmd",
+    "mvnw.bat",
+    "mvnw.exe",
     "./mvnw",
     ".\\mvnw.cmd",
 }
@@ -145,7 +149,7 @@ def command_executes_tests(command):
         isinstance(item, str) and item for item in argv
     ):
         return False
-    executable = Path(argv[0]).name.lower()
+    executable = Path(argv[0].replace("\\", "/")).name.lower()
     executable_raw = argv[0].lower()
     lowered = [item.lower() for item in argv[1:]]
     if executable in DIRECT_TEST_EXECUTABLES:

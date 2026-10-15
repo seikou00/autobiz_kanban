@@ -118,7 +118,7 @@ POM 修改可用 `apply-pom`、同一绑定参数和 `--content-file <worktree�
 
 有实际证据时 `select --preset <ID> --reason <原因>` 允许执行前调整一次；执行后冻结。静态依赖读取 `reference/legacy-static-test-patterns.md`，只复用可验证的 inline/PowerMock/隔离 fixture 模板。无法隔离时返回 `testability_gap`，不得静态推导 source_bug；H2/mapper 测试不替代 Service 授权逻辑。
 
-Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan V2 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。Maven 只读诊断统一经 `run_utest_command.py --kind setup`，相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
+Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan V2 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。所有 Maven 命令（含版本查询、依赖诊断、classpath、编译和测试）都由 Bash 直接执行，禁止 Python 原生 subprocess 启动 mvn，不要求创建 mvn.exe 包装器。Maven setup 统一经 `utest_runtime.py preflight-setup` 携带上述全部绑定参数和精确 argv；`status=prepared` 时原样执行返回的 `bashCommand`，`status=cached` 时复用实际结果。runner 仅用 `--kind setup --record-only` 登记，setup 不算行为测试，也不重置首次真实测试期限。相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
 
 ## 测试域路由
 
@@ -188,11 +188,13 @@ python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framewo
 
 ### 执行与证据
 
-环境 setup 命令（依赖安装或受支持 profile 的环境校验）仍由 runner 执行：
+Maven 环境 setup（版本查询、依赖诊断或 classpath 生成）先生成受控 Bash 脚本，再原样执行返回的 `bashCommand`。Bash 直接执行 Maven、实时显示输出并保留命令和 tee 的退出码；Python runner 只登记 setup 日志与缓存，不创建通过的测试 Evidence：
 
 ```bash
-python -X utf8 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --batch-worktree "${batchWorktree}" -- <argv...>
+python -X utf8 "${pluginPath}/hooks/utest_runtime.py" preflight-setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --run-id "<RUN_ID>" --batch-id "<BATCH_ID>" --task-id "<TASK_ID>" --batch-worktree "${batchWorktree}" --owner-token "<当前LEASE_TOKEN>" --stage-timeout 1800 --command-timeout 300 -- <MAVEN_ARGV...>
 ```
+
+非 Maven 的受支持环境安装/校验可继续使用 `run_utest_command.py --kind setup`；Maven 不允许这条直接执行入口。缓存结果必须读取 `result/exitCode/logExitCode`；登记进程返回 0 只表示登记成功。登记失败保留原输出，仅重试登记，不重新执行 Maven。
 
 一个 TASK 有多个环境目标时，setup 阶段按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`；test 阶段由测试文件路径选择其所属目标，嵌套项目使用最深匹配目录。
 

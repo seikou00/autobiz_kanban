@@ -31,10 +31,20 @@ candidates. Do not author repository/cwd values or change Plan to name modules.
    A candidate file must be in this worktree or system temporary directory.
    The test-stage authorization does not require reopening an implemented TASK.
 4. Resolve/probe required capabilities once. Existing `ready` can still lack H2,
-   Mockito inline/Byte Buddy or security-test. Run Maven read-only diagnostics via
-   `run_utest_command.py --kind setup`; successful and failed commands are cached
-   by module/build configuration/argv. Refresh only after the external dependency
-   environment changes with `--refresh-diagnostics`.
+   Mockito inline/Byte Buddy or security-test. All Maven commands execute
+   directly in Bash, including version queries,
+   dependency diagnostics and classpath generation. For Maven setup use
+   `utest_runtime.py preflight-setup` with the current Batch binding and exact
+   argv. Execute the returned `bashCommand` for `status=prepared`; reuse the
+   actual result for `status=cached`. The script streams output, captures Maven
+   and tee statuses and supervises descendants. `run_utest_command.py --kind
+   setup --record-only` only records logs and cache; direct Maven launch is
+   rejected. Setup success is not passing test Evidence and does not satisfy
+   the first-test deadline. Successful and failed diagnostics are cached by
+   module/build configuration/argv/PATH, using a new Bash cache namespace so
+   previous native-launch failures cannot poison the result. Refresh with
+   `preflight-setup --refresh-diagnostics` only after the external dependency
+   environment changes.
 5. For dependency classes, use `lookup-class` with `--classpath-file` and a fully
    qualified `--class-name`. `inspect-class` caches source-jar reads or bounded
    javap. Searches only touch listed module dependencies, preserving duplicate
@@ -44,6 +54,9 @@ candidates. Do not author repository/cwd values or change Plan to name modules.
    files; Gradle requires `--tests`. Execute the returned `bashCommand` exactly.
    Runtime validates the current lease/stage/files/command, preserves the real
    process and tee statuses and monitors a dedicated test process group.
+   Registration exit 0 only means registration succeeded; read the actual
+   result/exitCode/logExitCode. Retain output after a registration failure and
+   retry registration without launching Maven again.
 7. Test-owned repairs use the same target/argv with `--retry-kind test_bug` once.
    Source repairs need failing evidence, a new reviewed production commit and
    `--retry-kind source_repair` once. Runtime counters persist across recovery.

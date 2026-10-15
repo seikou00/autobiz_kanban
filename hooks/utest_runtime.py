@@ -83,23 +83,28 @@ def shell_quote(value):
     return shlex.quote(shell_path(value))
 
 
+def validate_maven_module_argv(argv, root):
+    for index, token in enumerate(argv):
+        candidate = None
+        if token in {"-f", "--file"} and index + 1 < len(argv):
+            candidate = argv[index + 1]
+        elif token.startswith("--file="):
+            candidate = token.split("=", 1)[1]
+        elif token.startswith("-f") and token != "-f":
+            candidate = token[2:].lstrip("=")
+        if candidate:
+            path = Path(candidate)
+            path = path if path.is_absolute() else Path(root) / path
+            if path.resolve() != (Path(root) / "pom.xml").resolve():
+                raise ValueError("utest_build_file_outside_selected_module")
+
+
 def validate_exact_test_argv(argv, test_files, root):
+    from hooks.run_utest_command import is_maven_command
     executable = Path(argv[0].replace("\\", "/")).name.lower()
     names = {Path(path).stem for path in test_files}
-    if executable in {"mvn", "mvnw", "mvn.cmd", "mvnw.cmd"}:
-        for index, token in enumerate(argv):
-            candidate = None
-            if token in {"-f", "--file"} and index + 1 < len(argv):
-                candidate = argv[index + 1]
-            elif token.startswith("--file="):
-                candidate = token.split("=", 1)[1]
-            elif token.startswith("-f") and token != "-f":
-                candidate = token[2:].lstrip("=")
-            if candidate:
-                path = Path(candidate)
-                path = path if path.is_absolute() else Path(root) / path
-                if path.resolve() != (Path(root) / "pom.xml").resolve():
-                    raise ValueError("utest_build_file_outside_selected_module")
+    if is_maven_command(argv):
+        validate_maven_module_argv(argv, root)
         selectors = [token.split("=", 1)[1] for token in argv if token.startswith(("-Dtest=", "-Dit.test="))]
         selected = {name.split("#", 1)[0].rsplit(".", 1)[-1] for selector in selectors for name in selector.split(",")}
         if not selected or selected != names:
@@ -304,7 +309,7 @@ def inspect_class(args, ctx):
     return result
 
 
-def preflight(args, ctx):
+def preflight(args, ctx, kind="test"):
     workspace, feature, worktree, root, target, task, base, path, state = ctx
     prepare(args, ctx)
     now = time.time()
@@ -319,30 +324,55 @@ def preflight(args, ctx):
         if relative.is_absolute() or ".." in relative.parts or not test.is_relative_to(root) or not test.is_file():
             raise ValueError("utest_preflight_test_file_invalid:" + name)
         files.append(name)
+    if kind == "setup" and files:
+        raise ValueError("utest_setup_does_not_accept_test_files")
     argv = [shell_path(token) for token in (args.argv[1:] if args.argv and args.argv[0] == "--" else args.argv)]
-    if not files or not command_executes_tests({"argv": argv}):
+    if not argv:
+        raise ValueError("utest_preflight_requires_argv")
+    if kind == "test" and (not files or not command_executes_tests({"argv": argv})):
         raise ValueError("utest_preflight_requires_test_files_and_behavior_command")
     if any(re.search(r"(?:skiptests|maven\.test\.skip|testfailureignore|failifnotests=false|failifnospecifiedtests=false)", item, re.I) for item in argv):
         raise ValueError("utest_preflight_test_masking_forbidden")
-    validate_exact_test_argv(argv, files, root)
-    key = hashlib.sha256(json.dumps([target["environmentTargetId"], files, argv]).encode()).hexdigest()[:20]
+    cache_path = None
+    if kind == "test":
+        validate_exact_test_argv(argv, files, root)
+    else:
+        from hooks.run_utest_command import is_maven_command, maven_setup_executes_build, diagnostic_cache_path, cached_diagnostic
+        if not is_maven_command(argv):
+            raise ValueError("utest_setup_requires_maven_command")
+        validate_maven_module_argv(argv, root)
+        if maven_setup_executes_build(argv):
+            raise ValueError("utest_setup_cannot_run_tests_or_compile: use behavior preflight or Bash compile")
+        cache_path = diagnostic_cache_path(workspace / ".autobizdevops" / "features" / feature, root, argv)
+    identity = [target["environmentTargetId"], files, argv]
+    if kind == "setup":
+        identity.extend(["bash-setup-v1", fingerprint(root), os.environ.get("PATH", "")])
+    key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:20]
     entry = state["tasks"][args.task_id]
-    if entry["commands"] and key not in entry["commands"]:
+    commands = entry.setdefault("setupCommands", {}) if kind == "setup" else entry["commands"]
+    if kind == "test" and commands and key not in commands:
         raise ValueError("utest_exact_command_frozen: retain the original argv and test target")
-    command = entry["commands"].setdefault(key, {"argv": argv, "testFiles": files, "attempts": 0})
+    command = commands.setdefault(key, {"argv": argv, "testFiles": files if kind == "test" else None, "attempts": 0, "kind": kind})
     if command.get("status") in {"running", "awaiting_record"}:
         return {"status": "awaiting_record", "executionId": key, "outputFile": command["outputFile"],
                 "requiredAction": "record_existing_output_only"}
     if command.get("status") == "prepared":
         return {"status": "prepared", "executionId": key, "outputFile": command["outputFile"],
                 "scriptPath": command["scriptPath"], "bashCommand": ["bash", command["scriptPath"]]}
-    if command["attempts"] >= 3 or command.get("passed"):
+    if kind == "setup":
+        if not getattr(args, "refresh_diagnostics", False):
+            cached = cached_diagnostic(cache_path, root, argv)
+            if cached:
+                return dict(cached, status="cached")
+            if command.get("status") == "recorded" and not cache_path:
+                return dict(command["response"], status="cached", diagnosticReused=True)
+    if kind == "test" and (command["attempts"] >= 3 or command.get("passed")):
         raise ValueError("utest_execution_budget_exhausted_or_already_passed")
-    if command["attempts"] and args.retry_kind not in {"test_bug", "source_repair"}:
+    if kind == "test" and command["attempts"] and args.retry_kind not in {"test_bug", "source_repair"}:
         raise ValueError("utest_retry_requires_classified_failure")
-    if args.retry_kind == "source_repair" and not command.get("sourceRepairEligible"):
+    if kind == "test" and args.retry_kind == "source_repair" and not command.get("sourceRepairEligible"):
         raise ValueError("utest_source_repair_requires_failing_evidence")
-    if args.retry_kind == "source_repair":
+    if kind == "test" and args.retry_kind == "source_repair":
         import subprocess
         current = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, timeout=10).stdout.strip()
         if current == command.get("sourceCommit"):
@@ -352,30 +382,38 @@ def preflight(args, ctx):
             from hooks.validate_utest_source_bug import validate_claim
             validate_claim(workspace, feature, args.task_id, response["commandId"], response["targetId"],
                            response["taskDigest"], response["evidenceId"])
-    if args.retry_kind:
+    if kind == "test" and args.retry_kind:
         counter = args.retry_kind + "Count"
         if command.get(counter, 0) >= 1:
             raise ValueError("utest_repair_budget_exhausted:" + args.retry_kind)
         command[counter] = command.get(counter, 0) + 1
     timeout = min(args.command_timeout, POLICY["commandSeconds"], int(state["stageDeadlineEpoch"] - now))
-    command.update(pendingAttempt=command["attempts"] + 1, status="prepared", environmentFingerprint=fingerprint(root))
+    if kind == "setup" and not state.get("firstCommandAt"):
+        timeout = min(timeout, int(state["firstCommandDeadlineEpoch"] - now))
+    if timeout <= 0:
+        raise ValueError("stage_or_first_execution_deadline_exceeded")
+    command.update(pendingAttempt=command["attempts"] + 1, status="prepared", environmentFingerprint=fingerprint(root),
+                   executionRoot=str(root), diagnosticCachePath=str(cache_path) if cache_path else None)
     command.pop("pendingEvidenceId", None)
     command.pop("pendingOutputSha256", None)
     output = tempfile.NamedTemporaryFile(prefix="utest-output-", delete=False)
     output.close()
     command["outputFile"] = output.name
     script = base / ("execute-" + key + ".sh")
-    record = [sys.executable, str(ROOT / "hooks" / "run_utest_command.py"), "--kind", "test", "--record-only",
+    record = [sys.executable, str(ROOT / "hooks" / "run_utest_command.py"), "--kind", kind, "--record-only",
               "--workspace", str(workspace), "--feature", feature, "--task-id", args.task_id,
               "--batch-worktree", str(worktree), "--output-file", output.name,
               "--run-id", args.run_id, "--batch-id", args.batch_id, "--execution-id", key]
+    if args.environment_target_id:
+        record.extend(["--environment-target-id", args.environment_target_id])
     for file in files:
         record.extend(["--test-file", file])
     watchdog = [sys.executable, str(Path(__file__).resolve()), "watch", "--pid", "$test_native_pid", "--seconds", str(timeout), "--deadline", str(state["stageDeadlineEpoch"]), "--output-file", output.name]
     begin_argv = [sys.executable, str(Path(__file__).resolve()), "begin", "--workspace", str(workspace),
                   "--feature", feature, "--run-id", args.run_id, "--batch-id", args.batch_id,
                   "--batch-worktree", str(worktree), "--task-id", args.task_id, "--owner-token", args.owner_token,
-                  "--execution-id", key, "--attempt-number", str(command["pendingAttempt"])]
+                  "--execution-id", key, "--attempt-number", str(command["pendingAttempt"]), "--kind", kind,
+                  "--stage-timeout", str(args.stage_timeout)]
     if args.environment_target_id:
         begin_argv.extend(["--environment-target-id", args.environment_target_id])
     for file in files:
@@ -417,7 +455,8 @@ trap 'exit 143' TERM
 def begin(args, ctx):
     state, path = ctx[-1], ctx[-2]
     now = time.time()
-    command = state["tasks"][args.task_id]["commands"][args.execution_id]
+    kind = getattr(args, "kind", "test")
+    command = state["tasks"][args.task_id]["setupCommands" if kind == "setup" else "commands"][args.execution_id]
     if command["status"] != "prepared" or command["pendingAttempt"] != args.attempt_number:
         raise ValueError("utest_execution_already_started_or_stale_script")
     if now >= state["stageDeadlineEpoch"] or (not state.get("firstCommandAt") and now >= state["firstCommandDeadlineEpoch"]):
@@ -427,30 +466,35 @@ def begin(args, ctx):
     command.update(status="running", attempts=args.attempt_number, startedEpoch=now)
     import subprocess
     command["sourceCommit"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ctx[2], text=True, capture_output=True, timeout=10).stdout.strip()
-    state.setdefault("firstCommandAt", now)
+    if kind == "test":
+        state.setdefault("firstCommandAt", now)
     atomic_write_json(path, state)
     return {"status": "started", "executionId": args.execution_id}
 
 
-def validate_runtime_execution(workspace, feature, run_id, batch_id, execution_id, task_id, argv, test_files, output_file, worktree):
+def validate_runtime_execution(workspace, feature, run_id, batch_id, execution_id, task_id, argv, test_files, output_file, worktree, kind="test", execution_root=None):
     path = run_dir(Path(workspace), feature, run_id) / "utest" / batch_id / "UTEST_EXECUTION.json"
     state = _read(path)
-    cmd = state["tasks"][task_id]["commands"][execution_id]
+    cmd = state["tasks"][task_id]["setupCommands" if kind == "setup" else "commands"][execution_id]
     if (state["worktree"] != str(Path(worktree).resolve()) or cmd["argv"] != argv
             or cmd["testFiles"] != test_files or Path(cmd["outputFile"]).resolve() != Path(output_file).resolve()
             or cmd["status"] not in {"running", "awaiting_record", "recorded"}):
         raise ValueError("utest_execution_record_binding_mismatch")
+    if execution_root is not None and cmd.get("executionRoot") and Path(execution_root).resolve() != Path(cmd["executionRoot"]).resolve():
+        raise ValueError("utest_execution_record_module_mismatch")
     return cmd
 
 
-def record_runtime_execution(workspace, feature, run_id, batch_id, execution_id, task_id, argv, test_files, output_file, response):
-    """Commit an attempt only after Evidence/result registration succeeds."""
+def record_runtime_execution(workspace, feature, run_id, batch_id, execution_id, task_id, argv, test_files, output_file, response, kind="test"):
+    """Commit an attempt after setup logging or test Evidence registration."""
     path = run_dir(Path(workspace), feature, run_id) / "utest" / batch_id / "UTEST_EXECUTION.json"
     with run_lock(Path(workspace), feature, run_id):
         state = _read(path)
-        cmd = state["tasks"][task_id]["commands"][execution_id]
+        cmd = state["tasks"][task_id]["setupCommands" if kind == "setup" else "commands"][execution_id]
         if cmd["argv"] != argv or cmd["testFiles"] != test_files or Path(cmd["outputFile"]).resolve() != Path(output_file).resolve():
             raise ValueError("utest_execution_record_binding_mismatch")
+        if cmd.get("executionRoot") and Path(response["cwd"]).resolve() != Path(cmd["executionRoot"]).resolve():
+            raise ValueError("utest_execution_record_module_mismatch")
         cmd.update(status="recorded", passed=response["result"] == "PASS", result=response["result"],
                    evidenceId=response["evidenceId"], sourceRepairEligible=response["exitCode"] != 0 and response["result"] == "FAIL" and response["failureClassification"] in {"source_compile", "test_failure"},
                    response=response)
@@ -489,7 +533,7 @@ def main(argv=None):
     watcher.add_argument("--seconds", type=int, required=True)
     watcher.add_argument("--output-file", required=True)
     watcher.add_argument("--deadline", type=float, required=True)
-    for action in ("prepare", "select", "apply-pom", "lookup-class", "inspect-class", "preflight", "begin"):
+    for action in ("prepare", "select", "apply-pom", "lookup-class", "inspect-class", "preflight", "preflight-setup", "begin"):
         item = sub.add_parser(action)
         for name in ("workspace", "feature", "run-id", "batch-id", "batch-worktree", "task-id", "owner-token"):
             item.add_argument("--" + name, required=True)
@@ -503,12 +547,14 @@ def main(argv=None):
         elif action in {"lookup-class", "inspect-class"}:
             item.add_argument("--classpath-file", required=True)
             item.add_argument("--class-name", required=True)
-        elif action == "preflight":
-            item.add_argument("--test-file", action="append", required=True)
+        elif action in {"preflight", "preflight-setup"}:
+            item.add_argument("--test-file", action="append", required=action == "preflight")
             item.add_argument("--retry-kind", choices=("test_bug", "source_repair"))
+            item.add_argument("--refresh-diagnostics", action="store_true")
             item.add_argument("--command-timeout", type=int, default=POLICY["commandSeconds"])
             item.add_argument("argv", nargs=argparse.REMAINDER)
         elif action == "begin":
+            item.add_argument("--kind", choices=("test", "setup"), default="test")
             item.add_argument("--execution-id", required=True)
             item.add_argument("--attempt-number", type=int, required=True)
             item.add_argument("--test-file", action="append")
@@ -519,7 +565,8 @@ def main(argv=None):
     try:
         ctx = context(args)
         handlers = {"prepare": prepare, "select": choose, "apply-pom": apply_pom,
-                    "lookup-class": lookup, "inspect-class": inspect_class, "preflight": preflight, "begin": begin}
+                    "lookup-class": lookup, "inspect-class": inspect_class, "preflight": preflight,
+                    "preflight-setup": lambda args, ctx: preflight(args, ctx, kind="setup"), "begin": begin}
         with run_lock(ctx[0], ctx[1], args.run_id):
             ctx = context(args)
             result = handlers[args.action](args, ctx)
