@@ -121,6 +121,66 @@ class SpecsLiteWorkflowTest(unittest.TestCase):
         code, output = self.advance("design_in_progress")
         self.assertEqual(code, 0, output)
 
+    def test_specs_done_refreshes_ui_context_markdown_from_final_capabilities(self):
+        self.ui.update({
+            "uiRequired": True,
+            "notApplicableReason": "",
+            "pages": [{
+                "pageId": "PAGE-001",
+                "name": "订单导出",
+                "goal": "提交导出任务",
+                "states": ["default"],
+            }],
+            "capabilities": [{
+                "capabilityId": "order-export",
+                "uiRequired": True,
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": [],
+                "visualSourceRefs": [],
+                "specRefs": ["REQ-001", "SCN-001"],
+            }],
+        })
+        self.write_ui()
+        markdown_path = self.feature / "UI_CONTEXT.md"
+        markdown_path.write_text("stale markdown\n", encoding="utf-8")
+        (self.feature / "plan.json").write_text(json.dumps({
+            "tasks": [{
+                "id": "T001",
+                "title": "不应在 specs 阶段展示",
+                "uiRequired": True,
+                "uiRefs": {
+                    "pageRefs": ["PAGE-001"],
+                    "interactionRefs": [],
+                    "visualSourceRefs": [],
+                    "frontendRoute": "spec-driven-ui",
+                },
+            }],
+        }), encoding="utf-8")
+
+        code, output = self.advance("specs_done")
+
+        self.assertEqual(code, 0, output)
+        markdown = markdown_path.read_text(encoding="utf-8")
+        self.assertIn("## PAGE / UIX / VIS 映射", markdown)
+        self.assertIn("| PAGE-001 | 订单导出 |", markdown)
+        self.assertNotIn("关联依据", markdown)
+        self.assertNotIn("capability", markdown)
+        self.assertNotIn("specRefs", markdown)
+        self.assertNotIn("TASK ID", markdown)
+        self.assertNotIn("stale markdown", markdown)
+
+    def test_specs_done_does_not_advance_when_ui_context_markdown_refresh_fails(self):
+        markdown_path = self.feature / "UI_CONTEXT.md"
+        markdown_path.mkdir()
+
+        code, output = self.advance("specs_done")
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("ui_context_md_sync_failed", output)
+        records, errors, _ = load_state_json_records(self.project)
+        self.assertEqual(errors, [])
+        self.assertEqual(records["alpha"]["checkpoint"], "specs_in_progress")
+
     def test_final_gate_preserves_downstream_id_index(self):
         result = self.gate()
         self.assertTrue(result.ok, result.errors)
