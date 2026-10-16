@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -39,8 +40,8 @@ def utc_now() -> str:
 
 def default_status() -> dict[str, Any]:
     return {
-        "version": 1,
-        "published_artifacts": {},
+        "version": 2,
+        "targets": {},
         "events": {},
     }
 
@@ -105,8 +106,11 @@ def read_status(feature_dir: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"同步状态文件顶层必须是 JSON object: {path}")
     data.setdefault("version", 1)
-    if not isinstance(data.get("published_artifacts"), dict):
-        data["published_artifacts"] = {}
+    # Unscoped v1 publication records remain history, never evidence that a
+    # newly selected employee's directory has been published.
+    data.setdefault("targets", {})
+    if not isinstance(data["targets"], dict):
+        raise ValueError(f"同步状态文件 targets 必须是对象: {path}")
     if not isinstance(data.get("events"), dict):
         data["events"] = {}
     migrated = migrate_legacy_status(data) or migrated
@@ -145,6 +149,8 @@ def append_sync_log(
     status: str,
     message: str,
     event_id: str = "",
+    employee_id: str = "",
+    upload_base: str = "",
 ) -> None:
     record = {
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -152,6 +158,8 @@ def append_sync_log(
         "sessionId": os.environ.get("SESSION_ID", ""),
         "pluginId": "AUTOBIZDEVOPS-PLUGIN",
         "featureId": feature,
+        "employeeId": employee_id,
+        "uploadBase": upload_base,
         "eventId": "artifact-sync",
         "syncEventId": event_id,
         "eventStatus": status,
@@ -186,9 +194,9 @@ def relative_artifact_path(feature_dir: Path, path: Path) -> str:
         raise ValueError(f"产物路径越界: {path}") from exc
 
 
-def object_directory(project_code: str, feature: str, relative_path: str) -> str:
+def object_directory(project_code: str, feature: str, employee_id: str, relative_path: str) -> str:
     parent = Path(relative_path).parent.as_posix()
-    base = f"{project_code}/DEV/Features/{feature}"
+    base = f"{project_code}/DEV/Features/{feature}/{employee_id}"
     return base if parent in {"", "."} else f"{base}/{parent}"
 
 
@@ -198,6 +206,7 @@ def snapshot_file_artifact(
     *,
     project_code: str,
     feature: str,
+    employee_id: str,
 ) -> dict[str, Any]:
     relative_path = relative_artifact_path(feature_dir, path)
     return {
@@ -205,7 +214,7 @@ def snapshot_file_artifact(
         "local_path": str(path),
         "size": path.stat().st_size,
         "sha256": sha256_file(path),
-        "upload_path": object_directory(project_code, feature, relative_path),
+        "upload_path": object_directory(project_code, feature, employee_id, relative_path),
         "file_name": path.name,
     }
 
@@ -319,6 +328,11 @@ def validate_path_component(value: str, label: str) -> None:
         raise ValueError(f"{label} 不是合法目录名: {value}")
 
 
+def validate_employee_id(value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("工号必须为非空字符串，且只能包含英文字母、数字、下划线或连字符")
+
+
 def current_feature_record(workspace: Path, feature: str) -> dict[str, Any]:
     validate_path_component(feature, "Feature")
     path = workspace / ".autobizdevops" / "state.json"
@@ -370,7 +384,7 @@ def ignored_artifact(relative_path: str, *, globbed: bool) -> bool:
 
 
 def scan_artifacts(
-    feature_dir: Path, *, feature: str, project_code: str, config: dict[str, Any],
+    feature_dir: Path, *, feature: str, project_code: str, employee_id: str, config: dict[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     selected: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
@@ -398,7 +412,8 @@ def scan_artifacts(
                         diagnostics.append({"path": relative, "stage": node, "size": size,
                                             "reason": "file_size_exceeds_5mb"})
                         continue
-                    artifact = snapshot_file_artifact(feature_dir, path, project_code=project_code, feature=feature)
+                    artifact = snapshot_file_artifact(feature_dir, path, project_code=project_code,
+                                                      feature=feature, employee_id=employee_id)
                 except OSError as exc:
                     selected.pop(relative, None)
                     diagnostics.append({"path": relative, "stage": node, "reason": "file_unreadable", "error": str(exc)})
@@ -420,7 +435,8 @@ def needs_upload(artifact: dict[str, Any], status: dict[str, Any]) -> bool:
     ))
 
 
-def catalog_content(feature: str, selected: dict[str, dict[str, Any]], status: dict[str, Any]) -> dict[str, Any]:
+def catalog_content(feature: str, employee_id: str, selected: dict[str, dict[str, Any]],
+                    status: dict[str, Any]) -> dict[str, Any]:
     entries = []
     for path, artifact in selected.items():
         published = status["published_artifacts"].get(path)
@@ -436,14 +452,15 @@ def catalog_content(feature: str, selected: dict[str, dict[str, Any]], status: d
             # If an update failed, these still describe the last uploaded version.
             "size": published["size"], "sha256": published["sha256"],
         })
-    return {"schema_version": CATALOG_SCHEMA_VERSION, "feature_id": feature, "artifacts": entries}
+    return {"schema_version": CATALOG_SCHEMA_VERSION, "feature_id": feature,
+            "employee_id": employee_id, "artifacts": entries}
 
 
 def write_artifact_catalog(
-    feature_dir: Path, *, feature: str, project_code: str,
+    feature_dir: Path, *, feature: str, project_code: str, employee_id: str,
     selected: dict[str, dict[str, Any]], status: dict[str, Any],
 ) -> dict[str, Any]:
-    content = catalog_content(feature, selected, status)
+    content = catalog_content(feature, employee_id, selected, status)
     path = feature_dir / CATALOG_FILE_NAME
     relative_artifact_path(feature_dir, path)
     try:
@@ -452,7 +469,8 @@ def write_artifact_catalog(
         existing = None
     if not isinstance(existing, dict) or {k: v for k, v in existing.items() if k != "generated_at"} != content:
         atomic_write_json(path, dict(content, generated_at=utc_now()))
-    artifact = snapshot_file_artifact(feature_dir, path, project_code=project_code, feature=feature)
+    artifact = snapshot_file_artifact(feature_dir, path, project_code=project_code,
+                                      feature=feature, employee_id=employee_id)
     return dict(artifact, content_digest=json_digest(content))
 
 
@@ -489,8 +507,9 @@ def preflight_error(artifact: dict[str, Any]) -> str:
 class SyncSession:
     """One admitted invocation, sharing its config, file scan and durable state."""
 
-    def __init__(self, workspace: Path, feature: str, project_code: str):
+    def __init__(self, workspace: Path, feature: str, project_code: str, employee_id: str):
         validate_path_component(project_code, "PROJECT_CODE")
+        validate_employee_id(employee_id)
         self.config = load_config()
         record = current_feature_record(workspace, feature)
         self.checkpoint = record["checkpoint"]
@@ -501,6 +520,8 @@ class SyncSession:
         if self.feature_dir is None:
             raise ValueError(f"Feature 目录不存在: {feature}")
         self.feature, self.project_code = feature, project_code
+        self.employee_id = employee_id
+        self.upload_base = object_directory(project_code, feature, employee_id, ".")
         self.nodes = configured_nodes(self.config)
         self.config_digest = config_digest(self.config)
         self.selected, self.diagnostics = self.scan()
@@ -515,15 +536,28 @@ class SyncSession:
         return self._status
 
     def save(self) -> None:
+        self.status["version"] = 2
         write_status(self.feature_dir, self.status)
+
+    @property
+    def publication(self) -> dict[str, Any]:
+        target = self.status["targets"].setdefault(self.upload_base, {
+            "employee_id": self.employee_id, "published_artifacts": {},
+        })
+        if (not isinstance(target, dict) or target.get("employee_id") != self.employee_id
+                or not isinstance(target.get("published_artifacts"), dict)
+                or ("catalog" in target and not isinstance(target["catalog"], dict))):
+            raise ValueError(f"同步目标状态非法: {self.upload_base}")
+        return target
 
     def scan(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
         return scan_artifacts(self.feature_dir, feature=self.feature,
-                              project_code=self.project_code, config=self.config)
+                              project_code=self.project_code, employee_id=self.employee_id, config=self.config)
 
     def catalog(self) -> dict[str, Any]:
         return write_artifact_catalog(self.feature_dir, feature=self.feature,
-                                      project_code=self.project_code, selected=self.selected, status=self.status)
+                                      project_code=self.project_code, employee_id=self.employee_id,
+                                      selected=self.selected, status=self.publication)
 
     def report_diagnostics(self) -> None:
         if self._diagnostics_reported:
@@ -531,17 +565,32 @@ class SyncSession:
         self._diagnostics_reported = True
         for item in self.diagnostics:
             append_sync_log(self.feature_dir, feature=self.feature, status="skipped",
+                            employee_id=self.employee_id, upload_base=self.upload_base,
                             message=f"{item['path']}: {item['reason']}")
         if self.diagnostics:
             print("跳过产物: " + json.dumps(self.diagnostics, ensure_ascii=False), file=sys.stderr)
 
     def pending_event_ids(self) -> list[str]:
         return [key for key, event in self.status["events"].items()
-                if isinstance(event, dict) and event.get("status") in {"pending", "failed"}]
+                if isinstance(event, dict) and self.matches_target(event)
+                and event.get("status") in {"pending", "failed"}]
+
+    def matches_target(self, event: dict[str, Any]) -> bool:
+        return (event.get("feature") == self.feature
+                and event.get("employee_id") == self.employee_id
+                and event.get("upload_base") == self.upload_base)
+
+    def event_for_target(self, event_id: str) -> dict[str, Any]:
+        event = self.status["events"].get(event_id)
+        if not isinstance(event, dict) or event.get("feature") != self.feature:
+            raise ValueError(f"同步事件不存在或 Feature 不匹配: {event_id}")
+        if not self.matches_target(event):
+            raise ValueError(f"同步事件工号或上传目录不匹配: {event_id}；旧未绑定事件请通过 --sync 重新准备")
+        return event
 
     def changed_artifacts(self, stage: str) -> list[dict[str, Any]]:
         return [item for item in self.selected.values()
-                if item["stage"] == stage and needs_upload(item, self.status)]
+                if item["stage"] == stage and needs_upload(item, self.publication)]
 
     def set_snapshot(self, event: dict[str, Any], artifacts: list[dict[str, Any]]) -> None:
         event.update(config_digest=self.config_digest, config_snapshot=self.config,
@@ -557,6 +606,7 @@ class SyncSession:
             event_id = f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex[:8]}"
             events[event_id] = {
                 "event_id": event_id, "feature": self.feature, "source_stage": stage, "kind": kind,
+                "employee_id": self.employee_id, "upload_base": self.upload_base,
                 "status": "pending", "attempts": 0, "created_at": utc_now(),
             }
         self.set_snapshot(events[event_id], artifacts)
@@ -571,17 +621,17 @@ class SyncSession:
             if changed:
                 event_ids.append(self.queue_event(node, changed))
         catalog = self.catalog()
-        if event_ids or catalog_needs_upload(catalog, self.status):
+        if event_ids or catalog_needs_upload(catalog, self.publication):
             event_ids.append(self.queue_event(CATALOG_STAGE, [catalog], kind="catalog"))
         return list(dict.fromkeys(event_ids))
 
     def record_uploaded(self, artifact: dict[str, Any], stage: str) -> None:
-        self.status["published_artifacts"][artifact["path"]] = {
+        self.publication["published_artifacts"][artifact["path"]] = {
             "stage": stage, "sha256": artifact["sha256"], "size": artifact["size"],
             "object_key": artifact_object_key(artifact), "synced_at": utc_now(),
         }
         if "content_digest" in artifact:
-            self.status["catalog"] = {
+            self.publication["catalog"] = {
                 "content_digest": artifact["content_digest"],
                 "object_key": artifact_object_key(artifact), "synced_at": utc_now(),
             }
@@ -601,11 +651,12 @@ class SyncSession:
             print(f"artifact sync success: event_id={event_id} files={len(event['artifacts'])}")
         self.save()
         append_sync_log(self.feature_dir, feature=self.feature, event_id=event_id, status=event["status"],
+                        employee_id=self.employee_id, upload_base=self.upload_base,
                         message=error or skipped or f"{event['source_stage']} 同步完成")
         return int(bool(error))
 
     def execute_event(self, event_id: str, upload: Callable[[dict[str, Any]], tuple[bool, str]]) -> int:
-        event = self.status["events"][event_id]
+        event = self.event_for_target(event_id)
         event.update(status="pending", attempts=int(event.get("attempts", 0) or 0) + 1, updated_at=utc_now())
         for field in ("last_error", "skipped_reason", "synced_at"):
             event.pop(field, None)
@@ -620,7 +671,7 @@ class SyncSession:
                 # eligibility once at the end, not once for every node event.
                 self.selected, _ = self.scan()
                 catalog = self.catalog()
-                artifacts = [catalog] if catalog_needs_upload(catalog, self.status) else []
+                artifacts = [catalog] if catalog_needs_upload(catalog, self.publication) else []
             else:
                 artifacts = self.changed_artifacts(stage)
             self.set_snapshot(event, artifacts)
@@ -640,12 +691,9 @@ class SyncSession:
             return self.finish_event(event_id, error=f"产物同步失败: {exc}")
 
     def execute(self, event_ids: list[str], upload: Callable[[dict[str, Any]], tuple[bool, str]]) -> int:
-        events = self.status["events"]
         file_events, catalog_events = [], []
         for event_id in dict.fromkeys(event_ids):
-            event = events.get(event_id)
-            if not isinstance(event, dict) or event.get("feature") != self.feature:
-                raise ValueError(f"同步事件不存在或 Feature 不匹配: {event_id}")
+            event = self.event_for_target(event_id)
             (catalog_events if event.get("kind") == "catalog" else file_events).append(event_id)
         self.report_diagnostics()
         # Persist the catalog obligation before the first upload, including a

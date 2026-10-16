@@ -89,6 +89,7 @@ def upload_file(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Upload configured AutobizDevOps Feature artifacts")
     parser.add_argument("--feature", "-f", help="feature name; defaults to FEATURE_ID")
+    parser.add_argument("--employee-id", required=True, help="confirmed employee ID; preserved as a string")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--check", action="store_true", help="read-only admission and Feature directory check")
     action.add_argument("--sync", "--reconcile", dest="sync", action="store_true", help="sync configured artifacts (--reconcile is an alias)")
@@ -102,10 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         workspace = get_plugin_output_workspace()
         feature = resolve_env_feature(args.feature, required=True)
         project_code = str(os.environ.get("PROJECT_CODE") or "").strip()
-        session = SyncSession(workspace, feature, project_code)
+        session = SyncSession(workspace, feature, project_code, args.employee_id)
         if args.check:
             print(json.dumps({"feature": feature, "checkpoint": session.checkpoint,
-                              "feature_dir": str(session.feature_dir)}, ensure_ascii=False))
+                              "feature_dir": str(session.feature_dir), "employee_id": session.employee_id,
+                              "upload_base": session.upload_base}, ensure_ascii=False))
             return 0
         if args.event_id:
             event_ids = [args.event_id]
@@ -114,7 +116,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             event_ids = session.prepare()
         if args.prepare_only:
-            print(json.dumps({"feature": feature, "event_ids": event_ids, "uploaded": False}, ensure_ascii=False))
+            print(json.dumps({"feature": feature, "employee_id": session.employee_id,
+                              "upload_base": session.upload_base, "event_ids": event_ids,
+                              "uploaded": False}, ensure_ascii=False))
             return 0
         if not event_ids:
             print("没有待上传的产物或目录。")

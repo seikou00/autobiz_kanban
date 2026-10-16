@@ -70,7 +70,9 @@ class ArtifactSyncTest(unittest.TestCase):
         for paths in sync.configured_nodes(self.config).values():
             for pattern in paths:
                 self.write_artifact(SAMPLES.get(pattern, pattern))
+        self.employee_id = "001234"
         self.uploaded = []
+        self.upload_snapshots = []
         self.remote_catalogs = []
         self.failures = set()
         upload_patch = patch.object(cli, "upload_file", side_effect=self.upload)
@@ -99,6 +101,7 @@ class ArtifactSyncTest(unittest.TestCase):
     def upload(self, artifact):
         path = artifact["path"]
         self.uploaded.append(path)
+        self.upload_snapshots.append(copy.deepcopy(artifact))
         if path in self.failures:
             return False, f"test upload failure: {path}"
         if path == CATALOG:
@@ -106,14 +109,29 @@ class ArtifactSyncTest(unittest.TestCase):
         return True, ""
 
     def run_cli(self, *args, expected=0):
+        if "--employee-id" not in args:
+            args = (*args, "--employee-id", self.employee_id)
         self.stdout = io.StringIO()
         self.stderr = io.StringIO()
         with contextlib.redirect_stdout(self.stdout), contextlib.redirect_stderr(self.stderr):
             code = cli.main(list(args))
         self.assertEqual(code, expected, self.stderr.getvalue())
 
-    def status(self):
+    def upload_base(self, employee_id=None, project_code="P001"):
+        return f"{project_code}/DEV/Features/alpha/{employee_id or self.employee_id}"
+
+    def raw_status(self):
         return sync.read_status(self.feature_dir)
+
+    def status(self, employee_id=None, project_code="P001"):
+        # A convenience view for existing one-target assertions. State mutations
+        # must use raw_status() to retain every target and legacy history.
+        status = self.raw_status()
+        target = status.get("targets", {}).get(self.upload_base(employee_id, project_code), {})
+        view = {key: value for key, value in status.items() if key not in {"published_artifacts", "catalog"}}
+        view.update(target)
+        view.setdefault("published_artifacts", {})
+        return view
 
     def catalog(self):
         return json.loads((self.feature_dir / CATALOG).read_text(encoding="utf-8"))
@@ -123,6 +141,7 @@ class ArtifactSyncTest(unittest.TestCase):
 
     def reset_uploads(self):
         self.uploaded.clear()
+        self.upload_snapshots.clear()
         self.remote_catalogs.clear()
 
     def files(self):
@@ -387,6 +406,8 @@ class ArtifactSyncTest(unittest.TestCase):
         result = json.loads(self.stdout.getvalue())
         self.assertEqual(result["checkpoint"], "code_done")
         self.assertEqual(Path(result["feature_dir"]), self.feature_dir.resolve())
+        self.assertEqual(result["employee_id"], self.employee_id)
+        self.assertEqual(result["upload_base"], self.upload_base())
 
     def test_all_entrypoints_reject_disallowed_checkpoint_without_writing(self):
         actions = [("--check",), ("--sync",), ("--sync", "--prepare-only"), ("--reconcile",),
@@ -413,7 +434,7 @@ class ArtifactSyncTest(unittest.TestCase):
     def test_direct_preparation_also_checks_admission(self):
         self.set_checkpoint("code_in_progress")
         with self.assertRaisesRegex(ValueError, "code_done"):
-            sync.SyncSession(self.workspace, "alpha", "P001").prepare()
+            sync.SyncSession(self.workspace, "alpha", "P001", self.employee_id).prepare()
         self.assertFalse((self.feature_dir / sync.STATUS_FILE_NAME).exists())
 
     def test_workflow_and_checkpoint_changes_do_not_change_scope(self):
@@ -470,8 +491,8 @@ class ArtifactSyncTest(unittest.TestCase):
 
     def test_legacy_published_records_do_not_force_file_reupload(self):
         self.run_cli("--sync")
-        status = self.status()
-        status.pop("catalog")
+        status = self.raw_status()
+        status["targets"][self.upload_base()].pop("catalog")
         for event in status["events"].values():
             event.pop("config_digest", None)
             event.pop("config_snapshot", None)
@@ -487,7 +508,162 @@ class ArtifactSyncTest(unittest.TestCase):
         with patch.dict(os.environ, {"PROJECT_CODE": "P002"}):
             self.run_cli("--sync")
         self.assertEqual(set(self.uploaded), before)
-        self.assertTrue(all(p["object_key"].startswith("P002/") for p in self.status()["published_artifacts"].values()))
+        self.assertTrue(all(p["object_key"].startswith("P002/") for p in self.status(project_code="P002")["published_artifacts"].values()))
+
+    def test_root_nested_and_catalog_upload_paths_use_employee_subdirectory(self):
+        self.run_cli("--sync")
+        uploads = {artifact["path"]: artifact for artifact in self.upload_snapshots}
+        for path in ("PRD.md", "specs/example/spec.md", "prd_original/source.docx", CATALOG):
+            with self.subTest(path=path):
+                parent = Path(path).parent.as_posix()
+                expected = self.upload_base() + (f"/{parent}" if parent != "." else "")
+                self.assertEqual(uploads[path]["upload_path"], expected)
+                self.assertEqual(uploads[path]["file_name"], Path(path).name)
+        self.assertEqual(self.catalog()["employee_id"], "001234")
+        for path, record in self.status()["published_artifacts"].items():
+            self.assertEqual(record["object_key"], f"{self.upload_base()}/{path}")
+        for event in self.raw_status()["events"].values():
+            self.assertEqual(event["employee_id"], self.employee_id)
+            self.assertEqual(event["upload_base"], self.upload_base())
+            self.assertEqual(event["feature"], "alpha")
+
+    def test_switching_employees_keeps_independent_incremental_records(self):
+        self.run_cli("--sync")
+        expected_uploads = set(self.uploaded)
+        first_target = copy.deepcopy(self.raw_status()["targets"][self.upload_base()])
+        self.reset_uploads()
+        self.run_cli("--sync", "--employee-id", "005678")
+        self.assertEqual(set(self.uploaded), expected_uploads)
+        self.assertTrue(all(a["upload_path"].startswith(self.upload_base("005678"))
+                            for a in self.upload_snapshots))
+        self.assertEqual(self.catalog()["employee_id"], "005678")
+        self.assertEqual(self.raw_status()["targets"][self.upload_base()], first_target)
+        self.assertEqual(set(self.raw_status()["targets"]), {self.upload_base(), self.upload_base("005678")})
+        self.reset_uploads()
+        self.run_cli("--sync")
+        self.assertEqual(self.uploaded, [])
+        self.assertEqual(self.catalog()["employee_id"], self.employee_id)
+        self.assertEqual(set(self.entries()), expected_uploads - {CATALOG})
+
+    def test_new_employee_failed_file_cannot_use_other_employees_publication(self):
+        self.run_cli("--sync")
+        first_target = copy.deepcopy(self.raw_status()["targets"][self.upload_base()])
+        self.failures.add("plan.json")
+        self.reset_uploads()
+        self.run_cli("--sync", "--employee-id", "005678", expected=1)
+        self.assertNotIn("plan.json", self.entries())
+        self.assertNotIn("plan.json", self.status("005678")["published_artifacts"])
+        self.assertEqual(self.catalog()["employee_id"], "005678")
+        self.assertEqual(self.remote_catalogs[-1]["employee_id"], "005678")
+        self.assertEqual(self.raw_status()["targets"][self.upload_base()], first_target)
+        self.failures.clear()
+        self.reset_uploads()
+        self.run_cli("--retry-failed")
+        self.assertEqual(self.uploaded, [])
+        self.run_cli("--retry-failed", "--employee-id", "005678")
+        self.assertEqual(self.uploaded, ["plan.json", CATALOG])
+        self.assertIn("plan.json", self.entries())
+        self.assertEqual(self.raw_status()["targets"][self.upload_base()], first_target)
+
+    def test_new_employee_catalog_failure_does_not_replace_other_catalog_status(self):
+        self.run_cli("--sync")
+        first_target = copy.deepcopy(self.raw_status()["targets"][self.upload_base()])
+        self.failures.add(CATALOG)
+        self.reset_uploads()
+        self.run_cli("--sync", "--employee-id", "005678", expected=1)
+        self.assertNotIn("catalog", self.status("005678"))
+        self.assertEqual(self.raw_status()["targets"][self.upload_base()], first_target)
+        self.failures.clear()
+        self.reset_uploads()
+        self.run_cli("--retry-failed", "--employee-id", "005678")
+        self.assertEqual(self.uploaded, [CATALOG])
+        self.assertEqual(self.upload_snapshots[0]["upload_path"], self.upload_base("005678"))
+        self.assertEqual(self.raw_status()["targets"][self.upload_base()], first_target)
+
+    def test_pending_events_are_neither_reused_nor_retried_for_another_employee(self):
+        self.run_cli("--sync", "--prepare-only")
+        first_events = copy.deepcopy(self.raw_status()["events"])
+        first_id = next(iter(first_events))
+        self.run_cli("--retry-failed", "--employee-id", "005678")
+        self.assertEqual(self.uploaded, [])
+        self.assertEqual(self.raw_status()["events"], first_events)
+        self.run_cli("--event-id", first_id, "--employee-id", "005678", expected=1)
+        self.assertEqual(self.uploaded, [])
+        self.assertEqual(self.raw_status()["events"], first_events)
+        self.run_cli("--sync", "--prepare-only", "--employee-id", "005678")
+        combined = self.raw_status()["events"]
+        second_events = {key: event for key, event in combined.items() if key not in first_events}
+        self.assertEqual(len(second_events), len(first_events))
+        self.assertTrue(all(event["employee_id"] == "005678" for event in second_events.values()))
+        self.run_cli("--retry-failed")
+        self.assertTrue(self.uploaded)
+        self.assertTrue(all(a["upload_path"].startswith(self.upload_base()) for a in self.upload_snapshots))
+        events = self.raw_status()["events"]
+        self.assertTrue(all(events[key]["status"] == "success" for key in first_events))
+        self.assertEqual({key: events[key] for key in second_events}, second_events)
+
+    def test_legacy_publications_are_preserved_but_do_not_satisfy_new_target(self):
+        legacy = {
+            "version": 1,
+            "published_artifacts": {"PRD.md": {
+                "object_key": "P001/DEV/Features/alpha/PRD.md",
+                "sha256": sync.sha256_file(self.feature_dir / "PRD.md"),
+                "size": (self.feature_dir / "PRD.md").stat().st_size,
+            }},
+            "catalog": {"object_key": f"P001/DEV/Features/alpha/{CATALOG}", "sha256": "old-catalog"},
+            "events": {"old": {"event_id": "old", "feature": "alpha", "status": "pending",
+                               "source_stage": "dev.specs", "artifacts": [{"path": "proposal.md"}]}},
+        }
+        sync.write_status(self.feature_dir, legacy)
+        before = self.files()
+        self.run_cli("--check")
+        self.assertEqual(self.files(), before)
+        self.run_cli("--event-id", "old", expected=1)
+        self.assertEqual(self.uploaded, [])
+        self.run_cli("--retry-failed")
+        self.assertEqual(self.uploaded, [])
+        self.run_cli("--sync")
+        expected = {SAMPLES.get(p, p) for paths in sync.configured_nodes(self.config).values() for p in paths}
+        self.assertEqual(set(self.uploaded), expected | {CATALOG})
+        current = self.raw_status()
+        self.assertEqual(current["version"], 2)
+        self.assertEqual(current["published_artifacts"], legacy["published_artifacts"])
+        self.assertEqual(current["catalog"], legacy["catalog"])
+        self.assertEqual(current["events"]["old"], legacy["events"]["old"])
+        self.assertEqual(set(current["targets"]), {self.upload_base()})
+        self.assertEqual(set(self.status()["published_artifacts"]), expected | {CATALOG})
+
+    def test_employee_id_is_required_for_every_cli_action(self):
+        before = self.files()
+        actions = [("--check",), ("--sync",), ("--sync", "--prepare-only"), ("--reconcile",),
+                   ("--retry-failed",), ("--drain-outbox",), ("--event-id", "old")]
+        for args in actions:
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main(list(args))
+                self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.uploaded, [])
+
+    def test_invalid_employee_ids_are_rejected_without_writes(self):
+        before = self.files()
+        for employee_id in ("", ".", "..", "../001", "001/2", "001\\2", " 001", "001 ", "中", "00.1", "001\n"):
+            with self.subTest(employee_id=employee_id):
+                self.run_cli("--sync", "--employee-id", employee_id, expected=1)
+                with self.assertRaises(ValueError):
+                    sync.SyncSession(self.workspace, "alpha", "P001", employee_id)
+                self.assertEqual(self.files(), before)
+        self.assertEqual(self.uploaded, [])
+
+    def test_employee_id_allows_ascii_letters_digits_underscore_and_hyphen(self):
+        before = self.files()
+        for employee_id in ("000123", "Ab_01-2"):
+            self.run_cli("--check", "--employee-id", employee_id)
+            result = json.loads(self.stdout.getvalue())
+            self.assertEqual(result["employee_id"], employee_id)
+            self.assertEqual(result["upload_base"], self.upload_base(employee_id))
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.uploaded, [])
 
     def test_config_errors_and_escaping_paths_do_not_write(self):
         invalid_configs = [[], {}, {"allowedCheckpoints": [], "stages": {"biz": {}, "dev": {}}}]
@@ -528,11 +704,11 @@ class ArtifactSyncTest(unittest.TestCase):
 
     def test_preflight_detects_changed_content(self):
         path = self.feature_dir / "proposal.md"
-        artifact = sync.snapshot_file_artifact(self.feature_dir, path, project_code="P001", feature="alpha")
+        artifact = sync.snapshot_file_artifact(self.feature_dir, path, project_code="P001", feature="alpha", employee_id=self.employee_id)
         self.write_artifact("proposal.md", "new bytes")
         self.assertIn("同步快照不一致", sync.preflight_error(artifact))
 
-    def test_legacy_directory_status_migration(self):
+    def test_legacy_directory_status_migration_preserves_unbound_events(self):
         legacy = self.feature_dir / "artifact-sync"
         legacy.mkdir()
         status = sync.default_status()
@@ -545,9 +721,14 @@ class ArtifactSyncTest(unittest.TestCase):
         (legacy / "outbox.ndjson").write_text("{}\n", encoding="utf-8")
         self.write_artifact("outside-config.md")
         self.run_cli("--retry-failed")
-        self.assertEqual(self.uploaded, ["PRD.md", "prd_original/source.docx", "sources/SRC-001.md", CATALOG])
-        self.assertEqual(self.status()["events"]["old"]["source_stage"], "biz.prd")
+        self.assertEqual(self.uploaded, [])
+        old = self.raw_status()["events"]["old"]
+        self.assertEqual(old["status"], "pending")
+        self.assertNotIn("employee_id", old)
+        self.assertNotIn("upload_base", old)
         self.assertFalse(legacy.exists())
+        self.run_cli("--event-id", "old", expected=1)
+        self.assertEqual(self.uploaded, [])
 
     def test_skill_entrypoint_works_without_board_or_hook_entrypoints_from_other_cwd(self):
         plugin = self.root / "isolated-plugin"
@@ -563,7 +744,7 @@ class ArtifactSyncTest(unittest.TestCase):
         environment.pop("PYTHONPATH", None)
         for entry in ("skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py",):
             for args in (["--check"], ["--sync", "--prepare-only"]):
-                result = subprocess.run([sys.executable, "-B", str(plugin / entry), *args], cwd=self.root,
+                result = subprocess.run([sys.executable, "-B", str(plugin / entry), *args, "--employee-id", self.employee_id], cwd=self.root,
                                         env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIsInstance(json.loads(result.stdout), dict)
@@ -709,11 +890,14 @@ class ArtifactSyncTest(unittest.TestCase):
         commands = re.findall(r"```bash\n(.*?)```", document, re.DOTALL)
         self.assertTrue(commands)
         for command in commands:
-            expanded = command.replace("${pluginPath}", str(ROOT)).replace("${feature}", "alpha")
+            expanded = (command.replace("${pluginPath}", str(ROOT)).replace("${feature}", "alpha")
+                        .replace("${employee_id}", self.employee_id))
             words = shlex.split(expanded.replace("\\\n", " "))
             self.assertEqual(words[:3], ["python", "-X", "utf8"])
             self.assertEqual(Path(words[3]), SCRIPTS / "sync_artifacts.py")
             args = words[4:]
+            self.assertIn("--employee-id", args)
+            self.assertEqual(args[args.index("--employee-id") + 1], self.employee_id)
             if "--prepare-only" in args:
                 self.write_artifact("proposal.md", "pending change from documented preparation")
             before = self.files()
@@ -755,7 +939,7 @@ class ArtifactSyncTest(unittest.TestCase):
                      ["--retry-failed", "--prepare-only"], ["--sync", "--workspace", str(self.workspace)]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as raised:
-                    cli.main(args)
+                    cli.main([*args, "--employee-id", self.employee_id])
                 self.assertEqual(raised.exception.code, 2)
         self.assertEqual(self.files(), before)
         self.assertEqual(self.uploaded, [])
