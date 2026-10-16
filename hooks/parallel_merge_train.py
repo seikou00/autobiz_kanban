@@ -29,6 +29,7 @@ from hooks.parallel_runtime import append_event, load_manifest, mergeable_batche
 from hooks.parallel_repair import create_repair_batch
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
+from hooks.merge_resolution_context import prepare_context
 from hooks.merge_resolution import (
     PLATFORM_EXCLUDE, business_status, candidate_binding, git as resolution_git,
     git_output, has_conflict_markers, merge_parents, outside_diff_digest, resolution_files,
@@ -775,20 +776,24 @@ def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, re
             outside = outside_diff_digest(path, files)
             if previous and (previous.get("parents") != parents or previous.get("outsideDiffDigest") != outside):
                 raise ValueError("candidate_resolution_git_state_changed")
-            if attempt_id and previous.get("status") == "running" and previous.get("attemptId") == attempt_id:
-                # Empty-response retries repeat the same preparation command.
-                # They must not consume another model-edit attempt.
-                return {
-                    "success": True, "status": "resolution_required", "worktreePath": str(path),
-                    "conflictedFiles": files, "repositoryRef": repository_ref, "wave": wave,
-                    "attempts": context.attempts, "reused": True,
-                }
-            if context.attempts >= maximum:
+            same_attempt = bool(attempt_id and previous.get("status") == "running" and previous.get("attemptId") == attempt_id)
+            if not same_attempt and context.attempts >= maximum:
                 if previous:
                     previous["status"] = "exhausted"
                     record["status"] = "needs_resolution"
                     save_manifest(workspace, feature, run_id, manifest)
                 raise ValueError("max_resolution_attempts_exceeded")
+            locations = prepare_context(workspace, feature, run_id, manifest, record, path, files, parents)
+            record["resolutionContext"] = locations
+            if attempt_id and previous.get("status") == "running" and previous.get("attemptId") == attempt_id:
+                # Empty-response retries repeat the same preparation command.
+                # They must not consume another model-edit attempt.
+                save_manifest(workspace, feature, run_id, manifest)
+                return {
+                    "success": True, "status": "resolution_required", "worktreePath": str(path),
+                    "conflictedFiles": files, "repositoryRef": repository_ref, "wave": wave,
+                    "attempts": context.attempts, "reused": True, **locations,
+                }
             message = build_commit_message(manifest.get("taskCardId"), f"解决冲突 {', '.join(context.batch_ids)}")
             context.attempts += 1
             record["conflictContext"]["attempts"] = context.attempts
@@ -801,7 +806,7 @@ def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, re
             return {
                 "success": True, "status": "resolution_required", "worktreePath": str(path),
                 "conflictedFiles": files, "repositoryRef": repository_ref, "wave": wave,
-                "attempts": context.attempts,
+                "attempts": context.attempts, **locations,
             }
         except (OSError, ValueError) as exc:
             return {"success": False, "status": "needs_resolution", "error": str(exc), "worktreePath": record.get("worktreePath")}

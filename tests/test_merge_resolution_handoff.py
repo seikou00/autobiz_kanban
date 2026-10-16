@@ -27,7 +27,14 @@ def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 @contextlib.contextmanager
-def conflicted_candidate(filename: str = "src/service.py", maximum: int = 2):
+def conflicted_candidate(filename: str = "src/service.py", maximum: int = 2, scenario: str = "modify"):
+    def content(side):
+        if scenario == "binary":
+            return {"base": b"base\0bytes\xff", "main": b"main\0bytes\xfe", "delivery": b"delivery\0bytes\xff"}[side]
+        if scenario == "multi-hunk":
+            return (f"start = '{side}'\n" + "unchanged\n" * 20 + f"end = '{side}'\n").encode()
+        return f"value = '{side}'\n".encode()
+
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         repo = root / "business"
@@ -36,19 +43,28 @@ def conflicted_candidate(filename: str = "src/service.py", maximum: int = 2):
         git(repo, "init", "-b", "main")
         git(repo, "config", "user.name", "Merge Test")
         git(repo, "config", "user.email", "merge@example.com")
+        if scenario == "multi-hunk":
+            git(repo, "config", "merge.conflictStyle", "diff3")
         source = repo / filename
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text("value = 'base'\n", encoding="utf-8")
+        if scenario != "add-add":
+            source.write_bytes(content("base"))
         (repo / "clean.txt").write_text("base\n", encoding="utf-8")
         git(repo, "add", ".")
         git(repo, "commit", "-m", "base")
         git(repo, "checkout", "-b", "delivery")
-        source.write_text("value = 'delivery'\n", encoding="utf-8")
+        source.write_bytes(content("delivery"))
         (repo / "clean.txt").write_text("auto-merged delivery\n", encoding="utf-8")
-        git(repo, "commit", "-am", "delivery")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "delivery")
         delivery = git(repo, "rev-parse", "HEAD").stdout.strip()
         git(repo, "checkout", "main")
-        source.write_text("value = 'main'\n", encoding="utf-8")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        if scenario == "delete-modify":
+            source.unlink()
+        else:
+            source.write_bytes(content("main"))
+        git(repo, "add", ".")
         git(repo, "commit", "-am", "main update")
         base = git(repo, "rev-parse", "HEAD").stdout.strip()
         candidate, branch = _candidate_paths(workspace, "feature", "run", "default", 1)
@@ -64,7 +80,8 @@ def conflicted_candidate(filename: str = "src/service.py", maximum: int = 2):
                 "baseSha": base, "batchIds": ["B001"], "conflictedFiles": [filename],
                 "candidateWorktree": str(candidate), "repositoryRef": "default", "wave": 1,
                 "attempts": 0, "taskCardId": "Z990692-294",
-                "conflictMarkers": {filename: (candidate / filename).read_text(encoding="utf-8")},
+                "conflictMarkers": {filename: (candidate / filename).read_text(encoding="utf-8", errors="replace")}
+                if (candidate / filename).is_file() else {},
             },
         }
         manifest = {
@@ -87,6 +104,150 @@ def complete(workspace: Path):
 
 
 class MergeResolutionHandoffTest(unittest.TestCase):
+    def test_context_provides_exact_paths_three_way_snapshots_and_business_references(self):
+        with conflicted_candidate("src/申请书 [单笔].py") as (workspace, repo, candidate, filename, base, delivery):
+            manifest = load_manifest(workspace, "feature", "run")
+            evidence_path = workspace / "stage evidence.json"
+            evidence_path.write_text('{"evidenceId":"review-001"}')
+            manifest["batches"] = {"B001": {"taskIds": ["T004"], "stageStates": {
+                "review": {"status": "passed", "evidenceIds": ["review-001"], "evidencePath": str(evidence_path)}}},
+                "B000": {"taskIds": ["T001"]}}
+            ancestor = git(repo, "rev-parse", base + "^").stdout.strip()
+            manifest["mergeTrains"]["default:wave-000"] = {
+                "status": "promoted", "repositoryRef": "default", "batchIds": ["B000"],
+                "baseSha": ancestor, "candidateSha": base}
+            save_manifest(workspace, "feature", "run", manifest)
+            plan = workspace / ".autobizdevops/features/feature/plans/B001/plan.json"
+            plan.parent.mkdir(parents=True)
+            plan.write_text(json.dumps({"tasks": [{"id": "T004", "goal": "单笔下载", "acceptanceCriteria": ["保留鉴权"]}]}))
+            prepared = prepare(workspace)
+            self.assertTrue(prepared["success"], prepared)
+            index = json.loads(Path(prepared["contextPath"]).read_bytes())
+            self.assertEqual(Path(prepared["manifestPath"]), Path(prepared["runDir"]) / "manifest.json")
+            self.assertEqual(index["identity"]["parents"], [base, delivery])
+            entry = index["files"][0]
+            self.assertEqual(entry["candidatePath"], str((candidate / filename).resolve()))
+            for side, expected in (("base", "base"), ("ours", "main"), ("theirs", "delivery")):
+                self.assertEqual(Path(entry["sides"][side]["snapshotPath"]).read_text(), f"value = '{expected}'\n")
+            self.assertNotEqual(entry["sides"]["base"]["blobSha"], entry["sides"]["ours"]["blobSha"])
+            self.assertEqual(len(entry["hunks"]), 1)
+            self.assertIn("<<<<<<<", json.loads(Path(entry["hunksPath"]).read_text())[0]["content"])
+            changes = Path(entry["changesPath"]).read_text()
+            self.assertIn("+++ ours", changes)
+            self.assertIn("+++ theirs", changes)
+            business = json.loads(Path(index["businessContextPath"]).read_text())
+            self.assertEqual(business["oursRelatedBatchIds"], ["B000"])
+            incoming = business["batches"]["B001"]
+            self.assertEqual(incoming["taskIds"], ["T004"])
+            self.assertEqual(incoming["planSnapshot"]["tasks"][0]["goal"], "单笔下载")
+            self.assertEqual(incoming["stageEvidence"][0]["evidencePath"], str(evidence_path))
+            self.assertEqual(business["batches"]["B000"]["planStatus"], "missing")
+            self.assertFalse(Path(prepared["contextPath"]).is_relative_to(candidate.resolve()))
+
+    def test_context_reuses_original_snapshots_and_keeps_partial_edits(self):
+        with conflicted_candidate() as (workspace, _, candidate, filename, _, _):
+            first = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="immediate")
+            index_bytes = Path(first["contextPath"]).read_bytes()
+            (candidate / filename).write_text("partially resolved\n")
+            repeated = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="immediate")
+            self.assertTrue(repeated["success"], repeated)
+            self.assertEqual(first["contextDigest"], repeated["contextDigest"])
+            self.assertEqual(Path(first["contextPath"]).read_bytes(), index_bytes)
+            final = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="final")
+            self.assertEqual(first["contextPath"], final["contextPath"])
+            self.assertEqual(final["attempts"], 2)
+            self.assertEqual((candidate / filename).read_text(), "partially resolved\n")
+
+    def test_missing_or_modified_context_fails_without_rebuilding_it(self):
+        for damage in ("missing-index", "modified-index", "modified-snapshot", "wrong-identity"):
+            with self.subTest(damage=damage), conflicted_candidate() as (workspace, _, _, _, _, _):
+                first = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="same")
+                index_path = Path(first["contextPath"])
+                index = json.loads(index_path.read_bytes())
+                if damage == "missing-index":
+                    index_path.unlink()
+                elif damage == "modified-index":
+                    index_path.write_text("{}")
+                elif damage == "modified-snapshot":
+                    Path(index["files"][0]["sides"]["ours"]["snapshotPath"]).write_text("tampered")
+                else:
+                    manifest = load_manifest(workspace, "feature", "run")
+                    manifest["mergeTrains"]["default:wave-001"]["resolutionContext"]["identityDigest"] = "wrong"
+                    save_manifest(workspace, "feature", "run", manifest)
+                repeated = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="same")
+                self.assertFalse(repeated["success"], repeated)
+                self.assertIn("candidate_context_", repeated["error"])
+
+    def test_context_marks_missing_sides_and_preserves_binary_bytes(self):
+        for scenario, absent in (("add-add", "base"), ("delete-modify", "ours"), ("binary", None)):
+            with self.subTest(scenario=scenario), conflicted_candidate(scenario=scenario) as (workspace, _, _, _, _, _):
+                prepared = prepare(workspace)
+                self.assertTrue(prepared["success"], prepared)
+                index = json.loads(Path(prepared["contextPath"]).read_bytes())
+                entry = index["files"][0]
+                if absent:
+                    self.assertEqual(entry["sides"][absent], {"exists": False, "snapshotPath": None})
+                else:
+                    self.assertFalse(entry["sides"]["ours"]["textUtf8"])
+                    self.assertEqual(Path(entry["sides"]["ours"]["snapshotPath"]).read_bytes(), b"main\0bytes\xfe")
+                business = json.loads(Path(index["businessContextPath"]).read_bytes())
+                self.assertEqual(business["oursTraceStatus"], "unavailable")
+                self.assertEqual(business["batches"]["B001"]["planStatus"], "missing")
+
+    def test_rebuilt_candidate_gets_new_context_without_replacing_old_snapshots(self):
+        with conflicted_candidate() as (workspace, _, candidate, filename, _, _):
+            first = prepare(workspace)
+            original = Path(first["contextPath"]).read_bytes()
+            git(candidate, "merge", "--abort")
+            (candidate / filename).write_text("value = 'new main'\n")
+            git(candidate, "commit", "-am", "advance candidate base")
+            new_base = git(candidate, "rev-parse", "HEAD").stdout.strip()
+            git(candidate, "merge", "--no-ff", "-m", "retry", "delivery", check=False)
+            manifest = load_manifest(workspace, "feature", "run")
+            record = manifest["mergeTrains"]["default:wave-001"]
+            # A rebuild creates a fresh candidate record, not an editing retry.
+            record.pop("resolutionContext")
+            record.pop("resolution")
+            record["baseSha"] = new_base
+            record["conflictContext"].update({"baseSha": new_base, "attempts": 0,
+                "conflictMarkers": {filename: (candidate / filename).read_text()}})
+            save_manifest(workspace, "feature", "run", manifest)
+            rebuilt = prepare(workspace)
+            self.assertTrue(rebuilt["success"], rebuilt)
+            self.assertNotEqual(first["contextPath"], rebuilt["contextPath"])
+            self.assertEqual(Path(first["contextPath"]).read_bytes(), original)
+
+    def test_context_indexes_multiple_hunks(self):
+        with conflicted_candidate(scenario="multi-hunk") as (workspace, _, _, _, _, _):
+            prepared = prepare(workspace)
+            index = json.loads(Path(prepared["contextPath"]).read_bytes())
+            entry = index["files"][0]
+            hunks = json.loads(Path(entry["hunksPath"]).read_bytes())
+            self.assertEqual([(h["startLine"], h["endLine"]) for h in hunks], [(1, 7), (28, 34)])
+            self.assertIn("|||||||", hunks[0]["content"])
+            self.assertIn("start = 'delivery'", hunks[0]["content"])
+            self.assertIn("end = 'main'", hunks[1]["content"])
+
+    def test_legacy_prepared_candidate_gets_full_context_without_losing_partial_edits(self):
+        from hooks.merge_resolution import outside_diff_digest
+
+        with conflicted_candidate(scenario="multi-hunk") as (workspace, _, candidate, filename, base, delivery):
+            manifest = load_manifest(workspace, "feature", "run")
+            record = manifest["mergeTrains"]["default:wave-001"]
+            record["resolution"] = {"status": "running", "files": [filename], "parents": [base, delivery],
+                                    "outsideDiffDigest": outside_diff_digest(candidate, [filename]), "attemptId": "legacy"}
+            record["conflictContext"]["attempts"] = 1
+            original = (candidate / filename).read_text()
+            partial = "start = 'merged'\n" + original.split(">>>>>>> delivery\n", 1)[1]
+            (candidate / filename).write_text(partial)
+            save_manifest(workspace, "feature", "run", manifest)
+            prepared = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="legacy")
+            self.assertTrue(prepared["success"], prepared)
+            self.assertEqual(prepared["attempts"], 1)
+            index = json.loads(Path(prepared["contextPath"]).read_bytes())
+            self.assertEqual(len(index["files"][0]["hunks"]), 2)
+            self.assertEqual((candidate / filename).read_text(), partial)
+
     def test_plugin_commits_unstaged_model_edits_and_preserves_auto_merged_files(self):
         with conflicted_candidate(maximum=1) as (workspace, repo, candidate, filename, base, delivery):
             self.assertEqual(prepare(workspace)["status"], "resolution_required")
@@ -242,6 +403,13 @@ class MergeResolutionHandoffTest(unittest.TestCase):
             prepared = subprocess.run([sys.executable, "-X", "utf8", script, "prepare-resolution", *arguments], capture_output=True, text=True)
             self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
             self.assertEqual(json.loads(prepared.stdout)["status"], "resolution_required")
+            packet = json.loads(prepared.stdout)
+            query = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / "hooks/query_json_fields.py"),
+                                    "--file", packet["contextPath"], "--field", "identity.parents",
+                                    "--field", "files[0].hunks", "--field", "businessContextPath"],
+                                   capture_output=True, text=True)
+            self.assertEqual(query.returncode, 0, query.stdout + query.stderr)
+            self.assertEqual(len(json.loads(query.stdout)["fields"]["files[0].hunks"]), 1)
             (candidate / filename).write_text("resolved\n")
             committed = subprocess.run([sys.executable, "-X", "utf8", script, "complete-resolution", *arguments], capture_output=True, text=True)
             self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)

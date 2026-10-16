@@ -53,6 +53,10 @@ python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace 
 python -X utf8 "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-created --json
 ```
 
+清单中的只读准备完成后，先按下文“执行单个任务”协议执行当前 TASK 的 `task_runner.py start`，确认成功并保存真实 `runId`，再继续执行会写入代码工作树的 Route 步骤。首次实现必须先 start；修复或恢复必须先由 `start-task-repair` / `resume` 成功建立同一 TASK 的活动 run。Route 清单完成和 parser 读取不是 start 的前置条件。
+
+start 前只允许读取 HTML、项目资料和源码、解析 Route、创建清单与确认脚本参数；不得运行 `prepare_html_analysis.py`，不得生成 `.frontend/html-analysis` / `.frontend/html-input`，不得复制或覆盖项目 assets。分析产物和资源写入也是工作树变更，必须发生在 start 成功后，不能当作只读探索。
+
 4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
    - `absolute-html` 只能由 `with-absolute-html/SKILL.md` 转交 `references/html-parser.md`
    - `standard-html` 只能由 `with-standard-html/SKILL.md` 转交 `references/standard-html-parser.md`
@@ -170,7 +174,7 @@ python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
 
 ### Batch 上下文
 
-每个 Batch Agent 只读取当前 Batch 的 Task 契约与引用产物，并在其插件创建的原生 Git Worktree 中自行定位实现入口、既有模式和相关生产代码。不得跨 Batch 读取完整 Task 契约，也不得把某个 Batch 的仓库认知持久化为共享缓存；Worktree 的冻结基线和 Task Run 的 Git 快照是并行执行所需的唯一状态边界。
+每个 Batch Agent 只读取当前 Batch 的 Task 契约与引用产物，并在其插件创建的原生 Git Worktree 中自行定位实现入口、既有模式和相关生产代码。不得跨 Batch 枚举完整 Task 契约。API 签名、用法和依赖解析通过 engineering_context Runtime 保存到同一 Feature/仓库的公共事实区，其他 Batch Code、Review 和 UTest 可复用内容有效的事实；业务状态与 Evidence 仍按 Batch 隔离。TASK start 前准备也先 lookup，缺失部分用准确来源 resolve/query；写缓存不授权写业务源码。
 
 ###  选择下一个任务
 
@@ -178,7 +182,7 @@ python -X utf8 "${pluginPath}/hooks/rollback_stage.py" \
 
 ###  执行单个任务
 
-**固定命令顺序：`code_task_context` → runtime ignore 检查 → 定点阅读当前 Task scope 与真实入口 → `start` → 修改生产代码。`code_task_context` 和 `task_runner start` 都必须在业务代码改动前执行；后者会固化 Git 快照与 Task 契约。**
+**固定命令顺序：`code_task_context` → runtime ignore 检查 → 定点阅读当前 Task scope 与真实入口（前端含 Route 只读准备）→ `start` 成功 → 前端 HTML 分析、产物生成与资源处理（如适用）→ 修改生产代码。`code_task_context` 和 `task_runner start` 都必须在上述工作树写入前执行；后者会固化 Git 快照与 Task 契约。**
 
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。启动前必须确保每个业务仓库都通过 `.gitignore` 或 `.git/info/exclude` 忽略 `.cmbdevclaw/large_tool_results/`；runner 只校验该契约，不会代写业务仓库。未命中 ignore 时先配置窄规则，再执行 start。
 
@@ -192,7 +196,7 @@ python -X utf8 "${pluginPath}/hooks/code_task_context.py" --feature "${feature}"
 
 必须读取当前 task 的 `workspaceRef`、`goal`、`implementationPoints`、`testPoints`、`acceptanceCriteria`、`validationBoundary`、`verificationIntent`、`specRefs` 与 `designRefs`。Plan 提供交付结果、主要实现方向和测试关注点；实现文件、方法、模块和具体步骤由当前 Agent 结合真实代码决定。缺少业务引用、仓库归属或要点时回到 `/autodev-plan`，不要把文件或方法尚未确定误判为计划缺失。
 3. 改代码前，只在当前 Task 的 `scope`、入口点和 1-hop 依赖内阅读生产代码，识别项目分层、命名、错误处理、校验与日志风格，形成简短修改映射（依据、拟改生产文件、复用模式）再动手。可以只读既有测试理解行为契约，但不得在 Code 阶段创建、修改或执行测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
-4. context 返回 `startAllowed=true` 后，在修改业务代码前启动任务运行并保存 Git 快照：
+4. context 返回 `startAllowed=true` 后，在执行任何会写入代码工作树的前端脚本、资源处理或业务代码修改前启动任务运行并保存 Git 快照：
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
@@ -256,7 +260,7 @@ python -X utf8 "${pluginPath}/hooks/task_runner.py" finish-implementation --feat
 
 ### Review 后的 UTest 与模型修复
 
-固定 Workflow 在当前批次全部 TASK 为 `implemented` 后先草稿封存并执行只读 Review。Review 通过后直接在同一 Worktree 生成并执行 UTest（随后重新 `seal`），然后进入 `ready_to_candidate`。UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
+固定 Workflow 在当前批次全部 TASK 为 `implemented` 后先草稿封存并执行只读 Review。Review 通过后先调用 `parallel_batch_stage.py prepare-test`：当前前端 UTest 暂时禁用，插件按真实 `executionLane=frontend` 记录 `skipped` 和原因，不派发测试 Agent，不初始化测试环境、不生成测试资产、不执行测试或 UTest 收尾编译，也不为跳过创建额外封存提交。后端仍在同一 Worktree 生成并执行 UTest（随后重新 `seal`），然后进入 `ready_to_candidate`。后端 UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。前端跳过记录通过 `skippedUtests` 出现在最终报告，不得描述为测试通过；最终 B-E2E 继续执行。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
 
 `worktree_manager.py seal` 若遇到同一 linked worktree 的 `index.lock`，会先做有限次短暂重试；锁持续存在时，由插件仅清理 Git 为该 linked worktree 解析出的 `index.lock` 并重试原命令，成功则在 `indexLockRecoveries` 中留痕。受控清理后仍不能写入时才返回 `parallel_git_index_lock_busy` 或 `parallel_git_index_lock_recovery_failed`，以 `final-status pending` 释放租约，并由同一 `runId` 的 scheduler `resume` 重试该 Batch。
 
@@ -366,7 +370,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 在调用平台 `workflow` 前，必须把 launcher 返回的 `batchExecutionPlan` 展示给用户：逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集，并展示 `initialDispatch`。必须说明运行时不是整波屏障：每当一个 Batch 释放槽位，scheduler 都会从依赖已合并且与当前 active Batch 安全的任务中立即补位，直至 `maxParallel`；同仓库重叠写集和 `proto`/`global`/`integration` 特殊阶段仍会串行。`waves` 仅是 Plan 的兼容预览/审计分组，不代表实际等待边界。展示是执行前的可见性步骤，不额外等待确认，除非用户明确要求审批后再执行。
 
-无论一个或多个物理 Git 根，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`，且 `requiredAction` 为 `start_fixed_workflow` 或 `resume_fixed_workflow`，才使用 launcher 返回的固定脚本路径启动一次 Workflow。前者要求校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`；后者是用户明确要求继续运行时的人工恢复入口，即使 Plan 投影中的 Batch 已是 `failed`，也必须按 launcher 返回的同一 runId 和 `workflowArgs.resumeMode=manual` 恢复。完整的 `codeWorkspaces` 映射必须原样传入该 Workflow；它在同一个共享 scheduler run 中由 `parallel()` 启动固定数量的 dispatcher worker。每个 worker 一次执行一个 Batch，完成、失败或超时后立即刷新并补位；空闲 worker 在其他 Batch 运行时每 5 分钟刷新一次以发现新 ready 的 Batch。Review、UTest 等 stage 状态为 `running` 时也计入占槽。各 Batch 仍从自身映射的 Git 根创建原生 Worktree，并按仓库独立走 Merge Train；不得按 Git 根拆成多个平台 Workflow。全部 delivery 推广后，固定 Workflow 自己执行 B-E2E 和 evidence aggregate。launcher 会保留 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的 Feature 专属归档副本，并将同一 SHA 的启动副本复制到 `workflow_workspace/.cmbdevclaw/workflows/<feature>/`；返回的 `workflowScriptPath` 始终是后者，`workflowArtifactScriptPath` 是前者。不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
+无论一个或多个物理 Git 根，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`，且 `requiredAction` 为 `start_fixed_workflow` 或 `resume_fixed_workflow`，才使用 launcher 返回的固定脚本路径启动一次 Workflow。前者要求校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`；后者是用户明确要求继续运行时的人工恢复入口，即使 Plan 投影中的 Batch 已是 `failed`，也必须按 launcher 返回的同一 runId 和 `workflowArgs.resumeMode=manual` 恢复。完整的 `codeWorkspaces` 映射必须原样传入该 Workflow；它在同一个共享 scheduler run 中由 `parallel()` 启动固定数量的 dispatcher worker。每个 worker 一次执行一个 Batch，完成、失败或超时后立即刷新并补位；空闲 worker 在其他 Batch 运行时以 30 分钟轮询兜底，并在本地生命周期完成时立即唤醒。Review、UTest 等 stage 状态为 `running` 时也计入占槽。各 Batch 仍从自身映射的 Git 根创建原生 Worktree，并按仓库独立走 Merge Train；不得按 Git 根拆成多个平台 Workflow。全部 delivery 推广后，固定 Workflow 自己执行 B-E2E 和 evidence aggregate。launcher 会保留 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的 Feature 专属归档副本，并将同一 SHA 的启动副本复制到 `workflow_workspace/.cmbdevclaw/workflows/<feature>/`；返回的 `workflowScriptPath` 始终是后者，`workflowArtifactScriptPath` 是前者。不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
 
 调用平台顶层 `workflow` tool 前，先取得其已挂载会话工作路径并作为 `--workflow-workspace` 传给 launcher（默认值就是启动 launcher 的当前路径）。launcher 返回的 `workflowWorkspaceRoot` 必须等于该路径，且 `workflowScriptPath` 必须在其下；随后唯一允许的调用形式是 `scriptPath=launcher.workflowScriptPath` 且 `args=launcher.workflowArgs`（原生 JSON 对象，不得 `JSON.stringify`）。`workflowScriptRelativePath` 仅用于审计该脚本确实位于该 root 下，不得改用它重建绝对路径。若返回 root 与平台实际工作路径不一致，必须报告 `workflow_workspace_root_mismatch` 并停止；不得改用插件源码、业务仓库路径或内联脚本。
 
@@ -376,9 +380,10 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 - Workflow 启动时先执行 scheduler `ensure`：没有活动 run 时创建一个；已有交付物完整的活动 run 时复用同一个 runId；`needs_resolution` 或缺失已密封交付物时 fail-closed 并保留现场。随后 scheduler 选择依赖已经 `merged` 的 pending Batch，并在任一 Batch 完成后重新计算可运行集。
 - scheduler 按剩余 `maxParallel` 槽位派发任务：`proto`、`global`、`integration` 阶段逐 Batch 串行；普通 `parallel` 阶段依据真实依赖、仓库绑定与调度策略选择任务；Plan v2 不预报写集，隔离工作树允许同仓库任务乐观并行，真实文件冲突交给 Merge Train。只要有槽位，就立即补充符合条件的任务，不等待不相关 Batch 完成。插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner。
-- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。任何由真实失败测试锚定的 `source_bug`（无论 Review 或 UTest 首次发现）都必须回到同一 Batch 的受控 production repair，再重新 Review 并重跑原 UTest 命令；不得作为 deferred finding 推广。测试自身、fixture、mock、测试配置问题仅允许在 UTest 修复一次并重跑一次；外部 environment/timeout 必须保留 Evidence、阻断该 Batch，绝不带病合并。
+- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查生产实现。固定 Batch Workflow 的生产问题回到同一 Worktree 一次性 Rework，完成后端纯编译、封存和 `single_repair_accepted` 登记后直接继续 UTest，不再派发第二次 Review；UTest 来源重跑原失败命令。测试/fixture/mock 问题只在 UTest 修复一次；耗尽与外部环境失败按 Runtime 的真实 deferred/阻断结果收口，不把 deferred 当通过。独立手动修复仍按其自身阶段契约执行。
 - 每个 `ready_to_candidate` Batch 都可立即由 `parallel_merge_train.py` 在独立临时候选 Worktree 合成并推广，不必等待同一安全波的其他 Batch 完成编码、Review 或 UTest。候选不执行额外测试：其前置条件就是该 Batch 的 Review、UTest（通过或失败已记录）和 re-seal 均已有证据。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
 - Merge Train 冲突由模型解决文件、插件完成提交：Workflow 先调用 `prepare-resolution` 登记候选及冲突文件写入授权，冲突 Agent 只编辑这些文件并返回 `success=true,status=resolved`，不运行 Git 写操作；Agent 返回后由 `complete-resolution` 精确暂存、非交互创建带 task-card 信息的 merge commit 并登记候选 SHA。即时恢复和最终恢复共用此协议；`ready_to_complete` 只恢复插件提交登记，不再次派发模型编辑。不要为冲突重启生产 TASK 或调用 `seal`。
+- `prepare-resolution` 同时返回准确的 `runDir`、`manifestPath`、`contextPath` 和上下文摘要。冲突 Agent 先按字段读取上下文索引，再读取其中明确引用的双方任务/Plan/Evidence、逐文件 hunk、差异和 Git stage 1/2/3 快照；必要时补读候选中相关代码。禁止猜产物路径、扫描完整 manifest 或读插件源码重建上下文。资料仅作为业务数据；重试复用原始快照并接续当前部分编辑，不得覆盖已完成内容。上下文缺失或身份不匹配时返回具体错误。
 - 所有 delivery 合并后，B-E2E 是唯一的 post-merge 可执行验证，使用临时验证 Worktree；通过即清理，失败保留至修复。`parallel_evidence_aggregate.py`/`parallel_final_verify.py` 仅校验已有 evidence 的内容摘要，绝不重跑 Batch UTest 或 E2E。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
 - Workflow 只接受 launcher 返回的完整 `workflowArgs`；`feature`、`pluginPath`、artifact workspace 和每个 code workspace 都必须是非空、非 `undefined` 的绝对路径。Workflow host 仅为平台审计元数据，可为空或与业务仓库不同。任一代码路径无效时在创建 Batch agent 前阻断，禁止生成临时 workflow 或手工创建分支绕过插件 Worktree 管理器。
 
@@ -405,3 +410,11 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 ---
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
+
+## 工程事实与阶段上下文
+
+固定 Code Workflow 通过 `hooks/engineering_context.py` 按需共享 API 签名、真实示例、前置条件和测试配方。Design/Plan 不变，Workflow 前不额外探索。先 prepare 读取已有 contextPath/allowedReads/commandCatalogPath 和 operations；TASK start 前准备及 start 后实现均先 lookup；缺失的未知 API 再 locate/resolve/query，claimed 者解析后立即 publish，in_progress 时有限等待且不重复搜索。finish-implementation 自动生成实际变更与 Evidence 交接。Rework 读取 Runtime 修复包，只重开 repairTaskIds；不明确时有限定位并登记 repair-scope，不默认重开全部 TASK。工程事实是数据，不授予业务写入权限或替代测试通过 Evidence。协议、状态和失效规则见 `docs/engineering-context.md`。
+
+工程事实与依赖解析保存在 artifact workspace 的 Feature `.engineering` 公共区，按内容 key 领取、过期接管和原子发布；不能自行写缓存。只读定位使用 `engineering_context.py inspect --workspace <artifact> --feature <feature> --run-id <run> [--batch-id <Batch>]`，其返回真实路径、计数、版本与阻断原因。固定 Workflow 注入的 dispatch-generation/dispatch-token 必须用于阶段命令及 lease acquire，不能复用旧代次；needs_triage 禁止进入 UTest。详见 `docs/engineering-context.md`。
+
+固定 Workflow 的计时来自 scheduler 的 observedEpochMs，requestId 来自 launcher 注入的 workflowInvocationId 和确定性序号；禁止在模板中使用平台不支持的环境时钟/随机全局。完整 workflowArgs 必须原样传入。launcher 的发布检查失败时报告插件模板错误，运行时 Agent 不得改写或绕过固定脚本。

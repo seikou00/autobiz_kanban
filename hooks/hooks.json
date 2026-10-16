@@ -1,6 +1,17 @@
 {
   "PreToolUse": [
     {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python -X utf8 hooks/utest_deadline_guard.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
       "matcher": "task|Task",
       "hooks": [
         {
@@ -49,7 +60,7 @@
           "onBlock": {
             "reason": "代码写入闸门检查不通过",
             "systemMessage": "业务代码写入必须由完整的 v2 task run 和当前探索证明授权；前端任务还必须完成 FRONTEND_ROUTE 协议。",
-            "additionalContext": "不要手工修改 .task-runs。先运行 code_task_context 并完成探索，再由 task_runner start；absolute-html/standard-html 还需完整读取 route SKILL、创建 route todos 并由 route SKILL 转交 parser。"
+            "additionalContext": "不要手工修改 .task-runs。先运行 code_task_context 并完成只读探索，再由 task_runner start；start 成功后才能运行 prepare_html_analysis.py、生成 .frontend 产物、复制项目 assets 或写业务代码。absolute-html/standard-html 还需完整读取 route SKILL、创建 route todos 并由 route SKILL 转交 parser；Route 清单完成不是 start 的前置条件。"
           },
           "persistAfterInterrupt": true
         },

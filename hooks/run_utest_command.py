@@ -43,6 +43,51 @@ from hooks.utest_workspace_binding import (  # noqa: E402
 UT_ID_RE = re.compile(r"^UT-\d{3,}$")
 TASK_ID_RE = re.compile(r"^T\d{3}$")
 MODES = ("setup", "test")
+MAVEN_EXECUTABLES = {"mvn", "mvnw", "mvn.cmd", "mvnw.cmd", "mvn.bat", "mvnw.bat", "mvn.exe", "mvnw.exe"}
+
+
+def is_maven_command(argv):
+    return bool(argv and argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() in MAVEN_EXECUTABLES)
+
+
+def maven_setup_executes_build(argv):
+    forbidden = {"compile", "testcompile", "test-compile", "test", "integration-test", "package", "verify", "install", "deploy", "clean"}
+    return any(token.lower().rsplit(":", 1)[-1] in forbidden for token in argv[1:] if not token.startswith("-"))
+
+
+def diagnostic_cache_path(feature_dir, cwd, argv):
+    goals = [item for item in argv[1:] if ":" in item and not item.startswith("-")]
+    diagnostics = {"dependency:tree", "dependency:build-classpath", "dependency:resolve", "help:effective-pom"}
+    mutating = {"clean", "compile", "test", "test-compile", "package", "verify", "install", "deploy", "integration-test"}
+    version_query = argv[1:] in (["-v"], ["--version"])
+    if not is_maven_command(argv) or (not version_query and (not goals or not all(item in diagnostics for item in goals))) or any(item in mutating for item in argv[1:]):
+        return None
+    from hooks.engineering_environment import diagnostic_identity
+    try:
+        identity = diagnostic_identity(Path(cwd), argv)
+    except (ValueError, OSError):
+        return None
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return feature_dir / ".engineering" / "diagnostics" / identity["repositoryId"] / (digest + ".json")
+
+
+def cached_diagnostic(path, cwd, argv):
+    if path is None or not path.is_file():
+        return None
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(cached, dict) or not isinstance(cached.get("exitCode"), int):
+        return None
+    expiry = cached.get("cacheExpiresEpoch")
+    if cached.get("cacheVersion") != 2 or (expiry is not None and (not isinstance(expiry, (int, float)) or time.time() >= expiry)):
+        return None
+    output_files = [item.split("=", 1)[1] for item in argv if re.match(r"-D(?:mdep\.)?outputFile=", item)]
+    from hooks.engineering_environment import restore_diagnostic
+    if cached["exitCode"] != 0 or restore_diagnostic(cached, Path(cwd), argv):
+        return dict(cached, diagnosticReused=True, cwd=str(cwd))
+    return None
 
 
 class UTestCommandError(Exception):
@@ -404,6 +449,12 @@ def execute_utest_command(
             "调用方 taskDigest 与当前 plan 不一致。修复：停止复用旧 assignment 并重新路由。"
         )
     command_argv = _validate_argv(argv)
+    if selected_kind == "setup" and is_maven_command(command_argv) and maven_setup_executes_build(command_argv):
+        raise UTestCommandError("Maven setup 不执行编译或测试。修复：行为测试使用 preflight；compile-only 使用 Bash 编译协议。")
+    if selected_kind == "setup" and is_maven_command(command_argv) and not record_only:
+        raise UTestCommandError(
+            "所有 Maven 命令必须由 Bash 直接执行。修复：使用 utest_runtime.py preflight-setup 和当前 run/Batch/worktree/lease 绑定，执行返回的 bashCommand；runner 仅以 --kind setup --record-only 登记输出。"
+        )
     if selected_kind == "test":
         if target_id is not None and (
             not isinstance(target_id, str) or not UT_ID_RE.fullmatch(target_id)
@@ -467,27 +518,18 @@ def execute_utest_command(
         runtime_command = validate_runtime_execution(
             artifact_workspace, resolved_feature, run_id, batch_id, execution_id, task_id,
             command_argv, test_files, recorded_output_file, code_workspace,
+            kind=selected_kind,
+            execution_root=command_cwd,
         )
         if runtime_command.get("status") == "recorded":
             return dict(runtime_command["response"], recordingReused=True)
-    diagnostic_path = None
-    diagnostic_goals = {"dependency:tree", "dependency:build-classpath", "dependency:resolve", "help:effective-pom"}
-    goals = [item for item in command_argv[1:] if ":" in item and not item.startswith("-")]
-    mutating_goals = {"clean", "compile", "test", "test-compile", "package", "verify", "install", "deploy", "integration-test"}
-    if (selected_kind == "setup" and Path(command_argv[0]).name.lower() in {"mvn", "mvnw", "mvn.cmd", "mvnw.cmd"}
-            and goals and all(item in diagnostic_goals for item in goals)
-            and not any(item in mutating_goals for item in command_argv[1:])):
-        from hooks.utest_runtime import fingerprint
-        digest = hashlib.sha256(json.dumps([str(command_cwd), fingerprint(command_cwd), command_argv]).encode()).hexdigest()
-        diagnostic_path = feature_dir / ".runtime" / "utest-diagnostics" / (digest + ".json")
-        if diagnostic_path.is_file() and not refresh_diagnostics:
-            cached = json.loads(diagnostic_path.read_text(encoding="utf-8"))
-            output_files = [item.split("=", 1)[1] for item in command_argv if re.match(r"-D(?:mdep\.)?outputFile=", item)]
-            if cached["exitCode"] != 0 or all((Path(file) if Path(file).is_absolute() else command_cwd / file).is_file() for file in output_files):
-                return dict(cached, diagnosticReused=True)
+    diagnostic_path = diagnostic_cache_path(feature_dir, command_cwd, command_argv) if selected_kind == "setup" else None
+    if selected_kind == "setup" and runtime_command:
+        # Git Bash may translate Windows PATH. Use the cache identity frozen
+        # by preflight rather than recomputing it in the recording process.
+        frozen_cache = runtime_command.get("diagnosticCachePath")
+        diagnostic_path = Path(frozen_cache) if frozen_cache else None
     if record_only:
-        if selected_kind != "test":
-            raise UTestCommandError("--record-only 仅用于已由 Bash 执行的 test 命令。")
         if not isinstance(recorded_exit_code, int) or recorded_exit_code < 0:
             raise UTestCommandError("--record-only 需要 Bash 返回的非负 --exit-code。")
         if not isinstance(recorded_output_file, str) or not recorded_output_file.strip():
@@ -580,7 +622,15 @@ def execute_utest_command(
     }
     if selected_kind == "setup":
         if diagnostic_path is not None:
-            atomic_write_json(diagnostic_path, response)
+            from hooks.engineering_environment import capture_diagnostic, publish_diagnostic
+            response["diagnosticPublished"] = publish_diagnostic(diagnostic_path,
+                runtime_command.get("diagnosticClaimToken") if runtime_command else None,
+                capture_diagnostic(response, Path(command_cwd), command_argv))
+        if execution_id:
+            from hooks.utest_runtime import record_runtime_execution
+            record_runtime_execution(artifact_workspace, resolved_feature, run_id, batch_id,
+                                     execution_id, task_id, command_argv, test_files, recorded_output_file,
+                                     response, kind="setup")
         return response
 
     output_tail = "\n".join(
@@ -708,7 +758,7 @@ def main(argv=None):
     parser.add_argument(
         "--record-only",
         action="store_true",
-        help="不执行命令；登记 Bash 已执行的 test 命令、退出码与输出。",
+        help="不执行命令；登记 Bash 已执行的 setup/test 命令、退出码与输出。",
     )
     parser.add_argument("--exit-code", type=int, help="--record-only 时 Bash 命令的退出码。")
     parser.add_argument("--output-file", help="--record-only 时包含 Bash 合并输出的临时文件。")

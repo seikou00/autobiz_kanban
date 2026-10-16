@@ -13,6 +13,7 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 项 | 规则 |
 | --- | --- |
 | 允许入口 | 仅允许由 `../SKILL.md` 转交进入 |
+| TASK 启动 | 上游已成功执行当前 TASK 的 `task_runner.py start` 并保存真实 `runId`；修复/恢复已有绑定正确的活动 run。分析产物、assets 和代码写入均在该 run 内完成，不在 parser 入口重新 start |
 | `task-stem` | 上游通过 `--task-stem` 传入；本文里的 `<task-stem>`、`use-detail-1` 都是它的具体取值 |
 | `hasManifest=true` | 已有 `.frontend/html-analysis/<task-stem>.md` 与 `<task-stem>.json`，后续步骤可读取脚本产物 |
 | `hasManifest=false` | Stage 1 脚本失败或走降级路径，后续直接以原始 HTML 为唯一视觉源继续 |

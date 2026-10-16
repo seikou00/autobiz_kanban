@@ -114,7 +114,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 ## 4. 默认读取顺序
 
-进入本 route 后，先把下面这组 write_todos 视为主流程骨架；**未完成前不得提前转交 `references/html-parser.md`**。脚本仍然默认必跑，任何异常都按 §7 降级处理，不阻塞后续步骤。
+进入本 route 后，先把下面这组 write_todos 视为主流程骨架；**推进到“转交 parser”步骤前不得提前读取 `references/html-parser.md`**。步骤 1、2 是只读准备；当前 TASK start 成功后，才执行分析、产物生成、assets 复制和代码写入。脚本仍然默认必跑，脚本异常按 §7 降级处理；TASK 启动失败不属于脚本降级，必须返回主流程处理。
 
 ### 步骤 1: 读取 HTML 来源
 
@@ -132,11 +132,19 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - [ ] 这份清单是固定前置检查，不会因为原稿是高保真 HTML 就省略；只有当项目里确实不存在对应资料时，才把该项标记为”无可用证据”并继续下一项。
   - [ ] 页面模块清单只负责实现范围盘点，不承担脚本执行。
 
-### 步骤 3: 执行脚本
+### 步骤 3: 启动当前 TASK
+
+- [ ] 只读准备完成后，按 code 根技能的“执行单个任务”协议执行当前 TASK 的 `task_runner.py start`，使用当前 TASK / Batch / workspace 绑定参数。
+- [ ] 确认 start 成功并保存真实 `runId`；修复或恢复必须先由 `start-task-repair` / `resume` 成功建立当前 TASK 的活动 run，不重复 start。
+- [ ] start 前仅确认脚本参数和输入可读，不运行 `prepare_html_analysis.py`，不创建 `.frontend/html-analysis` / `.frontend/html-input`，不复制或覆盖项目 assets。
+- [ ] start 失败时停止本路线，保留原始错误并返回主流程；不得执行脚本或借脚本降级继续写入。
+
+### 步骤 4: 执行脚本
 
 - [ ] 写出脚本清单（write_todos）。
   - [ ] 建立独立的脚本清单，不并入页面模块清单
   - [ ] 确认 `--project-root`、`--task-stem`、`--html-file` 参数完整
+  - [ ] 确认当前 TASK 已成功 start，且 `--project-root` 指向该 run 绑定的实际代码工作区
   - [ ] 确认 HTML 来源可读，且多片段输入已按页面模块合并
   - [ ] 执行 `prepare_html_analysis.py`
   - [ ] 脚本清单必须和页面模块清单同时存在，最低粒度至少要覆盖 `参数确认 / 执行脚本 / 检查产物 / 失败降级` 四类事项，不能只用一句”脚本执行”代替。
@@ -144,7 +152,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
     - `autodev-code` 技能根目录：
       ```
       python -X utf8 references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
-        --project-root . \
+        --project-root <CODE_WORKSPACE> \
         --task-stem <task-stem> \
         --html-file <HTML_PATH>
       ```
@@ -160,7 +168,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
     - 对多片段输入，脚本会生成 merged analysis input 做聚合分析；但原始 HTML 仍然是视觉真相。
     - 只要原始 HTML 与脚本结论冲突，就优先相信原始 HTML。
 
-### 步骤 4: 读取脚本产物
+### 步骤 5: 读取脚本产物
 
 - [ ] 读取上下文。
   - [ ] 检查 `.frontend/html-analysis/<task-stem>.md`
@@ -171,7 +179,9 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - [ ] 若走降级路径：直接以原始高保真 HTML 为主。
   - [ ] 若 checklist / handoff 标记 `componentizationMode=conservative` 或 `analysisConfidence.level != high`：先锁定原始 HTML 的宏观布局、模块边界、表格/图表/时间线/上传等所有权，再把脚本产物仅用于缺项点查与 whole-section 保留，不要让 `replacementSlots` 主导大块组件化。
 
-### 步骤 5: 处理 assets 资源
+### 步骤 6: 处理 assets 资源
+
+本步骤必须在当前 TASK start 成功后执行；扫描可属于只读准备，映射产物生成和资源复制必须归属该 TASK 的活动 run。
 
 当高保真 HTML 压缩包中包含 `assets/` 文件夹时，必须执行 `../references/assets-processing-guide.md` 中定义的完整流程：
 
@@ -185,13 +195,13 @@ Assets 处理总结将作为后续”编码前简报”的输入材料。详细�
 
 **重要：** 仅处理 HTML 中实际引用的资源文件，未被引用的文件无需处理。
 
-### 步骤 6: 转交 parser
+### 步骤 7: 转交 parser
 
 - [ ] 转交 `references/html-parser.md`。
   - [ ] `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
   - [ ] `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
 
-### 步骤 7: 生成代码
+### 步骤 8: 生成代码
 
 - [ ] 完成主线代码生成、页面拆分 / 抽取与最低校验。
 - [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明”已跳过 Stage 1 脚本及原因”），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进；不得发起独立回检选择。
@@ -229,7 +239,7 @@ Assets 处理总结将作为后续”编码前简报”的输入材料。详细�
   - 任何未在上面列举的异常
 - 降级路径动作：
   1. 不再重试脚本，也不要原地等待用户补救
-  2. 直接进入 §4 第 4 步，转交 `references/html-parser.md`，并带 `hasManifest=false` 状态
+  2. 在当前 TASK 已成功 start 的前提下，进入 §4 第 5 步处理产物缺失，再推进到第 7 步转交 `references/html-parser.md`，并带 `hasManifest=false` 状态
   3. 由 `references/html-parser.md` 以原始 HTML 为唯一视觉源继续整页恢复与组件化
   4. 在最终交付总结里显式列出"已跳过 Stage 1 脚本"和具体原因（如"argparse 缺参数"、"语法错误 line N"、"FileNotFoundError"）
 - 唯一例外（不走降级、必须先修复）：模型自己虚构了"已跳过原因"而实际并未执行脚本。脚本必须至少被真实尝试执行一次，并捕获真实异常信息

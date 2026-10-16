@@ -476,6 +476,13 @@ def build_context(
     )
     data_out["implementationAllowed"] = start_allowed
     data_out["startAllowed"] = start_allowed
+    data_out["engineeringContext"] = {
+        "argvPrefix": [sys.executable, "-X", "utf8", str(Path(__file__).with_name("engineering_context.py")), "prepare"],
+        "bindingArguments": ["--workspace", str(workspace), "--feature", feature,
+                             "--batch-id", active_batch_id, "--task-id", task_id],
+        "requiredRuntimeArguments": ["--run-id", "--batch-worktree", "--stage"],
+        "policy": "No pre-Workflow exploration. Query shared facts on demand; publish immediately. Design and Plan unchanged.",
+    }
     return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)
 
 

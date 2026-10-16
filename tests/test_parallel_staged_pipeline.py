@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from hooks.parallel_batch_stage import (
     defer_stage,
     fail_stage,
     gate_batch,
+    prepare_test,
     record_single_repair_resolution,
     record_test_failure,
     start_stage,
@@ -25,7 +27,7 @@ from hooks.parallel_merge_train import _remove_candidate, begin_e2e, build_candi
 from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease, save_manifest
 from hooks.parallel_validation_ownership import build_pipeline_contract, validation_ownership_errors
 from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
-from tests.test_task_runner import _git, _workspace
+from tests.test_task_runner import _configure_frontend_without_batch_compile, _git, _workspace
 
 
 def create_run(workspace: Path, feature: str, **kwargs):
@@ -50,6 +52,69 @@ def _enable_pipeline(feature_dir: Path) -> None:
 
 
 class ParallelStagedPipelineTest(unittest.TestCase):
+    def test_frontend_utest_is_skipped_and_can_promote_without_testing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_frontend_without_batch_compile(feature_dir)
+            _enable_pipeline(feature_dir)
+            run_id = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "frontend.ts").write_text("export const ready = true;\n")
+            _git(worktree, "add", "frontend.ts")
+            _git(worktree, "commit", "-m", "frontend delivery")
+            commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree),
+                       branchName=provisioned["branchName"], commitSha=commit, compileStatus="skipped")
+            with self.assertRaisesRegex(ValueError, "requires_review_passed"):
+                prepare_test(workspace, "alpha", run_id, "B001")
+            for stage in ("prepare", "implement", "review"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            with self.assertRaisesRegex(ValueError, "frontend_utest_disabled"):
+                start_stage(workspace, "alpha", run_id, "B001", "test")
+
+            command = subprocess.run([
+                sys.executable, "-X", "utf8", str(Path(__file__).resolve().parents[1] / "hooks/parallel_batch_stage.py"),
+                "prepare-test", "--workspace", str(workspace), "--feature", "alpha", "--run-id", run_id, "--batch-id", "B001",
+            ], capture_output=True, text=True)
+            self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+            skipped = json.loads(command.stdout)
+            repeated = prepare_test(workspace, "alpha", run_id, "B001")
+            self.assertEqual(skipped["testStatus"], "skipped")
+            self.assertEqual(skipped["commitSha"], commit)
+            self.assertTrue(repeated["reused"])
+            self.assertEqual(repeated["stageEvidenceId"], skipped["stageEvidenceId"])
+            manifest = load_manifest(workspace, "alpha", run_id)
+            state = manifest["batches"]["B001"]["stageStates"]["test"]
+            self.assertEqual(state["status"], "skipped")
+            evidence = json.loads(Path(state["evidencePath"]).read_text())
+            self.assertEqual(evidence["outcome"], "SKIP")
+            self.assertEqual(evidence["metadata"]["executionOutcome"], "not_run")
+            self.assertIsNone(manifest["batches"]["B001"]["activeStage"])
+            self.assertFalse((feature_dir / ".parallel-runs" / run_id / "utest").exists())
+            self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
+            view = schedule(workspace, "alpha", run_id, workflow_view=True)
+            self.assertEqual(view["manifest"]["skippedUtests"][0]["batchId"], "B001")
+            build_candidate(workspace, "alpha", run_id, wave=1, batch_ids=["B001"])
+            with patch("hooks.parallel_merge_train.mark_parallel_batch_tasks_merged", return_value=WriterResult(ok=True, errors=[])):
+                self.assertTrue(promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default", allow_unverified=True)["success"])
+            aggregate = aggregate_evidence(workspace, "alpha", run_id)
+            self.assertEqual(aggregate["skippedUtests"][0]["reason"], "frontend_utest_temporarily_disabled")
+            self.assertNotIn("B001.test_evidence_missing", aggregate["errors"])
+            self.assertIn("V-E2E.not_verified", aggregate["errors"])
+
+    def test_backend_utest_policy_does_not_complete_its_test_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            run_id = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])["runId"]
+            before = load_manifest(workspace, "alpha", run_id)
+            preparation = prepare_test(workspace, "alpha", run_id, "B001")
+            self.assertEqual(preparation["status"], "test_required")
+            self.assertEqual(load_manifest(workspace, "alpha", run_id), before)
+            self.assertFalse(gate_batch(workspace, "alpha", run_id, "B001")["success"])
+
     def test_sealed_interrupted_utest_is_explicit_stage_resume(self) -> None:
         """A sealed delivery resumes UTest; it is never reclassified as pending work."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,8 +364,12 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                     "failedStage": "review",
                     "failureType": "implementation",
                     "message": "missing authorization check",
+                    "repairContextPath": failed["repairContextPath"],
+                    "repairContextDigest": failed["repairContextDigest"],
+                    "affectedTaskIds": failed["affectedTaskIds"],
                 },
             )
+            self.assertTrue(Path(failed["repairContextPath"]).is_file())
 
             for stage in ("prepare", "implement"):
                 start_stage(workspace, "alpha", run_id, "B001", stage)
@@ -823,12 +892,11 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             batch = manifest["batches"]["B001"]
 
         self.assertTrue(lease["ownerToken"])
-        self.assertEqual("ready_to_candidate", batch["status"])
-        self.assertIsNone(batch["lease"])
-        self.assertEqual("deferred", batch["stageStates"]["test"]["status"])
-        self.assertEqual("utest_stage_timeout", batch["stageStates"]["test"]["deferredDisposition"])
-        self.assertFalse(manifest["deferredIssues"][0]["blocksWorkflow"])
-        self.assertIn("B001", snapshot["mergeableBatches"])
+        self.assertTrue(batch["utestClosurePending"])
+        self.assertIsNotNone(batch["lease"])
+        self.assertEqual("running", batch["stageStates"]["test"]["status"])
+        self.assertEqual("stage_deadline_exceeded", batch["stageStates"]["test"]["stopRequested"]["reasonCode"])
+        self.assertNotIn("B001", snapshot["mergeableBatches"])
 
 
     def test_failed_final_e2e_validation_creates_repair_contract(self) -> None:

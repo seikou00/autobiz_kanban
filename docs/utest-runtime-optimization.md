@@ -31,10 +31,20 @@ candidates. Do not author repository/cwd values or change Plan to name modules.
    A candidate file must be in this worktree or system temporary directory.
    The test-stage authorization does not require reopening an implemented TASK.
 4. Resolve/probe required capabilities once. Existing `ready` can still lack H2,
-   Mockito inline/Byte Buddy or security-test. Run Maven read-only diagnostics via
-   `run_utest_command.py --kind setup`; successful and failed commands are cached
-   by module/build configuration/argv. Refresh only after the external dependency
-   environment changes with `--refresh-diagnostics`.
+   Mockito inline/Byte Buddy or security-test. All Maven commands execute
+   directly in Bash, including version queries,
+   dependency diagnostics and classpath generation. For Maven setup use
+   `utest_runtime.py preflight-setup` with the current Batch binding and exact
+   argv. Execute the returned `bashCommand` for `status=prepared`; reuse the
+   actual result for `status=cached`. The script streams output, captures Maven
+   and tee statuses and supervises descendants. `run_utest_command.py --kind
+   setup --record-only` only records logs and cache; direct Maven launch is
+   rejected. Setup success is not passing test Evidence and does not satisfy
+   the first-test deadline. Successful and failed diagnostics are cached by
+   module/build configuration/argv/PATH, using a new Bash cache namespace so
+   previous native-launch failures cannot poison the result. Refresh with
+   `preflight-setup --refresh-diagnostics` only after the external dependency
+   environment changes.
 5. For dependency classes, use `lookup-class` with `--classpath-file` and a fully
    qualified `--class-name`. `inspect-class` caches source-jar reads or bounded
    javap. Searches only touch listed module dependencies, preserving duplicate
@@ -44,6 +54,10 @@ candidates. Do not author repository/cwd values or change Plan to name modules.
    files; Gradle requires `--tests`. Execute the returned `bashCommand` exactly.
    Runtime validates the current lease/stage/files/command, preserves the real
    process and tee statuses and monitors a dedicated test process group.
+   Registration exit 0 only means registration succeeded; read the actual
+   result/exitCode/logExitCode. Retain output after a registration failure and
+   retry registration without launching Maven again.
+6a. Consume prepare.engineeringContext brief before source/environment discovery. Reuse valid facts across Batches; independent assertions/current Evidence do not require starting discovery from scratch.
 7. Test-owned repairs use the same target/argv with `--retry-kind test_bug` once.
    Source repairs need failing evidence, a new reviewed production commit and
    `--retry-kind source_repair` once. Runtime counters persist across recovery.
@@ -73,7 +87,7 @@ content digest and cannot be edited or replayed. Each script rechecks its attemp
 before launching tests. Evidence registration is idempotent after success and
 retains its pending Evidence ID when result registration needs repair.
 
-Initial budgets: first test command within 600 seconds; total stage at most 1800
+Default budgets: first test command within 1800 seconds; total stage at most 2700
 seconds, command at most 300 seconds. Workflow can narrow these budgets. The
 stage includes discovery/setup/repair, and recovery/lease renewal cannot extend
 the stored deadline. Static/class inspection is bounded to 30 seconds.
@@ -94,3 +108,24 @@ execution, replay prevention, timeout evidence, repair counters, zero/skipped
 cases and class/source-jar caching. No business Maven module or Windows machine
 is available in this checkout: the real legacy service and Windows Git Bash
 process-tree termination still need an integration run in that environment.
+
+
+## Shared discovery and durable policy
+
+The authoritative defaults live in hooks/utest_policy.py. A test attempt freezes
+its policy and deadlines; scheduler, tools and Workflow consume the same values.
+Legacy running attempts retain their earlier known deadline. Dispatch fallback
+polling is thirty minutes and does not enforce quality-stage deadlines.
+
+Workflow check-test-budget and the tool-boundary deadline guard independently
+request a stop. Preserve the owner lease to seal existing assets before deferral;
+utestClosurePending prevents candidate promotion. Current integration supports
+cooperative tool-boundary stopping, not a claim of native model cancellation.
+
+Shared source/bytecode lives in .engineering/dependencies. Environment declarations
+and read-only diagnostics use .engineering/environments and diagnostics. Keys use
+repository/module/content/tool/environment identity rather than worktree cwd.
+Structured classpath output can be materialized for the current binding; actual
+tests and Evidence are never transplanted. Concurrent diagnostic producers use
+fenced expiring claims; transient failures expire. Runtime deployment receipts
+include the agent definition and policy so mixed installations are detectable.

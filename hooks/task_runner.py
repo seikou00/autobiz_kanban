@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence, read_records, stream_path  # noqa: E402
 from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.runtime_guidance import RuntimeArgumentParser
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     PlanBundle,
@@ -1375,6 +1376,11 @@ def _finish_implementation_unlocked(
             and isinstance(implementation_evidence_id, str)
             and latest_implementation_evidence_id == implementation_evidence_id
         ):
+            if parallel_run_id:
+                from hooks.engineering_context import record_implementation
+                state["engineeringHandoff"] = record_implementation(
+                    workspace, feature, parallel_run_id, batch_id, requested_workspaces[0], task, state)
+                _save_run(path, state)
             return True, state
         latest_implementation_run_id = next(
             (
@@ -1624,6 +1630,10 @@ def _finish_implementation_unlocked(
     })
     if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
         state["batchContinuation"] = result.data["batchContinuation"]
+    if parallel_run_id:
+        from hooks.engineering_context import record_implementation
+        state["engineeringHandoff"] = record_implementation(
+            workspace, feature, parallel_run_id, batch_id, requested_workspaces[0], task, state)
     _save_run(path, state)
     return True, state
 
@@ -2121,7 +2131,8 @@ def _cmd_start(args: argparse.Namespace) -> int:
             lease_token=args.lease_token,
             workspace_ref=args.workspace_ref,
         )
-        return _emit(True, **state)
+        from hooks.runtime_guidance import task_guidance
+        return _emit(True, **state, **task_guidance(args, workspace, feature, code_workspace[0], state))
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
 
@@ -2157,7 +2168,11 @@ def _cmd_finish_implementation(args: argparse.Namespace) -> int:
             activeBatchId=continuation.get("activeBatchId") if continuation else None,
             nextTaskId=continuation.get("nextTaskId") if continuation else None,
             requiredAction=continuation.get("requiredAction") if continuation else None,
+            engineeringHandoff=state.get("engineeringHandoff"),
         )
+    except OSError as exc:
+        return _emit(False, error="implementation_handoff_storage_failed", detail=str(exc),
+                     requiredAction="retry_same_finish_only_do_not_reimplement_or_recompile")
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
 
@@ -2207,7 +2222,8 @@ def _cmd_start_task_repair(args: argparse.Namespace) -> int:
             lease_token=args.lease_token,
             workspace_ref=args.workspace_ref,
         )
-        return _emit(True, **state)
+        from hooks.runtime_guidance import task_guidance
+        return _emit(True, **state, **task_guidance(args, workspace, feature, code_workspace[0], state))
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
 
@@ -2243,7 +2259,8 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             lease_token=args.lease_token,
             workspace_ref=args.workspace_ref,
         )
-        return _emit(True, **state)
+        from hooks.runtime_guidance import task_guidance
+        return _emit(True, **state, **task_guidance(args, workspace, feature, code_workspace[0], state))
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
 
@@ -2288,8 +2305,8 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Implement structured code tasks")
+def build_parser() -> argparse.ArgumentParser:
+    parser = RuntimeArgumentParser(description="Implement structured code tasks")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def common(subparser: argparse.ArgumentParser, *, needs_run: bool = False) -> None:
@@ -2348,7 +2365,11 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument("--run-id")
     inspect.set_defaults(func=_cmd_inspect)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return args.func(args)
 
 

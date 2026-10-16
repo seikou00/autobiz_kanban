@@ -21,7 +21,8 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.plan_write_ownership import is_test_asset_path
-from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, utc_now
+from hooks.parallel_batch_stage import FRONTEND_UTEST_SKIP_REASON
+from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, skipped_utests, utc_now
 
 
 def _digest(value: Any) -> str:
@@ -58,7 +59,9 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         if not isinstance(state, dict) or state.get("status") not in {"passed", "skipped", "deferred"}:
             errors.append(f"{batch_id}.{stage}_not_passed")
             continue
-        if state.get("status") == "skipped":
+        skipped_frontend_test = (stage == "test" and state.get("status") == "skipped"
+                                 and state.get("skipReason") == FRONTEND_UTEST_SKIP_REASON)
+        if state.get("status") == "skipped" and not skipped_frontend_test:
             continue
         evidence = _read_evidence(state.get("evidencePath"))
         if evidence is None:
@@ -67,6 +70,8 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         if evidence.get("digest") != _digest({key: value for key, value in evidence.items() if key != "digest"}):
             errors.append(f"{batch_id}.{stage}_evidence_digest_invalid")
             continue
+        if skipped_frontend_test and (evidence.get("outcome") != "SKIP" or batch.get("executionLane") != "frontend"):
+            errors.append(f"{batch_id}.{stage}_skip_evidence_invalid")
         inputs = evidence.get("inputs") if isinstance(evidence.get("inputs"), dict) else {}
         if inputs.get("planRevision") != pipeline.get("planRevision"):
             errors.append(f"{batch_id}.{stage}_plan_revision_stale")
@@ -127,7 +132,8 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
                 errors.append(f"{validation_id}.not_verified")
                 continue
             errors.extend(_evidence_errors(manifest, validation_id, batch))
-        # Each delivery has passed its own Review and UTest before promotion.
+        # Each delivery has Review evidence and an explicit UTest disposition
+        # (passed, deferred failure, or the current frontend skip policy).
         # The only post-merge executable validation is V-E2E; merge-train
         # records still prove that main advanced to each exact candidate SHA.
         trains = manifest.get("mergeTrains", {})
@@ -166,6 +172,7 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             "errors": sorted(set(errors)),
             "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
             "deferredIssues": deferred_issues,
+            "skippedUtests": skipped_utests(manifest),
         }
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
         report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)

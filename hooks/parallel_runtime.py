@@ -42,6 +42,11 @@ def batch_occupies_scheduler_slot(batch: object) -> bool:
     status = batch.get("status")
     if status in {"retry_pending", "failed", "blocked", "cancelled", "merged"}:
         return False
+    dispatch = batch.get("dispatch") or {}
+    if (dispatch.get("status") == "running"
+            and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+            and dispatch.get("expiresEpoch", 0) > time.time()):
+        return True
     if status in {"leased", "running"}:
         return True
     states = batch.get("stageStates")
@@ -372,6 +377,7 @@ def create_manifest(
             ]
         entry_state = {
             "batchId": batch_id,
+            "dispatchGeneration": 1,
             "type": "delivery",
             # Persist the Plan-owned task contract in the durable run. The
             # workflow must consume these IDs from the scheduler response; it
@@ -541,6 +547,7 @@ def acquire_lease(
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     owner_token: str | None = None,
     lease_guard: bool = False,
+    dispatch_auth: dict | None = None,
 ) -> dict[str, Any]:
     # Fixed-workflow agents may spend over an hour editing between plugin
     # commands. A guarded lease must cover that normal execution window even
@@ -552,6 +559,14 @@ def acquire_lease(
         batch = manifest.get("batches", {}).get(batch_id)
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
+        dispatch = batch.get("dispatch") or {}
+        if dispatch_auth is not None and dispatch:
+            if (dispatch_auth.get("generation") != batch.get("dispatchGeneration", 1)
+                    or dispatch.get("generation") != dispatch_auth.get("generation")
+                    or dispatch.get("status") != "running" or dispatch.get("expiresEpoch", 0) <= time.time()
+                    or dispatch.get("tokenSha256") != hashlib.sha256((dispatch_auth.get("token") or "").encode()).hexdigest()):
+                raise ValueError(f"parallel_dispatch_stale_lease_owner:{batch_id}")
+            dispatch["expiresEpoch"] = time.time() + max(60, int(dispatch.get("ttlSeconds", 14400)))
         states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
         rework_stage = (states.get("implement") or {}).get("status")
         review_stage = (states.get("review") or {}).get("status")
@@ -599,6 +614,8 @@ def acquire_lease(
                 "expiresAt": datetime.fromtimestamp(now + ttl_seconds, timezone.utc).isoformat().replace("+00:00", "Z"),
                 "expiresEpoch": now + ttl_seconds,
             }
+            if dispatch:
+                lease.update(dispatchGeneration=batch.get("dispatchGeneration", 1), dispatchTokenSha256=dispatch.get("tokenSha256"))
             atomic_write_json(path, lease)
         # Keep the bearer token only in the lease file returned to the worker;
         # the durable manifest and audit log contain metadata, never the token.
@@ -630,6 +647,16 @@ def check_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
         return False
     if float(lease.get("expiresEpoch", 0)) <= time.time():
         return False
+    if lease.get("dispatchGeneration") is not None:
+        try:
+            batch = load_manifest(workspace, feature, run_id)["batches"][batch_id]
+            dispatch = batch.get("dispatch") or {}
+            if (batch.get("dispatchGeneration", 1) != lease["dispatchGeneration"]
+                    or dispatch.get("tokenSha256") != lease.get("dispatchTokenSha256")
+                    or dispatch.get("status") != "running" or dispatch.get("expiresEpoch", 0) <= time.time()):
+                return False
+        except (OSError, ValueError, KeyError):
+            return False
     # A lease is a durable time-bound capability, not the lifetime of the CLI
     # process that acquired it.  Batch agents run each command in an isolated
     # sandbox, where the acquiring process necessarily exits before the next
@@ -683,6 +710,8 @@ def renew_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
     now = time.time()
     with FileLock(path.with_suffix(".lock")):
         lease = json.loads(path.read_text(encoding="utf-8"))
+        if lease.get("ownerToken") != owner_token or lease.get("expiresEpoch", 0) <= now:
+            raise ValueError(f"parallel_batch_lease_invalid:{batch_id}")
         effective_ttl = ttl_seconds if ttl_seconds is not None else int(lease.get("ttlSeconds", DEFAULT_TTL_SECONDS))
         if effective_ttl <= 0:
             raise ValueError("parallel_batch_lease_ttl_invalid")
@@ -756,7 +785,7 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
     batches = manifest.get("batches", {})
     result: list[str] = []
     for batch_id, item in batches.items():
-        if not isinstance(item, dict) or item.get("type", "delivery") == "validation" or item.get("status") != "ready_to_candidate":
+        if not isinstance(item, dict) or item.get("type", "delivery") == "validation" or item.get("status") != "ready_to_candidate" or item.get("utestClosurePending"):
             continue
         if not item.get("commitSha"):
             continue
@@ -773,6 +802,22 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
         ):
             result.append(str(batch_id))
     return sorted(result)
+
+
+def skipped_utests(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Report intentional test omissions separately from test passes/failures."""
+    result = []
+    for batch_id, batch in manifest.get("batches", {}).items():
+        if not isinstance(batch, dict):
+            continue
+        state = (batch.get("stageStates") or {}).get("test") or {}
+        if state.get("status") == "skipped":
+            result.append({
+                "batchId": batch_id, "executionLane": batch.get("executionLane"),
+                "status": "skipped", "reason": state.get("skipReason") or "test_stage_skipped",
+                "stageEvidenceId": state.get("latestEvidenceId"),
+            })
+    return result
 
 
 def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
@@ -916,6 +961,7 @@ def select_runnable_batches(
         return []
     candidates = sorted({batch_id for batch_id in batch_ids if isinstance(batch_id, str) and batch_id in by_id})
     active = sorted({batch_id for batch_id in active_batch_ids if isinstance(batch_id, str) and batch_id in by_id})
+    candidates = [batch_id for batch_id in candidates if batch_id not in active]
     if not candidates:
         return []
 

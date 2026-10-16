@@ -78,9 +78,11 @@ def protected_path(raw_path):
     else:
         candidate = candidate.resolve(strict=False)
     candidate_parts = candidate.parts
+    if ".engineering" in candidate_parts and ".autobizdevops" in candidate_parts:
+        return True
     if ".parallel-runs" in candidate_parts:
         index = candidate_parts.index(".parallel-runs")
-        if len(candidate_parts) > index + 2 and candidate_parts[index + 2] == "utest":
+        if len(candidate_parts) > index + 2 and candidate_parts[index + 2] in {"utest", "engineering", "dispatch"}:
             return True
     if (
         candidate.name in PROTECTED_RUNTIME_FILES
@@ -138,7 +140,8 @@ def _words(command):
 def _mentions_protected_artifact(command):
     markers = PROTECTED_ROOT_FILES | PROTECTED_RUNTIME_FILES | PROTECTED_EVIDENCE_FILES | PROTECTED_STATE_FILES
     normalized = command.replace("\\", "/")
-    return (".parallel-runs/" in normalized and "/utest/" in normalized) or PROTECTED_DRAFT_MARKER in normalized or any(
+    return "/.engineering/" in normalized or (".parallel-runs/" in normalized and any(
+        marker in normalized for marker in ("/utest/", "/engineering/", "/dispatch/"))) or PROTECTED_DRAFT_MARKER in normalized or any(
         marker in command for marker in markers
     )
 
@@ -153,7 +156,8 @@ def _verified_utest_script(words):
         state = json.loads((script.parent / "UTEST_EXECUTION.json").read_text(encoding="utf-8"))
         digest = hashlib.sha256(script.read_bytes()).hexdigest()
         return any(command.get("scriptPath") == str(script) and command.get("scriptSha256") == digest
-                   for task in state["tasks"].values() for command in task["commands"].values())
+                   for task in state["tasks"].values() for group in ("commands", "setupCommands")
+                   for command in task.get(group, {}).values())
     except (OSError, ValueError, KeyError):
         return False
 

@@ -189,6 +189,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertLess(len(view_output.getvalue().encode("utf-8")), 20_000)
             view = json.loads(view_output.getvalue())
             self.assertTrue(view["ok"])
+            self.assertIsInstance(view["observedEpochMs"], int)
+            self.assertGreater(view["observedEpochMs"], 0)
             self.assertEqual([["B001"]], view["scheduledGroups"])
             self.assertEqual("default", view["batchWorkspaces"]["B001"]["workspaceRef"])
             self.assertEqual("pending", view["manifest"]["batches"]["B001"]["status"])
