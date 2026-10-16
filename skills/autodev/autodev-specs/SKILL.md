@@ -68,6 +68,7 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_
 - `uiRequired=true` 时至少有一个独立 UI capability，其 `specRefs` 回链真实 REQ/SCN；有高保真输入才绑定真实 VIS，无则 `visualSourceRefs=[]`。
 - `uiRequired=false` 时不生成 UI capability，并填写 `notApplicableReason`。
 - specs 完成时锁定 UI 决策：`decisionStatus=locked`、`lockedAtCheckpoint=specs_done`。
+- `specs_done` 更新器会在状态落盘前，基于最终 `UI_CONTEXT.json` 强制重建 Plan 前版本的 `UI_CONTEXT.md`；同步失败时不得绕过或手工推进 checkpoint。
 
 ## 检查与完成
 

@@ -626,7 +626,11 @@ def _ui_context_payload(workspace: Path, feature: str) -> dict[str, Any] | None:
         raise
 
 
-def _collect_frontend_batches(fd: Path, visual_sources_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _collect_frontend_batches(
+    fd: Path,
+    visual_sources_by_id: dict[str, dict[str, Any]],
+    ignored_source_ids: set[str],
+) -> list[dict[str, Any]]:
     """Collect all frontend batches with their visual source route declarations."""
     _, _, load_plan = _import_ui_context_helpers()
     if load_plan is None:
@@ -671,7 +675,7 @@ def _collect_frontend_batches(fd: Path, visual_sources_by_id: dict[str, dict[str
                 if isinstance(refs, list):
                     visual_source_refs.extend(str(r) for r in refs if isinstance(r, str))
 
-        visual_source_refs = sorted(set(visual_source_refs))
+        visual_source_refs = sorted(set(visual_source_refs) - ignored_source_ids)
 
         declared_routes = {}
         for vis_id in visual_source_refs:
@@ -713,11 +717,19 @@ def route_payload_from_ui_context(
 ) -> dict[str, Any]:
     fd = feature_dir(workspace, feature)
     cli_html_sources = existing_paths(normalize_path(raw) for raw in html_files if raw.strip())
-    all_visual_sources = [
+    raw_visual_sources = [
         source
         for source in data.get("visualSources", [])
         if isinstance(source, dict)
     ] if isinstance(data.get("visualSources"), list) else []
+    ignored_source_ids = {
+        str(source.get("sourceId"))
+        for source in raw_visual_sources
+        if source.get("type") == "prototype_link" and isinstance(source.get("sourceId"), str)
+    }
+    all_visual_sources = [
+        source for source in raw_visual_sources if source.get("type") != "prototype_link"
+    ]
     scope = _plan_ui_scope(fd, batch_id=batch_id, task_id=task_id)
     active_ui_tasks = scope["tasks"]
     visual_sources_by_id = {
@@ -729,7 +741,13 @@ def route_payload_from_ui_context(
         source_id
         for task in active_ui_tasks
         for source_id in task.get("visualSourceRefs", [])
-        if isinstance(source_id, str)
+        if isinstance(source_id, str) and source_id not in ignored_source_ids
+    }
+    ignored_referenced_source_ids = {
+        source_id
+        for task in active_ui_tasks
+        for source_id in task.get("visualSourceRefs", [])
+        if isinstance(source_id, str) and source_id in ignored_source_ids
     }
     unknown_source_ids = sorted(referenced_source_ids - set(visual_sources_by_id))
     if unknown_source_ids:
@@ -788,6 +806,12 @@ def route_payload_from_ui_context(
         route_reasons = ["UI_CONTEXT uiRequired=false"]
     else:
         plan_route, plan_reasons = _route_from_plan(fd, batch_id=batch_id, task_id=task_id)
+        if plan_route == ROUTE_MISSING and ignored_referenced_source_ids and not visual_sources:
+            plan_route = ROUTE_SPEC_DRIVEN
+            plan_reasons = [
+                *plan_reasons,
+                "legacy prototype_link references ignored; using spec-driven-ui",
+            ]
         visual_route, visual_reasons = _route_from_visual_sources(visual_sources, html_sources)
         if visual_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING}:
             route = visual_route
@@ -827,7 +851,7 @@ def route_payload_from_ui_context(
             + "; falling back to spec-driven-ui",
         ]
 
-    frontend_batches = _collect_frontend_batches(fd, visual_sources_by_id)
+    frontend_batches = _collect_frontend_batches(fd, visual_sources_by_id, ignored_source_ids)
 
     payload: dict[str, Any] = {
         "version": 1,
@@ -851,7 +875,11 @@ def route_payload_from_ui_context(
         "taskSourceBindings": {
             str(task.get("taskId")): {
                 "route": task.get("route"),
-                "visualSourceIds": list(task.get("visualSourceRefs", [])),
+                "visualSourceIds": [
+                    source_id
+                    for source_id in task.get("visualSourceRefs", [])
+                    if isinstance(source_id, str) and source_id not in ignored_source_ids
+                ],
                 "htmlSourcePaths": [
                     str(path)
                     for source_id in task.get("visualSourceRefs", [])

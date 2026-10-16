@@ -5,8 +5,6 @@ description: 按实际代码生成或更新 FEATURE_API_DETAIL.md，并同步产
 
 # /autobizdevops-artifact-sync - 产物同步
 
-根据当前 Feature 的实际代码生成接口文档，已有计划和实现记录用于辅助定位。
-
 ## 确定同步上下文
 
 ```bash
@@ -18,21 +16,17 @@ python -X utf8 "${pluginPath}/skills/autobizdevops-artifact-sync/scripts/sync_ar
 
 准入 checkpoint、节点、产物路径与简述统一维护在 [同步配置](config/artifact-sync.json)。需要调整同步范围时修改该配置。
 
-按该插件的实际产物文件名维护配置。
-
 ## 生成接口交付文档
 
 准入通过后，常规同步先检查并生成或更新 `--check` 返回的 `feature_dir` 下的 `FEATURE_API_DETAIL.md`，再上传。仅检查、准备同步清单或补传失败事件时复用现有文档。
 
 读取 [接口文档生成规则与模板](references/feature-api-detail.md)。保留文件名 `FEATURE_API_DETAIL.md`。
 
-- 从当前会话或用户指定的代码工作区确认业务仓库，结合当前 Feature 的需求、计划和实际变更确定实现范围。产物目录不等于代码仓库，不能把整个仓库或其他 Feature 的接口算入本次交付。
-- 如果存在 `plan.json.codeWorkspaces`、implementation evidence 或 Batch manifest，可用来定位仓库和实现；这些内容不是必须的前置条件，若没有可使用已有的 `plan.md` 和实现记录辅助定位。
-- 有提交记录时，用"cmbdevclaw提交"或"[cmbdevclaw]"标记辅助定位并核对当前 Feature 的关联；没有该标记或尚未提交时，结合可确认的提交范围、暂存和未暂存变更、未跟踪的新文件核查实现。记录本次采用的代码范围，便于判断旧文档是否需要更新。
-- 读取接口入口、请求/响应类型、返回包装、Service、Mapper/Repository、错误码与枚举；代码依据注明仓库相对路径，多仓库时补充仓库名称或路径，如有 `workspaceRef` 时可一并标注。
+- 用 `plan.json` 的 `codeWorkspaces`、当前 Feature 的 implementation evidence、Batch manifest 与 Git 变更（commit中带有“cmbdevclaw提交”的提交）确定仓库和实现范围。文档以当前 Feature 实际交付的代码为依据，不能把整个仓库或其他 Feature 的接口算入本次交付。
+- 读取接口入口、请求/响应类型、返回包装、Service、Mapper/Repository、错误码与枚举；多仓库代码依据同时注明 `workspaceRef` 和仓库相对路径。记录可确认的提交或变更范围，便于判断旧文档是否需要更新。
 - 需求和设计只用于定位范围，不能据此编造接口字段或实现逻辑。按模板展开复杂字段，给出真实 SQL/查询构造片段和调用顺序。
 - 无法确认的信息标为“代码中未确认”；检索后不存在的内容标为“代码中未发现”。确认没有接口变更时，在文档中说明并列出检查范围。
-- 源码不可用或无法确认当前 Feature 的实现范围时，保留已有文档并报告未更新的原因，不宣称文档已反映最新代码，也不据此判定“没有接口变更”；缺失文档不阻断其他已存在产物的同步。
+- 源码不可用时保留已有文档并报告未更新的原因，不宣称文档已反映最新代码；缺失文档不阻断其他已存在产物的同步。
 
 ## 同步产物
 

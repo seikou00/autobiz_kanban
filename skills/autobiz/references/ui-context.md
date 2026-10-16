@@ -11,17 +11,24 @@ is automatically generated in the same directory. This Markdown file:
 
 - When `uiRequired=true`, focuses on frontend developer concerns: pages, interactions, visual sources, and restoration paths
 - When `uiRequired=false`, shows the UI decision, decision source/status, and `notApplicableReason`, and omits empty frontend tables
-- Shows the relationship between capabilities, HTML resources, and restoration routes
-- Renders `capabilityId` values directly; it does not invent Chinese translations for capability names
-- Shows a visual source's formal Plan tasks as `T00X: task title` when `uiRefs.visualSourceRefs` binds them; before Plan exists it shows `待Plan阶段关联`
-- Includes a visual tree diagram mapping tasks → HTML → paths
-- Can be manually edited and synced back to JSON using `sync-from-md` command
+- Before Plan exists, leads with one PAGE / UIX / VIS table built from capability `pageRefs`, `interactionRefs`, and `visualSourceRefs`; it does not render TASK columns or Task placeholders
+- Before Specs is finalized, unbound UIX/VIS scope uses `待specs阶段归属`; after `specs_done`, any still-unbound scope uses `未明确页面归属`
+- After formal Plan exists, replaces that table with one TASK / PAGE / UIX / VIS mapping table using Plan `uiRefs` and real Task IDs/titles
+- Uses PAGE as the primary dimension, follows `pages[]` declaration order, and aggregates each PAGE's related values
+- Orders pre-Plan columns as PAGE → VIS → UIX and formal-Plan columns as PAGE → TASK → VIS → UIX; every ID stays separate from its name
+- PAGE displays only `name`, VIS displays only `path`, UIX displays `summary` as its interaction name, and TASK displays `title`
+- Omits capabilities whose effective PAGE/UIX/VIS scope is entirely empty; after Plan exists, preserves meaningful unbound scope and unresolved Task ownership explicitly
+- Omits the association-evidence column and internal `capability`, `specRefs`, and Plan `uiRefs` details from all Markdown mapping tables; those references remain available for association and validation in the machine-readable sources
+- Keeps PAGE and visual-source data in the primary mapping table; no supplementary visual-source or page-definition tables are generated
+- Appends one restoration-route guide after the mapping table
+- The generated mapping table is a read-only projection; `sync-from-md` only supports legacy list sections, not these generated tables or derived task bindings
 - Serves as a quick reference for frontend teams to review UI scope and implementation strategy
 
 **Synchronization**:
 - JSON → MD: automatic (on every JSON write)
-- Plan → MD: automatic (on every formal Plan write, to refresh exact task IDs and titles)
-- MD → JSON: manual (using `python -X utf8 hooks/ui_context_writer.py sync-from-md --feature <feature>`)
+- Specs → MD: mandatory final pre-Plan refresh before `specs_done`; checkpoint completion is blocked if the Markdown projection cannot be written
+- Plan → MD: automatic (on every formal Plan write, to refresh TASK/PAGE/UIX/VIS mappings)
+- Legacy MD list sections → JSON: manual (using `python -X utf8 hooks/ui_context_writer.py sync-from-md --feature <feature>`); edit generated mappings through the source JSON/Plan writers instead
 
 See `docs/ui-context-md-generation.md` for detailed documentation.
 
@@ -111,7 +118,9 @@ When the user confirms this is a non-UI feature, set:
 ## Visual Sources
 
 Use `visualSources[]` only for design inputs such as high-fidelity HTML,
-standard HTML, design links, prototypes, images, or other visual references.
+standard HTML, design links, images, or other visual references.
+Prototype links are navigation references rather than restorable visual inputs;
+do not record them in `visualSources[]`.
 Do not paste HTML or design links into PRD text as requirements.
 
 Allowed `type` values:
@@ -119,7 +128,6 @@ Allowed `type` values:
 - `high_fidelity_html`
 - `standard_html`
 - `design_link`
-- `prototype_link`
 - `image`
 - `other`
 

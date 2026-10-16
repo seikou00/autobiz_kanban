@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import shutil
 import sys
 import uuid
@@ -81,19 +82,6 @@ def _structure_errors(data: dict[str, Any], feature: str) -> list[str]:
     ]
 
 
-def _visual_source_type_zh(source_type: str) -> str:
-    """将visualSource类型转换为中文"""
-    type_map = {
-        "high_fidelity_html": "高保真HTML",
-        "standard_html": "标准HTML",
-        "design_link": "设计链接",
-        "prototype_link": "原型链接",
-        "image": "图片",
-        "other": "其他"
-    }
-    return type_map.get(source_type, source_type)
-
-
 def _load_plan_tasks(workspace: Path, feature: str) -> list[dict[str, Any]]:
     """Best-effort load of formal Plan tasks for the generated Markdown view."""
     feature_dir = _path(workspace, feature).parent
@@ -135,24 +123,396 @@ def _load_plan_tasks(workspace: Path, feature: str) -> list[dict[str, Any]]:
     return tasks
 
 
-def _task_display_for_visual_source(tasks: list[dict[str, Any]], source_id: str) -> str:
-    """Render exact Plan task IDs and titles bound to a visual source."""
-    labels: list[str] = []
-    seen_task_ids: set[str] = set()
+def _ref_ids(item: dict[str, Any], field: str) -> list[str]:
+    values = item.get(field)
+    if not isinstance(values, list):
+        return []
+    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value.strip()))
+
+
+def _md_cell(value: Any) -> str:
+    return html.escape(str(value), quote=False).replace("|", "&#124;").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+
+
+def _pre_plan_mapping_lines(data: dict[str, Any]) -> list[str]:
+    """Render PAGE/VIS/UIX scope from capabilities before a formal Plan exists."""
+    pages = {page["pageId"]: page for page in data.get("pages", [])}
+    interactions = {item["interactionId"]: item for item in data.get("interactions", [])}
+    specs_finalized = (
+        data.get("lockedAtCheckpoint") == "specs_done"
+        or data.get("decisionStatus") == "locked"
+    )
+    unbound_page_label = "未明确页面归属" if specs_finalized else "待specs阶段归属"
+    raw_sources = [source for source in data.get("visualSources", []) if isinstance(source, dict)]
+    ignored_source_ids = {
+        source.get("sourceId")
+        for source in raw_sources
+        if source.get("type") == "prototype_link" and isinstance(source.get("sourceId"), str)
+    }
+    sources = {
+        source["sourceId"]: source
+        for source in raw_sources
+        if source.get("type") != "prototype_link" and isinstance(source.get("sourceId"), str)
+    }
+    capabilities = [cap for cap in data.get("capabilities", []) if cap.get("uiRequired") is not False]
+    records: list[dict[str, Any]] = []
+    shown_pages: set[str] = set()
+    shown_interactions: set[str] = set()
+    shown_sources: set[str] = set()
+
+    def interaction_page(interaction_id: str) -> str | None:
+        return interactions.get(interaction_id, {}).get("pageId")
+
+    def page_scope(item: dict[str, Any]) -> list[str | None]:
+        result: list[str | None] = list(_ref_ids(item, "pageRefs"))
+        for interaction_id in _ref_ids(item, "interactionRefs"):
+            page_id = interaction_page(interaction_id)
+            if page_id not in result:
+                result.append(page_id)
+        return result
+
+    def source_scope(item: dict[str, Any]) -> list[str]:
+        return [
+            source_id
+            for source_id in _ref_ids(item, "visualSourceRefs")
+            if source_id not in ignored_source_ids
+        ]
+
+    def add_record(page_id: str | None, interaction_ids: list[str], source_ids: list[str],
+                   routes: list[str]) -> None:
+        records.append({
+            "pageId": page_id,
+            "interactionIds": interaction_ids,
+            "sourceIds": source_ids,
+            "routes": routes,
+        })
+        if page_id is not None:
+            shown_pages.add(page_id)
+        shown_interactions.update(interaction_ids)
+        shown_sources.update(source_ids)
+
+    for capability in capabilities:
+        capability_pages = page_scope(capability)
+        capability_interactions = _ref_ids(capability, "interactionRefs")
+        capability_sources = source_scope(capability)
+        if not capability_pages and not capability_interactions and not capability_sources:
+            continue
+        routes = list(dict.fromkeys(
+            sources.get(source_id, {}).get("route", "未指定")
+            for source_id in capability_sources
+        )) or ["spec-driven-ui"]
+        for page_id in capability_pages or [None]:
+            page_interactions = [
+                interaction_id
+                for interaction_id in capability_interactions
+                if interaction_page(interaction_id) == page_id
+            ]
+            add_record(page_id, page_interactions, capability_sources, routes)
+
+    # Definitions that are not referenced by a capability remain visible but
+    # do not acquire an inferred PAGE relationship.
+    for page_id in pages:
+        if page_id not in shown_pages:
+            add_record(page_id, [], [], ["未指定"])
+    remaining_interactions = [
+        interaction_id for interaction_id in interactions if interaction_id not in shown_interactions
+    ]
+    remaining_sources = [source_id for source_id in sources if source_id not in shown_sources]
+    if remaining_interactions or remaining_sources:
+        routes = list(dict.fromkeys(
+            sources.get(source_id, {}).get("route", "未指定")
+            for source_id in remaining_sources
+        )) or ["未指定"]
+        add_record(None, remaining_interactions, remaining_sources, routes)
+
+    aggregates: dict[str | None, dict[str, Any]] = {}
+
+    def extend_unique(target: list[Any], values: list[Any]) -> None:
+        for value in values:
+            if value not in target:
+                target.append(value)
+
+    for record in records:
+        page_id = record["pageId"]
+        aggregate = aggregates.setdefault(page_id, {
+            "sourceIds": [], "interactionIds": [], "routes": [],
+            "firstIndex": len(aggregates),
+        })
+        extend_unique(aggregate["sourceIds"], record["sourceIds"])
+        extend_unique(aggregate["interactionIds"], record["interactionIds"])
+        extend_unique(aggregate["routes"], record["routes"])
+
+    page_rank = {page_id: index for index, page_id in enumerate(pages)}
+
+    def sort_key(item: tuple[str | None, dict[str, Any]]) -> tuple[int, int]:
+        page_id, aggregate = item
+        if page_id in page_rank:
+            return page_rank[page_id], 0
+        return len(page_rank) + (1 if page_id is None else 0), aggregate["firstIndex"]
+
+    rows: list[str] = []
+    for page_id, aggregate in sorted(aggregates.items(), key=sort_key):
+        source_ids = aggregate["sourceIds"]
+        interaction_ids = aggregate["interactionIds"]
+        page = pages.get(page_id) if page_id is not None else None
+        cells = [
+            _md_cell(page_id if page_id is not None else unbound_page_label),
+            _md_cell(page.get("name", "未填写名称")) if page is not None else "-",
+            "<br>".join(_md_cell(source_id) for source_id in source_ids) or "-",
+            "<br>".join(
+                _md_cell(sources[source_id].get("path", "未填写路径"))
+                if source_id in sources else "未定义"
+                for source_id in source_ids
+            ) or "-",
+            "<br>".join(_md_cell(interaction_id) for interaction_id in interaction_ids) or "-",
+            "<br>".join(
+                _md_cell(interactions[interaction_id].get("summary", ""))
+                if interaction_id in interactions else "未定义"
+                for interaction_id in interaction_ids
+            ) or "-",
+            "<br>".join(_md_cell(route) for route in aggregate["routes"]),
+        ]
+        rows.append("| " + " | ".join(cells) + " |")
+
+    lines = [
+        "## PAGE / UIX / VIS 映射", "",
+        "Plan 生成前以 PAGE 为主维度，按已明确的关系聚合 PAGE、VIS、UIX。",
+        (
+            "未明确归属的有效 UIX/VIS 统一列在表尾。"
+            if specs_finalized
+            else "未明确归属的有效 UIX/VIS 统一列在表尾，等待 specs 阶段归属。"
+        ), "",
+    ]
+    if rows:
+        lines.extend([
+            "| PAGE ID | 页面名称 | VIS ID | 视觉资源路径 | UIX ID | 交互名称 | 还原路径 |",
+            "| --- | --- | --- | --- | --- | --- | --- |", *rows, "",
+        ])
+    else:
+        lines.extend(["暂无 UI 映射范围。", ""])
+    return lines
+
+
+def _ui_mapping_lines(data: dict[str, Any], tasks: list[dict[str, Any]]) -> list[str]:
+    """Join explicit Plan scope with capability bindings and aggregate by PAGE."""
+    pages = {page["pageId"]: page for page in data.get("pages", [])}
+    interactions = {item["interactionId"]: item for item in data.get("interactions", [])}
+    raw_sources = [source for source in data.get("visualSources", []) if isinstance(source, dict)]
+    ignored_source_ids = {
+        source.get("sourceId")
+        for source in raw_sources
+        if source.get("type") == "prototype_link" and isinstance(source.get("sourceId"), str)
+    }
+    sources = {
+        source["sourceId"]: source
+        for source in raw_sources
+        if source.get("type") != "prototype_link" and isinstance(source.get("sourceId"), str)
+    }
+    capabilities = [cap for cap in data.get("capabilities", []) if cap.get("uiRequired") is not False]
+    records: list[dict[str, Any]] = []
+    shown_pages: set[str] = set()
+    shown_interactions: set[str] = set()
+    shown_sources: set[str] = set()
+    # Coverage stays per capability/page so partially planned UI remains visible.
+    coverage: dict[tuple[int, str | None], tuple[set[str], set[str]]] = {}
+
+    def interaction_page(interaction_id: str) -> str | None:
+        return interactions.get(interaction_id, {}).get("pageId")
+
+    def page_scope(item: dict[str, Any]) -> list[str | None]:
+        result: list[str | None] = list(_ref_ids(item, "pageRefs"))
+        for interaction_id in _ref_ids(item, "interactionRefs"):
+            page_id = interaction_page(interaction_id)
+            if page_id not in result:
+                result.append(page_id)
+        return result
+
+    def source_scope(item: dict[str, Any]) -> list[str]:
+        return [
+            source_id
+            for source_id in _ref_ids(item, "visualSourceRefs")
+            if source_id not in ignored_source_ids
+        ]
+
+    def add_row(task_id: str, task_name: str, page_id: str | None, interaction_ids: list[str],
+                source_ids: list[str], route: str) -> None:
+        records.append({
+            "taskId": task_id,
+            "taskName": task_name,
+            "pageId": page_id,
+            "interactionIds": interaction_ids,
+            "sourceIds": source_ids,
+            "route": route or "未指定",
+        })
+        if page_id is not None:
+            shown_pages.add(page_id)
+        shown_interactions.update(interaction_ids)
+        shown_sources.update(source_ids)
+
     for task in tasks:
         ui_refs = task.get("uiRefs")
-        visual_source_refs = ui_refs.get("visualSourceRefs") if isinstance(ui_refs, dict) else None
-        if not isinstance(visual_source_refs, list) or source_id not in visual_source_refs:
+        if task.get("uiRequired") is False or not isinstance(ui_refs, dict) or not task.get("id"):
             continue
-        raw_task_id = task.get("id")
-        raw_title = task.get("title")
-        task_id = raw_task_id.strip() if isinstance(raw_task_id, str) else ""
-        title = raw_title.strip() if isinstance(raw_title, str) else ""
-        if not task_id or task_id in seen_task_ids:
+        task_id = str(task["id"])
+        task_name = str(task.get("title", ""))
+        task_interactions = _ref_ids(ui_refs, "interactionRefs")
+        task_sources = source_scope(ui_refs)
+        if task.get("uiRequired") is not True and not (
+            _ref_ids(ui_refs, "pageRefs") or task_interactions or task_sources
+        ):
+            # Explicit legacy UI references remain traceable even when all
+            # IDs are undefined; an empty legacy UI block adds no scope.
             continue
-        seen_task_ids.add(task_id)
-        labels.append(f"{task_id}: {title}" if title else task_id)
-    return "<br>".join(labels) if labels else "待Plan阶段关联"
+        task_specs = _ref_ids(task, "specRefs")
+        bound_sources: set[str] = set()
+        for page_id in page_scope(ui_refs):
+            page_interactions = [item for item in task_interactions if interaction_page(item) == page_id]
+            bound_interactions: set[str] = set()
+            has_capability = False
+            page_capabilities = [cap for cap in capabilities if page_id in page_scope(cap)]
+            for cap_index, cap in enumerate(capabilities):
+                if page_id not in page_scope(cap):
+                    continue
+                cap_specs = _ref_ids(cap, "specRefs")
+                common_specs = [ref for ref in task_specs if ref in cap_specs]
+                cap_interactions = _ref_ids(cap, "interactionRefs")
+                selected_interactions = [item for item in page_interactions if item in cap_interactions]
+                selected_sources = [item for item in task_sources if item in source_scope(cap)]
+                if task_specs and cap_specs:
+                    if not common_specs:
+                        continue
+                elif page_interactions and cap_interactions and not selected_interactions:
+                    continue
+                elif not selected_interactions and not selected_sources and len(page_capabilities) > 1:
+                    # PAGE alone cannot establish which of several capabilities
+                    # a legacy Task owns; UIX or VIS must disambiguate it.
+                    continue
+                # Unknown interaction ownership must never join by None == None.
+                if page_id is None:
+                    continue
+                add_row(task_id, task_name, page_id, selected_interactions, selected_sources,
+                        ui_refs.get("frontendRoute", ""))
+                covered_interactions, covered_sources = coverage.setdefault((cap_index, page_id), (set(), set()))
+                covered_interactions.update(selected_interactions)
+                covered_sources.update(selected_sources)
+                bound_interactions.update(selected_interactions)
+                bound_sources.update(selected_sources)
+                has_capability = True
+            remaining_interactions = [item for item in page_interactions if item not in bound_interactions]
+            if remaining_interactions or not has_capability:
+                add_row(task_id, task_name, page_id, remaining_interactions, [], ui_refs.get("frontendRoute", ""))
+        remaining_sources = [item for item in task_sources if item not in bound_sources]
+        if remaining_sources or not page_scope(ui_refs):
+            add_row(task_id, task_name, None, [], remaining_sources, ui_refs.get("frontendRoute", ""))
+
+    pending_task = "未关联Task"
+    for cap_index, cap in enumerate(capabilities):
+        cap_pages = page_scope(cap)
+        cap_interaction_ids = _ref_ids(cap, "interactionRefs")
+        cap_sources = source_scope(cap)
+        if not cap_pages and not cap_interaction_ids and not cap_sources:
+            continue
+        for page_id in cap_pages or [None]:
+            cap_interactions = [item for item in cap_interaction_ids if interaction_page(item) == page_id]
+            key = (cap_index, page_id)
+            covered_interactions, covered_sources = coverage.get(key, (set(), set()))
+            remaining_interactions = [item for item in cap_interactions if item not in covered_interactions]
+            remaining_sources = [item for item in cap_sources if item not in covered_sources]
+            if key in coverage and not remaining_interactions and not remaining_sources:
+                continue
+            # Unplanned interactions still use their capability's visual input,
+            # including sources already assigned to another Task.
+            scope_sources = cap_sources if remaining_interactions else remaining_sources
+            routes = list(dict.fromkeys(sources.get(item, {}).get("route", "未指定") for item in scope_sources))
+            add_row(pending_task, "", page_id, remaining_interactions, scope_sources,
+                    ", ".join(routes) if routes else "spec-driven-ui")
+
+    # Keep scope outside capabilities visible instead of silently dropping it.
+    for page_id in dict.fromkeys([*pages, *(interaction_page(item) for item in interactions)]):
+        remaining_interactions = [item for item in interactions if interaction_page(item) == page_id and item not in shown_interactions]
+        if remaining_interactions or (page_id is not None and page_id not in shown_pages):
+            add_row(pending_task, "", page_id, remaining_interactions, [], "未指定")
+    for source_id, source in sources.items():
+        if source_id not in shown_sources:
+            add_row(pending_task, "", None, [], [source_id], source.get("route", ""))
+
+    aggregates: dict[str | None, dict[str, Any]] = {}
+
+    def extend_unique(target: list[Any], values: list[Any]) -> None:
+        for value in values:
+            if value not in target:
+                target.append(value)
+
+    for record in records:
+        page_id = record["pageId"]
+        aggregate = aggregates.setdefault(page_id, {
+            "sourceIds": [], "interactionIds": [], "tasks": [],
+            "routes": [], "firstIndex": len(aggregates),
+        })
+        extend_unique(aggregate["sourceIds"], record["sourceIds"])
+        extend_unique(aggregate["interactionIds"], record["interactionIds"])
+        task = (record["taskId"], record["taskName"])
+        if task not in aggregate["tasks"]:
+            aggregate["tasks"].append(task)
+        extend_unique(aggregate["routes"], [record["route"]])
+
+    page_rank = {page_id: index for index, page_id in enumerate(pages)}
+
+    def aggregate_sort_key(item: tuple[str | None, dict[str, Any]]) -> tuple[int, int]:
+        page_id, aggregate = item
+        if page_id in page_rank:
+            return page_rank[page_id], 0
+        return len(page_rank) + (1 if page_id is None else 0), aggregate["firstIndex"]
+
+    def page_description(page_id: str | None) -> str:
+        if page_id is None:
+            return "-"
+        page = pages.get(page_id)
+        if page is None:
+            return "未定义"
+        return _md_cell(page.get("name", "未填写名称"))
+
+    def source_path(source_id: str) -> str:
+        source = sources.get(source_id)
+        if source is None:
+            return "未定义"
+        return _md_cell(source.get("path", "未填写路径"))
+
+    rows: list[str] = []
+    for page_id, aggregate in sorted(aggregates.items(), key=aggregate_sort_key):
+        source_ids = aggregate["sourceIds"]
+        interaction_ids = aggregate["interactionIds"]
+        task_values = aggregate["tasks"]
+        cells = [
+            _md_cell(page_id if page_id is not None else "未明确页面归属"),
+            page_description(page_id),
+            "<br>".join(_md_cell(task_id) for task_id, _ in task_values) or "-",
+            "<br>".join(_md_cell(task_name) if task_name else "-" for _, task_name in task_values) or "-",
+            "<br>".join(_md_cell(source_id) for source_id in source_ids) or "-",
+            "<br>".join(source_path(source_id) for source_id in source_ids) or "-",
+            "<br>".join(_md_cell(interaction_id) for interaction_id in interaction_ids) or "-",
+            "<br>".join(
+                _md_cell(interactions[interaction_id].get("summary", ""))
+                if interaction_id in interactions else "未定义"
+                for interaction_id in interaction_ids
+            ) or "-",
+            "<br>".join(_md_cell(route) for route in aggregate["routes"]),
+        ]
+        rows.append("| " + " | ".join(cells) + " |")
+
+    lines = [
+        "## TASK / PAGE / UIX / VIS 映射", "",
+        "以 PAGE 为主维度，按 UI_CONTEXT.json 中的页面声明顺序展示；同一 PAGE 的 TASK、VIS、UIX 分列聚合。",
+        "视觉资源按已明确的关系与任务关联；无法确定 PAGE 的范围统一列在表尾。", "",
+    ]
+    if rows:
+        lines.extend([
+            "| PAGE ID | 页面名称 | TASK ID | 任务名称 | VIS ID | 视觉资源路径 | UIX ID | 交互名称 | 还原路径 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |", *rows, "",
+        ])
+    else:
+        lines.extend(["暂无 UI 映射范围。", ""])
+    return lines
 
 
 def _generate_ui_context_md(
@@ -166,10 +526,15 @@ def _generate_ui_context_md(
     对纯后端 Feature，先明确说明 UI 不适用及其依据，避免把空的
     前端表格误读为 JSON → MD 同步失败。
     """
+    projection_intro = (
+        "本文档基于 UI_CONTEXT.json 生成；正式 Plan 尚未生成，当前仅展示 PAGE、VIS、UIX 范围。"
+        if tasks is None
+        else "本文档基于 UI_CONTEXT.json 与正式 Plan 生成；JSON 是 UI 范围的机器事实源，Plan 提供任务绑定。"
+    )
     lines = [
         f"# UI Context - {feature}",
         "",
-        "本文档基于 UI_CONTEXT.json 生成；JSON 是 UI 范围的机器事实源。",
+        projection_intro,
         "",
     ]
 
@@ -196,117 +561,19 @@ def _generate_ui_context_md(
         return "\n".join(lines)
     lines.append("")
 
-    pages = data.get('pages', [])
-    visual_sources = data.get('visualSources', [])
-    capabilities = data.get('capabilities', [])
-    interactions = data.get('interactions', [])
-    plan_tasks = tasks or []
-
-    # ========== 1. 视觉资源与还原路径 ==========
+    if tasks is None:
+        lines.extend(_pre_plan_mapping_lines(data))
+    else:
+        lines.extend(_ui_mapping_lines(data, tasks))
     lines.extend([
-        "## 视觉资源与还原路径",
+        "### 还原路径说明",
+        "",
+        "- **absolute-html**: 使用高保真HTML进行像素级还原",
+        "- **standard-html**: 使用标准HTML作为参考",
+        "- **spec-driven-ui**: 基于需求规格说明驱动UI开发",
+        "- **missing-html**: 缺少HTML资源",
         "",
     ])
-
-    if visual_sources:
-        lines.extend([
-            "| 资源ID | 关联任务 | 类型 | 路径 | 还原路径 | 是否必需 |",
-            "| ------ | -------- | ---- | ---- | -------- | -------- |",
-        ])
-        for vs in visual_sources:
-            source_id = vs.get('sourceId', 'N/A')
-            vs_type = vs.get('type', 'N/A')
-            vs_type_zh = _visual_source_type_zh(vs_type)
-            path = vs.get('path', 'N/A')
-            route = vs.get('route', 'N/A')
-            required = '是' if vs.get('required') else '否'
-
-            # 精确展示引用该视觉资源的正式 Plan Task。
-            task_name = _task_display_for_visual_source(plan_tasks, source_id)
-
-            lines.append(f"| {source_id} | {task_name} | {vs_type_zh} | `{path}` | `{route}` | {required} |")
-        lines.append("")
-
-        # 还原路径说明
-        lines.extend([
-            "### 还原路径说明",
-            "",
-            "- **absolute-html**: 使用高保真HTML进行像素级还原",
-            "- **standard-html**: 使用标准HTML作为参考",
-            "- **spec-driven-ui**: 基于需求规格说明驱动UI开发",
-            "- **missing-html**: 缺少HTML资源",
-            "",
-        ])
-    else:
-        lines.extend([
-            "暂无视觉资源。",
-            "",
-        ])
-
-    # ========== 2. 页面与能力映射 ==========
-    lines.extend([
-        "## 页面与能力映射",
-        "",
-    ])
-
-    if pages:
-        # 构建页面到能力的映射
-        page_to_capabilities = {}
-        if capabilities:
-            for cap in capabilities:
-                cap_id = cap.get('capabilityId', '')
-                page_refs = cap.get('pageRefs', [])
-                for page_ref in page_refs:
-                    if page_ref not in page_to_capabilities:
-                        page_to_capabilities[page_ref] = []
-                    page_to_capabilities[page_ref].append(cap_id)
-
-        # 按页面组织交互列表
-        interactions_by_page = {}
-        for interaction in interactions:
-            page_id = interaction.get('pageId', 'N/A')
-            if page_id not in interactions_by_page:
-                interactions_by_page[page_id] = []
-            interactions_by_page[page_id].append(interaction)
-
-        # 页面表格（包含能力列）
-        lines.extend([
-            "| 页面ID | 页面名称 | 页面目标 | 路由提示 | 状态 | 关联能力 | 交互 |",
-            "| ------ | -------- | -------- | -------- | ---- | -------- | ---- |",
-        ])
-
-        for page in pages:
-            page_id = page.get('pageId', 'N/A')
-            name = page.get('name', 'N/A')
-            goal = page.get('goal', 'N/A')
-            route_hint = page.get('routeHint', '')
-            states = page.get('states', [])
-
-            route_hint_display = f"`{route_hint}`" if route_hint else '-'
-            states_display = ', '.join(states) if states else '-'
-
-            # 只展示稳定 capabilityId，不生成可能失真的中文映射。
-            capabilities_display = '-'
-            if page_id in page_to_capabilities:
-                capabilities_display = '<br>'.join(page_to_capabilities[page_id])
-
-            # 构建交互列表字符串（不显示ID，每条换行）
-            interactions_display = '-'
-            if page_id in interactions_by_page:
-                interaction_items = []
-                for interaction in interactions_by_page[page_id]:
-                    summary = interaction.get('summary', 'N/A')
-                    interaction_items.append(summary)
-                interactions_display = '<br>'.join(interaction_items)
-
-            lines.append(f"| {page_id} | {name} | {goal} | {route_hint_display} | {states_display} | {capabilities_display} | {interactions_display} |")
-
-        lines.append("")
-    else:
-        lines.extend([
-            "暂无页面定义。",
-            "",
-        ])
 
     return "\n".join(lines)
 
@@ -317,10 +584,17 @@ def _write_md(
     data: dict[str, Any],
     *,
     tasks: list[dict[str, Any]] | None = None,
+    force_pre_plan: bool = False,
 ) -> None:
     """写入UI_CONTEXT.md文件"""
     md_path = _path(workspace, feature).parent / "UI_CONTEXT.md"
-    plan_tasks = _load_plan_tasks(workspace, feature) if tasks is None else tasks
+    if force_pre_plan:
+        plan_tasks = None
+    elif tasks is None:
+        plan_path = _path(workspace, feature).parent / "plan.json"
+        plan_tasks = _load_plan_tasks(workspace, feature) if plan_path.is_file() else None
+    else:
+        plan_tasks = tasks
     md_content = _generate_ui_context_md(data, feature, tasks=plan_tasks)
     md_path.write_text(md_content, encoding="utf-8")
 
@@ -330,6 +604,7 @@ def refresh_ui_context_md(
     feature: str,
     *,
     tasks: list[dict[str, Any]] | None = None,
+    force_pre_plan: bool = False,
 ) -> bool:
     """Refresh UI_CONTEXT.md when UI context exists; return whether it ran."""
     context_path = _path(workspace, feature)
@@ -338,7 +613,7 @@ def refresh_ui_context_md(
     data = load_json(context_path)
     if not isinstance(data, dict):
         return False
-    _write_md(workspace, feature, data, tasks=tasks)
+    _write_md(workspace, feature, data, tasks=tasks, force_pre_plan=force_pre_plan)
     return True
 
 
@@ -532,6 +807,11 @@ def _cmd_add_interaction(args: argparse.Namespace) -> int:
 
 def _cmd_add_visual_source(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    if args.type == "prototype_link":
+        return render_result(fail(
+            "visual_source_type_unsupported",
+            "prototype_link 不是可还原视觉资源，请勿写入 visualSources",
+        ))
     data = _load(workspace, feature)
     sources = data.setdefault("visualSources", [])
     source_id = args.source_id or next_numbered_id(

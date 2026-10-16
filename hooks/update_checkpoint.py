@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -878,6 +878,27 @@ def main(argv: list[str] | None = None) -> int:
                 workflow_profile=args.workflow_profile,
                 workflow_decision_updates=workflow_decision_updates,
                 needs_fix_from_checkpoint=args.needs_fix_from_checkpoint,
+            )
+
+    if (
+        result.ok
+        and not args.dry_run
+        and not args.skip_node
+        and result.new_checkpoint == "specs_done"
+    ):
+        try:
+            from hooks.ui_context_writer import refresh_ui_context_md
+
+            if not refresh_ui_context_md(workspace, feature, force_pre_plan=True):
+                raise RuntimeError("UI_CONTEXT.json 不存在或不可读取")
+        except Exception as exc:
+            result = replace(
+                result,
+                ok=False,
+                content="",
+                state_json_content="",
+                records={},
+                lifecycle_errors=(*result.lifecycle_errors, f"ui_context_md_sync_failed:{exc}"),
             )
 
     requested_checkpoint = args.checkpoint or result.new_checkpoint or ""
