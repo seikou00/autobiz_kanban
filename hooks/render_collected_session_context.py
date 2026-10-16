@@ -734,6 +734,7 @@ def render(
 
 
 def _main(argv: Optional[List[str]] = None) -> int:
+    started = time.perf_counter()
     parser = argparse.ArgumentParser(
         description="session_context_inject: collect-knowledge.js -> sessionContext JSON",
         allow_abbrev=False,
@@ -821,6 +822,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
             npm_command=args.npm_command,
         )
 
+    elapsed = time.perf_counter() - started
+    message = str(result.get("message", "") or "")
+    result["message"] = "[加载耗时 {:.3f}s]{}".format(elapsed, " " + message if message else "")
     _timing_log("session.result", "ready", "ok={} context_chars={} message={}".format(
         result.get("ok"), len(result.get("sessionContext", "")), result.get("message", ""),
     ), limit=DIAGNOSTIC_LOG_LIMIT)
