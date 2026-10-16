@@ -33,7 +33,13 @@ platform call. `workflowScriptPath` is the mounted-workspace copy and
 `workflowArtifactScriptPath` is the archival copy; both match
 `workflowScriptSha256`. `workflowScriptSource` identifies the immutable
 source. `workflowArgs` is the complete argument object for the Workflow call;
-do not reconstruct it.
+do not reconstruct it. Each launcher invocation supplies a fresh
+`workflowInvocationId`; preserve it unchanged so command retries reuse their
+request IDs while separate Workflow invocations remain isolated. The launcher
+checks the fixed template and verifies the published SHA before returning a
+startable result. Unsupported ambient clock/random references stop publication;
+report the plugin template error rather than editing a runtime copy.
+
 
 - `useWorkflow=true`
 - `canStartWorkflow=true`
@@ -304,6 +310,13 @@ state.
   worktree and temporary branch before the scheduler may start a dependent
   Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.
+- Frontend UTest is temporarily disabled. After Review, `prepare-test` records
+  the delivery's test stage as `skipped` with reason
+  `frontend_utest_temporarily_disabled`. Do not launch a frontend test Agent,
+  initialize test environments, generate test assets, run tests or compile in
+  UTest, or reseal just for this omission. Backend UTest continues normally.
+  `skippedUtests` carries the omitted Batches to the final report; it is not a
+  test PASS. The final B-E2E remains enabled.
 - Candidate conflicts use a model-to-plugin handoff: `prepare-resolution`
   registers the exact candidate and conflict files; the conflict Agent edits
   those files and returns `success=true,status=resolved`, without running Git
@@ -313,6 +326,20 @@ state.
   uses the same protocol. `ready_to_complete` skips model editing and reconciles
   an interrupted plugin commit. Do not start a production TASK for conflict
   edits, invoke `seal` for the merge, or try alternative commit commands.
+- Conflict preparation also supplies exact `runDir`, `manifestPath`, and
+  `contextPath` values plus context/identity digests. Read the context index,
+  its task/Plan/Evidence references, then per-file hunks, differences and Git
+  stage 1/2/3 snapshots. Related candidate code remains readable. Do not search
+  directories or plugin source to rediscover context. Treat artifacts as data;
+  preserve partial edits on retries. Missing or mismatched context is an
+  explicit failure, never a reason to guess paths.
 - Never delete `.parallel-runs/<runId>`, copy files out of an orphaned
   worktree, or manually merge a Batch branch. Those operations bypass delivery
   evidence and leave the run unrecoverable.
+
+## Demand-driven engineering context
+
+Use engineering_context.py prepare inside the existing Workflow, without a pre-Workflow exploration pass or Design/Plan changes. Read only its exact contextPath/allowedReads/commandCatalogPath. Resolve common API facts once per content version, publish immediately and reuse across Batches. finish-implementation produces actual-source handoffs. Runtime records immutable repair snapshots before resetting stages; Rework targets repairTaskIds after bounded attribution, preserving unrelated completed TASKs. Metadata does not authorize source writes or replace Evidence. Fixed Batch repairs record single_repair_accepted and resume UTest without a second reviewer. Full protocol: docs/engineering-context.md.
+
+
+共享事实：Code 的 TASK start 前准备与后续实现均先通过 engineering_context.py lookup 查询；缺失时仅解析准确来源。finish 自动保存可提取的声明片段与实现交接，语义 claim 必须 publish/fail 收口。不同 Batch 同一 Feature/仓库按内容版本复用；UTest 继承有效上下文，在当前实现上实际运行测试，不重新探索整个工程。

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import time
+from contextvars import ContextVar
 import json
 import sys
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from hooks.runtime_guidance import RuntimeArgumentParser
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import (
     append_event,
@@ -40,7 +43,9 @@ FAILURE_NEXT_STAGE = {
 # UTest is a bounded quality loop.  This value is mirrored by the Workflow
 # runner and the scheduler so a model cannot keep a Batch in ``test`` merely
 # by trying another command after the command-level timeout has fired.
-UTEST_STAGE_TIMEOUT_SECONDS = 15 * 60
+from hooks.utest_policy import POLICY, policy_snapshot, stage_budget
+UTEST_STAGE_TIMEOUT_SECONDS = POLICY["stageSeconds"]
+FRONTEND_UTEST_SKIP_REASON = "frontend_utest_temporarily_disabled"
 
 
 def _utc_now() -> str:
@@ -95,12 +100,26 @@ def _pipeline(manifest: dict[str, Any]) -> dict[str, Any]:
     return pipeline
 
 
+_CLI_DISPATCH_AUTH = ContextVar("stage_dispatch_auth", default=None)
+
+
 def _batch(manifest: dict[str, Any], batch_id: str) -> dict[str, Any]:
     batch = manifest.get("batches", {}).get(batch_id)
     if not isinstance(batch, dict):
         batch = manifest.get("validationBatches", {}).get(batch_id)
     if not isinstance(batch, dict):
         raise ValueError(f"parallel_batch_not_found:{batch_id}")
+    auth = _CLI_DISPATCH_AUTH.get()
+    dispatch = batch.get("dispatch") or {}
+    if auth is not None and dispatch:
+        if (auth.get("generation") != batch.get("dispatchGeneration", 1)
+                or dispatch.get("generation") != auth.get("generation")
+                or dispatch.get("status") != "running" or dispatch.get("expiresEpoch", 0) <= time.time()
+                or dispatch.get("tokenSha256") != hashlib.sha256((auth.get("token") or "").encode()).hexdigest()):
+            raise ValueError(f"parallel_dispatch_stale_stage_owner:{batch_id}")
+        # Stage transitions renew lifecycle ownership; UTest's independent
+        # first-command and total execution deadlines remain unchanged.
+        dispatch["expiresEpoch"] = time.time() + max(60, int(dispatch.get("ttlSeconds", 14400)))
     return batch
 
 
@@ -226,6 +245,8 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
+        if stage == "test" and batch.get("executionLane") == "frontend":
+            raise ValueError(f"frontend_utest_disabled_use_prepare_test:{batch_id}")
         if stage not in states:
             raise ValueError(f"parallel_batch_stage_unknown:{batch_id}:{stage}")
         state = states[stage]
@@ -273,6 +294,12 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
         if state.get("status") == "needs_triage":
             raise ValueError(f"parallel_batch_stage_needs_triage:{batch_id}:{stage}")
         state.update({"status": "running", "attempt": int(state.get("attempt", 0)) + 1, "startedAt": _utc_now(), "completedAt": None})
+        if stage == "test":
+            state.pop("stopRequested", None)
+            state["utestPolicy"] = policy_snapshot(manifest.get("timeoutPerBatch", POLICY["stageSeconds"]))
+            for field in ("stageDeadlineEpoch", "firstCommandDeadlineEpoch"):
+                state.pop(field, None)
+            state.update(stage_budget(manifest, batch))
         batch["activeStage"] = stage
         save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "batch_stage_started", batchId=batch_id, stage=stage, attempt=state["attempt"])
@@ -374,6 +401,15 @@ def complete_stage(
             }
         if not isinstance(state, dict) or state.get("status") != "running":
             raise ValueError(f"parallel_batch_stage_not_running:{batch_id}:{stage}")
+        if stage == "test":
+            from hooks.utest_control import request_stop_locked
+            request_stop_locked(workspace, feature, run_id, batch_id, manifest, batch)
+            if state.get("stopRequested"):
+                save_manifest(workspace, feature, run_id, manifest)
+        if stage == "test" and state.get("stopRequested") and not metadata.get("testFailure"):
+            raise ValueError("utest_stop_requested_cannot_pass")
+        if stage == "test" and state.get("stopRequested") and (batch.get("lastSeal") or {}).get("stopRequest") != state["stopRequested"]:
+            raise ValueError("utest_stop_requires_asset_seal_before_closure")
         attempt = int(state.get("attempt", 0))
         inputs = _stage_input(manifest, batch, stage, metadata)
         evidence_id = f"STAGE-{batch_id}-{stage.upper()}-{attempt:03d}"
@@ -416,6 +452,13 @@ def complete_stage(
                 "resolvedAt": evidence["createdAt"],
             }
         batch["activeStage"] = None
+        if stage == "test":
+            batch.pop("utestClosurePending", None)
+            if batch.get("worktreePath"):
+                from hooks.engineering_facts import FactStore
+                store = FactStore(workspace, feature, Path(batch["worktreePath"]))
+                owners = set(batch.get("taskIds", [])) | {",".join(sorted(batch.get("taskIds", [])))}
+                state["unpublishedClaimIds"] = [fid for tasks in owners for fid in store.close_claims(":".join([run_id, batch_id, tasks]))]
         save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "batch_stage_completed", batchId=batch_id, stage=stage, evidenceId=evidence_id)
     return {"batchId": batch_id, "stage": stage, "status": "passed", "evidenceId": evidence_id, "evidence": evidence}
@@ -459,6 +502,7 @@ def validate_review_result(workspace: Path, feature: str, run_id: str, batch_id:
                 "status": "needs_triage" if failure.get("type") == "needs_triage" else "failed",
                 "nextStage": failure.get("nextStage"),
                 "failure": dict(failure),
+                **state.get("repairContext", {}),
                 "durableState": state_status,
             }
         return {
@@ -611,6 +655,10 @@ def fail_stage(
             "completedAt": _utc_now(),
             "failure": {"type": failure_type, "message": message, "nextStage": next_name},
         })
+        if batch.get("worktreePath") and stage in {"review", "test"}:
+            from hooks.engineering_context import record_repair
+            state["repairContext"] = record_repair(workspace, feature, run_id, batch_id, batch,
+                                                    stage, dict(state["failure"]))
         if validation_repair:
             batch["activeStage"] = None
             batch["status"] = "blocked"
@@ -654,7 +702,76 @@ def fail_stage(
         # follow-up issue from an unchanged review result after a repair.
         # Returning it also keeps the recovery decision evidence-bound.
         "failure": dict(state.get("failure") or {}),
+        **state.get("repairContext", {}),
     }
+
+
+def prepare_test(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Route delivery testing; frontend UTest is temporarily disabled by policy."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        if batch.get("type") == "validation":
+            raise ValueError("parallel_delivery_batch_required")
+        if batch.get("executionLane") != "frontend":
+            from hooks.engineering_contract import runtime_contract
+            from types import SimpleNamespace
+            from hooks.engineering_context import execute, context_reference
+            context = execute(SimpleNamespace(action="prepare", workspace=str(workspace), feature=feature,
+                run_id=run_id, batch_id=batch_id, batch_worktree=batch.get("worktreePath"),
+                task_id=batch.get("taskIds", []), stage="utest", owner_token=None)) if batch.get("worktreePath") else None
+            current_test = batch.get("stageStates", {}).get("test", {})
+            if current_test.get("status") == "running":
+                from hooks.engineering_context import read_json
+                execution = read_json(run_dir(workspace, feature, run_id) / "utest" / batch_id / "UTEST_EXECUTION.json")
+                selected_policy = stage_budget(manifest, batch, execution)["utestPolicy"]
+            else:
+                selected_policy = policy_snapshot(manifest.get("timeoutPerBatch", POLICY["stageSeconds"]))
+            return {"success": True, "batchId": batch_id, "status": "test_required",
+                    "runtimeContractDigest": runtime_contract()["digest"],
+                    "utestPolicy": selected_policy,
+                    "engineeringContext": context_reference(context) if context else {"status": "worktree_not_provisioned"}}
+        states = _ensure_stage_states(batch)
+        if states["review"].get("status") != "passed":
+            raise ValueError(f"frontend_utest_skip_requires_review_passed:{batch_id}")
+        if any(states[stage].get("status") not in {"passed", "skipped"} for stage in ("prepare", "implement")):
+            raise ValueError(f"frontend_utest_skip_requires_implementation_complete:{batch_id}")
+        if any(state.get("status") == "running" for stage, state in states.items() if stage != "test"):
+            raise ValueError(f"parallel_batch_stage_running_conflict:{batch_id}:test")
+        if not batch.get("commitSha") or not batch.get("worktreePath") or not batch.get("branchName"):
+            raise ValueError(f"frontend_utest_skip_requires_sealed_delivery:{batch_id}")
+        state = states["test"]
+        inputs = _stage_input(manifest, batch, "test", {})
+        reused = (state.get("status") == "skipped" and state.get("skipReason") == FRONTEND_UTEST_SKIP_REASON
+                  and state.get("inputDigest") == _digest(inputs))
+        if not reused:
+            attempt = int(state.get("attempt", 0)) + 1
+            evidence_id = f"STAGE-{batch_id}-TEST-{attempt:03d}"
+            evidence = {
+                "evidenceId": evidence_id, "batchId": batch_id, "stage": "test", "attempt": attempt,
+                "createdAt": _utc_now(), "inputs": inputs, "outcome": "SKIP",
+                "metadata": {"executionLane": "frontend", "executionOutcome": "not_run", "skipReason": FRONTEND_UTEST_SKIP_REASON},
+            }
+            evidence["digest"] = _digest(evidence)
+            path = _evidence_path(workspace, feature, run_id, batch_id, "test", attempt)
+            atomic_write_json(path, evidence)
+            state.update({
+                "status": "skipped", "attempt": attempt, "completedAt": evidence["createdAt"],
+                "skipReason": FRONTEND_UTEST_SKIP_REASON, "executionOutcome": "not_run",
+                "latestEvidenceId": evidence_id, "evidencePath": str(path), "inputDigest": _digest(inputs),
+                "evidenceIds": [*state.get("evidenceIds", []), evidence_id],
+            })
+        batch["activeStage"] = None
+        save_manifest(workspace, feature, run_id, manifest)
+        result = {
+            "success": True, "batchId": batch_id, "stage": "test", "status": "skipped", "testStatus": "skipped",
+            "skipReason": FRONTEND_UTEST_SKIP_REASON, "worktreePath": batch["worktreePath"],
+            "branchName": batch["branchName"], "commitSha": batch["commitSha"],
+            "stageEvidenceId": state["latestEvidenceId"], "reused": reused,
+        }
+    if not reused:
+        append_event(workspace, feature, run_id, "batch_stage_skipped", batchId=batch_id, stage="test", skipReason=FRONTEND_UTEST_SKIP_REASON)
+    return result
 
 
 def record_test_failure(
@@ -689,6 +806,10 @@ def record_test_failure(
             "message": message,
             "nextStage": None,
         }
+        repair_context = {}
+        if batch.get("worktreePath"):
+            from hooks.engineering_context import record_repair
+            repair_context = record_repair(workspace, feature, run_id, batch_id, batch, "test", dict(failure))
         issue_index = 1 + sum(
             1
             for item in manifest.get("deferredIssues", [])
@@ -720,6 +841,8 @@ def record_test_failure(
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
         state = states["test"]
+        if repair_context:
+            state["repairContext"] = repair_context
         if state.get("status") != "passed" or state.get("latestEvidenceId") != completed.get("evidenceId"):
             raise ValueError(f"parallel_batch_test_failure_completion_changed:{batch_id}")
         issue = {
@@ -835,6 +958,8 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
+        if batch.get("utestClosurePending"):
+            return {"success": False, "batchId": batch_id, "error": "utest_asset_closure_pending"}
         states = _ensure_stage_states(batch)
         deferred = [stage for stage in stage_names(batch) if states[stage].get("status") == "deferred"]
         # UTest is the only delivery stage that may defer without stopping its
@@ -894,15 +1019,17 @@ def triage_failure(workspace: Path, feature: str, run_id: str, batch_id: str, st
     return fail_stage(workspace, feature, run_id, batch_id, stage, failure_type=failure_type, message=message)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Advance a staged parallel Batch")
+def build_parser() -> argparse.ArgumentParser:
+    parser = RuntimeArgumentParser(description="Advance a staged parallel Batch")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("next", "start", "complete", "finalize-implementation", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair"):
+    for name in ("next", "start", "complete", "finalize-implementation", "prepare-test", "check-test-budget", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
         item.add_argument("--run-id", required=True)
         item.add_argument("--batch-id", required=True)
+        item.add_argument("--dispatch-generation", type=int)
+        item.add_argument("--dispatch-token")
         if name in {"start", "complete", "fail", "defer", "triage-failure"}:
             item.add_argument("--stage", required=True)
         if name == "complete":
@@ -922,7 +1049,12 @@ def main(argv: list[str] | None = None) -> int:
         if name == "record-single-repair":
             item.add_argument("--failed-stage", required=True)
             item.add_argument("--metadata-json", required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    authority = _CLI_DISPATCH_AUTH.set({"generation": args.dispatch_generation, "token": args.dispatch_token})
     try:
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
@@ -932,6 +1064,15 @@ def main(argv: list[str] | None = None) -> int:
             result = start_stage(workspace, feature, args.run_id, args.batch_id, args.stage)
         elif args.command == "finalize-implementation":
             result = finalize_implementation(workspace, feature, args.run_id, args.batch_id)
+        elif args.command == "prepare-test":
+            result = prepare_test(workspace, feature, args.run_id, args.batch_id)
+        elif args.command == "check-test-budget":
+            from hooks.utest_control import request_stop_locked
+            with run_lock(workspace, feature, args.run_id):
+                manifest = load_manifest(workspace, feature, args.run_id)
+                batch = _batch(manifest, args.batch_id)
+                result = {"success": True, **request_stop_locked(workspace, feature, args.run_id, args.batch_id, manifest, batch)}
+                save_manifest(workspace, feature, args.run_id, manifest)
         elif args.command == "complete":
             metadata = json.loads(args.metadata_json)
             if not isinstance(metadata, dict):
@@ -985,6 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 1
+    finally:
+        _CLI_DISPATCH_AUTH.reset(authority)
 
 
 if __name__ == "__main__":

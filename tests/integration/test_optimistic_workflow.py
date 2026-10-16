@@ -41,7 +41,8 @@ class OptimisticWorkflowIntegrationTest(unittest.TestCase):
                 json.dumps({"parallelSchedulingMode": "invalid", "maxParallel": 0}),
                 encoding="utf-8",
             )
-            self.assertEqual(_load_runtime_config(workspace)["parallelSchedulingMode"], "conservative")
+            # Invalid input falls back to the current optimistic default.
+            self.assertEqual(_load_runtime_config(workspace)["parallelSchedulingMode"], "optimistic")
             self.assertEqual(_load_runtime_config(workspace)["maxParallel"], 5)
 
     def test_conflict_extractor_reports_all_content_conflicts(self) -> None:

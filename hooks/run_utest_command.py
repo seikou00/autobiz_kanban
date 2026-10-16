@@ -59,21 +59,34 @@ def diagnostic_cache_path(feature_dir, cwd, argv):
     goals = [item for item in argv[1:] if ":" in item and not item.startswith("-")]
     diagnostics = {"dependency:tree", "dependency:build-classpath", "dependency:resolve", "help:effective-pom"}
     mutating = {"clean", "compile", "test", "test-compile", "package", "verify", "install", "deploy", "integration-test"}
-    if not is_maven_command(argv) or not goals or not all(item in diagnostics for item in goals) or any(item in mutating for item in argv[1:]):
+    version_query = argv[1:] in (["-v"], ["--version"])
+    if not is_maven_command(argv) or (not version_query and (not goals or not all(item in diagnostics for item in goals))) or any(item in mutating for item in argv[1:]):
         return None
-    from hooks.utest_runtime import fingerprint
-    # Invalidate native-subprocess failures recorded before the Bash migration.
-    digest = hashlib.sha256(json.dumps(["bash-setup-v1", str(cwd), fingerprint(cwd), os.environ.get("PATH", ""), argv]).encode()).hexdigest()
-    return feature_dir / ".runtime" / "utest-diagnostics" / (digest + ".json")
+    from hooks.engineering_environment import diagnostic_identity
+    try:
+        identity = diagnostic_identity(Path(cwd), argv)
+    except (ValueError, OSError):
+        return None
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return feature_dir / ".engineering" / "diagnostics" / identity["repositoryId"] / (digest + ".json")
 
 
 def cached_diagnostic(path, cwd, argv):
     if path is None or not path.is_file():
         return None
-    cached = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(cached, dict) or not isinstance(cached.get("exitCode"), int):
+        return None
+    expiry = cached.get("cacheExpiresEpoch")
+    if cached.get("cacheVersion") != 2 or (expiry is not None and (not isinstance(expiry, (int, float)) or time.time() >= expiry)):
+        return None
     output_files = [item.split("=", 1)[1] for item in argv if re.match(r"-D(?:mdep\.)?outputFile=", item)]
-    if cached["exitCode"] != 0 or all((Path(file) if Path(file).is_absolute() else cwd / file).is_file() for file in output_files):
-        return dict(cached, diagnosticReused=True)
+    from hooks.engineering_environment import restore_diagnostic
+    if cached["exitCode"] != 0 or restore_diagnostic(cached, Path(cwd), argv):
+        return dict(cached, diagnosticReused=True, cwd=str(cwd))
     return None
 
 
@@ -609,7 +622,10 @@ def execute_utest_command(
     }
     if selected_kind == "setup":
         if diagnostic_path is not None:
-            atomic_write_json(diagnostic_path, response)
+            from hooks.engineering_environment import capture_diagnostic, publish_diagnostic
+            response["diagnosticPublished"] = publish_diagnostic(diagnostic_path,
+                runtime_command.get("diagnosticClaimToken") if runtime_command else None,
+                capture_diagnostic(response, Path(command_cwd), command_argv))
         if execution_id:
             from hooks.utest_runtime import record_runtime_execution
             record_runtime_execution(artifact_workspace, resolved_feature, run_id, batch_id,

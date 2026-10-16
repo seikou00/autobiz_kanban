@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,7 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.json_writer_common import feature_dir, resolve_workspace  # noqa: E402
+from hooks.json_writer_common import atomic_write_json, feature_dir, resolve_workspace  # noqa: E402
+from hooks.workflow_sandbox_contract import validate_workflow_source
+from hooks.engineering_contract import runtime_contract
 from hooks.commit_message import normalize_task_card_id  # noqa: E402
 from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
@@ -143,14 +146,19 @@ def materialize_workflow_script(source: Path, runtime_workspace: str | Path, fea
         raise ValueError(f"fixed_workflow_script_unreadable:{source}:{exc}") from exc
     digest = hashlib.sha256(source_bytes).hexdigest()
     try:
-        source_bytes.decode("utf-8")
+        source_text = source_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"fixed_workflow_script_not_utf8:{source}:{exc}") from exc
+    validate_workflow_source(source_text, source)
     target = target_root / WORKFLOW_RUNTIME_DIRECTORY / feature / WORKFLOW_SCRIPT_NAME
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
             target.write_bytes(source_bytes)
+        published = target.read_bytes()
+        if hashlib.sha256(published).hexdigest() != digest:
+            raise ValueError(f"fixed_workflow_runtime_copy_sha_mismatch:{target}")
+        validate_workflow_source(published.decode("utf-8"), target)
     except OSError as exc:
         raise ValueError(f"fixed_workflow_runtime_copy_failed:{target}:{exc}") from exc
     return {
@@ -586,6 +594,12 @@ def analyze_batches(
             if runtime_workspace == artifact_workspace
             else materialize_workflow_script(workflow_script, runtime_workspace, feature)
         )
+        deployment = {"schemaVersion": "autodev.engineering.deployment.v1", "source": runtime_script["workflowScriptSource"],
+                      "executionPath": runtime_script["workflowScript"], "artifactPath": artifact_runtime_script["workflowScript"],
+                      "sha256": runtime_script["workflowScriptSha256"]}
+        deployment["runtimeContract"] = runtime_contract(script_root)
+        deployment_id = hashlib.sha256(json.dumps(deployment, sort_keys=True).encode()).hexdigest()
+        atomic_write_json(feature_dir(artifact_workspace, feature) / ".engineering" / "deployments" / (deployment_id + ".json"), deployment)
         workflow_contract = workflow_workspace_contract(
             runtime_workspace,
             runtime_script["workflowScript"],
@@ -629,6 +643,7 @@ def analyze_batches(
             "executionMode": "fixed",
             "workflowArgs": {
                 "feature": feature,
+                "workflowInvocationId": uuid.uuid4().hex,
                 "pluginPath": str(script_root),
                 "artifactWorkspace": str(artifact_workspace),
                 "codeWorkspaces": workspace_contract["codeWorkspaces"],
@@ -636,6 +651,7 @@ def analyze_batches(
                 "maxParallel": max_parallel,
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
                 "runtimeConfig": runtime_config,
+                "runtimeContractDigest": deployment["runtimeContract"]["digest"],
                 "taskCardId": selected_task_card_id,
                 "resumeMode": "manual" if manual_resume else "automatic",
                 "resumeRunId": active_run_id if manual_resume else None,

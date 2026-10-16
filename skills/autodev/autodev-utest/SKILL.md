@@ -18,6 +18,8 @@ python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --f
 
 ## 阶段定位
 
+优先继承 Runtime 提供且来源版本有效的实现交接、API 事实、依赖解析、环境诊断和测试配方，只对缺失或失效部分做有限探索。自主验证约束当前测试目标、断言与执行证据，不要求从零探索工程；不复用历史 PASS 不等于禁止复用探索结论。已有适用测试优先复用并补齐覆盖，在当前实现绑定下实际执行。
+
 Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创建测试。本阶段使用路由脚本生成的 assignment 内容，生成或补齐单测，运行真实测试命令，归因失败，生成 `UNIT_TEST_REPORT.md` 与 `UNIT_TEST_RESULT.json`。
 
 固定 Code Workflow 中，成功或失败时封存测试资产均携带 `--commit-stage utest --commit-summary "<本次新增或修复测试的中文说明>"`。提交格式为 `<看板ID> #comment cmbdevcalw提交 UTest：<说明>`，不附加 TASK，不自动宣称测试通过。生产问题回到 Rework，其提交也不附加 TASK；Review 只读、不创建提交。没有代码变更时复用已有 commitSha。详见 `docs/code-commit-messages.md`。
@@ -42,7 +44,7 @@ python -X utf8 "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${p
 
 Code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出 TASK `blockers[]`。测试归属的入场缺陷与 UT target 并列进入 UTest 修复队列；任何生产实现缺陷必须形成 `source_fix_request` 回到同一 Batch 的 implement repair，禁止在 UTest 直接改码。
 
-判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先重跑确认复现，再按失败分类处理。未经重跑不得直接依据字段动生产代码。
+判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先核对当前绑定的执行记录与恢复位置；awaiting_record 只补登记。确需复现时按原命令和剩余预算重跑，再按失败分类处理；有效负诊断不重复探测。未经重跑不得直接依据字段动生产代码。
 
 其余输入只用于定位与执行，不用于重新推导测试目标：
 
@@ -76,7 +78,7 @@ python -X utf8 "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${p
 ```
 
 1. 使用 router 返回的 assignment 顺序。
-2. 先串行执行全部 backend assignments，再串行执行全部 frontend assignments；其他 lane 排在其后。
+2. 当前前端 UTest 暂时禁用：`executionLane=frontend` 的 assignment 不派发测试 Agent，不做环境检查/初始化、测试资产生成、测试执行或收尾编译；记录 `skipped`，原因 `frontend_utest_temporarily_disabled`，不得记为 PASS。固定 Batch Workflow 由 `parallel_batch_stage.py prepare-test` 持久化该跳过记录。串行执行 backend assignments，其他非前端 lane 排在其后；保留前端 Plan 测试意图供后续恢复。
 3. 一次只派发一个 assignment；收到完整返回后再派发下一个，不并发跨 Batch 或跨仓库测试。
 4. task description 以 router 返回的 `promptContent` 原文开头，再附加 SCOPE/SYSTEM/UNIT 引用、环境检查器原样返回的仓库与模块路径、允许写入边界、失败分类和固定返回字段；不得附加 plan TASK JSON。
 5. 收集 `status`、`assignment`、`constraint_files`、`lane`、`framework`、`runner`、`environment_initialization`、`test_targets`、`command_results`、`evidence_ids`、`failure_classification`、`source_bug_attestation`、`source_fix_request`、`e2e_handoff`、`warnings`。
@@ -100,7 +102,7 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 python -X utf8 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --batch-worktree "${batchWorktree}" --json
 ```
 
-检查器只从当前 Plan 的 `codeWorkspaces` 映射解析仓库；模型不得填写 repo、仓库地址、framework 或 cwd，也不得从历史 Task Run、当前 cwd 或任何缓存推断仓库。必须传入当前 Batch 的 `--batch-worktree`，让检查和执行都绑定到同一 worktree。`scope.modules` 是可选的范围收窄项：声明时只检查所列模块；未声明时，检查器只在当前 Batch worktree 和 `scope.workspaceRoots` 内发现构建项目，不跨出该范围，也不进入嵌套 Git 仓库、依赖缓存或构建输出目录。若 Batch 当前提交或 UTest 改动能定位工程，检查器只检查改动所属的最深项目根；否则返回候选目标。`environment_target_ambiguous` 时，依据 TASK 与候选路径判断；能确定时用 `--task-id <TASK_ID> --environment-target "<TASK_ID>=<ENVIRONMENT_TARGET_ID>"` 重跑检查，并保留 `--batch-worktree`，不能确定时按环境阻断收口，不得猜选、初始化全部候选或要求把路径补写进 Plan。环境 ready 后，执行器仍按测试文件路径选择所属目标，嵌套项目优先匹配最深项目根。`workspace_binding_missing` 时回到 `/autodev-plan` 修正 `codeWorkspaces`；`contract_gap` 只用于 plan 的 `workspaceRef`、显式 `scope.modules` 与仓库绑定不一致。
+检查器只从当前 Plan 的 `codeWorkspaces` 映射解析仓库；模型不得填写 repo、仓库地址、framework 或 cwd，也不得从历史 Task Run、当前 cwd 或缓存推断仓库；这一限制只约束仓库绑定，不禁止绑定确定后读取有效工程事实与依赖缓存。必须传入当前 Batch 的 `--batch-worktree`，让检查和执行都绑定到同一 worktree。`scope.modules` 是可选的范围收窄项：声明时只检查所列模块；未声明时，检查器只在当前 Batch worktree 和 `scope.workspaceRoots` 内发现构建项目，不跨出该范围，也不进入嵌套 Git 仓库、依赖缓存或构建输出目录。若 Batch 当前提交或 UTest 改动能定位工程，检查器只检查改动所属的最深项目根；否则返回候选目标。`environment_target_ambiguous` 时，依据 TASK 与候选路径判断；能确定时用 `--task-id <TASK_ID> --environment-target "<TASK_ID>=<ENVIRONMENT_TARGET_ID>"` 重跑检查，并保留 `--batch-worktree`，不能确定时按环境阻断收口，不得猜选、初始化全部候选或要求把路径补写进 Plan。环境 ready 后，执行器仍按测试文件路径选择所属目标，嵌套项目优先匹配最深项目根。`workspace_binding_missing` 时回到 `/autodev-plan` 修正 `codeWorkspaces`；`contract_gap` 只用于 plan 的 `workspaceRef`、显式 `scope.modules` 与仓库绑定不一致。
 
 `status=init_required` 时读取并应用：
 
@@ -118,7 +120,7 @@ POM 修改可用 `apply-pom`、同一绑定参数和 `--content-file <worktree�
 
 有实际证据时 `select --preset <ID> --reason <原因>` 允许执行前调整一次；执行后冻结。静态依赖读取 `reference/legacy-static-test-patterns.md`，只复用可验证的 inline/PowerMock/隔离 fixture 模板。无法隔离时返回 `testability_gap`，不得静态推导 source_bug；H2/mapper 测试不替代 Service 授权逻辑。
 
-Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan V2 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。所有 Maven 命令（含版本查询、依赖诊断、classpath、编译和测试）都由 Bash 直接执行，禁止 Python 原生 subprocess 启动 mvn，不要求创建 mvn.exe 包装器。Maven setup 统一经 `utest_runtime.py preflight-setup` 携带上述全部绑定参数和精确 argv；`status=prepared` 时原样执行返回的 `bashCommand`，`status=cached` 时复用实际结果。runner 仅用 `--kind setup --record-only` 登记，setup 不算行为测试，也不重置首次真实测试期限。相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
+Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan V2 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。所有 Maven 命令（含版本查询、依赖诊断、classpath、编译和测试）都由 Bash 直接执行，禁止 Python 原生 subprocess 启动 mvn，不要求创建 mvn.exe 包装器。Maven setup 统一经 `utest_runtime.py preflight-setup` 携带上述全部绑定参数和精确 argv；`status=prepared` 时原样执行返回的 `bashCommand`，`status=cached` 时复用实际结果。runner 仅用 `--kind setup --record-only` 登记，setup 不算行为测试，也不重置首次真实测试期限。相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类先用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；再用 `inspect-class` 读取并缓存 source JAR/javap；缺 snapshot 时只执行一次受控 classpath setup。不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
 
 ## 测试域路由
 
@@ -176,7 +178,7 @@ python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framewo
 
 固定 Batch 流程必须在文件落地后运行 `utest_runtime.py preflight`，携带当前 Workflow run/Batch/worktree/lease/TASK 绑定、`--test-file <仓库根相对文件>`、`-- <精确 argv>`，然后执行返回的 `bashCommand`。Runtime 生成的 Bash 直接运行测试、监控子进程、立即捕获 PIPESTATUS/tee 状态并登记 Evidence；Python 不启动行为测试。`--retry-kind test_bug` 与受控生产修复后的 `--retry-kind source_repair` 各最多一次，argv/target 冻结。`awaiting_record` 只补记现有输出，不重跑。
 
-首次真实测试命令预算 600 秒，阶段总预算最多 1800 秒（Workflow 可收窄），命令最多 300 秒；预算包含探索和 setup，恢复/续 lease 不重置。Bash 开始执行前再次检查绑定与期限。零用例或无法证明用例实际执行为 BLOCKED；exit 0 不足以 PASS。到期或阻断仍须按 Workflow 封存有效测试资产、记录 issue 并释放 lease，不读插件源码寻找绕行路径。
+首次真实测试命令预算 1800 秒（30 分钟），阶段总预算最多 2700 秒（45 分钟，Workflow 可收窄），命令最多 300 秒；预算包含探索和 setup，恢复/续 lease 不重置。首次真实测试启动后继续使用同一阶段的剩余预算。Bash 开始执行前再次检查绑定与期限。零用例或无法证明用例实际执行为 BLOCKED；exit 0 不足以 PASS。到期或阻断仍须按 Workflow 封存有效测试资产、记录 issue 并释放 lease，不读插件源码寻找绕行路径。
 
 每个 UT target：
 
@@ -191,7 +193,7 @@ python -X utf8 "${pluginPath}/hooks/render_frontend_test_reference.py" --framewo
 Maven 环境 setup（版本查询、依赖诊断或 classpath 生成）先生成受控 Bash 脚本，再原样执行返回的 `bashCommand`。Bash 直接执行 Maven、实时显示输出并保留命令和 tee 的退出码；Python runner 只登记 setup 日志与缓存，不创建通过的测试 Evidence：
 
 ```bash
-python -X utf8 "${pluginPath}/hooks/utest_runtime.py" preflight-setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --run-id "<RUN_ID>" --batch-id "<BATCH_ID>" --task-id "<TASK_ID>" --batch-worktree "${batchWorktree}" --owner-token "<当前LEASE_TOKEN>" --stage-timeout 1800 --command-timeout 300 -- <MAVEN_ARGV...>
+python -X utf8 "${pluginPath}/hooks/utest_runtime.py" preflight-setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --run-id "<RUN_ID>" --batch-id "<BATCH_ID>" --task-id "<TASK_ID>" --batch-worktree "${batchWorktree}" --owner-token "<当前LEASE_TOKEN>" --stage-timeout 2700 --command-timeout 300 -- <MAVEN_ARGV...>
 ```
 
 非 Maven 的受支持环境安装/校验可继续使用 `run_utest_command.py --kind setup`；Maven 不允许这条直接执行入口。缓存结果必须读取 `result/exitCode/logExitCode`；登记进程返回 0 只表示登记成功。登记失败保留原输出，仅重试登记，不重新执行 Maven。
@@ -221,7 +223,7 @@ exit 0
 | 类型 | 处置 |
 |------|------|
 | `test_bug` | 测试工程师只修测试、fixture、mock、辅助代码或测试环境配置，重跑原命令 |
-| `source_bug` | 用失败测试锚点生成 `source_fix_request`；不得在 UTest 中改生产代码。固定 Batch Workflow 会回到同一 Worktree 的 implement repair，重新编译、Review、UTest |
+| `source_bug` | 用失败测试锚点生成 `source_fix_request`；不得在 UTest 中改生产代码。固定 Batch Workflow 会回到同一 Worktree 的 implement repair，重新编译、封存并登记一次性修复后直接继续原 UTest，不再派发第二次 Review |
 | `contract_gap` | 阻断并回流约束/计划 |
 | `environment` | 记录环境与复现命令；只应用受支持 initProfile |
 | `flaky` | 记录多次重跑结果与根因 |
@@ -239,7 +241,7 @@ python -X utf8 "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "$
 2. 排除测试、命令与环境问题。
 3. 不改生产代码；返回最小 `source_fix_request`，包含 attestation、失败命令、根因和受影响 implementation point。
 
-主协调器收到 `source_fix_request` 后，在同一 Batch 原生 Worktree 的 implement repair 中做最小生产修复，重新编译和封存；随后必须重新执行生产代码 Review 和原 Batch/lane/workspace UTest，复用 UT target 并追加新 Evidence。
+主协调器收到 `source_fix_request` 后，在同一 Batch 原生 Worktree 的 implement repair 中做最小生产修复，重新编译和封存；固定 Batch Workflow 随后登记一次性修复并直接执行原 Batch/lane/workspace UTest，不再派发第二次 Review；复用 UT target 并追加新 Evidence。独立手动流程按其阶段契约执行 Review/UTest。
 
 同一个生产根因最多受控修复一次；仍失败时保留该 Batch 的测试证据与阻断记录，不改变全局 Code checkpoint。
 
@@ -300,12 +302,12 @@ python -X utf8 "${pluginPath}/hooks/unit_test_result_writer.py" validate --works
 - 全部 P0 UT target PASS。
 - 入场缺陷已全部清零，每项都有重跑通过的 Evidence。
 - 报告、日志、结果 JSON、Evidence 完整且 writer 校验通过。
-- 源码修复均有失败测试锚点，并在实现阶段回修后重新经过 Review 与 UTest 的通过 Evidence。
+- 源码修复均有失败测试锚点，并在实现阶段回修后按当前流程完成一次性修复登记与原 UTest 重跑，真实结果保留 Evidence。
 - 扩大验证已执行并记录。
 
 存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保留该 Batch 的测试证据；全局 checkpoint 不变。
 
-测试归属的 `test_bug`、fixture/mock 与测试环境配置必须在本阶段修完并重跑。`source_bug` 是例外：只能携带 attestation 回到同一 Batch 的 implement repair，之后重新进入 Review 与 UTest；不得以 deferred finding 进入合并。`environment` 记录环境与复现命令后阻断，`contract_gap` 回流 `/autodev-plan`。
+测试归属的 `test_bug`、fixture/mock 与测试环境配置必须在本阶段修完并重跑。`source_bug` 是例外：只能携带 attestation 回到同一 Batch 的 implement repair，固定 Batch Workflow 登记一次性修复后直接续测，重跑原命令；耗尽后按 Runtime 的真实 deferred/阻断结果收口，不宣称测试通过。`environment` 记录环境与复现命令后按 Runtime 策略收口，`contract_gap` 回流 `/autodev-plan`。
 
 ## 质量规则
 
@@ -333,3 +335,9 @@ python -X utf8 "${pluginPath}/hooks/unit_test_result_writer.py" validate --works
 - [ ] 成功时已由固定 Workflow 收口当前 Batch 的 `test` 子阶段。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
+
+## 工程事实与修复交接
+
+`utest_runtime.py prepare` 返回独立的 `engineeringContext`，不改 router 的 UTEST_ASSIGNMENT 原文。先读其 contextPath、allowedReads、commandCatalogPath 和实现交接；已有 API 用法与测试隔离配方优先复用。未知内容通过同目录 engineering_context.py query/resolve 按需补充，静态配方的 source_observed 不代表能力已验证。测试自身修复用 stage=fix、原 target/argv 和 record-attempt；生产修复包由 runner/stage Runtime 自动生成。恢复保留 resumeCursor/deadlines，awaiting_record 只补登记，不重跑。准确工程上下文和命令目录属于允许只读材料；禁止直接改写 Runtime 文件。完整协议见 `docs/engineering-context.md`。
+
+工程事实与依赖解析保存在 artifact workspace 的 Feature `.engineering` 公共区，按内容 key 领取、过期接管和原子发布；不能自行写缓存。只读定位使用 `engineering_context.py inspect --workspace <artifact> --feature <feature> --run-id <run> [--batch-id <Batch>]`，其返回真实路径、计数、版本与阻断原因。固定 Workflow 注入的 dispatch-generation/dispatch-token 必须用于阶段命令及 lease acquire，不能复用旧代次；needs_triage 禁止进入 UTest。详见 `docs/engineering-context.md`。

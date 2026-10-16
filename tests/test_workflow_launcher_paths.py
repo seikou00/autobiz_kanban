@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import tempfile
 import subprocess
@@ -77,6 +78,10 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                     "Z990692-294",
                     workflow_workspace,
                 )
+                relaunched = analyze_batches("three-paths", plugin_path, artifact_workspace,
+                                             "Z990692-294", workflow_workspace)
+                self.assertNotEqual(result["workflowArgs"]["workflowInvocationId"],
+                                    relaunched["workflowArgs"]["workflowInvocationId"])
             self.assertTrue(
                 (
                     artifact_workspace
@@ -95,6 +100,11 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             )
             self.assertTrue(launch_script.is_file())
             self.assertEqual(launch_script.read_bytes(), script.read_bytes())
+            receipts = list((feature_dir / ".engineering" / "deployments").glob("*.json"))
+            self.assertEqual(1, len(receipts))
+            receipt = json.loads(receipts[0].read_text())
+            self.assertEqual(str(launch_script.resolve()), receipt["executionPath"])
+            self.assertEqual(hashlib.sha256(script.read_bytes()).hexdigest(), receipt["sha256"])
 
         self.assertTrue(result["useWorkflow"])
         self.assertEqual(result["strategy"], "fixed")
@@ -136,8 +146,10 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         })
         self.assertEqual(result["executionIsolation"], "native_git_worktrees")
         self.assertEqual(result["workflowHostGitRoot"], str(code_workspace.resolve()))
+        self.assertRegex(result["workflowArgs"]["workflowInvocationId"], r"^[a-f0-9]{32}$")
         self.assertEqual(result["workflowArgs"], {
             "feature": "three-paths",
+            "workflowInvocationId": result["workflowArgs"]["workflowInvocationId"],
             "pluginPath": str(plugin_path.resolve()),
             "artifactWorkspace": str(artifact_workspace.resolve()),
             "codeWorkspaces": {
@@ -155,6 +167,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                     "enableAutoResolve": False,
                 },
             },
+            "runtimeContractDigest": result["workflowArgs"]["runtimeContractDigest"],
             "taskCardId": "Z990692-294",
             "resumeMode": "automatic",
             "resumeRunId": None,
@@ -167,8 +180,10 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in execution_plan["batches"]], ["B001", "B002"])
         self.assertEqual(execution_plan["waves"][0]["batchIds"], ["B001", "B002"])
         self.assertTrue(any("合并" in note and "下游" in note for note in execution_plan["notes"]))
-        load_bundle.assert_called_once_with(feature_dir.resolve())
-        validate.assert_called_once_with(artifact_workspace.resolve(), "three-paths")
+        self.assertEqual(2, load_bundle.call_count)
+        load_bundle.assert_called_with(feature_dir.resolve())
+        self.assertEqual(2, validate.call_count)
+        validate.assert_called_with(artifact_workspace.resolve(), "three-paths")
         self.assertFalse((code_workspace / ".autobizdevops" / "features" / "three-paths" / "plan.json").exists())
 
     def test_cli_uses_the_launch_directory_for_the_workflow_workspace(self) -> None:

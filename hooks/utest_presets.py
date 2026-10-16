@@ -8,9 +8,7 @@ from pathlib import Path
 from hooks.utest_test_environment import local_tag, value
 
 
-POLICY = {"firstExecutionSeconds": 600, "stageSeconds": 1800,
-          "commandSeconds": 300, "strategyChanges": 1,
-          "testRepairs": 1, "sourceRepairs": 1, "indexSeconds": 30}
+from hooks.utest_policy import POLICY
 PRESETS = {
     "java-unit": {"domain": "fundamentals", "capabilities": ["junit"], "springContext": False, "mockBoundary": "none; real inputs and values"},
     "java-mockito": {"domain": "fundamentals", "capabilities": ["junit", "mockito"], "springContext": False, "mockBoundary": "external collaborators only; never mock the subject"},

@@ -1,6 +1,17 @@
 {
   "PreToolUse": [
     {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python -X utf8 hooks/utest_deadline_guard.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
       "matcher": "task|Task",
       "hooks": [
         {

@@ -32,6 +32,7 @@ from hooks.parallel_runtime import (
     renew_lease, run_dir, run_lock, save_manifest,
 )
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
+from hooks.runtime_guidance import RuntimeArgumentParser
 from hooks.json_writer_common import feature_dir
 from hooks.plan_json import load_plan_bundle, task_contract_sha256
 from hooks.plan_write_ownership import is_test_asset_path
@@ -841,6 +842,9 @@ def seal_parallel_batch(
         except CommitMessageError as exc:
             return {"success": False, "error": str(exc)}
         review_draft = purpose == "review"
+        if batch.get("stageStates", {}).get("test", {}).get("status") == "running":
+            from hooks.utest_control import request_stop_locked
+            request_stop_locked(artifact_workspace, feature, run_id, batch_id, manifest, batch)
         ready_for_review = batch.get("status") in {"running", "leased", "sealed"}
         ready_for_delivery = batch.get("status") in {"sealed", "leased"}
         if not (ready_for_review if review_draft else ready_for_delivery):
@@ -993,6 +997,7 @@ def seal_parallel_batch(
             "purpose": seal_purpose,
             "commitStage": actual_commit_stage,
             "indexLockRecoveries": index_lock_recoveries,
+            "stopRequest": batch.get("stageStates", {}).get("test", {}).get("stopRequested"),
         }
         save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(artifact_workspace, feature, run_id, "batch_sealed", batchId=batch_id, commitSha=sha.stdout.strip(), changedFiles=changed)
@@ -1123,8 +1128,8 @@ def list_worktrees(repo_path: Path) -> dict[str, Any]:
     return {"worktrees": worktrees, "error": None}
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="管理插件托管原生 Git Worktree 的 Batch 交付")
+def build_parser() -> argparse.ArgumentParser:
+    parser = RuntimeArgumentParser(description="管理插件托管原生 Git Worktree 的 Batch 交付")
     parser.add_argument("--json", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
     provision = commands.add_parser("provision")
@@ -1144,7 +1149,11 @@ def main(argv: list[str] | None = None) -> int:
     seal.add_argument("--commit-summary")
     listed = commands.add_parser("list")
     listed.add_argument("--repo", required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.command == "provision":
         result = provision_parallel_worktree(Path(args.artifact_workspace), args.feature, args.run_id, args.batch_id)

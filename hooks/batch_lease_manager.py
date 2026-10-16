@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from hooks.runtime_guidance import RuntimeArgumentParser
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.parallel_runtime import (
     DEFAULT_TTL_SECONDS,
@@ -30,8 +31,8 @@ def _emit(ok: bool, **payload: Any) -> int:
     return 0 if ok else 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Manage parallel Code batch leases")
+def build_parser() -> argparse.ArgumentParser:
+    parser = RuntimeArgumentParser(description="Manage parallel Code batch leases")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("acquire", "renew", "release", "check", "reclaim"):
         item = subparsers.add_parser(command)
@@ -43,13 +44,19 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--ttl-seconds", type=int, default=None if command == "renew" else DEFAULT_TTL_SECONDS)
         if command == "acquire":
             item.add_argument("--lease-guard", action="store_true")
+            item.add_argument("--dispatch-generation", type=int)
+            item.add_argument("--dispatch-token")
         if command == "check":
             item.add_argument("--require-lease-guard", action="store_true")
         if command == "release":
             item.add_argument("--final-status", default="pending")
         if command == "reclaim":
             item.add_argument("--force", action="store_true")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
@@ -62,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 ttl_seconds=args.ttl_seconds,
                 owner_token=args.owner_token,
                 lease_guard=args.lease_guard,
+                dispatch_auth={"generation": args.dispatch_generation, "token": args.dispatch_token},
             )
             return _emit(
                 True,

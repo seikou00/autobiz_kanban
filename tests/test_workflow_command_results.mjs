@@ -18,9 +18,10 @@ const conflicted = {
 };
 const promoted = { success: true, promoted: true, batchIds: ["B009"] };
 
-function harness(responses = []) {
+function harness(responses = [], projectStructured = false) {
   const calls = [];
   const instructions = [];
+  const callOptions = [];
   const records = [];
   const context = vm.createContext({
     batchWorkspaces: { B009: { workspaceRef: "default" } },
@@ -34,8 +35,15 @@ function harness(responses = []) {
     workflowAgent: async (instruction, options) => {
       calls.push(options.label);
       instructions.push(instruction);
+      callOptions.push(options);
       assert.ok(responses.length, `Unexpected agent call: ${options.label}`);
-      return responses.shift();
+      const response = responses.shift();
+      if (projectStructured && options.schema) {
+        // Model a transport that only projects explicitly declared fields.
+        const value = context.unwrap(response);
+        return Object.fromEntries(Object.entries(value).filter(([key]) => key in options.schema.properties));
+      }
+      return response;
     },
   });
   function load(start, end) {
@@ -48,13 +56,44 @@ function harness(responses = []) {
   load("function mergedBatchIds(", "async function cleanupMergedWorktrees(");
   load("async function resolveMergeCandidate(", "async function promoteReadyBatch(");
   load("async function attemptFinalCandidateRepair(", "async function runFinalRepairAndReport(");
-  return { context, calls, records, instructions };
+  return { context, calls, records, instructions, callOptions };
 }
 
 const preparedResolution = {
   success: true, status: "resolution_required", worktreePath: "/tmp/candidate",
   conflictedFiles: ["src/app.js"],
+  repositoryRef: "default", wave: 9,
+  runDir: "/tmp/workspace/.autobizdevops/features/feature/.parallel-runs/run",
+  manifestPath: "/tmp/workspace/.autobizdevops/features/feature/.parallel-runs/run/manifest.json",
+  contextPath: "/tmp/workspace/.autobizdevops/features/feature/.parallel-runs/run/resolution-context/index.json",
+  contextDigest: "a".repeat(64), identityDigest: "b".repeat(64),
 };
+
+test("conflict context survives wrapped structured projection and reaches the editing agent", async () => {
+  const { context, instructions, callOptions } = harness([
+    wrap(conflicted, 1), { value: JSON.stringify(wrap(preparedResolution)) },
+    { success: true, status: "resolved" }, built, promoted,
+  ], true);
+  assert.equal((await context.validateAndPromoteBatch("B009", 9)).promoted, true);
+  for (const key of ["runDir", "manifestPath", "contextPath", "contextDigest", "identityDigest", "repositoryRef", "wave"]) {
+    assert.ok(key in callOptions[1].schema.properties, key);
+    assert.ok(instructions[2].includes(String(preparedResolution[key])), key);
+  }
+  assert.match(instructions[2], /businessContextPath/);
+  assert.match(instructions[2], /Git index stage 1\/2\/3/);
+  assert.match(instructions[2], /不得用快照覆盖已完成内容/);
+  assert.match(instructions[2], /禁止搜索目录、扫描完整 manifest 或读取插件源码重建上下文/);
+});
+
+test("missing or misbound context stops before editing instead of asking the agent to rediscover it", async () => {
+  for (const bad of [{ contextPath: undefined }, { contextDigest: "bad" }, { identityDigest: "bad" },
+    { manifestPath: "relative.json" }, { repositoryRef: "other" }, { wave: 8 }]) {
+    const { context, calls } = harness([{ ...preparedResolution, ...bad }]);
+    const result = await context.resolveMergeCandidate("default", 9, "resolution", "候选验证");
+    assert.equal(result.error, "candidate_resolution_context_missing_or_invalid");
+    assert.equal(calls.length, 1);
+  }
+});
 
 test("model returns edited files before a separate plugin command commits and promotion starts", async () => {
   const { context, calls, instructions } = harness([
@@ -93,7 +132,7 @@ test("commit failure never asks the model for alternative Git commands", async (
 });
 
 test("final repair uses the same model-to-plugin handoff", async () => {
-  const { context, calls } = harness([
+  const { context, calls, instructions } = harness([
     preparedResolution, { success: true, status: "resolved" }, built, promoted,
   ]);
   await context.attemptFinalCandidateRepair({ repositoryRef: "default", wave: 9, batchIds: ["B009"] });
@@ -101,6 +140,7 @@ test("final repair uses the same model-to-plugin handoff", async () => {
   assert.deepEqual(calls.slice(0, 3), [
     "final-repair-candidate-default-9", "final-repair-candidate-default-9-edit", "final-repair-candidate-default-9-commit",
   ]);
+  assert.ok(instructions[1].includes(preparedResolution.contextPath));
 });
 
 test("interrupted commit registration is reconciled without another model edit", async () => {

@@ -57,6 +57,7 @@ candidates. Do not author repository/cwd values or change Plan to name modules.
    Registration exit 0 only means registration succeeded; read the actual
    result/exitCode/logExitCode. Retain output after a registration failure and
    retry registration without launching Maven again.
+6a. Consume prepare.engineeringContext brief before source/environment discovery. Reuse valid facts across Batches; independent assertions/current Evidence do not require starting discovery from scratch.
 7. Test-owned repairs use the same target/argv with `--retry-kind test_bug` once.
    Source repairs need failing evidence, a new reviewed production commit and
    `--retry-kind source_repair` once. Runtime counters persist across recovery.
@@ -86,7 +87,7 @@ content digest and cannot be edited or replayed. Each script rechecks its attemp
 before launching tests. Evidence registration is idempotent after success and
 retains its pending Evidence ID when result registration needs repair.
 
-Initial budgets: first test command within 600 seconds; total stage at most 1800
+Default budgets: first test command within 1800 seconds; total stage at most 2700
 seconds, command at most 300 seconds. Workflow can narrow these budgets. The
 stage includes discovery/setup/repair, and recovery/lease renewal cannot extend
 the stored deadline. Static/class inspection is bounded to 30 seconds.
@@ -107,3 +108,24 @@ execution, replay prevention, timeout evidence, repair counters, zero/skipped
 cases and class/source-jar caching. No business Maven module or Windows machine
 is available in this checkout: the real legacy service and Windows Git Bash
 process-tree termination still need an integration run in that environment.
+
+
+## Shared discovery and durable policy
+
+The authoritative defaults live in hooks/utest_policy.py. A test attempt freezes
+its policy and deadlines; scheduler, tools and Workflow consume the same values.
+Legacy running attempts retain their earlier known deadline. Dispatch fallback
+polling is thirty minutes and does not enforce quality-stage deadlines.
+
+Workflow check-test-budget and the tool-boundary deadline guard independently
+request a stop. Preserve the owner lease to seal existing assets before deferral;
+utestClosurePending prevents candidate promotion. Current integration supports
+cooperative tool-boundary stopping, not a claim of native model cancellation.
+
+Shared source/bytecode lives in .engineering/dependencies. Environment declarations
+and read-only diagnostics use .engineering/environments and diagnostics. Keys use
+repository/module/content/tool/environment identity rather than worktree cwd.
+Structured classpath output can be materialized for the current binding; actual
+tests and Evidence are never transplanted. Concurrent diagnostic producers use
+fenced expiring claims; transient failures expire. Runtime deployment receipts
+include the agent definition and policy so mixed installations are detectable.

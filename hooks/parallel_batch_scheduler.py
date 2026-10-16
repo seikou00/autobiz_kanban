@@ -41,11 +41,12 @@ from hooks.parallel_runtime import (
     resource_groups,
     select_runnable_batches,
     run_lock,
+    run_dir,
     save_manifest,
+    skipped_utests,
 )
 from hooks.plan_json import load_plan_bundle
 from hooks.parallel_validation_ownership import validation_ownership_errors
-from hooks.parallel_batch_stage import UTEST_STAGE_TIMEOUT_SECONDS
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -110,6 +111,11 @@ def _lease_staleness_reason_locked(
     path = lease_path(workspace, feature, run_id, batch_id)
     with FileLock(path.with_suffix(".lock")):
         if not path.is_file():
+            dispatch = batch.get("dispatch") or {}
+            states = batch.get("stageStates") or {}
+            if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+                    and dispatch.get("expiresEpoch", 0) > now and states.get("review", {}).get("status") == "running"):
+                return None  # Review is read-only and intentionally has no business lease.
             return "lease_missing"
         try:
             lease = json.loads(path.read_text(encoding="utf-8"))
@@ -160,6 +166,16 @@ def _mark_retry_pending_locked(
     """Persist one task-scoped recovery marker without delegating to a worker."""
     previous = previous_status if previous_status is not None else str(batch.get("status") or "")
     previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+    from hooks.parallel_failure import recovery_failure
+    failure = recovery_failure(error, batch, run_dir(workspace, feature, run_id) / "engineering" / batch_id)
+    unchanged = previous_recovery.get("status") != "manual_retry_queued" and previous_recovery.get("failureFingerprint") == failure["fingerprint"]
+    if failure["classification"] == "precondition" or unchanged:
+        batch.update(status="blocked", error=error, activeStage=None)
+        batch["recovery"] = {**previous_recovery, "status": "precondition_blocked" if failure["classification"] == "precondition" else "unchanged_failure",
+                             "failureClassification": failure["classification"], "failureFingerprint": failure["fingerprint"],
+                             "reasonCode": failure["reasonCode"], "lastError": error,
+                             "nextAction": "inspect_reported_precondition" if failure["classification"] == "precondition" else "inspect_unchanged_failure_before_retry"}
+        return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
     retry_attempts = (
         1
         if previous == "blocked" and previous_recovery.get("status") == "retry_exhausted"
@@ -198,6 +214,9 @@ def _mark_retry_pending_locked(
                 "retryAttempts": retry_attempts,
                 "lastFailureAt": manifest.get("updatedAt"),
                 "lastError": error,
+                "failureClassification": failure["classification"],
+                "failureFingerprint": failure["fingerprint"],
+                "reasonCode": failure["reasonCode"],
                 "resumeStatus": resume_status,
                 "kind": recovery_kind,
                 "resumeFromStage": (
@@ -264,70 +283,19 @@ def _close_overdue_utest_stages_locked(
     run_id: str,
     manifest: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Close a UTest stage whose durable wall-clock budget has elapsed.
-
-    The lease is an ownership mechanism, not a quality-stage deadline.  A
-    worker can otherwise keep a sealed Batch in ``test`` while it repeatedly
-    explores compiler workarounds. Clearing its lease makes later commands
-    fail safely; the controlled runner independently clamps each process to
-    this same deadline. Timeout is a visible non-blocking UTest deferral,
-    with final B-E2E still required before the run can succeed.
-    """
-    now = time.time()
-    stage_timeout = min(
-        UTEST_STAGE_TIMEOUT_SECONDS,
-        max(1, int(manifest.get("timeoutPerBatch", UTEST_STAGE_TIMEOUT_SECONDS))),
-    )
-    closed: list[dict[str, Any]] = []
-    for raw_batch_id, batch in manifest.get("batches", {}).items():
+    """Request cooperative stops without revoking the lease needed to seal."""
+    from hooks.utest_control import request_stop_locked
+    closed = []
+    for batch_id, batch in manifest.get("batches", {}).items():
         if not isinstance(batch, dict):
             continue
-        states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
-        test = states.get("test") if isinstance(states, dict) else None
-        if not isinstance(test, dict) or test.get("status") != "running":
-            continue
-        started = _parse_timestamp_epoch(test.get("startedAt"))
-        if started is None or now - started < stage_timeout:
-            continue
-        batch_id = str(raw_batch_id)
-        issue_index = 1 + sum(
-            1
-            for item in manifest.get("deferredIssues", [])
-            if isinstance(item, dict)
-            and item.get("batchId") == batch_id
-            and item.get("stage") == "test"
-            and item.get("kind") == "utest_stage_timeout"
-        )
-        issue_id = f"UTEST-TIMEOUT-{batch_id}-{issue_index:03d}"
-        message = "utest_stage_timeout:{}s".format(stage_timeout)
-        test.update({
-            "status": "deferred",
-            "completedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "failure": {"type": "environment", "message": message, "nextStage": None},
-            "deferredIssueId": issue_id,
-            "deferredDisposition": "utest_stage_timeout",
-        })
-        issues = manifest.setdefault("deferredIssues", [])
-        if isinstance(issues, list):
-            issues.append({
-                "issueId": issue_id,
-                "kind": "utest_stage_timeout",
-                "batchId": batch_id,
-                "stage": "test",
-                "failureType": "environment",
-                "message": message,
-                "disposition": "recorded_deferred",
-                "blocksWorkflow": False,
-                "status": "open",
-                "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            })
-        batch["activeStage"] = None
-        # The timed-out test has a durable terminal state. Mirror the
-        # non-blocking UTest gate outcome so an agent that timed out itself
-        # need not wake up just to advance this sealed delivery.
-        batch["status"] = "ready_to_candidate"
-        _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
-        closed.append({"batchId": batch_id, "timeoutSeconds": stage_timeout})
+        state = batch.get("stageStates", {}).get("test", {})
+        already_stopped = bool(state.get("stopRequested"))
+        result = request_stop_locked(workspace, feature, run_id, batch_id, manifest, batch)
+        if result["status"] == "stop_requested" and not already_stopped:
+            limit = "firstExecutionSeconds" if result["stopRequested"]["reasonCode"] == "first_execution_deadline_exceeded" else "stageSeconds"
+            closed.append({"batchId": batch_id, "timeoutSeconds": result["utestPolicy"][limit],
+                           "reasonCode": result["stopRequested"]["reasonCode"]})
     return closed
 
 
@@ -931,6 +899,9 @@ def _stage_recovery_failure_context(
             "failureType": str(failure.get("type") or "implementation"),
             "message": message,
         }
+        for field in ("repairContextPath", "repairContextDigest", "affectedTaskIds"):
+            if field in state.get("repairContext", {}):
+                context[field] = state["repairContext"][field]
         if stage == "test":
             context["testLogPath"] = str(test_log_path)
         return context
@@ -947,6 +918,16 @@ def schedule(
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        for batch_id, batch in manifest.get("batches", {}).items():
+            dispatch = batch.get("dispatch") or {}
+            if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+                    and dispatch.get("expiresEpoch", 0) <= time.time()
+                    and batch.get("status") in {"pending", "leased", "running", "sealed", "ready_to_candidate"}):
+                _mark_retry_pending_locked(workspace, feature, run_id, manifest, batch_id, batch, error="dispatch_claim_expired")
+                dispatch["status"] = "expired"
+                save_manifest(workspace, feature, run_id, manifest)
+                append_event(workspace, feature, run_id, "dispatch_claim_expired", batchId=batch_id,
+                             generation=batch.get("dispatchGeneration", 1))
         overdue_utests = _close_overdue_utest_stages_locked(
             workspace, feature, run_id, manifest
         )
@@ -960,6 +941,7 @@ def schedule(
                     "utest_stage_timeout",
                     batchId=item["batchId"],
                     timeoutSeconds=item["timeoutSeconds"],
+                    reasonCode=item["reasonCode"],
                 )
         bundle = load_plan_bundle(feature_dir(workspace, feature))
         # A retained per-Batch conflict (or one conflicted Merge Train) owns
@@ -1212,6 +1194,7 @@ def schedule(
             )
         result = {
             "runId": run_id,
+            "observedEpochMs": int(time.time() * 1000),
             "status": manifest.get("status"),
             "readyBatches": scoped_ready,
             "allReadyBatches": ready,
@@ -1287,6 +1270,7 @@ def schedule(
             )),
             "maxParallel": max_parallel,
             "activeWorkers": active,
+            "dispatchGrants": {key: int(item.get("dispatchGeneration", 1)) for key, item in manifest.get("batches", {}).items() if isinstance(item, dict)},
             "dispatchDiagnostics": {
                 "maxParallel": max_parallel,
                 "occupiedSlots": active,
@@ -1801,6 +1785,8 @@ def resume_run(
             }
             if implementation_resume is None:
                 batch["recovery"].pop("implementationResume", None)
+            batch["dispatchGeneration"] = int(batch.get("dispatchGeneration", 1)) + 1
+            batch.pop("dispatch", None)
             retry_resumed.append(str(batch_id))
         # Persist the recovery contract for every sealed delivery that still
         # has a stage to finish.  This is intentionally distinct from a
@@ -1963,7 +1949,7 @@ _WORKFLOW_STATUS_FIELDS = (
     "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
     "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",
     "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",
-    "maxParallel", "activeWorkers", "dispatchDiagnostics", "batchTaskIds",
+    "maxParallel", "activeWorkers", "observedEpochMs", "dispatchDiagnostics", "dispatchGrants", "batchTaskIds",
 )
 _WORKFLOW_WORKSPACE_FIELDS = (
     "workspaceRef", "componentRoots", "executionStage", "requestedPath",
@@ -1985,9 +1971,7 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
     issues = manifest.get("deferredIssues")
     issues = issues if isinstance(issues, list) else []
     result = {key: scheduled[key] for key in _WORKFLOW_STATUS_FIELDS if key in scheduled}
-    result["dispatchDiagnostics"] = {
-        "activeBatchIds": (scheduled.get("dispatchDiagnostics") or {}).get("activeBatchIds", [])
-    }
+    result["dispatchDiagnostics"] = scheduled.get("dispatchDiagnostics") or {}
     result["batchWorkspaces"] = {
         batch_id: {key: workspace.get(key) for key in _WORKFLOW_WORKSPACE_FIELDS}
         for batch_id, workspace in scheduled.get("batchWorkspaces", {}).items()
@@ -1997,6 +1981,8 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
         "batches": {
             batch_id: {
                 "status": batch.get("status"),
+                "dispatchGeneration": int(batch.get("dispatchGeneration", 1)),
+                "dispatch": {k: (batch.get("dispatch") or {}).get(k) for k in ("generation", "status", "worker", "expiresEpoch", "source")},
                 "dependencies": batch.get("dependencies", []),
                 "error": batch.get("error"),
                 "worktreePath": batch.get("worktreePath"),
@@ -2005,7 +1991,7 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
                 "mergeCommitSha": batch.get("mergeCommitSha"),
                 "recovery": {
                     key: (batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}).get(key)
-                    for key in ("status", "retryAttempts", "lastError")
+                    for key in ("status", "retryAttempts", "lastError", "failureClassification", "failureFingerprint", "reasonCode", "nextAction")
                 },
             }
             for batch_id, batch in batches.items()
@@ -2032,6 +2018,7 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
             for issue in issues
             if isinstance(issue, dict)
         ],
+        "skippedUtests": skipped_utests(manifest),
     }
     return result
 

@@ -130,8 +130,9 @@ def test_fixed_workflow_entrypoint():
         "仅 valid=true 才可继续",
         "git symbolic-ref --quiet --short HEAD",
         "LEASE_TOKEN",
-        "reclaim --workspace",
-        "--force",
+        "parallel_dispatch.py",
+        "--dispatch-generation",
+        "--dispatch-token",
         "禁止检查/修改插件源码",
         "runDeliveryWithImplementationRepair",
         "implementation_rework_required",
@@ -164,7 +165,7 @@ def test_fixed_workflow_entrypoint():
         "targetId、commandId、evidenceId、test-output.log",
         "record-test-failure",
         'testStatus:\\"source_repair_required\\"',
-        "UTEST_STAGE_TIMEOUT_SECONDS",
+        "utestPolicy.stageSeconds",
         "timeoutMs: utestStageTimeout * 1000",
         "executionOutcome=command_timeout/stage_deadline_exceeded",
         "--purpose review",
@@ -424,6 +425,7 @@ const schedulerSnapshot = overrides => ({
   parallelGroups: [["B007"]],
   allParallelGroups: [["B007"]],
   maxParallel: 1,
+  dispatchGrants: { B007: 1, B006: 1 },
   batchTaskIds: { B007: ["T010"] },
   batchWorkspaces: {
     B007: {
@@ -480,6 +482,11 @@ const schedulerAccepted = context.requireSchedulerResult(schedulerSnapshot({
     },
   },
 }), "scheduler status");
+if (context.requireSchedulerResult(schedulerSnapshot({ status: "blocked" }), "blocked snapshot").status !== "blocked") process.exit(29);
+let failedSnapshotRejected = false;
+try { context.requireSchedulerResult(schedulerSnapshot({ ok: false, status: "blocked" }), "failed read"); }
+catch (_) { failedSnapshotRejected = true; }
+if (!failedSnapshotRejected) process.exit(30);
 if (schedulerAccepted.batchWorkspaces.B007.workspaceRef !== "frontend") process.exit(21);
 if (schedulerAccepted.stageRecoveryBatches[0].nextStage !== "test") process.exit(25);
 if (schedulerAccepted.stageRecoveryBatches[0].preserveWorktree !== true) process.exit(27);
@@ -617,6 +624,9 @@ const context = {
   maxParallel: 5,
   timeoutPerBatch: 0,
   DISPATCH_POLL_INTERVAL_MS: 1,
+  activeDispatchGrants: new Map(),
+  workflowInvocationId: "a".repeat(32),
+  usableString: value => typeof value === "string" && value.length > 0,
   isValidBatchId: value => typeof value === "string" && value.length > 0,
   errorText: error => String(error),
   recordUnresolved: () => {},
@@ -648,6 +658,7 @@ const start = source.indexOf("function takeNextRunnableLifecycle(");
 const end = source.indexOf("async function drainRunnableLifecycles(");
 if (start < 0 || end < 0) process.exit(2);
 vm.runInContext(source.slice(start, end), context);
+context.dispatchCommand = async (action, job) => ({ success: true, status: action === "claim" ? "claimed" : "finished", ownerToken: "token", batchId: job.batchId });
 (async () => {
   const claimed = new Set();
   const dispatcherState = { active: 0, ranAny: false, runningBatchIds: new Set() };

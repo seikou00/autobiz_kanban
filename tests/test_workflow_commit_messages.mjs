@@ -5,13 +5,15 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../workflows/code-batched-execution.workflow.js", import.meta.url), "utf8");
 
-function harness() {
+function harness(testPreparation = { success: true, batchId: "B001", status: "test_required",
+  utestPolicy: { stageSeconds: 600, firstExecutionSeconds: 600, commandSeconds: 300, digest: "runtime-policy" },
+  engineeringContext: { brief: { facts: [{ symbol: "example.SharedApi", contentPreview: "current signature" }] } } }) {
   const prompts = [];
   const context = vm.createContext({
     feature: "orders", runId: "cw-test", artifactWorkspace: "/artifacts",
     batchWorkspaces: { B001: { workspaceRef: "default" } },
     batchTaskIds: { B001: ["T001"] },
-    timeoutPerBatch: 600, UTEST_STAGE_TIMEOUT_SECONDS: 1200,
+    timeoutPerBatch: 600, setTimeout, clearTimeout,
     BATCH_RESULT_SCHEMA: {}, UTEST_STAGE_SCHEMA: {},
     CODE_STAGE_EXECUTION_BOUNDARY: "", CODE_STAGE_COMPILE_COMMAND_GUIDANCE: "",
     leasePath: "/plugin/lease.py", stagePath: "/plugin/stage.py",
@@ -23,6 +25,7 @@ function harness() {
     unwrap: value => value, requireSuccess: value => value,
     workflowAgent: async (prompt, options) => {
       prompts.push({ prompt, options });
+      if (options.label === "prepare-utest-B001") return testPreparation;
       return { status: "success" };
     },
   });
@@ -90,9 +93,75 @@ test("ordinary implementation resume keeps the Code stage", async () => {
 test("UTest success and failure paths share the UTest seal command", async () => {
   const { context, prompts } = harness();
   await context.runBatchUtestAndSeal(delivery);
-  const prompt = prompts[0].prompt;
+  const prompt = prompts.find(item => item.options.label === "stage-utest-B001").prompt;
   assert.match(prompt, /seal --commit-stage utest --commit-summary/);
   assert.match(prompt, /第一次 source_compile\/source_bug 时，先按步骤 8 的封存命令 seal/);
   assert.match(prompt, /按步骤 8 的同一封存命令 seal 后执行 record-test-failure/);
   assert.match(prompt, /不写测试通过/);
+});
+
+test("frontend UTest skips before launching any test generation or execution agent", async () => {
+  const skipped = { success: true, ...delivery, status: "skipped", testStatus: "skipped", skipReason: "frontend_utest_temporarily_disabled" };
+  for (const failure of [null, { failureClassification: "source_compile", commandId: "old" }]) {
+    const { context, prompts } = harness(skipped);
+    const result = await context.runBatchUtestAndSeal(delivery, failure);
+    assert.equal(result.testStatus, "skipped");
+    assert.equal(result.commitSha, "draft");
+    assert.equal(result.status, "success");
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0].prompt, /prepare-test/);
+    assert.doesNotMatch(prompts[0].prompt, /preflight|record-test-failure|seal --commit-stage/);
+  }
+});
+
+test("backend UTest continues through its existing test agent", async () => {
+  const { context, prompts } = harness();
+  await context.runBatchUtestAndSeal(delivery);
+  assert.deepEqual(prompts.map(item => item.options.label), ["prepare-utest-B001", "stage-utest-B001"]);
+  assert.match(prompts[1].prompt, /example.SharedApi/);
+  assert.match(prompts[1].prompt, /不要求从零探索/);
+  assert.equal(prompts[1].options.timeoutMs, 600000);
+});
+
+test("missing Runtime policy fails closed instead of using a different deadline", async () => {
+  const { context, prompts } = harness({ success: true, batchId: "B001", status: "test_required" });
+  await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_runtime_policy_missing/);
+  assert.equal(prompts.length, 1);
+});
+
+test("changing an installed Runtime after launch stops before UTest discovery", async () => {
+  const { context, prompts } = harness();
+  context.runtimeContractDigest = "expected-deployment";
+  await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_runtime_deployment_changed/);
+  assert.equal(prompts.length, 1);
+});
+
+test("UTest deadline monitor runs independently of dispatch polling and retains asset ownership", async () => {
+  const { context, prompts } = harness();
+  let timerCallback, completeChild;
+  context.setTimeout = callback => { timerCallback = callback; return 1; };
+  context.clearTimeout = () => {};
+  context.workflowAgent = async (prompt, options) => {
+    prompts.push({ prompt, options });
+    if (options.label === "prepare-utest-B001") return { success: true, batchId: "B001", status: "test_required",
+      utestPolicy: { stageSeconds: 1800, firstExecutionSeconds: 600, commandSeconds: 300, digest: "runtime-policy" } };
+    if (options.label === "stage-utest-B001") return new Promise(resolve => { completeChild = resolve; });
+    assert.equal(options.label, "utest-budget-B001");
+    assert.match(prompt, /check-test-budget/);
+    assert.match(prompt, /保留封存资产所需 lease/);
+    completeChild({ success: true, testStatus: "deferred" });
+    return { success: true, batchId: "B001", status: "stop_requested" };
+  };
+  const run = context.runBatchUtestAndSeal(delivery);
+  await new Promise(resolve => setImmediate(resolve));
+  timerCallback();
+  const result = await run;
+  assert.equal(result.testStatus, "deferred");
+  assert.equal(prompts.length, 3);
+});
+
+test("invalid UTest policy output stops before a test agent can run", async () => {
+  const { context, prompts } = harness({ batchId: "B001", status: "unknown" });
+  await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_preparation_invalid/);
+  assert.equal(prompts.length, 1);
 });

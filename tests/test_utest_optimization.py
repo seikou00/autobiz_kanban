@@ -355,8 +355,9 @@ class UTestOptimizationTest(unittest.TestCase):
         self.assertNotEqual(0, replay.returncode)
         (self.a.worktree / "classpath space's.txt").unlink()
         replacement = preflight(self.args, self.ctx(), kind='setup')
-        self.assertEqual('prepared', replacement['status'])
-        self.assertIsNone(artifact_guard({'tool_name': 'execute', 'tool_input': {'command': 'bash ' + replacement['scriptPath']}}))
+        self.assertEqual('cached', replacement['status'])
+        self.assertEqual('classpath', (self.a.worktree / "classpath space's.txt").read_text())
+        self.assertNotIn('bashCommand', replacement)
 
     def test_failed_maven_diagnostic_reused_until_environment_changes(self):
         self.maven_setup("printf 'missing Byte Buddy\\n' >&2\nexit 1\n")

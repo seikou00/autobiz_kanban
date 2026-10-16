@@ -4,6 +4,12 @@
 
 One assignment contains tasks from one Batch with the same `executionLane` and `workspaceRef`. Use the stable order returned by `utest_assignment_router.py`: backend, frontend, then any unsupported lane. Do not run assignments concurrently.
 
+Frontend UTest is temporarily disabled. For `executionLane=frontend`, return
+`status=skipped` with reason `frontend_utest_temporarily_disabled` without
+inspecting or initializing test environments, generating test assets, running
+tests, or compiling. The fixed Workflow records this policy through the plugin's
+`prepare-test` command. Preserve test intent and never claim a test PASS.
+
 The task description starts with the router-produced `<UTEST_ASSIGNMENT>` block and carries:
 
 - `<SCOPE>`, `<SYSTEM>`, and `<UNIT>` references.
@@ -15,11 +21,20 @@ The task description starts with the router-produced `<UTEST_ASSIGNMENT>` block 
 
 Use the `<UTEST_ASSIGNMENT>` block verbatim; `batchPlanPath` is traceability evidence, so do not reopen plan.json to fetch or restate fields. Cover `testPoints` and `verificationIntent`, using `implementationPoints` for location. Plan V2 does not supply `nonGoals`, test paths, dependency coordinates or argv. Use `validationLocations` only to confirm the assigned repo/cwd; do not author or pass repository/cwd paths to UTest scripts. Use only the environment inspector's resolved paths for file access. Generate the precise test argv from the real runner after the file exists; the runtime preflight freezes it and the runner resolves current task/AC binding.
 
+## Reuse before discovery
+
+Read the Runtime engineeringContext brief and its exact references first. Reuse
+valid Code handoffs, API facts, dependency inspection, diagnostics and test recipes
+across Batches. Only missing or invalid facts require bounded discovery. Independent
+assertions and current execution Evidence are mandatory; discovering from scratch
+is not required. Repository binding remains Runtime-owned. Existing suitable tests
+are retained and supplemented, not recreated for each stage.
+
 ## Finite preparation and execution
 
 Run `utest_runtime.py prepare` with the Workflow's run/Batch/worktree/lease and task IDs. Use its preset and capability hints; a declaration is not proof of artifact resolution. Apply missing test dependencies once via `apply-pom`, then resolve/probe the chosen capabilities. `select --preset ... --reason ...` permits one evidence-backed adjustment before execution. Static mocks require the resolved version/maker; reuse verified PowerMock combinations only. Unisolatable static chains return `testability_gap`, retaining service testPoints even when mapper tests pass.
 
-Use `lookup-class --classpath-file ... --class-name fully.qualified.Class` for dependency lookup. No recursive local-repository scan; cached misses/timeouts are not retried without an environment change. All Maven commands run directly in Bash, including version queries and setup diagnostics. Use `utest_runtime.py preflight-setup` with the same live Batch/lease binding and exact argv; execute its returned `bashCommand` only for `status=prepared`, and reuse actual results for `status=cached`. Python only supervises and registers via `--kind setup --record-only`. Read-only Maven diagnostics are cached by module/configuration/argv, including negative results; old native-launch cache entries are invalidated. Setup never counts as behavioral execution or resets the first-test deadline. Read the recorded result/exitCode/logExitCode; recording success is not Maven success.
+Use `lookup-class --classpath-file ... --class-name fully.qualified.Class` then `inspect-class` for cached source/bytecode. If missing, generate the exact classpath once through controlled setup. No recursive local-repository scan; cached misses/timeouts are not retried without an environment change. All Maven commands run directly in Bash, including version queries and setup diagnostics. Use `utest_runtime.py preflight-setup` with the same live Batch/lease binding and exact argv; execute its returned `bashCommand` only for `status=prepared`, and reuse actual results for `status=cached`. Python only supervises and registers via `--kind setup --record-only`. Read-only Maven diagnostics are cached by module/configuration/argv, including negative results; old native-launch cache entries are invalidated. Setup never counts as behavioral execution or resets the first-test deadline. Read the recorded result/exitCode/logExitCode; recording success is not Maven success.
 
 After writing the test, call `preflight --test-file ... -- <exact argv>` and run the returned `bashCommand`. It binds the immutable target, enforces first-execution/total deadlines, supervises test descendants and records real Bash/tee statuses. Successful process exit with zero or unverified cases is BLOCKED. Repair test assets once with `--retry-kind test_bug`; controlled source repair uses `--retry-kind source_repair` once. Recovery preserves counters/deadlines. If registration fails, use its retained output rather than rerunning. Blocked paths must still seal valid test changes and release the lease through the Workflow.
 
@@ -39,8 +54,10 @@ Real-browser, multi-page, and real-network paths return `e2e_handoff` only.
 
 ## Failure result
 
-Use one classification: `test_bug`, `source_bug`, `contract_gap`, `environment`, `flaky`, or `unknown`. Fix test-owned failures in the assignment. A `source_bug` requires the source-bug validator's attestation for a FAIL target with non-zero current Evidence, matching taskDigest/commandId, and real AC covers. Do not fix production code in UTest: return `source_fix_request` with the attestation, failing command, root cause, and Batch boundary. The fixed Batch Workflow will repair production code, compile/reseal, and restart Review plus this assignment.
+Use one classification: `test_bug`, `source_bug`, `contract_gap`, `environment`, `flaky`, or `unknown`. Fix test-owned failures in the assignment. A `source_bug` requires the source-bug validator's attestation for a FAIL target with non-zero current Evidence, matching taskDigest/commandId, and real AC covers. Do not fix production code in UTest: return `source_fix_request` with the attestation, failing command, root cause, and Batch boundary. The fixed Batch Workflow repairs production code in the same worktree, compiles/reseals, records single_repair_accepted and resumes this assignment without dispatching a second Review. Retry the exact original command; preserve the actual outcome.
 
 ## Return object
 
 Return exactly: `status`, `assignment`, `constraint_files`, `lane`, `framework`, `runner`, `environment_initialization`, `test_targets`, `command_results`, `evidence_ids`, `failure_classification`, `source_bug_attestation`, `source_fix_request`, `e2e_handoff`, `warnings`.
+
+Read the independent engineeringContext returned by runtime prepare: current implementation handoffs, content-validated API facts, recipe provenance, precise repair logs, resumeCursor and deadlines. Preserve UTEST_ASSIGNMENT unchanged. Query unknown facts on demand through engineering_context.py; publish immediately. A fact or cached capability is never passing test Evidence. For test repairs retain the original argv and register attempted hypotheses with record-attempt. See docs/engineering-context.md.
