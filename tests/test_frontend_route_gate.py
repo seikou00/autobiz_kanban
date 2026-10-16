@@ -1228,7 +1228,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(payload["visualSourceIds"], [])
         self.assertEqual(payload["batchScope"], {"batchId": "B009", "source": "explicit-task"})
 
-    def test_prototype_link_required_falls_back_for_the_task_referencing_it(self) -> None:
+    def test_prototype_link_is_ignored_for_the_task_referencing_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_ui_context(workspace, self._prototype_link_context())
@@ -1239,14 +1239,13 @@ class FrontendRouteResolverTests(unittest.TestCase):
             payload = resolve_frontend_route(workspace, "alpha", task_id="T105", write_evidence=False)
 
         self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
-        self.assertEqual(payload["requiredVisualSourceFallbackRoute"], ROUTE_SPEC_DRIVEN)
-        self.assertEqual(
-            [item["sourceId"] for item in payload["requiredVisualSourceMissing"]],
-            ["VIS-001"],
-        )
-        self.assertTrue(payload["htmlSourceMissing"])
+        self.assertEqual(payload["visualSourceIds"], [])
+        self.assertEqual(payload["taskSourceBindings"]["T105"]["visualSourceIds"], [])
+        self.assertNotIn("requiredVisualSourceFallbackRoute", payload)
+        self.assertNotIn("requiredVisualSourceMissing", payload)
+        self.assertNotIn("htmlSourceMissing", payload)
 
-    def test_prototype_link_required_fallback_survives_write_evidence(self) -> None:
+    def test_ignored_prototype_link_stays_inert_in_write_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_ui_context(workspace, self._prototype_link_context())
@@ -1259,10 +1258,9 @@ class FrontendRouteResolverTests(unittest.TestCase):
             result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
 
         self.assertEqual(stored["route"], ROUTE_SPEC_DRIVEN)
-        self.assertEqual(
-            [item["sourceId"] for item in stored["requiredVisualSourceMissing"]],
-            ["VIS-001"],
-        )
+        self.assertEqual(stored["visualSourceIds"], [])
+        self.assertNotIn("requiredVisualSourceMissing", stored)
+        self.assertNotIn("htmlSourceMissing", stored)
         self.assertEqual(result, 0)
 
     def test_unbound_required_prototype_link_is_out_of_scope_without_task_id(self) -> None:
