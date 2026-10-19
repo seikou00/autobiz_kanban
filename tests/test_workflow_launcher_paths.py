@@ -160,6 +160,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             "maxParallel": 5,
             "timeoutPerBatch": 4 * 60 * 60,
             "runtimeConfig": {
+                "integrationMode": "isolated",
                 "parallelSchedulingMode": "optimistic",
                 "maxParallel": 5,
                 "conflictResolution": {

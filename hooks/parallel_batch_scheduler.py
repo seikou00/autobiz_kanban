@@ -46,6 +46,10 @@ from hooks.parallel_runtime import (
     skipped_utests,
 )
 from hooks.plan_json import load_plan_bundle
+from hooks.parallel_integration import (
+    PROMOTION_STATES, assert_integration, initialize_integrations,
+    integration_repo, isolated, promotion_view,
+)
 from hooks.parallel_validation_ownership import validation_ownership_errors
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
@@ -58,6 +62,7 @@ from hooks.repository_snapshot import (
 _BOOTSTRAP_IGNORE_RULES = (
     ".cmbdevclaw/large_tool_results/",
     ".autobizdevops/features/*/.parallel-runs/",
+    ".autobizdevops/worktrees/",
 )
 MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
 
@@ -405,7 +410,7 @@ def _ensure_git_root(requested: Path, *, allow_bootstrap: bool) -> tuple[Path, b
 
 def _ensure_runtime_ignores(git_root: Path) -> list[str]:
     """Keep workflow-owned files out of the user's tracked baseline."""
-    exclude = git_root / ".git" / "info" / "exclude"
+    exclude = _git_metadata_path(git_root, "--git-common-dir") / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     additions = [rule for rule in _BOOTSTRAP_IGNORE_RULES if rule not in existing.splitlines()]
@@ -505,6 +510,7 @@ def resolve_repository_bindings(
     feature: str = "feature",
     allow_bootstrap: bool = False,
     task_card_id: str | None = None,
+    integration_mode: str = "direct",
 ) -> dict[str, dict[str, Any]]:
     """Resolve `workspaceRef=/path` arguments into immutable repository bindings."""
     normalized_task_card_id = normalize_task_card_id(task_card_id)
@@ -536,12 +542,42 @@ def resolve_repository_bindings(
     if unexpected:
         raise ValueError("parallel_code_workspace_unknown:" + ",".join(unexpected))
     bindings: dict[str, dict[str, Any]] = {}
+    common_roots: dict[str, str] = {}
     for ref in refs:
         requested = parsed[ref]
         try:
-            git_root, initialized = _ensure_git_root(requested, allow_bootstrap=allow_bootstrap)
+            git_root, initialized = _ensure_git_root(requested, allow_bootstrap=allow_bootstrap if integration_mode != "isolated" else False)
         except (RepositorySnapshotError, ValueError) as exc:
             raise ValueError(f"parallel_code_workspace_invalid:{ref}:{exc}") from exc
+        if integration_mode == "isolated":
+            # Freeze the business checkout's current branch and committed HEAD
+            # once, before creating the run. Resume uses this binding even if
+            # the user later switches the source checkout to another branch.
+            target_branch = current_git_branch(git_root)
+            if not target_branch:
+                raise ValueError(f"integration_current_branch_required:{ref}:detached_head")
+            target = _git(git_root, "rev-parse", "--verify", f"refs/heads/{target_branch}^{{commit}}")
+            if target.returncode:
+                raise ValueError(f"integration_current_branch_no_commits:{ref}:{target_branch}")
+            head = target.stdout.strip()
+            if _git_head(git_root) != head or current_git_branch(git_root) != target_branch:
+                raise ValueError(f"integration_current_branch_changed:{ref}")
+            common = str(_git_metadata_path(git_root, "--git-common-dir"))
+            canonical_ref = common_roots.setdefault(common, ref)
+            bindings[ref] = {
+                "workspaceRef": ref, "requestedPath": str(requested), "gitRoot": str(git_root),
+                "baseSha": head, "headSha": head,
+                "baseBranch": target_branch, "sourceBranch": target_branch,
+                "integrationRepositoryRef": canonical_ref,
+                "bootstrap": {"created": False, "reason": "committed_current_branch_only"},
+                "runtimeIgnoreAdditions": _ensure_runtime_ignores(git_root),
+            }
+            if bindings[canonical_ref]["baseBranch"] != target_branch or bindings[canonical_ref]["baseSha"] != head:
+                raise ValueError(f"integration_shared_repository_target_mismatch:{ref}")
+            if canonical_ref != ref:
+                bindings[ref]["baseSha"] = bindings[canonical_ref]["baseSha"]
+                bindings[ref]["headSha"] = bindings[canonical_ref]["headSha"]
+            continue
         ignore_additions = _ensure_runtime_ignores(git_root)
         bootstrap = _bootstrap_repository(
             git_root,
@@ -610,7 +646,7 @@ def assert_batch_worktree_isolated(
         "sourceGitRoot": str(source_root),
         "worktreePath": str(candidate),
     }
-    if candidate_root == source_root:
+    if candidate_root == source_root or (isolated(manifest) and candidate_root == integration_repo(binding)):
         raise ValueError(
             "parallel_batch_worktree_not_isolated:"
             + json.dumps({**details, "reason": "source_checkout"}, ensure_ascii=False, separators=(",", ":"))
@@ -676,7 +712,7 @@ def _implementation_resume_details(
         return None
     if not isinstance(repository, dict):
         return None
-    expected_head = repository.get("headSha") or repository.get("baseSha")
+    expected_head = batch.get("startSha") or repository.get("headSha") or repository.get("baseSha")
     if not isinstance(expected_head, str) or not expected_head.strip():
         return None
     worktree = Path(raw_path).expanduser().resolve()
@@ -746,6 +782,7 @@ def create_run(
     workflow_workspace: Path | None = None,
     allow_bootstrap: bool = False,
     task_card_id: str | None = None,
+    integration_mode: str | None = None,
 ) -> dict[str, Any]:
     # Kept as an ignored Python API compatibility parameter for older callers.
     # The CLI and fixed Workflow no longer expose it: platform workspace identity
@@ -765,17 +802,19 @@ def create_run(
         if get_active_run(workspace, feature) is not None:
             raise ValueError("parallel_run_already_active")
         bundle = load_plan_bundle(feature_dir(workspace, feature))
+        from hooks.workflow_launcher import _load_runtime_config
+        runtime_config = _load_runtime_config(workspace)
+        mode = integration_mode or runtime_config["integrationMode"]
+        if mode not in {"isolated", "direct"}:
+            raise ValueError("integration_mode_invalid")
         repositories = resolve_repository_bindings(
             bundle,
             code_workspaces,
             feature=feature,
             allow_bootstrap=allow_bootstrap,
             task_card_id=normalized_task_card_id,
+            integration_mode=mode,
         )
-        # Load runtime config from workspace
-        from hooks.workflow_launcher import _load_runtime_config
-        runtime_config = _load_runtime_config(workspace)
-
         manifest = create_manifest(
             workspace,
             feature,
@@ -784,6 +823,7 @@ def create_run(
             repositories=repositories,
             runtime_config=runtime_config,  # Pass runtime config
             task_card_id=normalized_task_card_id,
+            integration_mode=mode,
         )
         manifest["isolation"] = {
             "mode": "native_git_worktrees",
@@ -792,8 +832,11 @@ def create_run(
             "provisioner": "hooks/worktree_manager.py",
             "workspaceRefs": sorted(repositories),
         }
+        manifest["integrationMode"] = mode
+        manifest["integrationReady"] = mode == "direct"
         manifest["status"] = "running"
         save_manifest(workspace, feature, str(manifest["runId"]), manifest)
+        initialize_integrations(workspace, feature, str(manifest["runId"]))
         append_event(workspace, feature, str(manifest["runId"]), "run_created", maxParallel=manifest["maxParallel"])
         return schedule(workspace, feature, str(manifest["runId"]))
 
@@ -846,7 +889,14 @@ def _source_repository_errors(manifest: dict[str, Any]) -> list[str]:
         if not isinstance(repository, dict) or not isinstance(repository.get("gitRoot"), str):
             errors.append(f"parallel_repository_binding_invalid:{ref}")
             continue
-        root = Path(repository["gitRoot"])
+        if isolated(manifest):
+            try:
+                root = assert_integration(repository)
+            except (ValueError, OSError) as exc:
+                errors.append(f"parallel_integration_invalid:{ref}:{exc}")
+                continue
+        else:
+            root = integration_repo(repository)
         status = git_status_porcelain(root)
         if status.returncode != 0:
             errors.append(f"parallel_repository_status_unavailable:{ref}")
@@ -918,6 +968,13 @@ def schedule(
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
+            return {"runId": run_id, "status": manifest["status"], "scheduledGroups": [],
+                    "readyBatches": [], "allReadyBatches": [], "mergeableBatches": [],
+                    "implementationRecoveryBatches": [], "stageRecoveryBatches": [], "retryPendingBatches": [],
+                    "blockedBatches": [], "parallelGroups": [], "allParallelGroups": [], "dispatchGrants": {},
+                    "batchTaskIds": {}, "batchWorkspaces": {}, "activeWorkers": 0,
+                    "maxParallel": manifest["maxParallel"], **promotion_view(manifest)}
         for batch_id, batch in manifest.get("batches", {}).items():
             dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
@@ -1302,6 +1359,7 @@ def schedule(
                 if isinstance(item, dict)
             },
             "isolation": manifest.get("isolation"),
+            **promotion_view(manifest),
         }
         return _workflow_status_view(result, manifest) if workflow_view else result
 
@@ -1360,7 +1418,7 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
             batch["completedAt"] = details.get("completedAt") or manifest.get("updatedAt")
         statuses = [item.get("status") for item in manifest.get("batches", {}).values() if isinstance(item, dict)]
         if statuses and all(item == "merged" for item in statuses):
-            manifest["status"] = "succeeded"
+            manifest["status"] = "verifying" if isolated(manifest) else "succeeded"
         elif status == "needs_resolution":
             manifest["status"] = "needs_resolution"
         elif status in {"failed", "blocked"}:
@@ -1392,6 +1450,10 @@ def resume_run(
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
     initial = load_manifest(workspace, feature, run_id)
+    if isolated(initial):
+        initialize_integrations(workspace, feature, run_id)
+        if initial.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
+            return schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
     promoted_train_batch_ids = {
         str(batch_id)
         for train in (initial.get("mergeTrains") or {}).values()
@@ -1946,6 +2008,7 @@ def _emit(ok: bool, **payload: Any) -> int:
 
 
 _WORKFLOW_STATUS_FIELDS = (
+    "integrationMode", "integrationWorkspaces", "mainPromotion",
     "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
     "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",
     "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",

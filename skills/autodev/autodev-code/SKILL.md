@@ -351,6 +351,10 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## Workflow 并行执行模式
 
+新 run 默认使用需求集成 Worktree：插件从 Plan `codeWorkspaces` 指定的各业务 checkout **启动时的当前分支及其已提交 HEAD** 创建集成分支与 Worktree，冻结为本次 run 的基线和最终合入目标；恢复时复用 manifest，不因用户切换分支而重新选择。无需配置分支，不得猜测 `main`/`master`，不得为选择分支创建或修改 `runtime_config.json`；旧 `targetBranches` 配置不再生效。Detached HEAD 或当前分支尚无提交时按插件错误停止，不选择其他分支。所有 Batch 从当时的集成 HEAD 创建，Batch Merge Train 仅推进集成分支。源 checkout 不执行 bootstrap 提交，也不带入未提交修改。已有旧 manifest 按原 direct 模式恢复。
+
+`merged` 只表示 Batch 已集成。最终 E2E 和 evidence aggregate 通过后，固定 Workflow 返回 `awaiting_user_confirmation` 与 `mainPromotion` 报告；launcher 的 `review_integration_and_confirm_promotion` 表示展示集成 Worktree、分支、SHA、diff 和验证结果并等待用户明确确认，不能当作 Plan 错误或重新启动 Workflow，也不能自动合入基线分支。仅在用户确认具体报告后，才通过 `parallel_integration.py promote --approval-digest <报告原值> --approved-by <用户标识> --confirm` 合入启动时冻结的基线分支；用户暂不合入时调用 `keep`，保留成果。基线分支或集成提交变化后必须重新准备和确认。`mainPromotion`、`sync-main` 是兼容接口名，不限定目标分支名。`integration_sync_conflicted` 时按插件返回的准确冲突路径处理，再调用 `complete-sync` 并恢复最终验证。完整配置、命令和恢复规则见 [需求集成 Worktree](../../../docs/feature-integration-worktree.md)。本段优先于下文旧 direct 模式的主分支、bootstrap 描述。
+
 当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。每个可写 Batch 先由插件调用 `worktree_manager.py provision`，从对应物理 Git 根的冻结提交创建并登记原生 linked Git worktree；平台 `agent()` 只负责在该明确路径中运行实现，不提供也不承担 Worktree 隔离。插件负责 Worktree 的创建、校验、提交、合并和清理。不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
 
 使用 Code 入口已取得的看板 ID 调用 launcher，不在此处再次提问：

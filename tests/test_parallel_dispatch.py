@@ -12,7 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 from hooks.parallel_dispatch import claim, defer, finish
 from hooks.parallel_runtime import acquire_lease, lease_path, load_manifest, save_manifest
-from hooks.parallel_batch_scheduler import resume_run, schedule
+from hooks.parallel_batch_scheduler import mark_batch, resume_run, schedule
+from hooks.parallel_batch_stage import start_stage, complete_stage
+from hooks.task_runner import start_task
+from hooks.worktree_manager import provision_parallel_worktree
 from tests.test_parallel_batch_runtime import create_run
 from tests.test_task_runner import _workspace, _configure_defer_to_test_stages
 
@@ -50,6 +53,112 @@ class DispatchGrantTest(unittest.TestCase):
         self.assertEqual("stale_owner_ignored", defer(self.workspace, "alpha", self.run, "B001", 1, first["ownerToken"], "old_failure")["status"])
         self.assertEqual("stale_owner_ignored", finish(self.workspace, "alpha", self.run, "B001", 1, first["ownerToken"])["status"])
         self.assertEqual(before, lease_path(self.workspace, "alpha", self.run, "B001").read_bytes())
+
+    def _single_slot_worktree(self):
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["maxParallel"] = 1
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        owner = self.claim()
+        self.assertEqual("claimed", owner["status"])
+        provisioned = provision_parallel_worktree(self.workspace, "alpha", self.run, "B001")
+        self.assertTrue(provisioned["success"], provisioned)
+        return owner, Path(provisioned["worktreePath"]), provisioned["branchName"]
+
+    def _interrupt_started_task(self, *, dirty=False):
+        owner, worktree, branch = self._single_slot_worktree()
+        lease = acquire_lease(self.workspace, "alpha", self.run, "B001", ttl_seconds=60,
+                              dispatch_auth={"generation": 1, "token": owner["ownerToken"]})
+        mark_batch(self.workspace, "alpha", self.run, "B001", "running",
+                   worktreePath=str(worktree), branchName=branch)
+        started = start_task(self.workspace, "alpha", "T001", worktree,
+                             parallel_run_id=self.run, lease_token=lease["ownerToken"], workspace_ref="default")
+        if dirty:
+            (worktree / "unfinished.txt").write_text("preserve unfinished implementation\n", encoding="utf-8")
+        before = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        self.assertEqual("running", before["stageStates"]["implement"]["status"])
+        failure = "execution was interrupted before implementation completed; lease remains owned; no commitSha produced"
+        self.assertEqual("retry_pending", defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], failure)["status"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        return owner, worktree, before, started, resumed
+
+    def test_started_task_interruption_releases_slot_without_resetting_stage_progress(self):
+        owner, worktree, before, started, resumed = self._interrupt_started_task()
+        self.assertEqual(["B001"], resumed["rescheduledRetryBatches"])
+        self.assertEqual([["B001"]], resumed["scheduledGroups"])
+        self.assertEqual(0, resumed["activeWorkers"])
+        self.assertEqual([], resumed["dispatchDiagnostics"]["activeBatchIds"])
+        batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        self.assertEqual(before["stageStates"], batch["stageStates"])
+        self.assertEqual(str(worktree), batch["worktreePath"])
+        self.assertIsNone(batch["lease"])
+        self.assertFalse(lease_path(self.workspace, "alpha", self.run, "B001").exists())
+        self.assertEqual(2, batch["dispatchGeneration"])
+        task_path = self.workspace / ".autobizdevops/features/alpha/.task-runs/T001" / (started["runId"] + ".json")
+        self.assertEqual("aborted", json.loads(task_path.read_text(encoding="utf-8"))["status"])
+        for _ in range(2):
+            polled = schedule(self.workspace, "alpha", self.run)
+            self.assertEqual([["B001"]], polled["scheduledGroups"])
+            self.assertEqual(2, polled["dispatchGrants"]["B001"])
+        next_owner = self.claim(2)
+        self.assertEqual("claimed", next_owner["status"])
+        next_lease = acquire_lease(self.workspace, "alpha", self.run, "B001", ttl_seconds=60,
+                                   dispatch_auth={"generation": 2, "token": next_owner["ownerToken"]})
+        restarted = start_task(self.workspace, "alpha", "T001", worktree,
+                               parallel_run_id=self.run, lease_token=next_lease["ownerToken"], workspace_ref="default")
+        self.assertNotEqual(started["runId"], restarted["runId"])
+        self.assertEqual("started", restarted["status"])
+        self.assertEqual(1, schedule(self.workspace, "alpha", self.run)["activeWorkers"])
+        next_lease_bytes = lease_path(self.workspace, "alpha", self.run, "B001").read_bytes()
+        self.assertEqual("stale_owner_ignored", finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"])["status"])
+        self.assertEqual(next_lease_bytes, lease_path(self.workspace, "alpha", self.run, "B001").read_bytes())
+
+    def test_dirty_implementation_recovery_can_use_the_only_worker_slot(self):
+        _, worktree, before, _, resumed = self._interrupt_started_task(dirty=True)
+        self.assertEqual(0, resumed["activeWorkers"])
+        self.assertEqual(["B001"], [item["batchId"] for item in resumed["implementationRecoveryBatches"]])
+        self.assertEqual([], resumed["scheduledGroups"])
+        self.assertEqual("preserve unfinished implementation\n", (worktree / "unfinished.txt").read_text(encoding="utf-8"))
+        self.assertEqual(before["stageStates"], load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["stageStates"])
+        claimed = claim(self.workspace, "alpha", self.run, "B001", 2, "implementation_recovery", "retry-worker")
+        self.assertEqual("claimed", claimed["status"])
+        next_lease = acquire_lease(self.workspace, "alpha", self.run, "B001", ttl_seconds=60,
+                                   dispatch_auth={"generation": 2, "token": claimed["ownerToken"]})
+        restarted = start_task(self.workspace, "alpha", "T001", worktree,
+                               parallel_run_id=self.run, lease_token=next_lease["ownerToken"], workspace_ref="default")
+        self.assertEqual("started", restarted["status"])
+        self.assertEqual("preserve unfinished implementation\n", (worktree / "unfinished.txt").read_text(encoding="utf-8"))
+        self.assertEqual(1, schedule(self.workspace, "alpha", self.run)["activeWorkers"])
+
+    def _assert_sealed_stage_recovery_reacquires_slot(self, stage):
+        owner, worktree, branch = self._single_slot_worktree()
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, check=True).stdout.strip()
+        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed", worktreePath=str(worktree), branchName=branch, commitSha=commit)
+        for completed in ("prepare", "implement", *(["review"] if stage == "test" else [])):
+            start_stage(self.workspace, "alpha", self.run, "B001", completed)
+            complete_stage(self.workspace, "alpha", self.run, "B001", completed, metadata={"batchCommit": commit})
+        start_stage(self.workspace, "alpha", self.run, "B001", stage)
+        if stage == "test":
+            acquire_lease(self.workspace, "alpha", self.run, "B001", ttl_seconds=60,
+                          dispatch_auth={"generation": 1, "token": owner["ownerToken"]})
+        # A live Review occupies its slot even though it has no business lease.
+        self.assertEqual(1, schedule(self.workspace, "alpha", self.run)["activeWorkers"])
+        before = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "workflow_agent_empty_response_exhausted")
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(0, resumed["activeWorkers"])
+        self.assertEqual(stage, resumed["stageRecoveryBatches"][0]["nextStage"])
+        batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        self.assertEqual(before["stageStates"], batch["stageStates"])
+        self.assertEqual(commit, batch["commitSha"])
+        next_owner = claim(self.workspace, "alpha", self.run, "B001", 2, "stage_recovery", "retry-worker")
+        self.assertEqual("claimed", next_owner["status"])
+        self.assertEqual(1, schedule(self.workspace, "alpha", self.run)["activeWorkers"])
+
+    def test_review_recovery_preserves_progress_and_reacquires_slot(self):
+        self._assert_sealed_stage_recovery_reacquires_slot("review")
+
+    def test_utest_recovery_preserves_progress_and_reacquires_slot(self):
+        self._assert_sealed_stage_recovery_reacquires_slot("test")
 
     def test_deterministic_handoff_failure_is_blocked_without_blind_retry(self):
         owner = self.claim()

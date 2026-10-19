@@ -37,6 +37,7 @@ from hooks.json_writer_common import feature_dir
 from hooks.plan_json import load_plan_bundle, task_contract_sha256
 from hooks.plan_write_ownership import is_test_asset_path
 from hooks.utest_test_environment import validate_worktree_pom
+from hooks.parallel_integration import integration_repo
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -514,12 +515,16 @@ def provision_parallel_worktree(
             return {"success": False, "error": f"parallel_batch_not_provisionable:{batch_id}:{status}"}
 
         head = str(
-            (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("headSha")
+            (batch.get("startSha") if manifest.get("integrationMode") == "isolated" else None)
+            or (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("headSha")
             or (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("baseSha")
             or ""
         )
         if not head or _git(git_root, "rev-parse", "--verify", head).returncode != 0:
             return {"success": False, "error": f"parallel_repository_head_unavailable:{repository_ref}"}
+        if manifest.get("integrationMode") == "isolated":
+            batch["startSha"] = head
+            save_manifest(artifact_workspace, feature, run_id, manifest)
         branch_name = "autodev/{}/{}/{}".format(
             _branch_component(feature), _branch_component(run_id), _branch_component(batch_id)
         )
@@ -1066,7 +1071,8 @@ def remove_parallel_worktree(
     if branch and branch != str((manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("baseBranch") or ""):
         exists = _git(git_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
         if exists.returncode == 0:
-            delete = _git(git_root, "branch", "-D" if force else "-d", branch)
+            deletion_repo = integration_repo(manifest["repositories"][repository_ref])
+            delete = _git(deletion_repo, "branch", "-D" if force else "-d", branch)
             if delete.returncode != 0:
                 return {"success": False, "error": f"parallel_worktree_branch_remove_failed:{delete.stderr.strip()}"}
             branch_removed = True

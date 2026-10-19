@@ -191,6 +191,7 @@ def workflow_workspace_contract(workflow_workspace: Path, workflow_script: str) 
 def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     """Load and validate runtime configuration from .autobiz/runtime_config.json."""
     defaults: dict[str, Any] = {
+        "integrationMode": "isolated",
         "parallelSchedulingMode": "optimistic",
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
         "conflictResolution": {
@@ -213,6 +214,12 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     max_parallel = raw.get("maxParallel")
     resolution = raw.get("conflictResolution")
     config = dict(defaults)
+    if "integrationMode" in raw:
+        if raw["integrationMode"] not in {"isolated", "direct"}:
+            raise ValueError("integration_mode_invalid")
+        config["integrationMode"] = raw["integrationMode"]
+    # Branch selection is captured from each business checkout when a run is
+    # created. Ignore legacy targetBranches rather than redirecting its baseline.
     if mode in {"optimistic", "conservative"}:
         config["parallelSchedulingMode"] = mode
     if isinstance(max_parallel, int) and not isinstance(max_parallel, bool) and max_parallel > 0:
@@ -355,7 +362,7 @@ def _batch_execution_plan(
     notes = [
         "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后执行 UTest 并重新封存，随后进入候选合并；成功合并后才释放下游。",
         "每个 Batch 在自己的 Worktree 完成业务 Review 与 UTest；Merge Train 只合成并推广这些已通过的 candidate SHA，成功后才释放下游 Batch。",
-        "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
+        "所有 delivery Batch 推广后，B-E2E 在交付 HEAD 对应的临时验证 Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
     ]
 
     if optimistic_mode:
@@ -479,6 +486,17 @@ def analyze_batches(
             if active_run_id is not None
             else None
         )
+        from hooks.parallel_integration import PROMOTION_STATES, isolated, promotion_view
+        if active_manifest and active_manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
+            return {"useWorkflow": False, "strategy": "awaiting_confirmation", "batchCount": 0,
+                    "batches": [], "runId": active_run_id, "status": active_manifest["status"],
+                    "canStartWorkflow": False, "reason": active_manifest["status"],
+                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else "review_integration_and_confirm_promotion",
+                    **promotion_view(active_manifest)}
+        final_validation_pending = bool(active_manifest and isolated(active_manifest)
+                                        and active_manifest.get("batches")
+                                        and all(b.get("status") == "merged" for b in active_manifest["batches"].values())
+                                        and not active_manifest.get("finalEvidenceAggregate", {}).get("passed"))
         # Recovery is not one generic retry: an unsealed but verified dirty
         # implementation Worktree and a sealed Review/UTest checkpoint both
         # resume in place, while a clean failed dispatch needs operator
@@ -513,14 +531,14 @@ def analyze_batches(
         )
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
         manual_resume = bool(active_run_id and retry_recovery_batch_ids)
-        has_durable_recovery = bool(active_run_id and recovery_batch_ids)
+        has_durable_recovery = bool(active_run_id and (recovery_batch_ids or final_validation_pending))
         visible_batch_ids = {batch["id"] for batch in valid_batches}
         launch_batches = [
             *valid_batches,
             *(batch for batch in recovery_batches if batch["id"] not in visible_batch_ids),
         ]
 
-        if not launch_batches:
+        if not launch_batches and not final_validation_pending:
             return {
                 "useWorkflow": False,
                 "strategy": "complete",

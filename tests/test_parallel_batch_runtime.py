@@ -67,6 +67,7 @@ def _git(repo: Path, *args: str) -> str:
 def create_run(workspace: Path, feature: str, **kwargs):
     """Create a fixed-workflow scheduler run for runtime tests."""
     kwargs.setdefault("task_card_id", "Z990692-294")
+    kwargs.setdefault("integration_mode", "direct")  # Cover legacy durable runs explicitly.
     return _create_run(workspace, feature, **kwargs)
 
 

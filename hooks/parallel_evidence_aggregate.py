@@ -191,6 +191,11 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             if report["passed"]
             else "blocked"
         )
+        if report["passed"]:
+            from hooks.parallel_integration import await_confirmation, promotion_view
+            await_confirmation(manifest)
+            report.update(promotion_view(manifest))
+            report["status"] = manifest["status"]
         save_manifest(workspace, feature, run_id, manifest)
         atomic_write_json(run_dir(workspace, feature, run_id) / "final-evidence-aggregate.json", report)
     append_event(workspace, feature, run_id, "evidence_aggregate_completed", passed=report["passed"], errors=report["errors"])

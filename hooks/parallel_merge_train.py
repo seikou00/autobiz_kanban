@@ -12,6 +12,7 @@ import argparse
 import json
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve
 from hooks.parallel_batch_stage import complete_stage, fail_stage, gate_batch, reset_validation_batch, start_stage
 from hooks.parallel_runtime import append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_repair import create_repair_batch
+from hooks.parallel_integration import integration_repo, assert_integration, isolated, record_integration_head
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
 from hooks.merge_resolution_context import prepare_context
@@ -203,7 +205,24 @@ def _remove_candidate(
     return errors
 
 
-def build_candidate(
+def _integration_train_lock(workspace: Path, feature: str, run_id: str, repository_ref: str):
+    manifest = load_manifest(workspace, feature, run_id)
+    if not isolated(manifest):
+        return nullcontext()
+    binding = manifest.get("repositories", {}).get(repository_ref, {})
+    canonical = str(binding.get("integrationRepositoryRef") or repository_ref)
+    return FileLock(run_dir(workspace, feature, run_id) / "integration-locks" / f"{_safe(canonical)}.lock")
+
+
+def build_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, batch_ids: list[str]) -> dict[str, Any]:
+    manifest = load_manifest(workspace, feature, run_id)
+    first = manifest.get("batches", {}).get(next(iter(batch_ids), ""), {})
+    ref = str(first.get("repositoryRef") or first.get("workspaceRef") or "")
+    with _integration_train_lock(workspace, feature, run_id, ref):
+        return _build_candidate(workspace, feature, run_id, wave=wave, batch_ids=batch_ids)
+
+
+def _build_candidate(
     workspace: Path,
     feature: str,
     run_id: str,
@@ -239,7 +258,7 @@ def build_candidate(
         # Allow rebuilding if previously conflicted or failed (not just stale/failed/promoted)
         if existing and existing.get("status") not in {"stale", "failed", "promoted", "discarded", "candidate_conflicted", "needs_resolution"}:
             raise ValueError(f"parallel_merge_train_wave_occupied:{repository_ref}:{wave}")
-        repo = Path(binding["gitRoot"]).resolve()
+        repo = assert_integration(binding) if isolated(manifest) else integration_repo(binding)
         expected_head = str(binding.get("headSha") or binding.get("baseSha") or "")
         _clean(repo)
         current_head = _head(repo)
@@ -376,7 +395,14 @@ def verify_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, r
     raise ValueError("parallel_merge_train_candidate_verification_removed_use_batch_utest_and_e2e")
 
 
-def promote_candidate(
+def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str,
+                      allow_unverified: bool = False) -> dict[str, Any]:
+    with _integration_train_lock(workspace, feature, run_id, repository_ref):
+        return _promote_candidate(workspace, feature, run_id, wave=wave, repository_ref=repository_ref,
+                                  allow_unverified=allow_unverified)
+
+
+def _promote_candidate(
     workspace: Path,
     feature: str,
     run_id: str,
@@ -405,7 +431,7 @@ def promote_candidate(
         binding = manifest.get("repositories", {}).get(repository_ref)
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
-        repo = Path(binding["gitRoot"]).resolve()
+        repo = assert_integration(binding) if isolated(manifest) else integration_repo(binding)
         record.update({
             "status": "promoting",
             "promotionReadyStatus": "built" if utest_gated_promotion else "verified",
@@ -445,7 +471,7 @@ def promote_candidate(
         wave=wave,
         promoted_sha=promoted_sha,
     )
-    recovered = recover_promoted_plan(workspace, feature, run_id, repository_ref=repository_ref, wave=wave)
+    recovered = _recover_promoted_plan(workspace, feature, run_id, repository_ref=repository_ref, wave=wave)
     if utest_gated_promotion and recovered.get("success"):
         with run_lock(workspace, feature, run_id):
             manifest = load_manifest(workspace, feature, run_id)
@@ -494,7 +520,7 @@ def _checkpoint_promoted_plan_recovery(
         }
         # The repository's actual HEAD is now a durable fact even though Plan
         # metadata may still need replay.  Never leave it pointing at base.
-        binding["headSha"] = promoted_sha
+        record_integration_head(manifest, repository_ref, promoted_sha)
         current.update({
             "status": "needs_resolution",
             "promotedSha": promoted_sha,
@@ -504,7 +530,19 @@ def _checkpoint_promoted_plan_recovery(
         save_manifest(workspace, feature, run_id, manifest)
 
 
-def recover_promoted_plan(
+def recover_promoted_plan(workspace: Path, feature: str, run_id: str, *, repository_ref: str, wave: int) -> dict[str, Any]:
+    with _integration_train_lock(workspace, feature, run_id, repository_ref):
+        # Another workflow may finish this promotion while resume waits for
+        # the physical repository lock. Its completed result is reusable.
+        manifest = load_manifest(workspace, feature, run_id)
+        record = _record(manifest, repository_ref, wave)
+        if isolated(manifest) and record and record.get("status") == "promoted":
+            return {"success": True, "reused": True, "promoted": True,
+                    "batchIds": record.get("batchIds", []), "candidateSha": record.get("candidateSha")}
+        return _recover_promoted_plan(workspace, feature, run_id, repository_ref=repository_ref, wave=wave)
+
+
+def _recover_promoted_plan(
     workspace: Path,
     feature: str,
     run_id: str,
@@ -530,7 +568,7 @@ def recover_promoted_plan(
             and not is_legacy
         ):
             return {"success": False, "error": "parallel_merge_train_not_waiting_for_plan_recovery"}
-        repo = Path(binding["gitRoot"]).resolve()
+        repo = integration_repo(binding)
 
     try:
         _clean(repo)
@@ -596,7 +634,7 @@ def recover_promoted_plan(
         binding = manifest.get("repositories", {}).get(repository_ref)
         if not isinstance(current, dict) or not isinstance(binding, dict):
             return {"success": False, "error": f"parallel_merge_train_recovery_record_missing:{repository_ref}:{wave}"}
-        binding["headSha"] = promoted_sha
+        record_integration_head(manifest, repository_ref, promoted_sha)
         resolution = current.get("resolution") if isinstance(current.get("resolution"), dict) else {}
         if plan_errors:
             resolution.update({"kind": _PROMOTED_PLAN_RESOLUTION, "planWriterErrors": plan_errors, "lastAttemptAt": utc_now()})
@@ -639,7 +677,9 @@ def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
             raise ValueError("parallel_e2e_delivery_incomplete:" + ",".join(sorted(incomplete)))
         heads = {ref: binding.get("headSha") for ref, binding in manifest.get("repositories", {}).items() if isinstance(binding, dict)}
         previous = manifest.get("validationBatches", {}).get("V-E2E", {})
-        if isinstance(previous, dict) and previous.get("status") == "running" and isinstance(previous.get("worktrees"), dict):
+        if (isinstance(previous, dict) and previous.get("status") == "running"
+                and previous.get("candidateSha") == json.dumps(heads, sort_keys=True)
+                and isinstance(previous.get("worktrees"), dict)):
             return {"success": True, "batchId": "V-E2E", "status": "running", "mainHeads": heads, "worktrees": previous["worktrees"], "reused": True}
         for ref, binding in manifest.get("repositories", {}).items():
             if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str) or not isinstance(heads.get(ref), str):
@@ -647,7 +687,7 @@ def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     worktrees: dict[str, str] = {}
     try:
         for ref, binding in manifest["repositories"].items():
-            repo = Path(str(binding["gitRoot"])).resolve()
+            repo = integration_repo(binding)
             _clean(repo)
             target = run_dir(workspace, feature, run_id) / "validation-worktrees" / "e2e" / _safe(ref)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1101,7 +1141,7 @@ def discard_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             return {"success": False, "error": f"repository_not_found:{repository_ref}"}
 
-        repo = Path(binding["gitRoot"]).resolve()
+        repo = integration_repo(binding)
         worktree_path = Path(record.get("worktreePath", ""))
         branch_name = record.get("branchName", "")
 

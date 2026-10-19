@@ -33,6 +33,7 @@ from tests.test_task_runner import _configure_frontend_without_batch_compile, _g
 def create_run(workspace: Path, feature: str, **kwargs):
     """Create a workflow run with the production commit context in tests."""
     kwargs.setdefault("task_card_id", "Z990692-294")
+    kwargs.setdefault("integration_mode", "direct")  # Cover legacy durable runs explicitly.
     return _create_run(workspace, feature, **kwargs)
 
 

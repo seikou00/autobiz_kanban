@@ -32,6 +32,7 @@ from hooks.parallel_runtime import (
 )
 from hooks.worktree_manager import remove_parallel_worktree
 from hooks.repository_snapshot import git_status_porcelain
+from hooks.parallel_integration import isolated
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -78,7 +79,7 @@ def reclaim_stale_leases(workspace: Path, feature: str, run_id: str, *, force: b
     return reclaimed
 
 
-def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = False) -> dict[str, Any]:
+def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = False, discard_integration: bool = False) -> dict[str, Any]:
     """Close a run and remove every plugin-owned execution resource.
 
     ``force`` is used by the feature rollback path.  It revokes outstanding
@@ -88,6 +89,10 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
     """
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if isolated(manifest) and (manifest.get("mainPromotion") or {}).get("status") == "promoting":
+            raise ValueError("integration_promotion_recovery_required_before_cleanup")
+        if isolated(manifest) and (manifest.get("mainPromotion") or {}).get("status") != "merged" and not discard_integration:
+            raise ValueError("integration_unpromoted_cleanup_requires_explicit_code_rollback")
         if manifest.get("status") not in {"succeeded", "failed", "blocked", "cancelled", "rolled_back"} and not force:
             raise ValueError("parallel_run_not_terminal")
         targets = [
@@ -206,6 +211,35 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
             "releasedLeases": released_leases,
             "errors": errors,
         }
+        for ref, binding in manifest.get("repositories", {}).items():
+            if binding.get("integrationRepositoryRef", ref) != ref:
+                continue
+            integration = binding.get("integration")
+            if not isinstance(integration, dict) or integration.get("owner") != "plugin":
+                continue
+            path = Path(integration["worktreePath"])
+            repo = Path(binding["gitRoot"])
+            branch = integration["branchName"]
+            if not discard_integration:
+                reachable = _git(repo, "merge-base", "--is-ancestor", branch, f"refs/heads/{binding['baseBranch']}")
+                if reachable.returncode:
+                    errors.append(f"integration_branch_not_in_target:{branch}")
+                    continue
+            if path.exists():
+                args = ["worktree", "remove", *(["--force"] if discard_integration else []), str(path)]
+                result = _git(repo, *args)
+                if result.returncode:
+                    errors.append(f"integration_cleanup_failed:{path}:{result.stderr.strip()}")
+                    continue
+                removed.append(str(path))
+            if _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+                # Reachability was checked against the actual target branch,
+                # which need not be checked out in the user's source checkout.
+                result = _git(repo, "branch", "-D", branch)
+                if result.returncode:
+                    errors.append(f"integration_branch_cleanup_failed:{branch}:{result.stderr.strip()}")
+                else:
+                    removed_branches.append(branch)
         manifest["status"] = "cleaned" if not errors else "cleanup_failed"
         save_manifest(workspace, feature, run_id, manifest)
         append_event(
@@ -346,7 +380,7 @@ def cleanup_feature_runs_for_code_rollback(workspace: Path, feature: str) -> lis
             # Non-runtime files under the artifact directory have no plugin
             # ownership information and are handled by artifact archival.
             continue
-        result = cleanup_run(workspace, feature, run_id, force=True)
+        result = cleanup_run(workspace, feature, run_id, force=True, discard_integration=True)
         if result.get("status") != "cleaned" or result.get("errors"):
             raise ValueError(
                 f"parallel_run_cleanup_failed:{run_id}:"
@@ -367,6 +401,8 @@ def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "par
         raise ValueError("rollback_requires_confirm")
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if isolated(manifest) and (manifest.get("mainPromotion") or {}).get("status") in {"promoting", "merged"}:
+            raise ValueError("integration_main_promotion_requires_separate_rollback")
         promoted_plan_recovery = any(
             isinstance(train, dict)
             and train.get("status") in {"promoting", "needs_resolution"}
@@ -383,7 +419,7 @@ def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "par
         if promoted_plan_recovery:
             raise ValueError("rollback_promoted_plan_recovery_required")
         reverted: list[str] = []
-        if mode == "full":
+        if mode == "full" and not isolated(manifest):
             task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
             commits_by_repository: dict[str, dict[str, Any]] = {}
             for item in manifest.get("batches", {}).values():

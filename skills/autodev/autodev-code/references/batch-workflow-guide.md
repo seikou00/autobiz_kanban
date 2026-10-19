@@ -5,6 +5,24 @@ has pending Batches. The workflow control plane is repository-owned at
 `workflows/code-batched-execution.workflow.js`; do not generate, validate, or
 replace it with model output.
 
+New runs use isolated feature integration by default. Each business checkout
+in Plan `codeWorkspaces` supplies its current branch and committed HEAD at run
+creation. These are frozen as the baseline and final promotion target; resume
+reuses the manifest even if the user later switches branches. Do not guess
+`main`/`master` or create runtime configuration to select a branch; legacy
+`targetBranches` no longer controls new runs. A detached HEAD or unborn branch
+stops creation with an explicit error. Every physical Git repository gets an
+integration branch/worktree, all Batch promotions target that integration
+checkout, and final verification ends at user confirmation.
+The launcher returns `review_integration_and_confirm_promotion` for a retained
+or reviewable result; do not restart the Workflow or report a Plan error.
+Never call the final `promote` command without the user's explicit approval of
+the concrete report and its `approvalDigest`. See
+[`docs/feature-integration-worktree.md`](../../../../docs/feature-integration-worktree.md)
+for configuration, final confirmation commands, main synchronization, and
+recovery. Existing manifests without isolated integration keep direct mode;
+the older bootstrap/main descriptions below apply to those runs only.
+
 ## Start
 
 Run the launcher in the mounted workspace of the platform Workflow tool. Keep
@@ -130,6 +148,15 @@ run only after validating every sealed native delivery. A `needs_resolution`
 run or a missing sealed worktree remains fail-closed; do not create a new run
 to bypass it.
 
+A Batch rescheduled after an interrupted child keeps its existing stage
+attempts and evidence, including a stage whose status is still `running`.
+That status is a continuation checkpoint while the new generation is waiting
+for execution: without a new dispatch or business lease, it must not occupy a
+scheduler slot or exclude itself from the runnable set. A newly claimed
+dispatch occupies a slot immediately, including during lease-free Review.
+After updating the plugin, use the launcher to continue the same run; retain
+the Worktree and manifest instead of deleting them or resetting stage evidence.
+
 The reuse validation also blocks a Batch marked `merged` without a non-empty
 `mergeCommitSha`, a dirty source checkout, or a source HEAD that differs from
 the run's recorded HEAD. In each case it returns the original `runId` with a
@@ -158,7 +185,10 @@ provisioned.
    `maxParallel` slot is free. Active includes running Review/UTest stages after
    a delivery has been sealed. The Workflow runs a fixed `maxParallel` worker
    pool: each worker executes one lifecycle, refreshes immediately on completion,
-   and idle workers poll every five minutes while another lifecycle is active.
+   and idle workers poll every thirty minutes while another lifecycle is active.
+   Periodic idle/capacity polls make one model call without empty-response
+   retries. A failed poll preserves the last state and waits for the next poll
+   or local wake; it does not trigger dispatch from a fallback snapshot.
    A failure releases that worker to dispatch an unrelated Batch; dependents
    remain blocked until their dependency is merged.
 2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.

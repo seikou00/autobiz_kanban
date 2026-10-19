@@ -36,7 +36,7 @@ MIN_GUARDED_TTL_SECONDS = 4 * 60 * 60
 
 
 def batch_occupies_scheduler_slot(batch: object) -> bool:
-    """Count a Batch through implementation, Review, and UTest."""
+    """Count live execution while retaining resumable stage checkpoints."""
     if not isinstance(batch, dict):
         return False
     status = batch.get("status")
@@ -49,6 +49,13 @@ def batch_occupies_scheduler_slot(batch: object) -> bool:
         return True
     if status in {"leased", "running"}:
         return True
+    recovery = batch.get("recovery") or {}
+    if recovery.get("status") == "rescheduled" and batch.get("lease") is None:
+        # Resume has revoked the previous owner and issued a new generation.
+        # A running stage is still its continuation checkpoint, not a worker.
+        # A fresh dispatch above (including lease-free Review) or a reacquired
+        # business lease restores occupancy when execution actually continues.
+        return False
     states = batch.get("stageStates")
     return isinstance(states, dict) and any(
         isinstance(state, dict) and state.get("status") == "running"
@@ -322,6 +329,7 @@ def create_manifest(
     repositories: dict[str, dict[str, Any]] | None = None,
     runtime_config: dict[str, Any] | None = None,
     task_card_id: str | None = None,
+    integration_mode: str | None = None,
 ) -> dict[str, Any]:
     bundle = load_plan_bundle(feature_dir(workspace, feature))
     errors = parallel_plan_errors(bundle)
@@ -478,6 +486,13 @@ def create_manifest(
         "mergeTrains": {},
         "costs": {"totalTimeSeconds": 0, "estimatedTokens": 0, "batchCosts": {}},
     }
+    if integration_mode is not None:
+        manifest["integrationMode"] = integration_mode
+        manifest["integrationReady"] = integration_mode == "direct"
+        manifest["isolation"] = {
+            "mode": "native_git_worktrees", "owner": "plugin", "cleanupOwner": "plugin",
+            "provisioner": "hooks/worktree_manager.py", "workspaceRefs": sorted(repositories),
+        }
     atomic_write_json(manifest_path(workspace, feature, run_id), manifest)
     return manifest
 
@@ -1027,7 +1042,9 @@ def get_active_run(workspace: Path, feature: str) -> str | None:
     active = [
         item
         for item in list_runs(workspace, feature)
-        if item.get("status") in {"created", "running", "merging", "verifying", "blocked", "needs_resolution"}
+        if item.get("status") in {"created", "running", "merging", "verifying", "blocked", "needs_resolution",
+                                 "awaiting_user_confirmation", "promotion_prepared", "promoting_main", "integration_retained",
+                                 "integration_sync_required", "integration_sync_conflicted"}
     ]
     if len(active) > 1:
         raise ValueError("multiple_parallel_runs_active")

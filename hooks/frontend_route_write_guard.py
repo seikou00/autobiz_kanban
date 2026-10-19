@@ -413,14 +413,30 @@ def validate_merge_resolution_write(workspace: Path, feature: str, target_path: 
                 continue
             worktree = Path(record["worktreePath"]).resolve(strict=False)
             if _path_within(target_path, worktree):
-                matches.append((worktree, manifest, record))
+                matches.append((worktree, manifest, record, "candidate"))
+        if manifest.get("integrationMode") == "isolated":
+            for ref, binding in (manifest.get("repositories") or {}).items():
+                if binding.get("integrationRepositoryRef", ref) != ref:
+                    continue
+                integration = binding.get("integration") or {}
+                if not isinstance(integration.get("worktreePath"), str):
+                    continue
+                worktree = Path(integration["worktreePath"]).resolve(strict=False)
+                if _path_within(target_path, worktree):
+                    matches.append((worktree, manifest, binding, "integration"))
     if not matches:
         return None
     deepest = max(len(item[0].parts) for item in matches)
     owners = [item for item in matches if len(item[0].parts) == deepest]
     if len(owners) != 1:
         return block("candidate_resolution_owner_ambiguous")
-    _, manifest, record = owners[0]
+    _, manifest, record, kind = owners[0]
+    if kind == "integration":
+        from hooks.parallel_integration import integration_sync_write_error
+        error = integration_sync_write_error(manifest, record, target_path)
+        if error:
+            return block(error, system_message="集成 Worktree 仅允许编辑 sync-main 返回的冲突文件；完成后交还 complete-sync 提交并重新验证。")
+        return 0
     error = resolution_write_error(manifest, record, target_path)
     if error:
         return block(error, system_message="冲突文件写入需由 prepare-resolution 授权当前候选；解决后交还插件 complete-resolution 提交。")
