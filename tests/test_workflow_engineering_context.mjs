@@ -41,7 +41,7 @@ test("test failure preserves original command coordinates alongside repair refer
 function dispatchHarness() {
   const context = vm.createContext({
     dispatchGrants: { B001: 1 }, retryPriorityBatchIds: new Set(), activeDispatchGrants: new Map(),
-    runnableScheduledBatchIds: () => ["B001"], runnableSchedulerFallbackBatchIds: () => [],
+    runnableScheduledBatchIds: () => ["B001"],
     runnableImplementationRecoveries: () => [], runnableStageRecoveries: () => [], runnableMergeableBatchIds: () => [],
     runInitialBatchLifecycle: async () => ({ batchId: "B001", status: "merged" }),
     setTimeout, clearTimeout, DISPATCH_POLL_INTERVAL_MS: 30000,

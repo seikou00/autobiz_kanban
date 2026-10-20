@@ -286,11 +286,11 @@ class SpecsRuntimeAuditTest(unittest.TestCase):
             for hook in registration.get("hooks", [])
         ]
         commands = [hook.get("command", "") for hook in post_hooks]
-        self.assertNotIn("python hooks/augment_critic_task_prompt.py", pre_commands)
-        self.assertNotIn("python hooks/augment_specs_gate_fixer_task_prompt.py", pre_commands)
-        self.assertIn("python hooks/critic_review_log_writer.py", commands)
-        self.assertNotIn("python hooks/critic_findings_writer.py", commands)
-        self.assertNotIn("python hooks/decision_ledger_writer.py", commands)
+        self.assertFalse(any(command.endswith("hooks/augment_critic_task_prompt.py") for command in pre_commands))
+        self.assertFalse(any(command.endswith("hooks/augment_specs_gate_fixer_task_prompt.py") for command in pre_commands))
+        self.assertTrue(any(command.endswith("hooks/critic_review_log_writer.py") for command in commands))
+        self.assertFalse(any(command.endswith("hooks/critic_findings_writer.py") for command in commands))
+        self.assertFalse(any(command.endswith("hooks/decision_ledger_writer.py") for command in commands))
         entry = next(
             hook
             for hook in post_hooks

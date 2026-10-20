@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import re
 from pathlib import Path
 
 
@@ -40,7 +41,9 @@ SHARED_ADJUDICATION_RULES = (
 
 
 def missing_rules(content: str, extra: tuple = ()) -> list[str]:
-    """返回未命中任何可接受写法的规则名。"""
+    """共享规则由被引用的协议提供；技能只保留阶段差异。"""
+    if "ask-user-question.md" in content:
+        content += "\n" + PROTOCOL.read_text(encoding="utf-8")
     missing = [
         name
         for name, variants in SHARED_ADJUDICATION_RULES
@@ -72,7 +75,7 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         content = DISCUSS_SKILL.read_text(encoding="utf-8")
 
         for required_rule in (
-            "如需补充其他问题，请直接在客户端自动提供的「其他」中填写问题内容",
+            "用户在逐项裁定的 Other /「其他」中补充新问题时，直接记录并合并到问题清单",
             "不得再次询问“请补充说明”",
             "不得生成「现在提供」「提供路径」「补充说明」等空动作选项",
             "自由文本补充类问题仍必须提供至少 2 个预设选项",
@@ -101,8 +104,8 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         self.assertIn("design_contract_lock.py\" sync", content)
         self.assertNotIn("整体确认门", content)
         self.assertNotIn("确认设计，进入 PLAN 生成", content)
-        self.assertIn("不得添加用于进入下游阶段的额外交互门", content)
-        self.assertIn("不得把它记为「Plan 首件事」", content)
+        self.assertIn("不得自行增加文本确认或绕过该命令", content)
+        self.assertLess(content.rindex('design_contract_lock.py" sync'), content.rindex("--checkpoint design_done"))
 
     def test_prd_and_specs_gates_match_plan_strictness(self) -> None:
         for skill in (PRD_SKILL, SPECS_SKILL):
@@ -119,23 +122,24 @@ class RequestUserInputProtocolTest(unittest.TestCase):
 
         # 裁定逐条进行，条目自身不再编号；`id` 由内容概括而来。
         self.assertNotIn("PRD-001", content)
-        self.assertIn("同一决策去重后逐条裁定", content)
+        self.assertIn("同一决策去重后逐条询问用户", content)
         self.assertIn("`id` 用条目内容的简短 snake_case 概括", content)
 
     def test_specs_only_adjudicates_open_questions(self) -> None:
         content = SPECS_SKILL.read_text(encoding="utf-8")
 
         for required_rule in (
-            "探索并生成待确认问题清单",
+            "探索结束时先生成待确认问题清单",
             "仅裁定讨论表中的待确认条目",
             # 「不把切分、命名或规格范围交给用户确认」不在此列：AGENTS.md 把该句
             # 本身列为技能编写反模式（不要把需求或改动目的写入技能）。同一语义由
             # 下一条「全部条目裁定后直接生成 proposal 与 specs」所在行的
             # 「不再确认 capability 切分或规格范围」承载。
             "全部条目裁定后直接生成 proposal 与 specs",
-            "不得使用「已准备好，稍后提供」",
         ):
             self.assertIn(required_rule, content)
+        self.assertIn("「已准备好，稍后提供」", PROTOCOL.read_text(encoding="utf-8"))
+        self.assertEqual(missing_rules(content), [])
 
         for forbidden_rule in (
             "等待用户确认规格范围",
@@ -151,7 +155,10 @@ class RequestUserInputProtocolTest(unittest.TestCase):
             if path == PROTOCOL:
                 continue
             content = path.read_text(encoding="utf-8")
-            if "request_user_input" in content and "ask-user-question.md" not in content:
+            calls_tool = any("request_user_input" in line
+                             and not re.search(r"(?:不得|禁止|不能|不允许).*request_user_input", line)
+                             for line in content.splitlines())
+            if calls_tool and "ask-user-question.md" not in content:
                 missing.append(str(path.relative_to(ROOT)))
 
         self.assertEqual([], missing, f"未加载共享提问协议: {missing}")

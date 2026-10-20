@@ -27,7 +27,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         create_feature(self.workspace, feature, workflow_template=workflow_template)
 
     def _plain(self, skill: str, feature: str) -> str:
-        contract, workflow_context, extra_missing_inputs = _find_feature_contract(
+        contract, workflow_context, extra_skipped_inputs = _find_feature_contract(
             ROOT,
             skill=skill,
             feature=feature,
@@ -37,7 +37,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
             contract,
             workflow_context,
             _resolve_feature_dir(self.workspace, feature),
-            extra_missing_inputs=extra_missing_inputs,
+            extra_skipped_inputs=extra_skipped_inputs,
         )
 
     def test_standard_prd_contract_uses_merged_requirement_skill(self) -> None:
@@ -55,7 +55,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertEqual(contract.required_inputs, ())
         self.assertEqual(contract.required_outputs, ("PRD.md", "UI_CONTEXT.json"))
         self.assertEqual(extra_missing, ())
-        self.assertEqual(self._plain("autobiz-requirement-discuss", feature), "")
+        self.assertEqual(self._plain("autobiz-requirement-discuss", feature), "## 输入产物（state: `ready`）\n- 无\n")
 
     def test_standard_design_and_plan_contracts_have_a_hard_handoff(self) -> None:
         feature = "design-plan-handoff"
@@ -83,14 +83,16 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertIn("design.md", plan.required_inputs)
         self.assertIn(".design-contract.lock.json", plan.required_inputs)
 
-    def test_plain_lean_workflow_requires_prd_only(self) -> None:
+    def test_plain_lean_workflow_reports_dropped_prd_inputs_as_skipped(self) -> None:
         feature = "lean-entry"
         self._create_feature(feature, workflow_template="lean")
 
         output = self._plain("autodev-specs", feature)
 
         self.assertIn("PRD.md", output)
-        self.assertIn("无 PRD 时基于用户描述直接澄清行为契约", output)
+        self.assertIn("state: `ready`", output)
+        self.assertIn("status: `skipped`", output)
+        self.assertIn("工作流模板 `lean` 未包含产出该产物的节点", output)
         self.assertIn("UI_CONTEXT.json", output)
 
     def test_plain_lean_archive_reports_nothing_to_handle(self) -> None:
@@ -99,7 +101,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         feature = "lean-archive"
         self._create_feature(feature, workflow_template="lean")
 
-        self.assertEqual(self._plain("autoops-archive", feature), "")
+        self.assertEqual(self._plain("autoops-archive", feature), "## 输入产物（state: `ready`）\n- 无\n")
 
     def test_plain_lean_code_omits_inputs_of_dropped_upstream_nodes(self) -> None:
         feature = "lean-code"

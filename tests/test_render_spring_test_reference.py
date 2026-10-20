@@ -224,7 +224,7 @@ class SpringTestReferenceIntegrationContractTest(unittest.TestCase):
 
         self.assertEqual(1, content.count("render_spring_test_reference.py"))
         self.assertIn(
-            'python "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>',
+            'python -X utf8 "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>',
             content,
         )
         self.assertIn("version: v1.2.08311", content)

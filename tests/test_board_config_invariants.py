@@ -319,7 +319,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        first_command = 'python "${pluginPath}/hooks/inspect_skill_contract.py"'
+        first_command = 'python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py"'
         self.assertIn(execution_rule, skill)
         self.assertIn(first_command, skill)
         self.assertLess(skill.index(execution_rule), skill.index(first_command))
@@ -380,7 +380,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "${pluginPath}/autobiz/hooks/biz_validate.py",
             "python skills/autobiz/hooks/biz_validate.py",
         }
-        required_path = 'python "${pluginPath}/skills/autobiz/hooks/biz_validate.py"'
+        required_path = 'python -X utf8 "${pluginPath}/skills/autobiz/hooks/biz_validate.py"'
         files = [
             "skills/autobiz/SKILL.md",
             "skills/autobiz/autobiz-requirement-discuss/SKILL.md",

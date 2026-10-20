@@ -72,7 +72,7 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             return denied("capacity_full")
         if batch_id not in select_runnable_batches(manifest, [batch_id], sorted(active_ids - {batch_id}), slots):
             return denied("resource_or_stage_conflict")
-        if source in {"initial", "scheduler_snapshot_fallback"}:
+        if source == "initial":
             allowed = select_runnable_batches(manifest, ready_batches(manifest), sorted(active_ids), slots)
             eligible = batch_id in allowed
         elif source == "merge_candidate":
@@ -182,7 +182,8 @@ def main(argv=None):
             error = base64.b64decode(args.error_b64, validate=True).decode("utf-8")
             result = defer(workspace, feature, args.run_id, args.batch_id, args.generation, args.owner_token, error)
     except (ValueError, OSError, KeyError) as exc:
-        result = {"success": False, "reasonCode": str(exc)}
+        result = {"success": False, "status": "failed", "batchId": args.batch_id,
+                  "generation": args.generation, "reasonCode": str(exc)}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["success"] else 1
 

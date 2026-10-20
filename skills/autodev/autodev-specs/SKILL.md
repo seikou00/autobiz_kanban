@@ -45,11 +45,12 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_
 - 生成待讨论问题时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 
 探索结束时先生成待确认问题清单。PRD.md中的「待补充」「待提供」「后续给出」如影响行为契约，逐项列入；无待确认项时写「无」并继续生成产物。
+仅裁定讨论表中的待确认条目，用户已确认内容直接复用。全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围；关键资料仍缺失时按共享提问协议消解，不把展示问题清单当作用户已裁定。
 ```
 
 ## 生成 proposal 与 specs
 
-先确定 capability 清单，再按proposal 模板(${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md) 和 spec 模板(${pluginPath}/skills/autodev/autodev-specs/templates/templates/spec.md) 生成产物。
+先确定 capability 清单，再按proposal 模板(${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md) 和 spec 模板(${pluginPath}/skills/autodev/autodev-specs/templates/spec.md) 生成产物。
 
 - proposal 默认写 Why、What Changes、Capabilities、Impact；影响面基于实际调研。Capabilities 使用 `- capability-name: 说明` 列表，名称为 kebab-case，与 `specs/<capability>/spec.md` 双向对应。
 - 非目标、关键取舍、问题记录和来源引用按需添加，没有内容直接省略。关键行为决定落实到 Requirement/Scenario；需要供设计引用的取舍可在 `## Decision Log` 下使用 `### DEC-NNN: 标题`，已有 DEC 引用保持稳定。

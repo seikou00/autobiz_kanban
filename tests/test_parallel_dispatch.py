@@ -143,7 +143,7 @@ class DispatchGrantTest(unittest.TestCase):
         # A live Review occupies its slot even though it has no business lease.
         self.assertEqual(1, schedule(self.workspace, "alpha", self.run)["activeWorkers"])
         before = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
-        defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "workflow_agent_empty_response_exhausted")
+        defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "worker_interrupted")
         resumed = resume_run(self.workspace, "alpha", self.run)
         self.assertEqual(0, resumed["activeWorkers"])
         self.assertEqual(stage, resumed["stageRecoveryBatches"][0]["nextStage"])

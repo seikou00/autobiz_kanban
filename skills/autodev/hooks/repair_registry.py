@@ -65,6 +65,16 @@ def render(template: str, target: str, fields: Dict[str, str] | None = None) -> 
 # --------------------------------------------------------------------------
 
 _ENTRY: Dict[str, Repair] = {
+    "invalid_json_artifact": Repair(
+        artifact="{target}",
+        problem="当前 JSON 产物无法解析：{target}",
+        action="根据预检输出中的 file、行列与解析错误修正所属输入，再通过该产物的 Runtime writer 重新生成合法 JSON；不要直接编辑机器状态文件。",
+    ),
+    "invalid_json_artifact_root": Repair(
+        artifact="{target}",
+        problem="当前 JSON 产物根节点不是对象：{target}",
+        action="将所属 writer 的输入修正为契约要求的对象并重新生成产物；不要用数组、字符串或空值替代根对象。",
+    ),
     "missing_required_artifacts": Repair(
         artifact="{target}",
         problem="本阶段的必备产物缺失或为空：{target}",
@@ -364,6 +374,11 @@ _PLAN: Dict[str, Repair] = {
         artifact="plan.json",
         problem="plan.json 结构不合法：{target}",
         action="修正 Plan v2 输入，不要就地改字段。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
+    ),
+    "invalid_parallel_batch_pipeline": Repair(
+        artifact="plan.json / plans/Bxxx/plan.json",
+        problem="并行批次流水线或验证意图归属不合法：{target}",
+        action="按 detail 修正 Plan 输入中的 Batch 绑定和 validationOwnership，delivery test 仅接收本 Batch 的测试意图，最终 e2e_test 归属 B-E2E。" + PLAN_REPUBLISH + PLAN_NO_HAND_EDIT,
     ),
     "plan_task_set_not_finalized": Repair(
         artifact="plan.json",

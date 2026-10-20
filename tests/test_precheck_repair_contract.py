@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ if str(HOOKS) not in sys.path:
 
 import repair_registry  # noqa: E402
 from artifact_check import (  # noqa: E402
+    VALIDATORS,
     HookContext,
     _validate_plan_json_traceability,
     validate_design_contract,
@@ -46,18 +48,12 @@ from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: 
 ARTIFACT_CHECK = HOOKS / "artifact_check.py"
 
 # board_config 中 dev.specs / dev.plan 两个节点声明的 validator
-IN_SCOPE_VALIDATORS = (
-    "validate_proposal_contract",
-    "validate_specs_contract",
-    "validate_capability_spec_correspondence",
-    "validate_specs_review_verdict",
-    "validate_design_contract",
-    "validate_plan_json_contract",
-    "validate_plan_json_initial_tasks",
-    "validate_plan_task_granularity",
-    "validate_plan_scenario_coverage",
-    "validate_plan_ref_resolution",
-)
+IN_SCOPE_VALIDATORS = tuple(dict.fromkeys(
+    VALIDATORS[validator].__name__
+    for node in json.loads((ROOT / "board_core/board_config.json").read_text(encoding="utf-8"))["workflow"]["nodes"]
+    if node["id"] in {"dev.specs", "dev.design", "dev.plan"}
+    for validator in node.get("validators", [])
+))
 
 # reason 由被调用方以数据形式返回、AST 在调用点看不到字面量的那些。
 # 每一项都配一条「与源文件同步」的断言，见 DynamicReasonsInSyncTest。

@@ -31,6 +31,7 @@ class OptimisticWorkflowIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 _load_runtime_config(workspace),
                 {
+                    "integrationMode": "isolated",
                     "parallelSchedulingMode": "optimistic",
                     "maxParallel": 6,
                     "conflictResolution": {"maxAttempts": 3, "enableAutoResolve": True},

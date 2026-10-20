@@ -1076,7 +1076,7 @@ class TaskRunnerTest(unittest.TestCase):
             started = _start(workspace, code)
             run_path = feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
             state = json.loads(run_path.read_text(encoding="utf-8"))
-            state["parallelRunId"] = "cw-empty-response"
+            state["parallelRunId"] = "cw-interrupted"
             state["integritySha256"] = task_runner_module.task_run_integrity_sha256(state)
             run_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             (code / "interrupted.txt").write_text("preserve me\n", encoding="utf-8")
@@ -1084,7 +1084,7 @@ class TaskRunnerTest(unittest.TestCase):
             recovered = task_runner_module.recover_interrupted_parallel_runs(
                 workspace,
                 "alpha",
-                "cw-empty-response",
+                "cw-interrupted",
                 "B001",
                 code,
             )
@@ -1093,7 +1093,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(recovered["recovered"][0]["runId"], started["runId"])
             state = json.loads(run_path.read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "aborted")
-            self.assertEqual(state["abortWhy"], "workflow_agent_empty_response_exhausted")
+            self.assertEqual(state["abortWhy"], "automatic_batch_retry")
             self.assertTrue((code / "interrupted.txt").is_file())
             self.assertEqual(_read_batch(feature_dir)["tasks"][0]["status"], "todo")
 

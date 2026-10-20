@@ -11,7 +11,7 @@ allowed-tools: execute task_output read_file grep glob write_file edit_file requ
 
 进入 Code 先取得 `taskCardId`，拿到有效 ID 后再进行准入检查、写入 `code_in_progress`、捕获基线并调用 launcher。
 
-- 缺少 ID 时调用 `request_user_input`：“请填写本次 Code 提交使用的看板 ID（例如 Z990692-294）。”通过工具的自由文本输入收集 ID。
+- 缺少 ID 时调用 `request_user_input`：“请填写本次 Code 提交使用的看板 ID（例如 Z990692-294）。”通过工具的自由文本输入收集 ID。提问前读取 `${pluginPath}/skills/references/ask-user-question.md`；已有明确 ID 时直接复用。
 - 去除首尾空白后，ID 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`；无效时请用户重新填写，不得猜测。
 - 已提供有效 ID 时直接复用。Workflow 启动后以及恢复同一 Run 时，使用 manifest 中保存的 ID，不再询问。ID 通过 `--task-card-id` 传入并由插件保存，本 Run 的提交统一使用 `<看板ID> #comment cmbdevcalw提交 <提交说明>`。
 - Code 封存携带 `--commit-stage code --commit-summary "<实际实现的中文功能说明>"`，插件只在正文附加当前 Batch 的 TASK 编号、标题和任务目标。Review/UTest 打回的生产修复使用 `--commit-stage rework`，摘要说明具体修复的问题，不带 TASK；普通中断恢复仍用 Code。`--purpose review` 是送审封存用途，不是 Review 提交。Review 只读、不创建提交，UTest 测试资产封存使用 `--commit-stage utest`，不带 TASK。详见 `docs/code-commit-messages.md`。
@@ -196,13 +196,15 @@ python -X utf8 "${pluginPath}/hooks/code_task_context.py" --feature "${feature}"
 
 必须读取当前 task 的 `workspaceRef`、`goal`、`implementationPoints`、`testPoints`、`acceptanceCriteria`、`validationBoundary`、`verificationIntent`、`specRefs` 与 `designRefs`。Plan 提供交付结果、主要实现方向和测试关注点；实现文件、方法、模块和具体步骤由当前 Agent 结合真实代码决定。缺少业务引用、仓库归属或要点时回到 `/autodev-plan`，不要把文件或方法尚未确定误判为计划缺失。
 3. 改代码前，只在当前 Task 的 `scope`、入口点和 1-hop 依赖内阅读生产代码，识别项目分层、命名、错误处理、校验与日志风格，形成简短修改映射（依据、拟改生产文件、复用模式）再动手。可以只读既有测试理解行为契约，但不得在 Code 阶段创建、修改或执行测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
-4. context 返回 `startAllowed=true` 后，在执行任何会写入代码工作树的前端脚本、资源处理或业务代码修改前启动任务运行并保存 Git 快照：
+4. context 返回 `startAllowed=true` 后，在执行任何会写入代码工作树的前端脚本、资源处理或业务代码修改前启动任务运行并保存 Task Run 的 Git 快照：
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
 ```
 
-保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `resume` / `abort` 处理原 run。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。业务源码写入前，写入闸门会严格校验完整 v2 run、路径身份和 `executionMode=code`；`verified_existing` / `external_dependency` 不允许写业务源码。
+保存输出中的 `runId`。非并行模式下同一 Feature 同时只允许一个活动 task run；并行模式以 `parallelRunId + batchId` 为活动 run 边界，同一 Batch 内 TASK 串行，不同 Batch 的活动 TASK 不互相阻塞。普通中断先用 `inspect` / `resume` 继续原 run，不得新建 run 绕过。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时，按错误中的实际 Batch/TASK 绑定处理，不得为了重新 start 而随意 abort。
+
+调度器把失败 Batch 从 `retry_pending` 恢复到新派发代次时，会先关闭该 Batch 的旧活动 TASK run 并保留变更。若 inspect 只返回 `aborted` 的旧 run，未完成 TASK 应重新 start；这不是需要继续 abort 或等待其他 Batch 的阻断条件。仅对同一 `parallelRunId + batchId` 尚未关闭的旧 run，按固定 Workflow 的 `automatic_batch_retry` 协议处理，不得触碰其他 Batch。业务源码写入前，写入闸门会严格校验完整 v2 run、路径身份和 `executionMode=code`；`verified_existing` / `external_dependency` 不允许写业务源码。
 `--code-workspace` 同时是 Git 仓库定位入口和 task workspace 基准，run 中固化 `scopePathBase=requested_code_workspace`；必须选择 task `workspaceRef` 指向的实际仓库，请求路径必须与 task `scope.workspaceRoots` 声明的位置完全一致。即使传模块子目录，runner 也会解析并快照整个 Git 根；`scope.paths` 仍是相对该模块的提示性范围，不是实现文件白名单。start 前只能保留已经由前序 TASK Evidence 认领的改动，未归属改动会返回 `prestart_unattributed_changes_detected`；start 成功到 finish 成功之间的全部有效业务变更都归属当前 TASK。start 不检查或执行 TASK 测试命令的 cwd、manifest、依赖或可执行文件；这些由后续 UTest/E2E 阶段负责。TASK finish 会记录该 workspace 内全部有效生产代码和生产配置变更；测试文件变更会被拒绝，跨 workspace 变更必须先修复工作区。`finish-implementation` / `abort` / `resume` 必须继续传相同请求路径并保持同一个 run；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。TASK 的实现 Evidence 使用该 TASK 从首次 start 到最终实现收口之间所有 run 的累计 `fileChanges/changedFiles`；abort 只结束一次 run，不清除已记录的变更。
 `start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。每个 TASK 的 context 复核同样应在对应 `start` 前完成。run 活动期间不得修改该 task 的 goal/scope/AC/testPoints/verificationIntent 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修复 Plan contract 时按下方协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch；普通新增 DTO/XML/生产资源文件不需要修 scope 或重建 digest。
 

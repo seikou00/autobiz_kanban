@@ -359,9 +359,19 @@ const requiredSchedulerFields = [
   "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups"
 ];
 if (requiredSchedulerFields.some(field => !context.schedulerSchema.properties[field])) process.exit(22);
-if (requiredSchedulerFields.some(field => !context.schedulerSchema.required.includes(field))) process.exit(23);
+const completeScheduler = { runId: "run", status: "running", maxParallel: 1,
+  scheduledGroups: [], readyBatches: [], allReadyBatches: [], mergeableBatches: [],
+  implementationRecoveryBatches: [], stageRecoveryBatches: [], retryPendingBatches: [], blockedBatches: [],
+  parallelGroups: [], allParallelGroups: [], dispatchGrants: {}, batchTaskIds: {}, batchWorkspaces: {} };
+for (const field of requiredSchedulerFields) {
+  const incomplete = { ...completeScheduler };
+  delete incomplete[field];
+  let rejected = false;
+  try { context.requireSchedulerResult(incomplete, "schema-contract"); } catch (_) { rejected = true; }
+  if (!rejected) process.exit(23);
+}
 const manifestSchema = context.schedulerSchema.properties.manifest;
-if (!manifestSchema?.properties?.batches || !manifestSchema.properties.mergeTrains || !manifestSchema.properties.deferredIssues) process.exit(29);
+if (!manifestSchema?.properties?.batches || !manifestSchema.properties.mergeTrains || !manifestSchema.properties.deferredIssues || !manifestSchema.properties.skippedUtests) process.exit(29);
 if (!source.includes("status --workflow-view")) process.exit(30);
 if (!context.schedulerSchema.properties.dispatchDiagnostics.properties.activeBatchIds) process.exit(31);
 if (!context.schedulerSchema.properties.stageRecoveryBatches.items.properties.failureContext.properties.argv) process.exit(32);
@@ -617,8 +627,6 @@ const context = {
   schedulerCycles: 0,
   MAX_SCHEDULER_CYCLES: 10,
   quarantinedBatchIds: new Set(),
-  schedulerFallbackConsumed: new Set(),
-  schedulerSnapshotDegraded: false,
   mergeableBatches: [],
   lastScheduler: { activeWorkers: 0 },
   maxParallel: 5,
@@ -635,7 +643,6 @@ let scheduled = ["B001"];
 const executed = [];
 let refreshes = 0;
 context.runnableScheduledBatchIds = () => scheduled;
-context.runnableSchedulerFallbackBatchIds = () => [];
 context.runnableImplementationRecoveries = () => [];
 context.runnableStageRecoveries = () => [];
 context.runnableMergeableBatchIds = () => [];
@@ -689,7 +696,6 @@ const source = fs.readFileSync(process.argv[1], "utf8");
 const context = {
   quarantinedBatchIds: new Set(),
   runnableScheduledBatchIds: () => ["B003", "B009"],
-  runnableSchedulerFallbackBatchIds: () => [],
   runnableImplementationRecoveries: () => [
     { batchId: "B008", worktreePath: "/tmp/B008", branchName: "batch-b008", recoveryKind: "implementation_resume", preserveWorktree: true, reprovision: false },
   ],
@@ -766,9 +772,9 @@ vm.runInContext(source.slice(start, end), context);
     return True
 
 
-def test_workflow_empty_response_recovery():
-    """空模型响应应重试，并只用已验证波次降级继续。"""
-    print("测试 9: 空响应恢复")
+def test_workflow_platform_transport_recovery():
+    """模型传输恢复交给平台，Workflow 不重复调用有副作用的子任务。"""
+    print("测试 9: 平台传输恢复边界")
     print("-" * 60)
 
     workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
@@ -777,55 +783,42 @@ const fs = require("fs");
 const vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const context = {
-  MAX_EMPTY_AGENT_RESPONSE_RETRIES: 2,
   pluginPath: "/test/plugin",
   usableString: value => typeof value === "string" && value.trim().length > 0,
 };
-let calls = 0;
 const labels = [];
+const failure = new Error("Received empty response from chat model call");
 context.agent = async (_prompt, options) => {
-  calls += 1;
   labels.push(options.label);
-  if (calls < 3) throw new Error("Received empty response from chat model call");
-  return '{"ok":true}';
+  throw failure;
 };
 vm.createContext(context);
 const agentStart = source.indexOf("const WORKFLOW_AUTONOMY_PREFIX");
 const agentEnd = source.indexOf("const aggregatePath", agentStart);
-const fallbackStart = source.indexOf("function nextSchedulerFallbackWave(");
-const fallbackEnd = source.indexOf("function cacheSchedulerFallbackGroups(", fallbackStart);
-if (agentStart < 0 || agentEnd < 0 || fallbackStart < 0 || fallbackEnd < 0) process.exit(2);
+if (agentStart < 0 || agentEnd < 0) process.exit(2);
 vm.runInContext(source.slice(agentStart, agentEnd), context);
-context.normalizeScheduledGroups = groups => Array.isArray(groups)
-  ? groups.map(group => Array.isArray(group) ? group.filter(value => typeof value === "string" && value) : []).filter(group => group.length)
-  : [];
-context.isValidBatchId = value => typeof value === "string" && value.length > 0;
-vm.runInContext(source.slice(fallbackStart, fallbackEnd), context);
 (async () => {
-  const result = await context.workflowAgent("return json", { label: "empty-test" });
-  if (result !== '{"ok":true}') process.exit(3);
-  if (calls !== 3) process.exit(4);
-  if (labels.join(",") !== "empty-test,empty-test-empty-retry-1,empty-test-empty-retry-2") process.exit(5);
-  const consumed = new Set(["B001"]);
-  const quarantined = new Set();
-  const groups = [["B001"], ["B007"], ["B015"]];
-  const first = context.nextSchedulerFallbackWave(groups, consumed, quarantined);
-  if (first.join(",") !== "B007") process.exit(6);
-  consumed.add("B007");
-  const second = context.nextSchedulerFallbackWave(groups, consumed, quarantined);
-  if (second.join(",") !== "B015") process.exit(7);
-  const bounded = context.boundedSchedulerFallbackGroups([["B001", "B007", "B015"]], 1);
-  if (JSON.stringify(bounded) !== JSON.stringify([["B001"], ["B007"], ["B015"]])) process.exit(8);
-  const parallel = context.boundedSchedulerFallbackGroups([["B001", "B007", "B015"]], 2);
-  if (JSON.stringify(parallel) !== JSON.stringify([["B001", "B007"], ["B015"]])) process.exit(9);
+  try {
+    await context.workflowAgent("return json", { label: "transport-test" });
+    process.exit(3);
+  } catch (error) {
+    if (error !== failure) process.exit(4);
+  }
+  if (labels.join(",") !== "transport-test") process.exit(5);
+  context.agent = async (_prompt, options) => {
+    labels.push(options.label);
+    return { status: "failed" };
+  };
+  const result = await context.workflowAgent("run batch", { label: "batch-test" });
+  if (result.status !== "failed" || labels.join(",") !== "transport-test,batch-test") process.exit(6);
 })().catch(() => process.exit(10));
 '''
     result = run_command(["node", "-e", script, str(workflow_script)])
     if result["returncode"] != 0:
-        print(f"✗ 空响应恢复错误: {result['stderr'] or result['stdout']}")
+        print(f"✗ 平台传输恢复边界错误: {result['stderr'] or result['stdout']}")
         return False
-    print("✓ 空模型响应会在同一子任务内受控重试")
-    print("✓ 调度快照空响应时只按上一个安全波次继续 B007/B015")
+    print("✓ 模型传输错误原样交回平台，Workflow 不额外重试")
+    print("✓ Batch 失败交由调度器恢复，不重放子任务调用")
     print()
     return True
 
@@ -884,7 +877,10 @@ def test_skill_integration():
         "停下用 `request_user_input` 单次确认",
         "ask-user-question.md",
     ]
-    present_confirmation_rules = [rule for rule in forbidden_confirmation_rules if rule in content]
+    # Before launch, the task-card question uses the shared protocol. Only the
+    # already-running autonomous Workflow must exclude confirmation rules.
+    post_launch = content.split("固定 Code Workflow 启动后禁止", 1)[-1]
+    present_confirmation_rules = [rule for rule in forbidden_confirmation_rules if rule in post_launch]
     if present_confirmation_rules:
         print(f"✗ Code 技能仍保留用户确认规则: {', '.join(present_confirmation_rules)}")
         all_passed = False
@@ -920,7 +916,7 @@ def main():
         ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
         ("Stage Recovery Priority", test_workflow_prioritizes_stage_recovery_dispatch),
         ("Stage Recovery Continuation", test_workflow_stage_recovery_continuation),
-        ("Empty Response Recovery", test_workflow_empty_response_recovery),
+        ("Platform Transport Recovery", test_workflow_platform_transport_recovery),
         ("Skill Integration", test_skill_integration),
     ]
 

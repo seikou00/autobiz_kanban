@@ -21,14 +21,13 @@ function harness() {
     SCHEDULER_RESULT_SCHEMA: {}, schedulerReadInFlight: null, lastScheduler: state,
     maxParallel: 2, timeoutPerBatch: 3600, schedulerCycles: 1,
     activeDispatchGrants: new Map(), dispatchGrants: {}, retryPriorityBatchIds: new Set(),
-    runnableScheduledBatchIds: () => [], runnableSchedulerFallbackBatchIds: () => [],
+    runnableScheduledBatchIds: () => [],
     runnableImplementationRecoveries: () => [], runnableStageRecoveries: () => [],
     runnableMergeableBatchIds: () => [], isValidBatchId: value => /^B\d+$/.test(value),
     recordUnresolved: value => assert.fail(JSON.stringify(value)), errorText: String,
     recordSchedulerFailure: (label, error) => failures.push({ label, error }),
     markSchedulerRecovered() {},
-    applySchedulerState: value => { context.lastScheduler = value; },
-    schedulerSnapshotFallback: () => assert.fail("failed polls must wait instead of dispatching a fallback"),
+    applySchedulerState: value => { context.lastScheduler = value; return value; },
   });
   vm.runInContext(source.slice(0, source.indexOf("const input = unwrap(args);")).replace("export const meta =", "const meta ="), context);
   for (const [start, end] of [
@@ -74,12 +73,24 @@ for (const capacityPoll of [false, true]) {
   }
 }
 
-test("non-poll agent calls retain their bounded empty response retries", async () => {
+test("agent calls delegate transport recovery to the platform and preserve dispatch identity", async () => {
+  for (const result of [null, { value: " " }, { batchId: "B001", status: "failed" }]) {
+    const { context: c } = harness(), labels = [];
+    c.activeDispatchGrants.set("B001", { generation: 2, ownerToken: "dispatch-owner" });
+    c.agent = async (instruction, options) => {
+      labels.push(options.label);
+      assert.match(instruction, /--dispatch-generation 2 --dispatch-token "dispatch-owner"/);
+      return result;
+    };
+    assert.equal(await c.workflowAgent("run task", { label: "task-B001" }), result);
+    assert.deepEqual(labels, ["task-B001"]);
+  }
+});
+
+test("agent transport errors propagate without workflow retries", async () => {
   const { context: c } = harness(), labels = [];
-  c.agent = async (_, options) => {
-    labels.push(options.label);
-    return labels.length < 3 ? null : { success: true };
-  };
-  assert.equal((await c.workflowAgent("run task", { label: "task-B001" })).success, true);
-  assert.deepEqual(labels, ["task-B001", "task-B001-empty-retry-1", "task-B001-empty-retry-2"]);
+  const failure = new Error("Received empty response from chat model call");
+  c.agent = async (_, options) => { labels.push(options.label); throw failure; };
+  await assert.rejects(c.workflowAgent("run task", { label: "task-B001" }), error => error === failure);
+  assert.deepEqual(labels, ["task-B001"]);
 });

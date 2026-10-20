@@ -18,13 +18,6 @@ const MAX_SCHEDULER_CYCLES = 100;
 // remain the fast path; this bounded poll closes the gap when readiness changes
 // outside the worker that currently owns the only active lifecycle.
 const DISPATCH_POLL_INTERVAL_MS = 30 * 60 * 1000;
-// A transport-level empty model response happens before the child can return
-// its command result.  It is neither a Batch verdict nor evidence that the
-// command failed, so give that same child a small, bounded retry budget.
-// Periodic scheduler polls opt out and wait for their next polling interval.
-// Retrying other errors would be unsafe because they may describe a genuine
-// command failure after a state-changing operation.
-const MAX_EMPTY_AGENT_RESPONSE_RETRIES = 2;
 // The scheduler is the authority for the per-Batch retry budget (currently
 // two failure admissions). Keep one extra pass to let the scheduler turn a
 // legacy retry marker with a zero counter into its explicit exhausted state.
@@ -47,6 +40,16 @@ const BATCH_RESULT_SCHEMA = {
     errorMessage: { type: "string" }
   },
   required: ["batchId", "status", "worktreePath", "branchName", "commitSha"],
+  additionalProperties: false
+};
+const DISPATCH_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    success: { type: "boolean" }, status: { type: "string" }, batchId: { type: "string" },
+    generation: { type: "integer" }, ownerToken: { type: "string" },
+    reasonCode: { type: ["string", "null"] }, reused: { type: "boolean" }
+  },
+  required: ["success", "status", "batchId"],
   additionalProperties: false
 };
 const MERGE_RESULT_SCHEMA = {
@@ -189,6 +192,21 @@ const WORKFLOW_MANIFEST_SCHEMA = {
         additionalProperties: false
       }
     },
+    skippedUtests: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          batchId: { type: "string" },
+          executionLane: { type: ["string", "null"] },
+          status: { const: "skipped" },
+          reason: { type: "string" },
+          stageEvidenceId: { type: ["string", "null"] }
+        },
+        required: ["batchId", "executionLane", "status", "reason", "stageEvidenceId"],
+        additionalProperties: false
+      }
+    },
     deferredIssues: {
       type: "array",
       items: {
@@ -217,6 +235,7 @@ const WORKFLOW_MANIFEST_SCHEMA = {
 const SCHEDULER_RESULT_SCHEMA = {
   type: "object",
   properties: {
+    ok: { type: "boolean" }, success: { type: "boolean" }, error: { type: "string" },
     integrationMode: { type: "string" },
     integrationWorkspaces: { type: "object", additionalProperties: true },
     mainPromotion: { type: ["object", "null"], additionalProperties: true },
@@ -271,14 +290,9 @@ const SCHEDULER_RESULT_SCHEMA = {
     },
     manifest: WORKFLOW_MANIFEST_SCHEMA
   },
-  required: [
-    "runId", "status", "scheduledGroups",
-    "readyBatches", "allReadyBatches", "mergeableBatches",
-    "implementationRecoveryBatches", "stageRecoveryBatches",
-    "retryPendingBatches", "blockedBatches", "dispatchGrants",
-    "parallelGroups", "allParallelGroups", "maxParallel",
-    "batchTaskIds", "batchWorkspaces"
-  ],
+  // Command errors are {ok:false,error}; requireSchedulerResult validates
+  // the complete successful snapshot before it can affect dispatch.
+  required: [],
   additionalProperties: true
 };
 // Review can return either `parallel_batch_stage.py complete` evidence or a
@@ -287,6 +301,7 @@ const SCHEDULER_RESULT_SCHEMA = {
 const REVIEW_STAGE_RESULT_SCHEMA = {
   type: "object",
   properties: {
+    ok: { type: "boolean" }, success: { type: "boolean" }, error: { type: "string" },
     batchId: { type: "string" },
     stage: { type: "string" },
     status: { enum: ["passed", "failed", "needs_triage"] },
@@ -299,7 +314,7 @@ const REVIEW_STAGE_RESULT_SCHEMA = {
     repairContextDigest: { type: "string" },
     affectedTaskIds: { type: "array", items: { type: "string" } }
   },
-  required: ["status"],
+  required: [],
   additionalProperties: true
 };
 // A reviewer may produce prose or lose its final tool output after it has
@@ -309,6 +324,7 @@ const REVIEW_STAGE_RESULT_SCHEMA = {
 const REVIEW_VALIDATION_SCHEMA = {
   type: "object",
   properties: {
+    ok: { type: "boolean" },
     success: { type: "boolean" },
     batchId: { type: "string" },
     stage: { const: "review" },
@@ -322,14 +338,15 @@ const REVIEW_VALIDATION_SCHEMA = {
     repairContextDigest: { type: "string" },
     affectedTaskIds: { type: "array", items: { type: "string" } }
   },
-  required: ["success", "batchId", "stage", "status"],
+  required: [],
   additionalProperties: true
 };
 const SINGLE_REPAIR_RESULT_SCHEMA = {
   type: "object",
   properties: {
-    ok: { const: true },
-    success: { const: true },
+    ok: { type: "boolean" },
+    success: { type: "boolean" },
+    error: { type: "string" },
     batchId: { type: "string" },
     failedStage: { type: "string" },
     status: { const: "success" },
@@ -337,12 +354,13 @@ const SINGLE_REPAIR_RESULT_SCHEMA = {
     stageEvidenceId: { type: "string" },
     stages: { type: "array", items: { type: "object" } }
   },
-  required: ["ok", "success", "batchId", "failedStage", "status", "stage", "stages"],
+  required: ["ok"],
   additionalProperties: false
 };
 const VERIFICATION_SCHEMA = {
   type: "object",
   properties: {
+    ok: { type: "boolean" }, success: { type: "boolean" }, error: { type: "string" },
     status: { type: "string" },
     integrationMode: { type: "string" },
     integrationWorkspaces: { type: "object", additionalProperties: true },
@@ -356,7 +374,7 @@ const VERIFICATION_SCHEMA = {
     deferredIssues: { type: "array", items: { type: "object" } },
     skippedUtests: { type: "array", items: { type: "object" } }
   },
-  required: ["passed"],
+  required: [],
   additionalProperties: true
 };
 const WORKTREE_SCHEMA = {
@@ -369,9 +387,10 @@ const WORKTREE_SCHEMA = {
     branchName: { type: "string" },
     reused: { type: "boolean" },
     recoveredIncomplete: { type: "boolean" },
-    error: { type: "string" }
+    error: { type: "string" },
+    readiness: { type: "object", additionalProperties: true }
   },
-  required: ["success", "batchId", "repositoryRef"],
+  required: ["success"],
   additionalProperties: false
 };
 // prepare-test is a separate control-plane agent, not a UTest execution
@@ -423,7 +442,7 @@ const UTEST_PREPARATION_SCHEMA = {
     reused: { type: "boolean" },
     error: { type: "string" }
   },
-  required: ["success", "batchId", "status"],
+  required: [],
   additionalProperties: true
 };
 const UTEST_STAGE_SCHEMA = {
@@ -453,12 +472,13 @@ const UTEST_STAGE_SCHEMA = {
 const MERGED_CLEANUP_SCHEMA = {
   type: "object",
   properties: {
+    ok: { type: "boolean" }, error: { type: "string" },
     success: { type: "boolean" },
     cleanedBatchIds: { type: "array", items: { type: "string" } },
     releasedLeases: { type: "array", items: { type: "string" } },
     errors: { type: "array", items: { type: "string" } }
   },
-  required: ["success", "cleanedBatchIds", "errors"],
+  required: [],
   additionalProperties: true
 };
 
@@ -830,45 +850,12 @@ const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 // confirmation prompt.
 const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。" +
   `凡本 Workflow 任一阶段执行 Python 命令，均使用 python -X utf8 <script.py> 启动（等效于 PYTHONUTF8=1，兼容 Windows/macOS/Linux），禁止裸 python。凡确需读取 JSON 文件中的字段，且该文件在当前阶段允许访问范围内，禁止用 read_file/cat 或分段读取整个文件来取字段；改用 python -X utf8 "${pluginPath}/hooks/query_json_fields.py" --file "<JSON_PATH>" --field "<FIELD_PATH>"，多个字段重复传入 --field。数组下标使用 [0]，对象集合可用 *；不要因此扩大当前阶段允许访问的文件范围。\n`;
-function emptyAgentResponse(value) {
-  if (value === null || value === undefined) return true;
-  if (typeof value === "string") return value.trim().length === 0;
-  return Boolean(
-    value
-    && typeof value === "object"
-    && typeof value.value === "string"
-    && value.value.trim().length === 0
-  );
-}
-
-function emptyAgentResponseFailure(error) {
-  const message = error instanceof Error ? error.message : String(error || "");
-  return /(?:received\s+)?empty\s+response\s+from\s+(?:chat\s+)?model(?:\s+call)?|workflow_agent_empty_response/i.test(message);
-}
-
-async function workflowAgent(instruction, options = {}, { retryEmptyResponse = true } = {}) {
+async function workflowAgent(instruction, options = {}) {
   const label = usableString(options.label) ? options.label : "workflow-agent";
   const batchMatch = label.match(/(?:^|-)(B\d{3,})(?:-|$)/);
   const grant = batchMatch && typeof activeDispatchGrants !== "undefined" ? activeDispatchGrants.get(batchMatch[1]) : null;
   if (grant) instruction += `\n派发身份：本子任务中每条 parallel_batch_stage.py 命令，以及 batch_lease_manager.py acquire 命令，必须追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。仅追加到以上命令，不能替代 TASK/UTest 的业务 lease-token/owner-token；stale_stage_owner 立即停止，禁止强制 reclaim。`;
-  let lastEmptyResponse;
-  const maxEmptyResponseRetries = retryEmptyResponse ? MAX_EMPTY_AGENT_RESPONSE_RETRIES : 0;
-  for (let attempt = 0; attempt <= maxEmptyResponseRetries; attempt += 1) {
-    const retryOptions = attempt === 0
-      ? options
-      : { ...options, label: `${label}-empty-retry-${attempt}` };
-    try {
-      const response = await agent(WORKFLOW_AUTONOMY_PREFIX + instruction, retryOptions);
-      if (!emptyAgentResponse(response)) return response;
-      lastEmptyResponse = new Error(`workflow_agent_empty_response:${label}:attempt=${attempt + 1}`);
-    } catch (error) {
-      if (!emptyAgentResponseFailure(error)) throw error;
-      lastEmptyResponse = error;
-    }
-  }
-  throw new Error(
-    `workflow_agent_empty_response_exhausted:${label}:${errorText(lastEmptyResponse)}`
-  );
+  return await agent(WORKFLOW_AUTONOMY_PREFIX + instruction, options);
 }
 const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py");
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
@@ -1032,6 +1019,7 @@ const lifecycleResults = [];
 const unresolvedRecords = [];
 const unresolvedRecordKeys = new Set();
 const quarantinedBatchIds = new Set();
+const quarantinedBatchGenerations = new Map();
 const schedulerFailures = [];
 const finalRepairResults = [];
 let schedulerCycles = 0;
@@ -1039,13 +1027,6 @@ let schedulerReadInFlight = null;
 let mergeSequence = 0;
 let blockedBatches = (prepared.blockedBatches || []).filter(usableString);
 let lastScheduler = prepared;
-// Keep only the scheduler's last proven-safe pending waves.  This is used
-// solely when a later *read-only* scheduler child exhausts empty-response
-// retries.  It lets unrelated work continue without inventing a new DAG or
-// bypassing the scheduler's conservative write-set grouping.
-let schedulerSnapshotDegraded = false;
-let schedulerFallbackGroups = [];
-const schedulerFallbackConsumed = new Set();
 
 function errorText(value) {
   if (value instanceof Error) return value.message || String(value);
@@ -1072,12 +1053,25 @@ function recordUnresolved(record) {
     durable: false,
     ...record,
   };
+  const quarantinesBatch = isValidBatchId(normalized.batchId)
+    && !["cleanup", "deferred_issue", "validation", "scheduler"].includes(normalized.kind);
+  if (quarantinesBatch) {
+    normalized.generation = Number.isInteger(normalized.generation)
+      ? normalized.generation
+      : (activeDispatchGrants.get(normalized.batchId) || {}).generation
+        || dispatchGrants[normalized.batchId] || 1;
+    if (normalized.generation < dispatchGrants[normalized.batchId]) {
+      normalized.resolved = true;
+      normalized.resolvedAt = "dispatch_generation_advanced";
+    }
+  }
   if (normalized.error !== undefined) normalized.error = errorText(normalized.error);
   const key = [
     normalized.kind,
     normalized.batchId || "",
     normalized.repositoryRef || "",
     normalized.wave || "",
+    normalized.generation || "",
     normalized.status || "",
     normalized.error || "",
   ].join("|");
@@ -1085,11 +1079,10 @@ function recordUnresolved(record) {
     unresolvedRecordKeys.add(key);
     unresolvedRecords.push(normalized);
   }
-  if (
-    isValidBatchId(normalized.batchId)
-    && !["cleanup", "deferred_issue", "validation", "scheduler"].includes(normalized.kind)
-  ) {
+  if (quarantinesBatch && normalized.resolved !== true) {
     quarantinedBatchIds.add(normalized.batchId);
+    quarantinedBatchGenerations.set(normalized.batchId,
+      Math.max(quarantinedBatchGenerations.get(normalized.batchId) || 0, normalized.generation));
   }
   return normalized;
 }
@@ -1097,6 +1090,7 @@ function recordUnresolved(record) {
 function markBatchResolved(batchId) {
   if (!usableString(batchId)) return;
   quarantinedBatchIds.delete(batchId);
+  quarantinedBatchGenerations.delete(batchId);
   for (const record of unresolvedRecords) {
     if (record && record.batchId === batchId && record.kind !== "cleanup") {
       record.resolved = true;
@@ -1119,12 +1113,13 @@ function markCandidateResolved(repositoryRef, wave) {
   }
 }
 
-function observeLifecycleResult(batchId, source, value) {
+function observeLifecycleResult(batchId, source, value, generation) {
   const result = unwrap(value);
   const status = result && typeof result === "object" ? result.status : undefined;
   const observation = {
     batchId,
     source,
+    generation,
     status: usableString(status) ? status : "unknown",
     durable: result && result.durable === true,
     error: result && (result.errorMessage || result.reason || result.cleanupError || result.error),
@@ -1147,6 +1142,7 @@ function observeLifecycleResult(batchId, source, value) {
       durable: observation.durable,
       error: observation.error || result,
       source,
+      generation,
       worktreePath: result && result.worktreePath,
       branchName: result && result.branchName,
     });
@@ -1166,8 +1162,6 @@ if (initialRetryRecoveryFailure) {
 }
 
 function markSchedulerRecovered() {
-  schedulerSnapshotDegraded = false;
-  schedulerFallbackConsumed.clear();
   for (const record of unresolvedRecords) {
     if (record && record.kind === "scheduler" && record.resolved !== true) {
       record.resolved = true;
@@ -1176,72 +1170,33 @@ function markSchedulerRecovered() {
   }
 }
 
-function nextSchedulerFallbackWave(groups, consumed, quarantined) {
-  for (const group of normalizeScheduledGroups(groups)) {
-    const remaining = group.filter(batchId => (
-      isValidBatchId(batchId)
-      && !consumed.has(batchId)
-      && !quarantined.has(batchId)
-    ));
-    if (remaining.length) return remaining;
-  }
-  return [];
-}
-
-function boundedSchedulerFallbackGroups(groups, capacity) {
-  const width = Number.isInteger(capacity) && capacity > 0 ? capacity : 1;
-  return normalizeScheduledGroups(groups).flatMap(group => {
-    const waves = [];
-    for (let index = 0; index < group.length; index += width) {
-      waves.push(group.slice(index, index + width));
-    }
-    return waves;
-  });
-}
-
-function cacheSchedulerFallbackGroups(scheduler) {
-  const ready = new Set([
-    ...(Array.isArray(scheduler && scheduler.readyBatches) ? scheduler.readyBatches : []),
-    ...(Array.isArray(scheduler && scheduler.allReadyBatches) ? scheduler.allReadyBatches : []),
-  ].filter(isValidBatchId));
-  const rawGroups = Array.isArray(scheduler && scheduler.parallelGroups)
-    ? scheduler.parallelGroups
-    : scheduler && scheduler.allParallelGroups;
-  const groups = normalizeScheduledGroups(rawGroups)
-    .map(group => group.filter(batchId => ready.has(batchId)))
-    .filter(group => group.length);
-  if (!groups.length) return;
-  // `parallelGroups` expresses conflict-safe compatibility, while the actual
-  // dispatch also observes maxParallel. Preserve both constraints before this
-  // snapshot can be used as a degraded-mode queue.
-  const capacity = Number.isInteger(scheduler && scheduler.maxParallel) && scheduler.maxParallel > 0
-    ? scheduler.maxParallel
-    : maxParallel;
-  schedulerFallbackGroups = boundedSchedulerFallbackGroups(groups, capacity);
-  schedulerFallbackConsumed.clear();
-}
-
-function schedulerSnapshotFallback(label, error) {
-  schedulerSnapshotDegraded = true;
-  return {
-    ...(lastScheduler && typeof lastScheduler === "object" ? lastScheduler : {}),
-    // `scheduledGroups` is a point-in-time dispatch grant. Replaying it after
-    // a read failure could re-run a just-finished Batch, so expose only the
-    // cached safe waves through `runnableSchedulerFallbackBatchIds` below.
-    scheduledGroups: [],
-    schedulerSnapshotFallback: true,
-    schedulerSnapshotFailure: {
-      label,
-      error: errorText(error),
-    },
-  };
-}
-
 function applySchedulerState(scheduler) {
-  if (!scheduler || typeof scheduler !== "object") return;
+  if (!scheduler || typeof scheduler !== "object") return lastScheduler;
+  // A status command can finish before resume but return after it. Neither its
+  // timestamp nor any durable dispatch generation may roll back local state.
+  if ((Number.isFinite(lastScheduler && lastScheduler.observedEpochMs)
+      && Number.isFinite(scheduler.observedEpochMs)
+      && scheduler.observedEpochMs < lastScheduler.observedEpochMs)
+    || Object.entries(scheduler.dispatchGrants || {}).some(([batchId, generation]) =>
+      Number.isInteger(dispatchGrants[batchId]) && generation < dispatchGrants[batchId])) {
+    return lastScheduler;
+  }
   lastScheduler = scheduler;
   dispatchGrants = scheduler.dispatchGrants || {};
-  cacheSchedulerFallbackGroups(scheduler);
+  // Quarantine belongs to a failed generation, not to the Batch forever. A
+  // normal status read must also admit a retry resumed by another worker.
+  for (const [batchId, failedGeneration] of quarantinedBatchGenerations) {
+    if (dispatchGrants[batchId] <= failedGeneration || !Number.isInteger(dispatchGrants[batchId])) continue;
+    quarantinedBatchIds.delete(batchId);
+    quarantinedBatchGenerations.delete(batchId);
+    retryPriorityBatchIds.add(batchId);
+    for (const record of unresolvedRecords) {
+      if (record.batchId === batchId && record.generation < dispatchGrants[batchId]) {
+        record.resolved = true;
+        record.resolvedAt = "dispatch_generation_advanced";
+      }
+    }
+  }
   scheduledGroups = normalizeScheduledGroups(scheduler.scheduledGroups || []);
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
   implementationRecoveryBatches = (scheduler.implementationRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
@@ -1257,14 +1212,15 @@ function applySchedulerState(scheduler) {
   batchWorkspaces = { ...batchWorkspaces, ...(scheduler.batchWorkspaces || {}) };
   blockedBatches = (scheduler.blockedBatches || []).filter(isValidBatchId);
   for (const batchId of retryPendingBatches) {
-    recordUnresolved({ kind: "batch", batchId, status: "retry_pending", durable: true, source: "scheduler" });
+    recordUnresolved({ kind: "batch", batchId, generation: dispatchGrants[batchId], status: "retry_pending", durable: true, source: "scheduler" });
   }
   for (const batchId of blockedBatches) {
-    recordUnresolved({ kind: "batch", batchId, status: "blocked", durable: true, source: "scheduler" });
+    recordUnresolved({ kind: "batch", batchId, generation: dispatchGrants[batchId], status: "blocked", durable: true, source: "scheduler" });
   }
+  return scheduler;
 }
 
-async function readSchedulerState(label, phaseName = "准备", { poll = false } = {}) {
+async function readSchedulerState(label, phaseName = "准备") {
   if (schedulerReadInFlight) return schedulerReadInFlight;
   schedulerReadInFlight = (async () => {
     try {
@@ -1272,8 +1228,7 @@ async function readSchedulerState(label, phaseName = "准备", { poll = false } 
         `执行 python -X utf8 "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
         `这是调度器输出的固定工作流字段视图；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只原样返回该命令 stdout 的 JSON；不得读取完整 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。` +
         `本读取器供准备、调度、Batch、候选验证、最终修复和最终报告的所有阶段共用（包括 final-repair-initial、final-repair-before-retry、final-repair-after-drain-* 与 final-report-snapshot）。状态必须通过此 status --workflow-view 命令取得；若需单独检查视图未包含的清单字段，另用 python -X utf8 "${pluginPath}/hooks/query_json_fields.py" --file "${artifactWorkspace}/.autobizdevops/features/${feature}/.parallel-runs/${runId}/manifest.json" --field "batches.<BATCH_ID>.status" 查询，不得读取完整 manifest，也不得用查询结果重建或替换 status 命令的工作流状态。`,
-        { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA },
-        { retryEmptyResponse: !poll }
+        { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
       ), label);
       const view = state.manifest;
       const missingBatches = view && view.batches && typeof view.batches === "object"
@@ -1282,18 +1237,13 @@ async function readSchedulerState(label, phaseName = "准备", { poll = false } 
       if (!view || !view.batches || !view.mergeTrains || !Array.isArray(view.deferredIssues) || missingBatches.length) {
         throw new Error(`parallel_scheduler_manifest_view_incomplete:${missingBatches.join(",")}`);
       }
-      applySchedulerState(state);
+      const applied = applySchedulerState(state);
       markSchedulerRecovered();
-      return state;
+      return applied;
     } catch (error) {
       recordSchedulerFailure(label, error);
-      // A periodic read can wait for the next interval. Do not retry now or
-      // dispatch from a fallback snapshot merely because this poll failed.
-      if (poll) return null;
-      // A blank model completion did not produce a scheduler verdict. Continue
-      // only from the last proven-safe fallback; malformed or real command
-      // failures never authorize dispatch from stale grants.
-      if (emptyAgentResponseFailure(error)) return schedulerSnapshotFallback(label, error);
+      // Read failures wait for a later scheduler refresh. Model transport
+      // recovery belongs to the platform; never dispatch from a stale snapshot.
       return null;
     }
   })();
@@ -1795,12 +1745,18 @@ async function recordSingleRepairResolution(recovery, repaired) {
     repairedFromStage: failedStage,
     repairDisposition: "single_repair_accepted",
   });
-  return requireSuccess(await workflowAgent(
+  const recorded = requireSuccess(await workflowAgent(
     `Batch ${batchId} 的 ${failedStage} 已按一次性修复策略完成生产代码修复和封存。` +
     `不得让模型串行拼接多个 stage start/complete，也不得根据原始文本判断是否收口。只执行 python -X utf8 "${stagePath}" record-single-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failedStage}" --metadata-json '${metadata}'。` +
     `该插件命令会以单个、幂等的受控入口写入 prepare/implement/review evidence，并验证最终 Review evidence 的 single_repair_accepted 标记。只原样返回 JSON。`,
     { label: `record-single-repair-${failedStage}-${batchId}`, phase: "Batch 阶段", schema: SINGLE_REPAIR_RESULT_SCHEMA }
   ), `record single repair ${failedStage} ${batchId}`);
+  if (recorded.ok !== true || recorded.success !== true || recorded.batchId !== batchId
+      || recorded.failedStage !== failedStage || recorded.status !== "success" || recorded.stage !== "review"
+      || !usableString(recorded.stageEvidenceId) || !Array.isArray(recorded.stages) || !recorded.stages.length) {
+    throw new Error(`parallel_single_repair_result_incomplete:${batchId}:${failedStage}`);
+  }
+  return recorded;
 }
 
 async function blockImplementationFinding(delivery, staged, disposition) {
@@ -2120,6 +2076,9 @@ async function runInitialBatchLifecycle(batchId) {
     ), `provision worktree ${batchId}`);
     batchWorktree = provisioned.worktreePath;
     batchBranch = provisioned.branchName;
+    if (provisioned.batchId !== batchId || provisioned.repositoryRef !== batchWorkspaceRef) {
+      throw new Error(`parallel_worktree_provision_binding_mismatch:${batchId}`);
+    }
     if (!usableString(batchWorktree) || !usableString(batchBranch)) {
       throw new Error(`plugin did not provide native worktree for ${batchId}`);
     }
@@ -2205,10 +2164,10 @@ async function runMergeableBatchLifecycle(batchId) {
   }
 }
 
-async function runLifecycleSafely(batchId, source, execute, fallback = {}) {
+async function runLifecycleSafely(batchId, source, execute, fallback = {}, generation) {
   try {
     const result = await execute();
-    return observeLifecycleResult(batchId, source, result);
+    return observeLifecycleResult(batchId, source, result, generation);
   } catch (error) {
     // `parallel()` must only receive resolving jobs.  If an unexpected Agent
     // exception escaped a lifecycle helper, retain the worktree and turn it
@@ -2219,26 +2178,14 @@ async function runLifecycleSafely(batchId, source, execute, fallback = {}) {
       fallback.branchName || (batchWorkspaces[batchId] || {}).branchName,
       errorText(error)
     );
-    return observeLifecycleResult(batchId, source, deferred);
+    return observeLifecycleResult(batchId, source, deferred, generation);
   }
 }
 
 function runnableScheduledBatchIds() {
   return normalizeScheduledGroups(scheduledGroups)
     .flat()
-    .filter(batchId => (
-      !quarantinedBatchIds.has(batchId)
-      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(batchId))
-    ));
-}
-
-function runnableSchedulerFallbackBatchIds() {
-  if (!schedulerSnapshotDegraded) return [];
-  return nextSchedulerFallbackWave(
-    schedulerFallbackGroups,
-    schedulerFallbackConsumed,
-    quarantinedBatchIds,
-  );
+    .filter(batchId => !quarantinedBatchIds.has(batchId));
 }
 
 function runnableImplementationRecoveries() {
@@ -2249,7 +2196,6 @@ function runnableImplementationRecoveries() {
       && recovery.preserveWorktree === true
       && recovery.reprovision === false
       && !quarantinedBatchIds.has(recovery.batchId)
-      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(recovery.batchId))
     ));
 }
 
@@ -2258,21 +2204,16 @@ function runnableStageRecoveries() {
     .filter(recovery => (
       recovery
       && !quarantinedBatchIds.has(recovery.batchId)
-      && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(recovery.batchId))
     ));
 }
 
 function runnableMergeableBatchIds() {
-  return mergeableBatches.filter(batchId => (
-    !quarantinedBatchIds.has(batchId)
-    && (!schedulerSnapshotDegraded || !schedulerFallbackConsumed.has(batchId))
-  ));
+  return mergeableBatches.filter(batchId => !quarantinedBatchIds.has(batchId));
 }
 
 function takeNextRunnableLifecycle(claimedBatchIds, runningBatchIds = new Set()) {
   const claimed = claimedBatchIds || new Set();
   const scheduledBatchIds = runnableScheduledBatchIds();
-  const fallbackBatchIds = runnableSchedulerFallbackBatchIds();
   const implementationRecoveries = runnableImplementationRecoveries();
   const recoveries = runnableStageRecoveries();
   const mergeable = runnableMergeableBatchIds();
@@ -2321,13 +2262,6 @@ function takeNextRunnableLifecycle(claimedBatchIds, runningBatchIds = new Set())
       execute: () => runInitialBatchLifecycle(batchId),
     });
   }
-  for (const batchId of fallbackBatchIds) {
-    candidates.push({
-      batchId,
-      source: "scheduler_snapshot_fallback",
-      execute: () => runInitialBatchLifecycle(batchId),
-    });
-  }
   for (const batchId of mergeable) {
     if (recoveredBatchIds.has(batchId)) continue;
     candidates.push({
@@ -2367,10 +2301,7 @@ async function dispatchCommand(action, job, extra, label) {
   const result = unwrap(await workflowAgent(
     `只执行 python -X utf8 "${script}" ${action} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${job.batchId}" --generation ${job.generation}${owner} ${extra}。` +
     `原样返回命令 JSON。not_claimed/stale_owner_ignored 是过期或已占用的派发许可，不得运行 TASK、强制 reclaim 或自行重试。不得读取插件源码。`,
-    { label, phase: "Batch 阶段", schema: { type: "object", properties: {
-      success: { type: "boolean" }, status: { type: "string" }, batchId: { type: "string" },
-      generation: { type: "integer" }, ownerToken: { type: "string" }, reasonCode: { type: ["string", "null"] }
-    }, required: ["success", "status", "batchId"], additionalProperties: false } }
+    { label, phase: "Batch 阶段", schema: DISPATCH_RESULT_SCHEMA }
   ));
   if (result.success !== true || result.commandExecutionFailure || result.batchId !== job.batchId) {
     throw new Error(`parallel_dispatch_command_failed:${action}:${job.batchId}:${JSON.stringify(result)}`);
@@ -2445,8 +2376,8 @@ function dispatchOccupiedSlots(state, dispatcherState) {
   return Math.max(activeIds.size, reported);
 }
 
-async function refreshSchedulerForDispatch(label, { poll = false } = {}) {
-  let state = await readSchedulerState(label, "Batch 阶段", { poll });
+async function refreshSchedulerForDispatch(label) {
+  let state = await readSchedulerState(label, "Batch 阶段");
   if (!state) return null;
   const pendingRetriesOf = scheduler => (
     scheduler && Array.isArray(scheduler.retryPendingBatches)
@@ -2467,19 +2398,11 @@ async function refreshSchedulerForDispatch(label, { poll = false } = {}) {
       recordSchedulerFailure(`${label}-resume-retry-pending`, error);
       return state;
     }
-    applySchedulerState(resumed);
-    const rescheduled = new Set([
-      ...(Array.isArray(resumed.rescheduledRetryBatches) ? resumed.rescheduledRetryBatches : []),
-      ...normalizeScheduledGroups(resumed.scheduledGroups || []).flat(),
-      ...(resumed.mergeableBatches || []),
-      ...(resumed.implementationRecoveryBatches || []).map(item => item && item.batchId),
-      ...(resumed.stageRecoveryBatches || []).map(item => item && item.batchId),
-    ].filter(isValidBatchId));
-    for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
+    resumed = applySchedulerState(resumed);
 
     // Re-read after resume so a retry marker written concurrently with that
     // resume is picked up before the worker decides the queue is drained.
-    state = await readSchedulerState(`${label}-after-retry-resume-${++resumePass}`, "Batch 阶段", { poll });
+    state = await readSchedulerState(`${label}-after-retry-resume-${++resumePass}`, "Batch 阶段");
     if (!state) return null;
     const stillPending = pendingRetriesOf(state);
     const madeProgress = pendingBefore.some(batchId => !stillPending.includes(batchId))
@@ -2514,8 +2437,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       if (dispatcherState.active === 0 && lastScheduler && lastScheduler.activeWorkers === 0) return;
       if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
       await refreshSchedulerForDispatch(
-        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`,
-        { poll: true }
+        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`
       );
       if (dispatchIdleExpired(idleStarted, lastScheduler, idlePolls, maxIdlePolls)) {
         recordUnresolved({
@@ -2549,7 +2471,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
           idlePolls = 0;
           idleStarted = dispatchSnapshotEpoch(lastScheduler);
           dispatcherState.ranAny = true;
-          const result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback);
+          const result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback, job.generation);
           outcome = result && result.status === "retry_pending" ? "retry_pending" : result && ["merged", "ready_to_candidate"].includes(result.status) ? "completed" : "failed";
         } else if (["capacity_full", "running", "business_lease_held", "resource_or_stage_conflict"].includes(acquired.reasonCode)) {
           claimedBatchIds.delete(job.grantKey);
@@ -2589,9 +2511,6 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       const state = await refreshSchedulerForDispatch(
         `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`
       );
-      if (state && state.schedulerSnapshotFallback === true) {
-        schedulerFallbackConsumed.add(job.batchId);
-      }
       if (!state) {
         if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
         const recovered = await refreshSchedulerForDispatch(
@@ -2632,8 +2551,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
     }
     if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
     await refreshSchedulerForDispatch(
-      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`,
-      { poll: true }
+      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`
     );
     if (dispatchIdleExpired(idleStarted, lastScheduler, idlePolls, maxIdlePolls)) {
       recordUnresolved({
@@ -3012,7 +2930,7 @@ async function runFinalRepairAndReport() {
       retryDrain += 1;
       try {
         repairState = await recoverPendingRetries(repairState, `final-repair-resume-retry-pending-${retryDrain}`);
-        applySchedulerState(repairState);
+        repairState = applySchedulerState(repairState);
         const rescheduled = new Set([
           ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
           ...normalizeScheduledGroups(repairState.scheduledGroups || []).flat(),
@@ -3020,7 +2938,6 @@ async function runFinalRepairAndReport() {
           ...(repairState.implementationRecoveryBatches || []).map(item => item && item.batchId),
           ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
         ].filter(isValidBatchId));
-        for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
         finalRepairResults.push({
           kind: "resume_retry_pending",
           status: repairState.status,

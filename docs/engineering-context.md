@@ -161,8 +161,11 @@ Scheduler 返回 `dispatchGrants[Batch]=generation`；普通 status/poll 不生�
 只有 retry_pending 的实际重新入队才递增。Workflow 本地按 `Batch:generation`
 去重，并在开始生命周期前用 `parallel_dispatch claim` 在 run 锁内检查当前状态、
 依赖、并发容量和当前持有者。一次代次已收口后，新建 drain 也不能重放它。claim 命令携带本次调用的唯一
-requestId（launcher 每次生成唯一 workflowInvocationId，脚本追加确定性序号），空响应后的同一命令可取回原许可；另一个 Workflow/worker 的请求不会
+requestId（launcher 每次生成唯一 workflowInvocationId，脚本追加确定性序号），平台重放同一命令时可取回原许可；另一个 Workflow/worker 的请求不会
 获得该 token。重复 defer 只读回既有收口，不重复扣重试次数。
+
+Workflow 本地失败隔离绑定派发代次；普通 status 读到更新的 generation 时也会释放旧代次的隔离，
+不依赖某一次 resume 响应里的临时字段。晚到的旧执行失败和旧调度快照不能重新隔离新代次或回退派发许可。
 
 `finish/defer` 都携带准确代次和 token。过期持有者返回 stale_owner_ignored，不清理
 新租约。阶段 CLI 的 dispatch-generation/dispatch-token 与 acquire 的相同身份检查

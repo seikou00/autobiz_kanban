@@ -80,7 +80,7 @@ class HumanGateDesignDoneTest(unittest.TestCase):
         gate_index = next(
             index
             for index, hook in enumerate(execute_hooks)
-            if hook.get("command") == "python hooks/human_gate_design_done.py"
+            if hook.get("command", "").endswith("hooks/human_gate_design_done.py")
         )
         self.assertEqual(execute_hooks[gate_index].get("if"), "execute(*update_checkpoint.py*)")
         self.assertTrue(execute_hooks[gate_index].get("persistAfterInterrupt"))
@@ -89,7 +89,7 @@ class HumanGateDesignDoneTest(unittest.TestCase):
             next(
                 index
                 for index, hook in enumerate(execute_hooks)
-                if hook.get("command") == "python hooks/performance_checker.py"
+                if hook.get("command", "").endswith("hooks/performance_checker.py")
             ),
         )
 

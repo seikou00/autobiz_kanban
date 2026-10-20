@@ -177,7 +177,7 @@ def recover_interrupted_parallel_runs(
     code_workspace: Path,
     *,
     workspace_ref: str | None = None,
-    abort_why: str = "workflow_agent_empty_response_exhausted",
+    abort_why: str = "automatic_batch_retry",
 ) -> dict[str, Any]:
     """Close abandoned task runs before a scheduler-owned Batch retry.
 

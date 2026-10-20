@@ -130,7 +130,12 @@ test("UTest preparation declares the fields needed by backend and frontend hando
   await context.runBatchUtestAndSeal(delivery);
   const schema = prompts[0].options.schema;
   assert.ok(schema, "prepare-utest must declare its structured result");
-  for (const key of ["success", "batchId", "status"]) assert.ok(schema.required.includes(key), key);
+  for (const key of ["success", "batchId", "status"]) {
+    assert.ok(key in schema.properties, key);
+    const incomplete = { success: true, batchId: "B001", status: "test_required" };
+    delete incomplete[key];
+    assert.throws(() => context.requireUtestPreparation(incomplete, "B001"), /utest_preparation_invalid/);
+  }
   for (const key of ["runtimeContractDigest", "utestPolicy", "engineeringContext", "testStatus",
     "skipReason", "worktreePath", "branchName", "commitSha", "stageEvidenceId"]) {
     assert.ok(key in schema.properties, key);

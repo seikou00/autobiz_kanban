@@ -156,6 +156,10 @@ scheduler slot or exclude itself from the runnable set. A newly claimed
 dispatch occupies a slot immediately, including during lease-free Review.
 After updating the plugin, use the launcher to continue the same run; retain
 the Worktree and manifest instead of deleting them or resetting stage evidence.
+Active TASK exclusivity is scoped to `parallelRunId + batchId`; a TASK in a
+different Batch does not block start. Resume closes the interrupted Batch's
+old active TASK runs. An inspect result containing only an `aborted` old run
+allows a fresh start for that unfinished TASK under the new dispatch grant.
 
 The reuse validation also blocks a Batch marked `merged` without a non-empty
 `mergeCommitSha`, a dirty source checkout, or a source HEAD that differs from
