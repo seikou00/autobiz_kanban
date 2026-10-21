@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from board_core.state_store import load_state_json_records, write_state_records
+from hooks.evidence_kernel import FileLock
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.rollback_stage import (
     _prepare_code_execution_reset,
@@ -22,7 +23,30 @@ from hooks.rollback_stage import (
 )
 from hooks.plan_json import task_set_digest, write_plan_json
 from hooks.repository_snapshot import capture_repository_snapshot
+from hooks.ui_context_writer import refresh_ui_context_md
 from tests.test_batched_plan import batch_entry, batch_plan, root_plan, task
+
+
+FEATURE_RUNTIME_LOCK_PATHS = (
+    ".plan.lock",
+    ".engineering/facts/repository/fact.lock",
+    ".engineering/dependencies/repository/class.lock",
+    ".engineering/diagnostics/repository/command.lock",
+    ".engineering/environments/repository/environment.lock",
+    ".engineering/observations/runtime.lock",
+    ".parallel-runs/.run-id.lock",
+    ".parallel-runs/cw-lock-only/.lock",
+    ".parallel-runs/cw-lock-only/events.lock",
+    ".parallel-runs/cw-lock-only/leases/B001.lock",
+    ".parallel-runs/cw-lock-only/integration-locks/default.lock",
+    ".parallel-runs/cw-lock-only/merge-trains/default/.candidate.lock",
+    ".parallel-runs/cw-lock-only/engineering/B001/handoffs/T001.lock",
+    ".parallel-runs/cw-lock-only/engineering/B001/usage/T001.lock",
+    ".parallel-runs/cw-lock-only/engineering/B001/.repair.lock",
+    ".task-runs/.lock",
+    "evidence/.lock",
+    "e2e-diagnostics/e2e-run.lock",
+)
 
 
 class RollbackStageTest(unittest.TestCase):
@@ -415,6 +439,224 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue((history / "artifacts" / "e2e-diagnostics" / "e2e-run.lock").is_file())
         self.assertEqual((history / "artifacts" / "hooks.ndjson").read_text(encoding="utf-8"), "old audit\n")
         self.assertNotIn("old audit", (self.feature_dir / "hooks.ndjson").read_text(encoding="utf-8"))
+
+    def test_code_rollback_archives_complete_engineering_and_batch_intermediates(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        generated = [
+            ".engineering/facts/repo/fact.json",
+            ".engineering/facts/repo/fact.lock",
+            ".engineering/facts/dependency-fingerprints/jar.json",
+            ".engineering/dependencies/repo/class.json",
+            ".engineering/dependencies/repo/class.claim.json",
+            ".engineering/environments/repo/environment.json",
+            ".engineering/diagnostics/repo/command.json",
+            ".engineering/diagnostics/repo/command.claim.json",
+            ".engineering/deployments/deployment.json",
+            ".engineering/observations/runtime.json",
+            ".engineering/observations/runtime.lock",
+            ".engineering/commands-current.json",
+            ".engineering/new-runtime-version/nested/derived.json",
+            ".parallel-runs/cw-interrupted/engineering/B001/contexts/code.json",
+            ".parallel-runs/cw-interrupted/engineering/B001/usage/T001.json",
+            ".parallel-runs/cw-interrupted/engineering/B001/handoffs/T001.json",
+            ".parallel-runs/cw-interrupted/engineering/B001/handoffs/snapshots/T001-sha.json",
+            ".parallel-runs/cw-interrupted/engineering/B001/repairs/sha.json",
+            ".parallel-runs/cw-interrupted/engineering/B001/REPAIR_CONTEXT.json",
+            ".parallel-runs/cw-interrupted/utest/B001/UTEST_ENVIRONMENT.json",
+            ".parallel-runs/cw-interrupted/utest/B001/UTEST_EXECUTION.json",
+            ".parallel-runs/cw-interrupted/utest/B001/command.sh",
+            ".parallel-runs/cw-interrupted/utest/B001/output.log",
+            ".parallel-runs/cw-interrupted/dispatch/B001.json",
+            ".parallel-runs/cw-interrupted/resolution-context/repo/wave-001/sha/index.json",
+            ".parallel-runs/cw-interrupted/main-promotion.json",
+            ".parallel-runs/cw-interrupted/final-evidence-aggregate.json",
+            ".runtime/CRITIC_REVIEWS.jsonl",
+            ".frontend/html-analysis/T001.json",
+            ".frontend/html-analysis/T001-assets-mapping.json",
+            ".frontend/html-input/T001.html",
+            "UTEST_ENVIRONMENT.json",
+            "UTEST_EXECUTION.json",
+        ]
+        preserved = [
+            "UI_CONTEXT.json", "UI_CONTEXT.md", "IMPLEMENTATION_SCOPE.json", "SCOPE_SPLIT.md",
+            "source-context.json", "sources/SRC-001/original.md", "frontend-html/VIS-001/original.html",
+            ".frontend/notes.txt", "user-notes.json",
+        ]
+        other_cache = self.feature_dir.parent / "other-feature" / ".engineering" / "fact.json"
+        other_cache.parent.mkdir(parents=True)
+        other_cache.write_text("another feature\n", encoding="utf-8")
+        for relative in generated + preserved:
+            path = self.feature_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative + "\n", encoding="utf-8")
+        (self.feature_dir / "UI_CONTEXT.json").write_text(
+            json.dumps({"version": 1, "featureId": self.feature, "uiRequired": False,
+                        "decisionStatus": "locked", "pages": [], "visualSources": [], "interactions": []}),
+            encoding="utf-8",
+        )
+        refresh_ui_context_md(self.project, self.feature)
+        preserved_contents = {
+            relative: (self.feature_dir / relative).read_bytes() for relative in preserved
+        }
+
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        self.assertTrue(plan.ok, plan.errors)
+        self.assertIn(self.feature_dir / ".engineering", plan.artifact_paths)
+        self.assertIn(self.feature_dir / ".parallel-runs", plan.artifact_paths)
+        self.assertIn(self.feature_dir / ".frontend" / "html-analysis", plan.artifact_paths)
+        # Planning must expose the complete scope without deleting a claim or cache.
+        for relative in generated:
+            self.assertTrue((self.feature_dir / relative).is_file(), relative)
+
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        archived = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id / "artifacts"
+        for relative in generated:
+            self.assertFalse((self.feature_dir / relative).exists(), relative)
+            self.assertEqual((archived / relative).read_text(encoding="utf-8"), relative + "\n")
+        for relative in preserved:
+            self.assertEqual((self.feature_dir / relative).read_bytes(), preserved_contents[relative])
+        self.assertEqual(other_cache.read_text(encoding="utf-8"), "another feature\n")
+        root = json.loads((self.feature_dir / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(root["status"], "todo")
+
+    def test_stage_owned_intermediates_are_removed_only_with_their_owner(self) -> None:
+        cases = [
+            ("ops.cicd", set()),
+            ("dev.code", {".engineering/fact.json"}),
+            ("dev.design", {".engineering/fact.json", ".design-contract.lock.json"}),
+            ("dev.specs", {".engineering/fact.json", "SPECS_REVIEW.md", ".design-contract.lock.json"}),
+            ("biz.prd", {".engineering/fact.json", "SPECS_REVIEW.md", "source-context.json", ".design-contract.lock.json"}),
+        ]
+        for stage, removed in cases:
+            with self.subTest(stage=stage):
+                self._set_checkpoint("cicd_done")
+                self._write_completed_code_plan()
+                paths = [".engineering/fact.json", "SPECS_REVIEW.md", "source-context.json",
+                         "sources/SRC-001/input.md", ".design-contract.lock.json"]
+                for relative in paths:
+                    path = self.feature_dir / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(relative, encoding="utf-8")
+                plan = prepare_stage_rollback(
+                    workspace=self.project, feature=self.feature, stage=stage, state_mode="target_in_progress",
+                )
+                self.assertTrue(plan.ok, plan.errors)
+                result = execute_stage_rollback(plan)
+                self.assertTrue(result.ok, result.errors)
+                for relative in paths:
+                    self.assertEqual((self.feature_dir / relative).exists(), relative not in removed, relative)
+
+    def test_code_rollback_archives_released_runtime_locks_and_preserves_shared_locks(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        for relative in FEATURE_RUNTIME_LOCK_PATHS:
+            with FileLock(self.feature_dir / relative):
+                pass
+        shared_locks = [
+            self.project / ".autobizdevops" / ".parallel-run-id.lock",
+            self.project / ".autobizdevops" / "rollback" / "history.lock",
+            self.project / ".autobizdevops" / "rollback" / "locks" / f"{self.feature}.lock",
+            self.feature_dir.parent / "other-feature" / ".engineering" / "fact.lock",
+            self.feature_dir / "user.lock",
+        ]
+        for path in shared_locks:
+            with FileLock(path):
+                pass
+        original_inodes = {path: path.stat().st_ino for path in shared_locks}
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        self.assertTrue(plan.ok, plan.errors)
+        for relative in FEATURE_RUNTIME_LOCK_PATHS:
+            self.assertEqual((self.feature_dir / relative).read_bytes(), b"0")
+
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        archived = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id / "artifacts"
+        for relative in FEATURE_RUNTIME_LOCK_PATHS:
+            self.assertFalse((self.feature_dir / relative).exists(), relative)
+            self.assertEqual((archived / relative).read_bytes(), b"0", relative)
+        for path in shared_locks:
+            self.assertEqual(path.read_bytes(), b"0")
+            self.assertEqual(path.stat().st_ino, original_inodes[path], str(path))
+        self.assertFalse((self.feature_dir / ".plan.lock").exists(), "reset must not leave a new Plan lock")
+        self.assertFalse((self.feature_dir / ".parallel-runs").exists(), "lock-only runs must be archived")
+
+    def test_failed_rollback_restores_released_lock_files(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        for relative in FEATURE_RUNTIME_LOCK_PATHS:
+            with FileLock(self.feature_dir / relative):
+                pass
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        self.assertTrue(plan.ok, plan.errors)
+        calls = 0
+
+        def fail_once(workspace: Path, records: dict, *, raw_records: dict) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("simulated state write failure after lock archival")
+            write_state_records(workspace, records)
+
+        with patch("hooks.rollback_stage.write_state_records_preserving_raw", side_effect=fail_once):
+            result = execute_stage_rollback(plan)
+
+        self.assertFalse(result.ok)
+        for relative in FEATURE_RUNTIME_LOCK_PATHS:
+            self.assertEqual((self.feature_dir / relative).read_bytes(), b"0", relative)
+            with FileLock(self.feature_dir / relative):
+                pass
+        records, errors, _ = load_state_json_records(self.project)
+        self.assertEqual(errors, [])
+        self.assertEqual(records[self.feature]["checkpoint"], "code_done")
+
+    def test_state_write_failure_restores_new_intermediates_and_code_plan(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        paths = [".engineering/diagnostics/result.json", ".frontend/html-analysis/T001.json", "UTEST_EXECUTION.json"]
+        for relative in paths:
+            path = self.feature_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative, encoding="utf-8")
+        original_plan = (self.feature_dir / "plan.json").read_bytes()
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        self.assertTrue(plan.ok, plan.errors)
+        calls = 0
+
+        def fail_once(workspace: Path, records: dict, *, raw_records: dict) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("simulated state write failure")
+            write_state_records(workspace, records)
+
+        with patch("hooks.rollback_stage.write_state_records_preserving_raw", side_effect=fail_once):
+            result = execute_stage_rollback(plan)
+
+        self.assertFalse(result.ok)
+        for relative in paths:
+            self.assertEqual((self.feature_dir / relative).read_text(encoding="utf-8"), relative)
+        self.assertEqual((self.feature_dir / "plan.json").read_bytes(), original_plan)
+        records, errors, _ = load_state_json_records(self.project)
+        self.assertEqual(errors, [])
+        self.assertEqual(records[self.feature]["checkpoint"], "code_done")
+
+    def test_nested_frontend_cleanup_rejects_symlink_outside_the_feature(self) -> None:
+        self._set_checkpoint("code_done")
+        outside = self.plugin_workspace / "shared-frontend" / "html-analysis"
+        outside.mkdir(parents=True)
+        payload = outside / "T001.json"
+        payload.write_text("must remain\n", encoding="utf-8")
+        (self.feature_dir / ".frontend").symlink_to(outside.parent, target_is_directory=True)
+
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+
+        self.assertFalse(plan.ok)
+        self.assertIn("符号链接越出 Feature", "\n".join(plan.errors))
+        self.assertEqual(payload.read_text(encoding="utf-8"), "must remain\n")
 
     def test_archived_feature_is_restored_to_active_directory(self) -> None:
         self._set_checkpoint("archived", iteration="1")

@@ -325,7 +325,12 @@
             "event": "PostSkillUse",
             "required": true
           }
-        ]
+        ],
+        "rollback": {
+          "archive": [
+            "source-context.json"
+          ]
+        }
       },
       {
         "id": "dev.specs",
@@ -437,7 +442,12 @@
           "specs_contract",
           "capability_spec_correspondence",
           "ui_context_json"
-        ]
+        ],
+        "rollback": {
+          "archive": [
+            "SPECS_REVIEW.md"
+          ]
+        }
       },
       {
         "id": "dev.design",
@@ -855,6 +865,9 @@
             ".parallel-runs",
             ".task-runs",
             ".runtime",
+            ".engineering",
+            ".frontend/html-analysis",
+            ".frontend/html-input",
             "evidence",
             "FRONTEND_ROUTE.json",
             "SMOKE_TEST_PLAN.json",
@@ -863,6 +876,8 @@
             "REQUIREMENTS_EVAL.md",
             "UNIT_TEST_REPORT.md",
             "UNIT_TEST_RESULT.json",
+            "UTEST_ENVIRONMENT.json",
+            "UTEST_EXECUTION.json",
             "test-output.log",
             "E2E_TEST_CASES.yaml",
             "E2E_REPORT.md",
