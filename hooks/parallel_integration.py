@@ -149,7 +149,9 @@ def _require_ready(manifest: dict) -> None:
         raise ValueError("integration_deliveries_incomplete")
     e2e = manifest.get("validationBatches", {}).get("V-E2E", {})
     expected = json.dumps({ref: b["headSha"] for ref, b in manifest["repositories"].items()}, sort_keys=True)
-    if e2e.get("status") != "verified" or e2e.get("candidateSha") != expected:
+    from hooks.parallel_batch_stage import deferred_e2e_errors
+    deferred = e2e.get("status") == "deferred" and not deferred_e2e_errors(manifest)
+    if (e2e.get("status") != "verified" and not deferred) or e2e.get("candidateSha") != expected:
         raise ValueError("integration_e2e_commit_mismatch")
 
 
@@ -176,6 +178,8 @@ def _snapshot(manifest: dict) -> dict:
                              "diffDigest": digest(git(repo, "diff", "--binary", target, candidate))}
     return {"runId": manifest["runId"], "repositories": repositories,
             "planDigest": manifest["planDigest"],
+            "e2eStatus": manifest["finalEvidenceAggregate"].get("e2eStatus", "passed"),
+            "deferredIssues": manifest["finalEvidenceAggregate"].get("deferredIssues", []),
             "previousPromotions": [{"approvalDigest": item.get("approvalDigest"), "repositories": item.get("repositories", {})}
                                    for item in manifest.get("mainPromotionHistory", [])],
             "evidenceDigest": digest(manifest["finalEvidenceAggregate"])}

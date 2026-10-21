@@ -1,6 +1,6 @@
 # 需求集成 Worktree 与最终人工合并
 
-新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支。启动时的当前分支记录为基线分支，也作为最终合入目标。最终 E2E、证据汇总通过后，run 等待用户确认；只有确认入口会修改基线分支。
+新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支。启动时的当前分支记录为基线分支，也作为最终合入目标。最终 E2E 结果登记、证据汇总通过后，run 等待用户确认；E2E 失败不阻断后续流程，作为明确的非阻断问题交给用户审阅；只有确认入口会修改基线分支。
 
 ```text
 启动时的当前分支 → integration → Batch Worktrees
@@ -34,9 +34,10 @@ artifact workspace 的 `.autobiz/runtime_config.json` 可配置：
 
 - 仓库绑定的 `gitRoot` 保留源 checkout 身份；`integration.worktreePath`、`integration.branchName` 保存集成工作区。`baseBranch`、`baseSha` 冻结启动时的当前分支和提交，`headSha` 跟随集成分支推进。
 - Batch 创建时保存 `startSha`。后续依赖 Batch 从依赖已集成后的 HEAD 创建；已经开始的 Batch 保留起始 SHA 和改动，冲突交给 Merge Train。
+- prepare 证据绑定 Batch 的 `startSha`，不会因集成 HEAD 推进而失效。UTest 可新增测试资产、修改 POM 的 test scope 依赖及必要 Surefire/Failsafe 配置；最终聚合读取证据提交到最终提交的真实 Git 差异，复用封存的 POM 内容校验。多次测试封存或 Batch Worktree 清理后仍可核验，既有阶段 evidence 不重写；生产代码、生产依赖和失败屏蔽配置的变更不能沿用旧 Review 证据。
 - Batch 的 `merged` 和 `mergeCommitSha` 表示已合入集成分支。`mainPromotion` 单独记录最终基线分支合并；两者不能混用。`mainPromotion`、`main-promotion.json` 和 `sync-main` 沿用现有接口名称，其中的 main 指本次 run 冻结的基线分支，不限定分支名为 `main`。
 - `cleanup-merged` 可以清理已集成的 Batch，始终保留集成 Worktree。等待确认、保留成果和基线分支同步状态都属于活动 run；launcher 返回验收入口，不重新派发 Batch。
-- 最终 E2E 在集成 SHA 对应的临时验证 Worktree 中运行。证据汇总通过后进入 `awaiting_user_confirmation`，固定 Workflow 准备 `main-promotion.json`，返回目标/集成 SHA、diff stat、diff digest、证据 digest 和 `approvalDigest`。
+- 最终 E2E 在集成 SHA 对应的临时验证 Worktree 中运行。证据汇总通过后进入 `awaiting_user_confirmation`，固定 Workflow 准备 `main-promotion.json`，返回目标/集成 SHA、diff stat、diff digest、证据 digest 和 `approvalDigest`。E2E 场景失败、执行超时或环境不可用均登记为带当前集成 SHA 的失败 Evidence 和 `blocksWorkflow=false` 的问题，继续汇总；报告保留 `e2eStatus=failed` 和失败摘要，不声称测试通过、不自动创建修复 Batch。缺失、损坏或过期的证据仍需修复登记，不能直接忽略。用户确认绑定这些问题和本次实际提交。
 - 固定 Workflow 从不调用 `promote`，也不把阶段成功视为用户同意。Agent 必须展示实际分支、SHA、变更及验证结果，等待用户明确同意后才执行最终合并。
 
 ## 最终确认命令

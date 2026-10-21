@@ -1,4 +1,4 @@
-"""Semantic ownership of test-only Maven changes, shared by guard and sealer.
+"""Semantic ownership of test-only changes for writes, seals and evidence.
 
 A pom is a mixed production/test file. It must never be classified as a test
 asset by its filename alone. Compare the production projection before allowing
@@ -7,9 +7,12 @@ test dependencies and Surefire/Failsafe configuration changes.
 from __future__ import annotations
 
 import copy
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from hooks.plan_write_ownership import is_test_asset_path
 
 
 TEST_PLUGINS = {"maven-surefire-plugin", "maven-failsafe-plugin"}
@@ -126,6 +129,44 @@ def validate_worktree_pom(worktree, relative_path, *, after=None):
     except OSError as exc:
         return {"allowed": False, "reason": "utest_pom_missing", "detail": str(exc)}
     return validate_test_pom_change(result.stdout, content)
+
+
+def validate_test_commit_change(repository, before, after):
+    """Check immutable Git contents even after the Batch Worktree is removed.
+
+    Historical stage evidence can survive test-only seals, including multiple
+    seals or a final no-op seal. A manifest's changedFiles list is not proof:
+    inspect the complete delta from the evidenced commit to the final commit.
+    """
+    if not all(isinstance(sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", sha)
+               for sha in (before, after)):
+        return {"allowed": False, "reason": "utest_commit_invalid"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repository, text=True, encoding="utf-8",
+                              errors="replace", capture_output=True, timeout=10)
+
+    try:
+        if git("merge-base", "--is-ancestor", before, after).returncode:
+            return {"allowed": False, "reason": "utest_commit_not_descendant"}
+        diff = git("diff", "--no-ext-diff", "--no-textconv", "--name-only", "--no-renames", "-z", before, after, "--")
+        if diff.returncode:
+            return {"allowed": False, "reason": "utest_commit_diff_unavailable"}
+        paths = [path for path in diff.stdout.split("\0") if path]
+        for path in paths:
+            if is_test_asset_path(path):
+                continue
+            if Path(path).name != "pom.xml":
+                return {"allowed": False, "reason": "parallel_utest_production_change_forbidden", "path": path}
+            old, new = git("show", before + ":" + path), git("show", after + ":" + path)
+            if old.returncode or new.returncode:
+                return {"allowed": False, "reason": "utest_pom_baseline_missing", "path": path}
+            validation = validate_test_pom_change(old.stdout, new.stdout)
+            if not validation["allowed"]:
+                return dict(validation, path=path)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"allowed": False, "reason": "utest_commit_diff_unavailable"}
+    return {"allowed": True, "reason": "test_only_commit_change", "changedFiles": paths}
 
 
 def prospective_content(path, tool_input):

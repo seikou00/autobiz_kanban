@@ -9,6 +9,7 @@ an additional test stage; the only post-merge executable validation is V-E2E.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import subprocess
 import sys
@@ -25,9 +26,8 @@ from hooks.conflict_resolution_agent import ModelBasedResolver
 from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import complete_stage, fail_stage, gate_batch, reset_validation_batch, start_stage
+from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure
 from hooks.parallel_runtime import append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
-from hooks.parallel_repair import create_repair_batch
 from hooks.parallel_integration import integration_repo, assert_integration, isolated, record_integration_head
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
@@ -719,36 +719,7 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
     e2e = (manifest.get("validationBatches") or {}).get("V-E2E", {})
     worktrees = e2e.get("worktrees", {}) if isinstance(e2e, dict) else {}
     if not passed:
-        states = e2e.get("stageStates") if isinstance(e2e, dict) and isinstance(e2e.get("stageStates"), dict) else {}
-        state = states.get("e2e_test") if isinstance(states, dict) else None
-        if isinstance(state, dict) and state.get("status") == "running":
-            result = fail_stage(workspace, feature, run_id, "V-E2E", "e2e_test", failure_type="implementation", message=str(metadata.get("message") or "e2e_test_failed"))
-        elif isinstance(state, dict) and state.get("status") in {"failed", "needs_triage"}:
-            # A previous call already recorded this failure.  Reuse that
-            # durable failure instead of trying to fail a non-running stage a
-            # second time.
-            result = {
-                "batchId": "V-E2E",
-                "stage": "e2e_test",
-                "status": state.get("status"),
-                "nextStage": (state.get("failure") or {}).get("nextStage"),
-                "failure": dict(state.get("failure") or {}),
-            }
-        else:
-            raise ValueError("parallel_e2e_stage_not_running_or_failed")
-        repair = create_repair_batch(
-            workspace,
-            feature,
-            run_id,
-            "V-E2E",
-            approved_plan_revision=str(manifest.get("pipeline", {}).get("planRevision") or ""),
-            failure_context={
-                "stage": "e2e_test",
-                "mainHeads": manifest.get("repositories", {}),
-                "metadata": metadata,
-            },
-        )
-        return {"success": False, "result": result, "repair": repair.get("repair")}
+        return record_e2e_failure(workspace, feature, run_id, metadata=metadata)
     environment = metadata.get("environment")
     if not isinstance(environment, dict):
         raise ValueError("parallel_e2e_environment_metadata_missing")
@@ -771,8 +742,12 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
         with run_lock(workspace, feature, run_id):
             updated = load_manifest(workspace, feature, run_id)
             updated["validationBatches"]["V-E2E"]["cleanup"] = {"at": utc_now(), "errors": cleanup_errors}
+            for issue in updated.get("deferredIssues", []):
+                if isinstance(issue, dict) and issue.get("kind") == "e2e_failure" and issue.get("status") == "open":
+                    issue.update({"status": "resolved", "resolvedAt": utc_now(),
+                                  "resolvedBy": updated["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"]["latestEvidenceId"]})
             save_manifest(workspace, feature, run_id, updated)
-    return {"success": bool(result.get("success")), "result": result, "environment": environment, "cleanupErrors": cleanup_errors}
+    return {"success": bool(result.get("success")), "e2eStatus": "passed", "result": result, "environment": environment, "cleanupErrors": cleanup_errors}
 
 
 def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str, attempt_id: str = "") -> dict[str, Any]:
@@ -1203,7 +1178,9 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--feature", required=True)
         item.add_argument("--run-id", required=True)
     e2e_finish.add_argument("--passed", choices=("true", "false"), required=True)
-    e2e_finish.add_argument("--metadata-json", default="{}")
+    e2e_metadata = e2e_finish.add_mutually_exclusive_group()
+    e2e_metadata.add_argument("--metadata-json", default="{}")
+    e2e_metadata.add_argument("--metadata-base64")
     assert promote_parser is not None
     promote_parser.add_argument("--allow-stale", action="store_true")
     promote_parser.add_argument("--allow-unverified", action="store_true")
@@ -1246,7 +1223,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "begin-e2e":
             result = begin_e2e(workspace, feature, args.run_id)
         else:
-            metadata = json.loads(args.metadata_json)
+            metadata = json.loads(base64.b64decode(args.metadata_base64, validate=True).decode("utf-8")
+                                  if args.metadata_base64 else args.metadata_json)
             if not isinstance(metadata, dict):
                 raise ValueError("parallel_e2e_metadata_must_be_object")
             result = finish_e2e(workspace, feature, args.run_id, passed=args.passed == "true", metadata=metadata)

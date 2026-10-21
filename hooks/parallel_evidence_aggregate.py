@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only completion gate for the staged parallel pipeline.
 
-No command is executed here.  The aggregate validates that the evidence which
-already exists still matches the exact Plan revision, delivery commit and
-dependency commits being declared complete.
+No build or test command is executed here. The aggregate validates existing
+evidence against the Plan revision and commit bindings; read-only Git queries
+prove whether later seals changed only tests and test-scoped POM content.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.plan_write_ownership import is_test_asset_path
-from hooks.parallel_batch_stage import FRONTEND_UTEST_SKIP_REASON
+from hooks.parallel_batch_stage import FRONTEND_UTEST_SKIP_REASON, deferred_e2e_errors
 from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, skipped_utests, utc_now
+from hooks.utest_test_environment import validate_test_commit_change
 
 
 def _digest(value: Any) -> str:
@@ -55,6 +55,7 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
     pipeline = manifest.get("pipeline") if isinstance(manifest.get("pipeline"), dict) else {}
     states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
     errors: list[str] = []
+    reseal_checks: dict[tuple[str, str], bool] = {}
     for stage, state in states.items():
         if not isinstance(state, dict) or state.get("status") not in {"passed", "skipped", "deferred"}:
             errors.append(f"{batch_id}.{stage}_not_passed")
@@ -78,7 +79,9 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         if stage == "prepare" and inputs.get("commitScope") == "repository_base":
             repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
             repository = manifest.get("repositories", {}).get(repository_ref, {})
-            expected_commit = repository.get("headSha") or repository.get("baseSha")
+            # The integration HEAD advances as other deliveries merge. Prepare
+            # proves the original Worktree binding, whose start stays fixed.
+            expected_commit = batch.get("startSha") or batch.get("preparationBaseSha") or repository.get("baseSha")
             if inputs.get("repositoryRef") != repository_ref or not expected_commit:
                 errors.append(f"{batch_id}.{stage}_repository_binding_invalid")
         elif batch.get("type") == "validation":
@@ -89,14 +92,20 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
             last_seal = batch.get("lastSeal") if isinstance(batch.get("lastSeal"), dict) else {}
             valid_utest_reseal = (
                 stage in {"prepare", "implement", "review"}
+                and batch.get("type") != "validation"
+                and isinstance(inputs.get("batchCommit"), str)
+                and isinstance(expected_commit, str)
                 and last_seal.get("purpose") == "utest"
                 and last_seal.get("commitSha") == expected_commit
-                and last_seal.get("previousCommitSha") == inputs.get("batchCommit")
-                and all(
-                    isinstance(path, str) and is_test_asset_path(path)
-                    for path in last_seal.get("changedFiles", [])
-                )
             )
+            if valid_utest_reseal:
+                key = (inputs.get("batchCommit"), expected_commit)
+                if key not in reseal_checks:
+                    repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
+                    repository = manifest.get("repositories", {}).get(repository_ref, {})
+                    root = repository.get("gitRoot")
+                    reseal_checks[key] = bool(root) and validate_test_commit_change(root, *key)["allowed"]
+                valid_utest_reseal = reseal_checks[key]
             if not valid_utest_reseal:
                 errors.append(f"{batch_id}.{stage}_batch_commit_stale")
         if inputs.get("dependencies") != _dependency_snapshot(manifest, batch):
@@ -128,6 +137,9 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
         validations = manifest.get("validationBatches", {})
         for validation_id in ("V-E2E",):
             batch = validations.get(validation_id) if isinstance(validations, dict) else None
+            if isinstance(batch, dict) and batch.get("status") == "deferred":
+                errors.extend(deferred_e2e_errors(manifest))
+                continue
             if not isinstance(batch, dict) or batch.get("status") != "verified":
                 errors.append(f"{validation_id}.not_verified")
                 continue
@@ -159,6 +171,8 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
                     elif any(not isinstance(item, dict) or item.get("passed") is not True for item in commands):
                         errors.append(f"merge_train_validation_failed:{train_id}")
         deferred_issues = list(manifest.get("deferredIssues", [])) if isinstance(manifest.get("deferredIssues"), list) else []
+        deferred_issues = [item for item in deferred_issues if not isinstance(item, dict)
+                           or item.get("kind") != "e2e_failure" or item.get("status") == "open"]
         blocking_deferred_issues = [
             item
             for item in deferred_issues
@@ -173,6 +187,8 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
             "deferredIssues": deferred_issues,
             "skippedUtests": skipped_utests(manifest),
+            "e2eStatus": "failed" if (validations.get("V-E2E") or {}).get("status") == "deferred" else "passed"
+                if (validations.get("V-E2E") or {}).get("status") == "verified" else "incomplete",
         }
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
         report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)

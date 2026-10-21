@@ -12,6 +12,7 @@ from hooks.json_writer_common import atomic_write_json
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import create_run as _create_run, mark_batch, schedule
 from hooks.parallel_batch_stage import (
+    begin_implementation,
     complete_stage,
     defer_stage,
     fail_stage,
@@ -766,14 +767,13 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
             self.assertTrue(provisioned["success"])
             worktree = Path(provisioned["worktreePath"])
+            begin_implementation(workspace, "alpha", run_id, "B001")
             (worktree / "delivery.txt").write_text("delivery\n", encoding="utf-8")
             _git(worktree, "add", "delivery.txt")
             _git(worktree, "commit", "-m", "delivery")
             commit = _git_output(worktree, "rev-parse", "HEAD")
             mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
-            for stage in ("prepare", "implement"):
-                start_stage(workspace, "alpha", run_id, "B001", stage)
-                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            complete_stage(workspace, "alpha", run_id, "B001", "implement", metadata={"batchCommit": commit})
             start_stage(workspace, "alpha", run_id, "B001", "review")
             complete_stage(workspace, "alpha", run_id, "B001", "review", metadata={"batchCommit": commit})
             lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
@@ -900,7 +900,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
         self.assertNotIn("B001", snapshot["mergeableBatches"])
 
 
-    def test_failed_final_e2e_validation_creates_repair_contract(self) -> None:
+    def test_failed_final_e2e_validation_records_a_nonblocking_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
             _enable_pipeline(feature_dir)
@@ -922,7 +922,11 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                 self.assertTrue(promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default", allow_unverified=True)["success"])
             self.assertTrue(begin_e2e(workspace, "alpha", run_id)["success"])
             failed = finish_e2e(workspace, "alpha", run_id, passed=False, metadata={"message": "e2e scenario failed"})
-            self.assertFalse(failed["success"])
-            self.assertEqual(failed["repair"]["repairFor"], "V-E2E")
-            self.assertTrue(failed["repair"]["requireReview"])
-            self.assertIn("review", failed["repair"]["stageStates"])
+            self.assertTrue(failed["success"])
+            self.assertEqual(failed["e2eStatus"], "failed")
+            self.assertFalse(failed["issue"]["blocksWorkflow"])
+            self.assertNotIn("repair", failed)
+            report = aggregate_evidence(workspace, "alpha", run_id)
+            self.assertTrue(report["passed"], report)
+            self.assertEqual(report["e2eStatus"], "failed")
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["status"], "succeeded_with_issues")

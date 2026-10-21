@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import contextlib
+import base64
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -12,13 +15,13 @@ from unittest.mock import patch
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_lifecycle import cleanup_run, cleanup_merged_batches, rollback_run
 from hooks.parallel_batch_scheduler import create_run, ensure_run, mark_batch, assert_batch_worktree_isolated
-from hooks.parallel_batch_stage import complete_stage, gate_batch, start_stage
+from hooks.parallel_batch_stage import begin_implementation, complete_stage, gate_batch, start_stage
 from hooks.parallel_evidence_aggregate import aggregate_evidence
 from hooks.parallel_integration import (git, integration_repo, keep_integration, prepare_promotion,
                                         promote_main, sync_main)
 from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate, recover_promoted_plan
-from hooks.parallel_runtime import get_active_run, load_manifest, save_manifest
-from hooks.worktree_manager import provision_parallel_worktree
+from hooks.parallel_runtime import acquire_lease, get_active_run, load_manifest, release_lease, save_manifest
+from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
 from hooks.workflow_launcher import analyze_batches
 from tests.test_parallel_staged_pipeline import _enable_pipeline
 from tests.test_task_runner import _workspace, _add_second_compile_only_batch
@@ -42,19 +45,31 @@ class ParallelIntegrationTest(unittest.TestCase):
     def manifest(self):
         return load_manifest(self.workspace, "alpha", self.run_id)
 
-    def deliver(self, *, filename="delivery.txt", content="delivery\n", batch_id="B001", wave=1):
+    def deliver(self, *, filename="delivery.txt", content="delivery\n", batch_id="B001", wave=1, utest_changes=None):
         provisioned = provision_parallel_worktree(self.workspace, "alpha", self.run_id, batch_id)
         self.assertTrue(provisioned["success"], provisioned)
         worktree = Path(provisioned["worktreePath"])
+        begin_implementation(self.workspace, "alpha", self.run_id, batch_id)
         (worktree / filename).write_text(content, encoding="utf-8")
         git(worktree, "add", filename)
         git(worktree, "commit", "-m", "delivery")
         commit = git(worktree, "rev-parse", "HEAD")
         mark_batch(self.workspace, "alpha", self.run_id, batch_id, "sealed", worktreePath=str(worktree),
                    branchName=provisioned["branchName"], commitSha=commit)
-        for stage in ("prepare", "implement", "review", "test"):
+        for stage in ("implement", "review", "test"):
             start_stage(self.workspace, "alpha", self.run_id, batch_id, stage)
+            if stage == "test" and utest_changes:
+                lease = acquire_lease(self.workspace, "alpha", self.run_id, batch_id, ttl_seconds=60)
+                for path, contents in utest_changes.items():
+                    target = worktree / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(contents, encoding="utf-8")
+                sealed = seal_parallel_batch(self.workspace, "alpha", self.run_id, batch_id, worktree, lease["ownerToken"])
+                self.assertTrue(sealed["success"], sealed)
+                commit = sealed["commitSha"]
             complete_stage(self.workspace, "alpha", self.run_id, batch_id, stage, metadata={"batchCommit": commit})
+            if stage == "test" and utest_changes:
+                release_lease(self.workspace, "alpha", self.run_id, batch_id, lease["ownerToken"], final_status="sealed")
         self.assertTrue(gate_batch(self.workspace, "alpha", self.run_id, batch_id)["success"])
         candidate = build_candidate(self.workspace, "alpha", self.run_id, wave=wave, batch_ids=[batch_id])
         # Task execution has its own tests; this fixture exercises the native
@@ -186,6 +201,135 @@ class ParallelIntegrationTest(unittest.TestCase):
         self.assertFalse(view["canStartWorkflow"])
         self.assertTrue(self.integration.exists())
         self.assertEqual(git(self.source, "rev-parse", "main"), self.baseline)
+
+    def test_test_pom_reseal_can_reaggregate_a_blocked_run_after_worktree_cleanup(self):
+        pom = "<project><modelVersion>4.0.0</modelVersion><groupId>demo</groupId><artifactId>demo</artifactId><version>1</version></project>"
+        dependency = "<dependencies><dependency><groupId>company</groupId><artifactId>test-helper</artifactId><version>1</version><scope>test</scope></dependency></dependencies>"
+        (self.source / "pom.xml").write_text(pom)
+        git(self.source, "add", "pom.xml")
+        git(self.source, "commit", "-m", "fixture Maven baseline")
+        self.create()
+        self.deliver(utest_changes={"pom.xml": pom.replace("</project>", dependency + "</project>")})
+        batch = self.manifest()["batches"]["B001"]
+        evidence_before = {state["evidencePath"]: Path(state["evidencePath"]).read_bytes()
+                           for state in batch["stageStates"].values()}
+        self.assertTrue(cleanup_merged_batches(self.workspace, "alpha", self.run_id)["success"])
+        self.assertFalse(Path(batch["worktreePath"]).exists())
+        begin_e2e(self.workspace, "alpha", self.run_id)
+        finish_e2e(self.workspace, "alpha", self.run_id, passed=False, metadata={"message": "E2E environment unavailable"})
+        manifest = self.manifest()
+        manifest["status"] = "blocked"
+        manifest["finalEvidenceAggregate"] = {"passed": False, "errors": ["B001.prepare_batch_commit_stale", "B001.review_batch_commit_stale"]}
+        save_manifest(self.workspace, "alpha", self.run_id, manifest)
+        for _ in range(2):
+            report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+            self.assertTrue(report["passed"], report)
+            self.assertEqual(report["e2eStatus"], "failed")
+            self.assertEqual(self.manifest()["status"], "awaiting_user_confirmation")
+        self.assertTrue(self.prepare())
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.manifest()["repositories"]["default"]["baseSha"])
+        for path, contents in evidence_before.items():
+            self.assertEqual(Path(path).read_bytes(), contents)
+
+    def test_failed_e2e_continues_to_confirmation_and_requires_explicit_approval(self):
+        self.create()
+        candidate = self.deliver()
+        begin_e2e(self.workspace, "alpha", self.run_id)
+        metadata = {"message": "checkout scenario failed", "outputFile": "/logs/e2e.log"}
+        failed = finish_e2e(self.workspace, "alpha", self.run_id, passed=False, metadata=metadata)
+        self.assertTrue(failed["success"])
+        self.assertEqual(failed["e2eStatus"], "failed")
+        self.assertFalse(failed["issue"]["blocksWorkflow"])
+        self.assertNotIn("repair", failed)
+        repeated = finish_e2e(self.workspace, "alpha", self.run_id, passed=False, metadata=metadata)
+        self.assertTrue(repeated["reused"])
+        self.assertEqual(len(self.manifest()["deferredIssues"]), 1)
+        state = self.manifest()["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"]
+        evidence = json.loads(Path(state["evidencePath"]).read_text())
+        self.assertEqual(evidence["outcome"], "FAIL")
+        self.assertEqual(evidence["metadata"]["outputFile"], "/logs/e2e.log")
+        report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+        self.assertTrue(report["passed"], report)
+        self.assertTrue(report["hasDeferredIssues"])
+        self.assertFalse(report["hasBlockingDeferredIssues"])
+        self.assertEqual(report["e2eStatus"], "failed")
+        self.assertEqual(self.manifest()["status"], "awaiting_user_confirmation")
+        approval = self.prepare()
+        snapshot = self.manifest()["mainPromotion"]["snapshot"]
+        self.assertEqual(snapshot["e2eStatus"], "failed")
+        self.assertEqual(snapshot["deferredIssues"][0]["message"], metadata["message"])
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
+        with self.assertRaisesRegex(ValueError, "explicit_user_confirmation"):
+            self.promote(approval)
+        result = self.promote(approval, confirm=True)
+        self.assertEqual(result["status"], "succeeded_with_issues")
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), candidate["candidateSha"])
+
+    def test_e2e_startup_failure_can_be_recorded_by_cli_before_a_worktree_exists(self):
+        self.create()
+        self.deliver()
+        metadata = {"message": '环境异常 "quoted" $(echo not-executed)\n完整输出', "executionOutcome": "not_run"}
+        encoded = base64.b64encode(json.dumps(metadata, ensure_ascii=False).encode()).decode()
+        result = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / "hooks/parallel_merge_train.py"),
+            "finish-e2e", "--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run_id,
+            "--passed", "false", "--metadata-base64", encoded], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["e2eStatus"], "failed")
+        report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["deferredIssues"][0]["message"], metadata["message"])
+        self.assertTrue(self.prepare())
+
+    def test_missing_or_changed_e2e_failure_evidence_cannot_authorize_promotion(self):
+        self.create()
+        self.deliver()
+        begin_e2e(self.workspace, "alpha", self.run_id)
+        finish_e2e(self.workspace, "alpha", self.run_id, passed=False, metadata={"message": "failed"})
+        self.assertTrue(aggregate_evidence(self.workspace, "alpha", self.run_id)["passed"])
+        approval = self.prepare()
+        state = self.manifest()["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"]
+        path = Path(state["evidencePath"])
+        original = path.read_bytes()
+        for corrupt in (None, b'{"outcome":"PASS"}'):
+            if corrupt is None:
+                path.unlink()
+            else:
+                path.write_bytes(corrupt)
+            with self.assertRaisesRegex(ValueError, "e2e_commit_mismatch"):
+                self.promote(approval, confirm=True)
+            report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+            self.assertFalse(report["passed"])
+            path.write_bytes(original)
+            aggregate_evidence(self.workspace, "alpha", self.run_id)
+            approval = self.prepare()
+
+    def test_e2e_failure_does_not_waive_validation_of_a_new_commit(self):
+        self.create()
+        self.deliver()
+        finish_e2e(self.workspace, "alpha", self.run_id, passed=False, metadata={"message": "environment unavailable"})
+        report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+        self.assertTrue(report["passed"])
+        (self.source / "later.txt").write_text("later main change\n")
+        git(self.source, "add", "later.txt")
+        git(self.source, "commit", "-m", "later change")
+        sync_main(self.workspace, "alpha", self.run_id)
+        report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any(error.startswith("V-E2E.") for error in report["errors"]))
+
+    def test_later_e2e_pass_resolves_the_issue_and_preserves_failure_evidence(self):
+        self.create()
+        self.deliver()
+        finish_e2e(self.workspace, "alpha", self.run_id, passed=False, metadata={"message": "startup failed"})
+        state = self.manifest()["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"]
+        original_path = Path(state["evidencePath"])
+        original = original_path.read_bytes()
+        report = self.validate()
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["e2eStatus"], "passed")
+        self.assertFalse(report["hasDeferredIssues"])
+        self.assertEqual(self.manifest()["deferredIssues"][0]["status"], "resolved")
+        self.assertEqual(original_path.read_bytes(), original)
 
     def test_main_change_invalidates_approval_then_sync_requires_new_e2e(self):
         self.create()
@@ -347,8 +491,11 @@ class ParallelIntegrationTest(unittest.TestCase):
         worktree = Path(second["worktreePath"])
         (worktree / "unfinished.txt").write_text("unfinished work\n")
         self.deliver()
+        begin_implementation(self.workspace, "alpha", self.run_id, "B002")
         manifest = self.manifest()
         batch = manifest["batches"]["B002"]
+        preparation = json.loads(Path(batch["stageStates"]["prepare"]["evidencePath"]).read_text())
+        self.assertEqual(preparation["inputs"]["batchCommit"], batch["startSha"])
         batch["recovery"] = {"kind": "implementation_resume"}
         save_manifest(self.workspace, "alpha", self.run_id, manifest)
         resumed = ensure_run(self.workspace, "alpha", max_parallel=2, timeout_seconds=60,

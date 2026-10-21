@@ -143,6 +143,13 @@ class CodeStageAuthorityTest(unittest.TestCase):
         manifest = load_manifest(self.workspace, "alpha", self.parallel_id)
         self.assertEqual(_evidence_errors(manifest, "B001", manifest["batches"]["B001"]), [])
 
+    def test_prepare_evidence_for_a_different_start_remains_stale(self) -> None:
+        self._initial_delivery()
+        manifest = load_manifest(self.workspace, "alpha", self.parallel_id)
+        batch = manifest["batches"]["B001"]
+        batch["startSha"] = batch["commitSha"]
+        self.assertIn("B001.prepare_batch_commit_stale", _evidence_errors(manifest, "B001", batch))
+
     def test_repair_reopens_code_before_compilation_and_keeps_attempt(self) -> None:
         finished, _ = self._initial_delivery()
         release_lease(self.workspace, "alpha", self.parallel_id, "B001", self.token, final_status="sealed")

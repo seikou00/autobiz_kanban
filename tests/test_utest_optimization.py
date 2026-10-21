@@ -19,7 +19,9 @@ from hooks.json_writer_common import atomic_write_json
 from hooks.frontend_route_write_guard import main as write_guard
 from hooks.inspect_test_environment import inspect_environment
 from hooks.parallel_batch_stage import complete_stage, finalize_implementation, start_stage
-from hooks.parallel_runtime import run_lock
+from hooks.parallel_evidence_aggregate import _evidence_errors
+from hooks.parallel_integration import git
+from hooks.parallel_runtime import load_manifest, run_lock, save_manifest
 from hooks.run_utest_command import execute_utest_command, observed_test_count, _failure_classification, UTestCommandError
 from hooks.runtime_artifact_guard import guard as artifact_guard
 from hooks.utest_runtime import apply_pom, begin, choose, context, inspect_class, lookup, preflight, prepare, shell_quote, validate_exact_test_argv
@@ -126,6 +128,54 @@ class UTestOptimizationTest(unittest.TestCase):
         sealed = seal_parallel_batch(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', self.a.worktree, self.a.token)
         self.assertTrue(sealed['success'], sealed)
         self.assertEqual('utest', sealed['purpose'])
+        self.assertEqual([], self.finish_test_evidence_errors())
+
+    def finish_test_evidence_errors(self):
+        complete_stage(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', 'test')
+        manifest = load_manifest(self.a.workspace, 'alpha', self.a.parallel_id)
+        return _evidence_errors(manifest, 'B001', manifest['batches']['B001'])
+
+    def test_multiple_test_seals_and_a_noop_seal_preserve_review_evidence(self):
+        pom = self.a.worktree / 'pom.xml'
+        pom.write_text(POM.replace('</dependencies>', H2 + '</dependencies>'))
+        first = seal_parallel_batch(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', self.a.worktree, self.a.token)
+        self.assertTrue(first['success'], first)
+        self.write_test()
+        second = seal_parallel_batch(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', self.a.worktree, self.a.token)
+        self.assertTrue(second['success'], second)
+        noop = seal_parallel_batch(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', self.a.worktree, self.a.token)
+        self.assertTrue(noop['success'], noop)
+        self.assertEqual(noop['commitSha'], second['commitSha'])
+        self.assertEqual([], self.finish_test_evidence_errors())
+
+    def test_aggregate_rejects_a_production_pom_delta_despite_test_only_seal_metadata(self):
+        previous = self.a._batch()['commitSha']
+        pom = self.a.worktree / 'pom.xml'
+        pom.write_text(POM.replace('</dependencies>', H2.replace('<scope>test</scope>', '') + '</dependencies>'))
+        git(self.a.worktree, 'add', 'pom.xml')
+        git(self.a.worktree, 'commit', '-m', 'fixture unreviewed production dependency')
+        commit = git(self.a.worktree, 'rev-parse', 'HEAD')
+        manifest = load_manifest(self.a.workspace, 'alpha', self.a.parallel_id)
+        batch = manifest['batches']['B001']
+        batch['commitSha'] = commit
+        batch['lastSeal'] = {'purpose': 'utest', 'previousCommitSha': previous,
+                             'commitSha': commit, 'changedFiles': ['tests/test_only.py']}
+        save_manifest(self.a.workspace, 'alpha', self.a.parallel_id, manifest)
+        errors = self.finish_test_evidence_errors()
+        self.assertIn('B001.implement_batch_commit_stale', errors)
+        self.assertIn('B001.review_batch_commit_stale', errors)
+
+    def test_aggregate_requires_git_objects_to_inherit_pre_seal_evidence(self):
+        (self.a.worktree / 'pom.xml').write_text(POM.replace('</dependencies>', H2 + '</dependencies>'))
+        sealed = seal_parallel_batch(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', self.a.worktree, self.a.token)
+        self.assertTrue(sealed['success'], sealed)
+        self.assertEqual([], self.finish_test_evidence_errors())
+        manifest = load_manifest(self.a.workspace, 'alpha', self.a.parallel_id)
+        batch = manifest['batches']['B001']
+        manifest['repositories'][batch['repositoryRef']]['gitRoot'] = str(self.a.workspace / 'missing-repository')
+        errors = _evidence_errors(manifest, 'B001', batch)
+        self.assertIn('B001.implement_batch_commit_stale', errors)
+        self.assertIn('B001.review_batch_commit_stale', errors)
 
     def test_guard_and_sealer_both_reject_production_pom_delta(self):
         pom = self.a.worktree / 'pom.xml'
@@ -150,6 +200,7 @@ class UTestOptimizationTest(unittest.TestCase):
         pom.write_text(POM.replace('</dependencies>', H2 + '</dependencies>'))
         sealed = seal_parallel_batch(self.a.workspace, 'alpha', self.a.parallel_id, 'B001', self.a.worktree, self.a.token)
         self.assertTrue(sealed['success'], sealed)
+        self.assertEqual([], self.finish_test_evidence_errors())
 
     def test_runtime_writer_applies_h2_and_invalidates_environment_snapshot(self):
         first = prepare(self.args, self.ctx())

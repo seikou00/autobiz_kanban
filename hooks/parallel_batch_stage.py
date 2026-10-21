@@ -159,7 +159,14 @@ def reset_validation_batch(
         batch["trainId"] = train_id
         if dependency_batch_ids is not None:
             batch["dependencies"] = sorted(set(dependency_batch_ids))
+        previous_states = batch.get("stageStates") or {}
         batch["stageStates"] = stage_template(batch)
+        for name, state in batch["stageStates"].items():
+            previous = previous_states.get(name) or {}
+            # A new validation must not overwrite an earlier attempt's
+            # immutable pass/failure evidence at the same numbered path.
+            state["attempt"] = int(previous.get("attempt", 0))
+            state["evidenceIds"] = list(previous.get("evidenceIds", []))
         save_manifest(workspace, feature, run_id, manifest)
     append_event(
         workspace,
@@ -196,13 +203,15 @@ def _stage_input(manifest: dict[str, Any], batch: dict[str, Any], stage: str, me
     }
     if stage == "prepare" and metadata.get("preparationSource") == "task_runner_workspace_binding":
         # Preparation happens before production changes exist. Its evidence
-        # binds the frozen repository base, not the future sealed delivery.
+        # binds this Batch's frozen start, not the moving integration HEAD
+        # or the future sealed delivery. Another Batch can merge before this
+        # one starts its first TASK.
         repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
         repository = manifest.get("repositories", {}).get(repository_ref, {})
         inputs.update({
             "commitScope": "repository_base",
             "repositoryRef": repository_ref,
-            "batchCommit": repository.get("headSha") or repository.get("baseSha"),
+            "batchCommit": batch.get("startSha") or repository.get("headSha") or repository.get("baseSha"),
         })
     return inputs
 
@@ -215,6 +224,108 @@ def _digest(value: Any) -> str:
 
 def _evidence_path(workspace: Path, feature: str, run_id: str, batch_id: str, stage: str, attempt: int) -> Path:
     return run_dir(workspace, feature, run_id) / "stages" / batch_id / stage / f"{attempt:03d}.json"
+
+
+def deferred_e2e_errors(manifest: dict[str, Any]) -> list[str]:
+    """Accept an E2E failure only with current, intact non-blocking evidence."""
+    batch = manifest.get("validationBatches", {}).get("V-E2E", {})
+    if not isinstance(batch, dict) or not isinstance(batch.get("stageStates"), dict):
+        return ["V-E2E.failure_not_recorded"]
+    state = batch.get("stageStates", {}).get("e2e_test", {})
+    if batch.get("status") != "deferred" or not isinstance(state, dict) or state.get("status") != "deferred":
+        return ["V-E2E.failure_not_recorded"]
+    heads = {ref: binding.get("headSha") for ref, binding in manifest.get("repositories", {}).items()}
+    if batch.get("candidateSha") != json.dumps(heads, sort_keys=True):
+        return ["V-E2E.failure_commit_stale"]
+    try:
+        evidence = json.loads(Path(state["evidencePath"]).read_text(encoding="utf-8"))
+    except (KeyError, TypeError, OSError, ValueError):
+        return ["V-E2E.failure_evidence_missing"]
+    if not isinstance(evidence, dict) or evidence.get("digest") != _digest({key: value for key, value in evidence.items() if key != "digest"}):
+        return ["V-E2E.failure_evidence_digest_invalid"]
+    inputs = evidence.get("inputs") or {}
+    metadata = evidence.get("metadata") or {}
+    if (not isinstance(inputs, dict) or not isinstance(metadata, dict)
+            or evidence.get("outcome") != "FAIL" or evidence.get("batchId") != "V-E2E"
+            or evidence.get("stage") != "e2e_test"
+            or evidence.get("evidenceId") != state.get("latestEvidenceId")
+            or metadata.get("e2eFailureDisposition") != "recorded_deferred"):
+        return ["V-E2E.failure_evidence_invalid"]
+    if (inputs.get("planRevision") != _pipeline(manifest).get("planRevision")
+            or inputs.get("batchCommit") != batch.get("candidateSha")
+            or inputs.get("dependencies") != _dependency_snapshot(manifest, batch)
+            or state.get("inputDigest") != _digest(inputs)):
+        return ["V-E2E.failure_inputs_stale"]
+    issue = next((item for item in manifest.get("deferredIssues", [])
+                  if isinstance(item, dict) and item.get("issueId") == state.get("deferredIssueId")), {})
+    failure = metadata.get("e2eFailure")
+    if (issue.get("kind") != "e2e_failure" or issue.get("batchId") != "V-E2E"
+            or issue.get("stage") != "e2e_test" or issue.get("blocksWorkflow") is not False
+            or issue.get("status") != "open" or issue.get("disposition") != "recorded_deferred"
+            or issue.get("evidenceId") != evidence.get("evidenceId")
+            or issue.get("batchCommit") != batch.get("candidateSha")
+            or metadata.get("e2eFailureIssueId") != issue.get("issueId")
+            or not isinstance(failure, dict) or issue.get("message") != failure.get("message")
+            or state.get("failure") != failure):
+        return ["V-E2E.failure_issue_invalid"]
+    return []
+
+
+def record_e2e_failure(workspace: Path, feature: str, run_id: str, *, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Record a failed/interrupted E2E without a pass or an automatic repair."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        if any(batch.get("status") != "merged" for batch in manifest.get("batches", {}).values()):
+            raise ValueError("parallel_e2e_delivery_incomplete")
+        batch = _batch(manifest, "V-E2E")
+        heads = {ref: binding.get("headSha") for ref, binding in manifest.get("repositories", {}).items()}
+        candidate = json.dumps(heads, sort_keys=True)
+        if batch.get("candidateSha") == candidate and batch.get("status") == "verified":
+            # A transport error after finish-e2e must not erase a known pass.
+            return {"success": True, "batchId": "V-E2E", "e2eStatus": "passed", "reused": True}
+        if not deferred_e2e_errors(manifest):
+            state = batch["stageStates"]["e2e_test"]
+            issue = next(item for item in manifest["deferredIssues"] if item.get("issueId") == state["deferredIssueId"])
+            return {"success": True, "batchId": "V-E2E", "status": "deferred", "e2eStatus": "failed", "issue": issue, "reused": True}
+        if (manifest.get("mainPromotion") or {}).get("status") in {"promoting", "merged"}:
+            raise ValueError("integration_promotion_already_started")
+        if batch.get("candidateSha") != candidate:
+            for state in _ensure_stage_states(batch).values():
+                state["status"] = "stale"
+        batch.update({"candidateSha": candidate, "candidateBaseSha": candidate,
+                      "dependencies": sorted(manifest.get("batches", {})), "trainId": "merged-main"})
+        state = _ensure_stage_states(batch)["e2e_test"]
+        metadata = {**metadata, "executionOutcome": metadata.get("executionOutcome")
+                    or ("failed" if state.get("startedAt") else "not_run")}
+        attempt = int(state.get("attempt", 0)) + 1
+        while _evidence_path(workspace, feature, run_id, "V-E2E", "e2e_test", attempt).exists():
+            attempt += 1
+        evidence_id = f"STAGE-V-E2E-E2E_TEST-{attempt:03d}"
+        issue_id = f"E2E-FAILED-{attempt:03d}"
+        failure = {"type": "e2e_failure", "message": str(metadata.get("message") or "e2e_test_failed"), "nextStage": None}
+        evidence = {
+            "evidenceId": evidence_id, "batchId": "V-E2E", "stage": "e2e_test", "attempt": attempt,
+            "createdAt": _utc_now(), "inputs": _stage_input(manifest, batch, "e2e_test", metadata),
+            "outcome": "FAIL", "metadata": {**metadata, "e2eFailure": failure,
+                "e2eFailureDisposition": "recorded_deferred", "e2eFailureIssueId": issue_id},
+        }
+        evidence["digest"] = _digest(evidence)
+        path = _evidence_path(workspace, feature, run_id, "V-E2E", "e2e_test", attempt)
+        atomic_write_json(path, evidence)
+        state.update({"status": "deferred", "attempt": attempt, "completedAt": evidence["createdAt"],
+                      "latestEvidenceId": evidence_id, "evidencePath": str(path), "inputDigest": _digest(evidence["inputs"]),
+                      "evidenceIds": [*state.get("evidenceIds", []), evidence_id], "failure": failure, "deferredIssueId": issue_id})
+        issue = {"issueId": issue_id, "kind": "e2e_failure", "batchId": "V-E2E", "stage": "e2e_test",
+                 "failureType": "e2e_failure", "message": failure["message"], "disposition": "recorded_deferred",
+                 "blocksWorkflow": False, "status": "open", "evidenceId": evidence_id,
+                 "batchCommit": candidate, "createdAt": evidence["createdAt"]}
+        manifest.setdefault("deferredIssues", []).append(issue)
+        batch.update({"status": "deferred", "activeStage": None})
+        manifest["status"] = "running"
+        manifest.pop("finalEvidenceAggregate", None)
+        save_manifest(workspace, feature, run_id, manifest)
+    append_event(workspace, feature, run_id, "e2e_failure_recorded", issueId=issue_id, evidenceId=evidence_id)
+    return {"success": True, "batchId": "V-E2E", "status": "deferred", "e2eStatus": "failed", "issue": issue, "reused": False}
 
 
 def next_stage(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
@@ -412,6 +523,10 @@ def complete_stage(
             raise ValueError("utest_stop_requires_asset_seal_before_closure")
         attempt = int(state.get("attempt", 0))
         inputs = _stage_input(manifest, batch, stage, metadata)
+        if stage == "prepare" and inputs.get("commitScope") == "repository_base" and not batch.get("startSha"):
+            # Legacy direct runs do not freeze dispatch's startSha. Preserve
+            # the preparation binding separately without changing recovery.
+            batch["preparationBaseSha"] = inputs["batchCommit"]
         evidence_id = f"STAGE-{batch_id}-{stage.upper()}-{attempt:03d}"
         evidence = {
             "evidenceId": evidence_id,
@@ -788,7 +903,7 @@ def record_test_failure(
 
     This is the terminal escape hatch for an exhausted test/environment retry
     budget. It keeps the evidence and lets this delivery continue as an
-    explicitly unverified candidate. The final B-E2E remains mandatory and
+    explicitly unverified candidate. Final B-E2E execution/result recording remains mandatory and
     the deferred UTest finding remains visible in the run result.
     """
     if failure_type not in FAILURE_NEXT_STAGE:
