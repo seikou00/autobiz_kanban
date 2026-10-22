@@ -16,6 +16,15 @@ integration branch/worktree, all Batch promotions target that integration
 checkout, and final verification ends at user confirmation.
 The launcher returns `review_integration_and_confirm_promotion` for a retained
 or reviewable result; do not restart the Workflow or report a Plan error.
+Before asking for final approval, the main agent must send a visible message
+listing each repository's baseline branch/SHA, `gitRoot`, and actual
+`targetWorktreePath`, followed by the integration `worktreePath`, branch/SHA,
+diff, validation findings, and `mainPromotion.reportPath`. Tell the user which
+directory to open to inspect baseline code and which to open for the proposed
+code. A null `targetWorktreePath` means the baseline branch is not checked out;
+direct the user to that branch in the repository's Git view, without switching
+their checkout. Run `prepare` first if an older report lacks these locations.
+Show these paths in the conversation before opening the confirmation question.
 Never call the final `promote` command without the user's explicit approval of
 the concrete report and its `approvalDigest`. See
 [`docs/feature-integration-worktree.md`](../../../../docs/feature-integration-worktree.md)

@@ -44,6 +44,8 @@ Git 2.20 可使用最终合入入口。读取目标分支的 Worktree 登记时�
 - 历史 run 若因聚合校验失败停在 `blocked` 且已有聚合报告，可直接调用下文 `prepare`；插件重新生成审计报告后准备确认，不重跑 Batch 或 E2E。原 stage Evidence 保留。读取状态或持久化报告失败时仍须先解决该执行错误。
 - 固定 Workflow 从不调用 `promote`，也不把阶段成功视为用户同意。Agent 必须展示实际分支、SHA、变更及验证结果，等待用户明确同意后才执行最终合并。
 
+最终确认前，主 Agent 必须先在对话中展示代码位置，再发起确认提问。`mainPromotion.snapshot.repositories` 的每个物理仓库包含源仓库绝对路径 `gitRoot`、基线分支 `targetBranch` 与 `targetSha`、基线分支实际检出的绝对路径 `targetWorktreePath`，以及待合入成果的集成路径 `worktreePath`、分支 `branchName` 与 `candidateSha`。告诉用户在 IDE/文件管理器中打开哪个目录查看基线、哪个目录查看新代码，并展示变更、验证问题和 `mainPromotion.reportPath` 指向的报告。基线分支未检出时 `targetWorktreePath=null`，应明确说明可在 `gitRoot` 的 Git 分支视图查看基线，不能将当前检出的其他分支当作基线，也不自动切换分支。旧报告缺少这些字段时先重新 `prepare`，再展示并确认。提问位于固定 Workflow 返回后的主 Agent，已取得同一份有效报告明确授权时不重复提问。
+
 ## 最终确认命令
 
 以下命令中的 workspace 为 artifact workspace；run-id 必须复用返回的 runId。

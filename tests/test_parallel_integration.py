@@ -177,7 +177,18 @@ class ParallelIntegrationTest(unittest.TestCase):
         self.assertEqual(get_active_run(self.workspace, "alpha"), self.run_id)
         with self.assertRaisesRegex(ValueError, "unpromoted_cleanup"):
             cleanup_run(self.workspace, "alpha", self.run_id, force=True)
-        approval = self.prepare()
+        prepared = prepare_promotion(self.workspace, "alpha", self.run_id)
+        promotion = prepared["mainPromotion"]
+        repository = promotion["snapshot"]["repositories"]["default"]
+        self.assertEqual(repository["gitRoot"], str(self.source.resolve()))
+        self.assertEqual(repository["targetWorktreePath"], str(self.source.resolve()))
+        self.assertEqual(repository["targetBranch"], "main")
+        self.assertEqual(repository["targetSha"], self.baseline)
+        self.assertEqual(repository["worktreePath"], str(self.integration))
+        self.assertEqual(repository["candidateSha"], candidate["candidateSha"])
+        self.assertEqual(promotion["reportPath"], prepared["reportPath"])
+        self.assertEqual(json.loads(Path(promotion["reportPath"]).read_text()), promotion)
+        approval = promotion["approvalDigest"]
         with self.assertRaisesRegex(ValueError, "explicit_user_confirmation"):
             self.promote(approval)
         self.assertTrue(self.promote(approval, confirm=True)["success"])
@@ -461,7 +472,6 @@ class ParallelIntegrationTest(unittest.TestCase):
         self.create()
         candidate = self.deliver()
         self.validate()
-        approval = self.prepare()
         original = subprocess.run
         listed = []
 
@@ -476,6 +486,9 @@ class ParallelIntegrationTest(unittest.TestCase):
             return original(argv, **kwargs)
 
         with patch("subprocess.run", side_effect=old_git):
+            approval = self.prepare()
+            repository = self.manifest()["mainPromotion"]["snapshot"]["repositories"]["default"]
+            self.assertEqual(repository["targetWorktreePath"], str(self.source.resolve()))
             self.assertTrue(self.promote(approval, confirm=True)["success"])
         self.assertTrue(any("-z" in argv for argv in listed))
         self.assertTrue(any("-z" not in argv for argv in listed))
@@ -558,6 +571,10 @@ class ParallelIntegrationTest(unittest.TestCase):
         git(self.source, "switch", "main")
         (self.source / "untracked.txt").write_text("user work\n")
         approval = self.prepare()
+        repository = self.manifest()["mainPromotion"]["snapshot"]["repositories"]["default"]
+        self.assertEqual(repository["gitRoot"], str(self.source.resolve()))
+        self.assertEqual(repository["targetBranch"], "feature/development")
+        self.assertIsNone(repository["targetWorktreePath"])
         self.promote(approval, confirm=True)
         self.assertEqual(git(self.source, "rev-parse", "feature/development"), candidate["candidateSha"])
         self.assertEqual(git(self.source, "rev-parse", "main"), self.baseline)
@@ -567,6 +584,24 @@ class ParallelIntegrationTest(unittest.TestCase):
         self.assertEqual(cleaned["status"], "cleaned", cleaned)
         self.assertFalse(self.integration.exists())
         self.assertEqual(git(self.source, "symbolic-ref", "--short", "HEAD"), "main")
+
+    def test_promotion_report_locates_baseline_in_another_worktree(self):
+        self.create()
+        candidate = self.deliver()
+        self.validate()
+        git(self.source, "switch", "-c", "user-current")
+        target = self.source.parent / "基线 checkout"
+        git(self.source, "worktree", "add", str(target), "main")
+        approval = self.prepare()
+        repository = self.manifest()["mainPromotion"]["snapshot"]["repositories"]["default"]
+        self.assertEqual(repository["gitRoot"], str(self.source.resolve()))
+        self.assertEqual(repository["targetWorktreePath"], str(target.resolve()))
+        self.assertEqual(git(target, "rev-parse", "HEAD"), repository["targetSha"])
+        self.assertEqual(git(self.source, "symbolic-ref", "--short", "HEAD"), "user-current")
+        self.assertFalse((target / "delivery.txt").exists())
+        self.promote(approval, confirm=True)
+        self.assertEqual(git(target, "rev-parse", "HEAD"), candidate["candidateSha"])
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
 
     def test_initialization_interruption_keeps_isolated_mode_and_reuses_run(self):
         git(self.source, "switch", "-c", "original-work")

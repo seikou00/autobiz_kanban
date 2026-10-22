@@ -3076,7 +3076,8 @@ if (verification.integrationMode === "isolated") {
   try {
     const promotion = requireSuccess(await workflowAgent(
       `执行 python -X utf8 "${joinPath(pluginPath, "hooks/parallel_integration.py")}" prepare --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-      `只准备可审阅的最终合并报告和 approvalDigest，不得执行 promote、修改主分支或替用户确认。完整返回 JSON。`,
+      `只准备可审阅的最终合并报告和 approvalDigest，不得执行 promote、修改主分支或替用户确认。` +
+      `完整返回 JSON，保留 mainPromotion.reportPath 和 snapshot.repositories 内各仓库的 gitRoot、targetWorktreePath、targetBranch、targetSha、worktreePath、branchName、candidateSha，供主 Agent 先展示代码查看位置再发起确认提问。`,
       { label: "prepare-user-confirmed-promotion", phase: "最终验证" }
     ), "prepare main promotion");
     verification.mainPromotion = promotion.mainPromotion;

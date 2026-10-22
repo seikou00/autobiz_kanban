@@ -357,6 +357,13 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 `merged` 只表示 Batch 已集成。最终 E2E 结果登记并生成 evidence aggregate 报告后，固定 Workflow 返回 `awaiting_user_confirmation` 与 `mainPromotion` 报告。聚合采用 report-only 策略：校验未通过仍保留 `passed=false`、完整 `errors` 和 deferred 问题，继续准备确认报告，不改写旧证据、不反复重跑测试、不描述为验证通过。展示 `validationStatus`、`evidencePassed`、`evidenceErrors` 和测试结果，让用户确认具体问题及候选提交；Batch 未交付、实际提交未进入候选、未解决冲突或确认过期仍阻断合入。历史 run 若因聚合失败处于 blocked 且已有报告，可调用 `parallel_integration.py prepare` 刷新审计并准备报告，不重跑 Batch/E2E。launcher 的 `review_integration_and_confirm_promotion` 表示展示集成 Worktree、分支、SHA、diff 和验证结果并等待用户明确确认，不能当作 Plan 错误或重新启动 Workflow，也不能自动合入基线分支。仅在用户确认具体报告后，才通过 `parallel_integration.py promote --approval-digest <报告原值> --approved-by <用户标识> --confirm` 合入启动时冻结的基线分支；用户暂不合入时调用 `keep`，保留成果。基线分支或集成提交变化后必须重新准备和确认。`mainPromotion`、`sync-main` 是兼容接口名，不限定目标分支名。`integration_sync_conflicted` 时按插件返回的准确冲突路径处理，再调用 `complete-sync` 并恢复最终验证。完整配置、命令和恢复规则见 [需求集成 Worktree](../../../docs/feature-integration-worktree.md)。本段优先于下文旧 direct 模式的主分支、bootstrap 描述。
 
+**最终合入确认必须先展示位置，再提问。** 固定 Workflow 返回后，由主 Agent 按以下顺序执行，子 Agent 不在 Workflow 内提问：
+
+1. 若尚未 prepare，或旧报告缺少以下定位字段，先调用 `parallel_integration.py prepare`。使用本次返回的 `mainPromotion`，不猜测业务仓库路径，不把 artifact workspace 当作代码目录。
+2. 在对话中先发送一条用户可见消息，逐仓库列出 `snapshot.repositories` 的基线分支 `targetBranch`、基线 SHA `targetSha`、源仓库绝对路径 `gitRoot`，以及基线分支实际检出的位置 `targetWorktreePath`。明确告诉用户可在 IDE/文件管理器打开哪个目录查看基线代码；若 `targetWorktreePath=null`，说明该基线分支当前未检出，应在 `gitRoot` 的 Git 分支视图查看该分支，不能声称源目录当前展示的就是基线代码，也不要自动切换用户分支。
+3. 同一消息中展示待合入成果的绝对路径 `worktreePath`、集成分支 `branchName`、候选 SHA `candidateSha`、变更摘要和验证问题，并给出 `mainPromotion.reportPath`，告诉用户可打开集成目录查看新代码、打开报告查看合入详情。路径必须作为可复制的完整路径展示；平台支持本地文件链接时同时提供链接。不得只把这些位置留在工具 JSON、日志或提问框中。
+4. 展示完成后再使用平台提问工具，请用户选择“合入上述基线分支”或“暂不合入，保留成果”。用户确认绑定刚展示的报告及 `approvalDigest`。已有同一份有效报告的明确授权时，展示位置后直接按授权执行，无需重复提问。
+
 当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。每个可写 Batch 先由插件调用 `worktree_manager.py provision`，从对应物理 Git 根的冻结提交创建并登记原生 linked Git worktree；平台 `agent()` 只负责在该明确路径中运行实现，不提供也不承担 Worktree 隔离。插件负责 Worktree 的创建、校验、提交、合并和清理。不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
 
 使用 Code 入口已取得的看板 ID 调用 launcher，不在此处再次提问：

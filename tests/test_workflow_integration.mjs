@@ -49,7 +49,11 @@ async function finalize({ isolated = true, syncFailure = false, prepareFailure =
             e2eStatus: e2eFailure || beginFailure ? "failed" : "passed",
             hasDeferredIssues: Boolean(e2eFailure || beginFailure), deferredIssues: e2eFailure || beginFailure ? [issue] : [] };
         case "prepare-user-confirmed-promotion":
-          return { success: !prepareFailure, mainPromotion: { status: "prepared", approvalDigest: "review-this" } };
+          return { success: !prepareFailure, mainPromotion: { status: "prepared", approvalDigest: "review-this",
+            reportPath: "/artifacts/main-promotion.json", snapshot: { repositories: {
+              default: { gitRoot: "/source", targetWorktreePath: "/baseline", targetBranch: "release",
+                targetSha: "baseline", worktreePath: "/integration", branchName: "integration", candidateSha: "candidate" },
+            } } } };
         default:
           throw new Error(`unexpected command ${options.label}`);
       }
@@ -63,6 +67,8 @@ test("isolated finalization validates integration and stops at user confirmation
   const { result, commands } = await finalize();
   assert.equal(result.finalStatus, "awaiting_user_confirmation");
   assert.equal(result.verification.mainPromotion.approvalDigest, "review-this");
+  assert.equal(result.verification.mainPromotion.reportPath, "/artifacts/main-promotion.json");
+  assert.equal(result.verification.mainPromotion.snapshot.repositories.default.targetWorktreePath, "/baseline");
   assert.deepEqual(commands.map(command => command.label), [
     "sync-main-into-integration", "begin-e2e-validation", "run-e2e-validation",
     "aggregate-staged-evidence", "prepare-user-confirmed-promotion",

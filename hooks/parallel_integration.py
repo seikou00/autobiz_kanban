@@ -188,7 +188,10 @@ def _snapshot(manifest: dict) -> dict:
         ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", target, candidate], cwd=repo, capture_output=True)
         if ancestor.returncode:
             raise ValueError(f"integration_main_sync_required:{ref}")
+        target_worktree = _target_worktree(repo, binding["baseBranch"])
         repositories[ref] = {"targetBranch": binding["baseBranch"], "targetSha": target, "candidateSha": candidate,
+                             "gitRoot": str(Path(binding["gitRoot"]).resolve()),
+                             "targetWorktreePath": str(target_worktree.resolve()) if target_worktree is not None else None,
                              "branchName": binding["integration"]["branchName"], "worktreePath": str(repo),
                              "diffStat": git(repo, "diff", "--stat", target, candidate),
                              "diffDigest": digest(git(repo, "diff", "--binary", target, candidate))}
@@ -224,10 +227,11 @@ def prepare_promotion(workspace: Path, feature: str, run_id: str) -> dict:
         _assert_plan(workspace, feature, manifest)
         snapshot = _snapshot(manifest)
         approval = digest(snapshot)
-        manifest["mainPromotion"] = {"status": "prepared", "approvalDigest": approval, "snapshot": snapshot, "preparedAt": utc_now()}
+        path = run_dir(workspace, feature, run_id) / "main-promotion.json"
+        manifest["mainPromotion"] = {"status": "prepared", "approvalDigest": approval, "snapshot": snapshot,
+                                     "reportPath": str(path), "preparedAt": utc_now()}
         manifest["status"] = "promotion_prepared"
         save_manifest(workspace, feature, run_id, manifest)
-        path = run_dir(workspace, feature, run_id) / "main-promotion.json"
         atomic_write_json(path, manifest["mainPromotion"])
         return {"success": True, "runId": run_id, "status": manifest["status"], "reportPath": str(path), **promotion_view(manifest)}
 
