@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 """通过 collect-knowledge.js 恢复 session_context_inject JSON。
 
-本脚本是 ``render_session_context.py`` 之上的兼容适配层，不修改旧加载器：
+本脚本是 ``render_session_context.py`` 之上的兼容适配层：
 
 1. 检查 collector 同目录的 ``node_modules/gray-matter`` 关键文件，缺失时执行 ``npm install``；
 2. 调用 ``node collect-knowledge.js --listDeployUnits --knowledgePath <path>``；
 3. 对选中的 deployUnit 调用 ``--deployUnit <id>``；
 4. 将返回 JSON 的 ``systemPrompt`` 放入原有 ``sessionContext`` 契约；
-5. 列表接口不可用时，整次调用委托给旧 ``render_session_context.render``。
+5. 列表接口不可用时，整次调用委托给旧 ``render_session_context.render``；
+6. 单元未在 collector 列表中或正文接口失败时，先按清单映射加载，再回退本地文件。
 
 ``--list-supported-deploy-ids`` 独立返回 collector 和
 ``<knowledgePath>/agents.manifest.json`` 中部署单元 ID 的去重 JSON 数组。
 一个来源不可用时返回另一个来源；两个来源都不可用时输出空数组并以状态码 1 退出。
 
-部署单元接口失败时仍可回退到 ``<localRepoPath>/AGENTS.md``。除入参 JSON
+清单映射也不可用时仍可回退到 ``<localRepoPath>/AGENTS.md``。除入参 JSON
 非法外，外部接口故障不会中断会话。
 
 各阶段的开始、结束和耗时输出到 stderr，stdout 保持原有 JSON 契约。
@@ -41,9 +42,12 @@ if str(ROOT) not in sys.path:
 
 from hooks.agents_repo import (  # noqa: E402
     AgentsManifestError,
+    DeployUnit,
     MANIFEST_NAME,
+    SystemEntry,
     display_path_join,
     get_agents_root,
+    index_unit_pairs,
     load_manifest,
 )
 from hooks.render_session_context import (  # noqa: E402
@@ -54,10 +58,13 @@ from hooks.render_session_context import (  # noqa: E402
     _build_workspace_content,
     _compose_prompt,
     _domain_context_status,
+    _fill_plugin_root,
     _heading_slug,
     _norm_path,
     _parse_selected,
     _read_nonempty,
+    _ref_for,
+    _resolve_one,
     _session_runtime_policy,
     _unit_heading_label,
     _workspace_binding,
@@ -421,6 +428,7 @@ def _legacy_result(
     project: Optional[str],
     feature: Optional[str],
     board_config_path: Optional[Path],
+    knowledge_path: str,
 ) -> dict:
     _timing_log("legacy.render", "fallback", reason)
     result = _timed_call(
@@ -434,6 +442,7 @@ def _legacy_result(
         project=project,
         feature=feature,
         board_config_path=board_config_path,
+        knowledge_root=Path(knowledge_path),
     )
     old_message = str(result.get("message", "") or "")
     prefix = f"collector 不可用，已回退旧逻辑: {_short_error(reason)}"
@@ -456,12 +465,13 @@ def _resolve_unit(
     knowledge_path: str,
     platform: Optional[str],
     node_command: str,
-) -> Tuple[dict, Optional[Path], Optional[str]]:
+    manifest_pair: Optional[Tuple[SystemEntry, DeployUnit]] = None,
+) -> Tuple[dict, Optional[Path], Optional[str], Optional[dict]]:
     uid = selected["deployUnitId"]
     collector_error = ""
     if uid not in supported_units:
         similar = _similar_units(uid, supported_units)
-        collector_error = "deployUnit 不在知识库列表中: {}（列表共 {} 个{}）".format(
+        collector_error = "collector 文档头未匹配 deployUnit: {}（列表共 {} 个{}）".format(
             uid, len(supported_units),
             "，相近: " + ", ".join(similar) if similar else "",
         )
@@ -486,7 +496,49 @@ def _resolve_unit(
                 },
                 None,
                 prompt,
+                None,
             )
+
+    # collector 的 header 覆盖集合并非发布单元全集；清单映射是独立的知识来源。
+    system_section = None
+    if manifest_pair is not None:
+        system, unit = manifest_pair
+        root = Path(knowledge_path)
+        _timing_log("unit.{}".format(uid), "manifest_fallback", collector_error)
+        system_status, system_path, system_content = _resolve_one(
+            uid, system.agents_relpath(), "",
+            plugin_root=None, platform=platform, allow_local_fallback=False,
+            knowledge_root=root,
+        )
+        if system_content is not None:
+            title = system.system_id
+            if system.system_name:
+                title += f"（{system.system_name}）"
+            system_section = {
+                "systemId": system.system_id,
+                "title": title,
+                "path": system_path,
+                "content": _fill_plugin_root(
+                    system_content, plugin_root=None, platform=platform, knowledge_root=root,
+                ),
+            }
+        if unit.agents_rel:
+            status, unit_path, content = _resolve_one(
+                uid, unit.agents_rel, "",
+                plugin_root=None, platform=platform, allow_local_fallback=False,
+                knowledge_root=root,
+            )
+            if content is not None:
+                content = _fill_plugin_root(
+                    content, plugin_root=None, platform=platform, knowledge_root=root,
+                )
+        else:
+            # 没有独立单元文档时，所属系统知识即为该单元的清单加载结果。
+            status, unit_path, content = system_status, None, None
+        if status["loaded"]:
+            status["message"] = f"已回退 agents.manifest.json: {collector_error}"
+            return status, unit_path, content, system_section
+        collector_error += "；agents.manifest.json 对应知识文件未找到或为空"
 
     _timing_log("unit.{}".format(uid), "local_fallback", collector_error)
     local_repo = selected.get("localRepoPath", "")
@@ -509,6 +561,7 @@ def _resolve_unit(
             },
             local_path,
             local_content,
+            system_section,
         )
     return (
         {
@@ -520,6 +573,7 @@ def _resolve_unit(
         },
         None,
         None,
+        system_section,
     )
 
 
@@ -539,7 +593,7 @@ def render(
     node_command: str = "node",
     npm_command: str = "npm",
 ) -> dict:
-    """使用新接口渲染；接口不可用时委托旧 renderer。"""
+    """collector 优先；未命中的单元按清单映射加载，最后回退本地。"""
     if not selected:
         return _timed_call(
             "legacy.render(empty_selection)", render_legacy,
@@ -590,18 +644,23 @@ def render(
             project=project,
             feature=feature,
             board_config_path=board_config_path,
+            knowledge_path=resolved_knowledge_path,
         )
 
     duplicate_unit_ids: set[str] = set()
     manifest_path = Path(resolved_knowledge_path) / MANIFEST_NAME
+    pairs = {}
     try:
-        load_manifest(
+        manifest = load_manifest(
             duplicate_unit_ids=duplicate_unit_ids,
             manifest_path=manifest_path,
         )
+        pairs = index_unit_pairs(manifest)
+        for uid in duplicate_unit_ids:
+            pairs.pop(uid, None)
     except AgentsManifestError as exc:
         duplicate_unit_ids.clear()
-        _timing_log("manifest.duplicates", "warning", str(exc))
+        _timing_log("manifest.load", "warning", str(exc))
 
     agent_config = _agent_config(
         _timed_call(
@@ -622,9 +681,11 @@ def render(
         "workspace.domain", _build_domain_context, session_workspace_path,
     )
     load_status: List[dict] = []
+    system_sections: List[dict] = []
+    system_loaded: Set[str] = set()
     unit_sections: List[dict] = []
     unit_has_section: Set[str] = set()
-    seen_local_paths: Set[Path] = set()
+    seen_paths: Set[Path] = set()
 
     for item in selected:
         if item["deployUnitId"] in duplicate_unit_ids:
@@ -638,7 +699,7 @@ def render(
             load_status.append(status)
             _timing_log("unit.{}".format(item["deployUnitId"]), "result", status["message"])
             continue
-        status, local_path, content = _timed_call(
+        status, content_path, content, system_section = _timed_call(
             "unit.{}.resolve".format(item["deployUnitId"]), _resolve_unit,
             item,
             supported_units=supported_units,
@@ -646,24 +707,31 @@ def render(
             knowledge_path=resolved_knowledge_path,
             platform=platform,
             node_command=node_command,
+            manifest_pair=pairs.get(item["deployUnitId"]),
         )
         load_status.append(status)
         _timing_log("unit.{}".format(item["deployUnitId"]), "result",
                     "source={} loaded={} path={} {}".format(
                         status["source"], status["loaded"], status["path"], status["message"],
                     ), limit=DIAGNOSTIC_LOG_LIMIT)
+        if system_section is not None:
+            key = _norm_path(system_section["path"])
+            if system_section["systemId"] not in system_loaded and key not in seen_paths:
+                system_sections.append(system_section)
+                system_loaded.add(system_section["systemId"])
+                seen_paths.add(key)
         if content is None:
             continue
-        if local_path is not None:
-            key = _norm_path(local_path)
-            if key in seen_local_paths:
+        if content_path is not None:
+            key = _norm_path(content_path)
+            if key in seen_paths:
                 continue
-            seen_local_paths.add(key)
+            seen_paths.add(key)
         uid = item["deployUnitId"]
         unit_sections.append(
             {
                 "deployUnitId": uid,
-                "ref": item.get("description", ""),
+                "ref": _ref_for(pairs.get(uid), item),
                 "content": content,
             }
         )
@@ -671,7 +739,7 @@ def render(
 
     if workspace_content is not None:
         workspace_path = Path((session_workspace_path or "").strip()) / WORKSPACE_AGENTS_MD
-        if _norm_path(workspace_path) in seen_local_paths:
+        if _norm_path(workspace_path) in seen_paths:
             workspace_content = None
 
     bindings: List[dict] = []
@@ -679,24 +747,27 @@ def render(
         bindings.append(_workspace_binding(session_workspace_path))
     for item in selected:
         uid = item["deployUnitId"]
-        ref = item.get("description", "")
+        pair = pairs.get(uid)
+        ref = _ref_for(pair, item)
+        if uid in unit_has_section:
+            anchor = _heading_slug(_unit_heading_label(uid, ref))
+        elif pair is not None and pair[0].system_id in system_loaded:
+            anchor = f"sys-{pair[0].system_id}"
+        else:
+            anchor = ""
         bindings.append(
             {
                 "deployUnitId": uid,
                 "ref": ref,
                 "localRepoPath": item.get("localRepoPath", ""),
-                "anchor": (
-                    _heading_slug(_unit_heading_label(uid, ref))
-                    if uid in unit_has_section
-                    else ""
-                ),
+                "anchor": anchor,
             }
         )
 
     prompt = _timed_call(
         "context.compose", _compose_prompt,
         bindings,
-        [],
+        system_sections,
         workspace_content,
         unit_sections,
         domain_context,

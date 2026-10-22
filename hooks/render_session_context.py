@@ -104,7 +104,9 @@ if str(ROOT) not in sys.path:
 
 from hooks.agents_repo import (  # noqa: E402
     AgentsManifestError,
+    MANIFEST_NAME,
     Manifest,
+    _safe_join,
     display_path_join,
     get_agents_root,
     get_manifest_path,
@@ -484,14 +486,18 @@ def _fill_plugin_root(
     *,
     plugin_root: Optional[Path],
     platform: Optional[str] = None,
+    knowledge_root: Optional[Path] = None,
 ) -> str:
-    """把正文里的 ``{plugin_root}`` 占位符替换为知识库根目录绝对路径。
+    """把正文里的 ``{plugin_root}`` 替换为显式知识库根目录或默认的 plugin_root/sys。
 
     无占位符时原样返回。
     """
     if PLUGIN_ROOT_PLACEHOLDER not in content:
         return content
-    root_dir = display_path_join(get_agents_root(plugin_root), platform=platform)
+    root_dir = display_path_join(
+        knowledge_root if knowledge_root is not None else get_agents_root(plugin_root),
+        platform=platform,
+    )
     platform_text = (platform or sys.platform).strip().lower()
     if not platform_text.startswith("win"):
         return content.replace(PLUGIN_ROOT_PLACEHOLDER, root_dir)
@@ -518,9 +524,11 @@ def _resolve_one(
     plugin_root: Optional[Path],
     platform: Optional[str] = None,
     allow_local_fallback: bool = True,
+    knowledge_root: Optional[Path] = None,
 ) -> Tuple[dict, Optional[Path], Optional[str]]:
     """一个 md 文件：remote 优先 →（可选）local 兜底 → 都无则 loaded:false。
 
+    ``knowledge_root`` 可覆盖默认的 plugin_root/sys，不影响插件自身配置路径。
     ``allow_local_fallback=False`` 时只认 remote：系统级 AGENTS.md 用此模式——本机不知道用户
     把系统级文件放在哪，不能拿 ``<localRepoPath>/AGENTS.md``（那是单元级兜底）冒名顶替，
     remote 缺失就直接报 remote 未命中，不走 local。
@@ -529,8 +537,17 @@ def _resolve_one(
     """
     # ① remote：清单里有该路径 且 sys/ 下文件存在 → 用 remote，忽略 local。
     if rel_in_manifest:
+        remote_display = (
+            display_path_join(knowledge_root, rel_in_manifest, platform=platform)
+            if knowledge_root is not None
+            else sys_abs_display(rel_in_manifest, plugin_root, platform=platform)
+        )
         try:
-            abs_path = sys_abspath(rel_in_manifest, plugin_root)
+            abs_path = (
+                _safe_join(knowledge_root, rel_in_manifest)
+                if knowledge_root is not None
+                else sys_abspath(rel_in_manifest, plugin_root)
+            )
         except AgentsManifestError:
             abs_path = None  # 路径非法（穿越/绝对）：当作 remote 取不到，转 local 兜底。
         if abs_path is not None:
@@ -538,7 +555,7 @@ def _resolve_one(
             if content is not None:
                 status = {
                     "deployUnitId": owner_uid,
-                    "path": sys_abs_display(rel_in_manifest, plugin_root, platform=platform),
+                    "path": remote_display,
                     "loaded": True,
                     "source": "remote",
                     "message": "",
@@ -550,7 +567,7 @@ def _resolve_one(
         status = {
             "deployUnitId": owner_uid,
             "path": (
-                sys_abs_display(rel_in_manifest, plugin_root, platform=platform)
+                remote_display
                 if rel_in_manifest
                 else ""
             ),
@@ -849,6 +866,7 @@ def render(
     project: Optional[str] = None,
     feature: Optional[str] = None,
     board_config_path: Optional[Path] = None,
+    knowledge_root: Optional[Path] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
     agent_config = _agent_config(
@@ -897,12 +915,20 @@ def render(
             "agentConfig": agent_config,
         }
 
+    manifest_path = (
+        knowledge_root / MANIFEST_NAME
+        if knowledge_root is not None else get_manifest_path(plugin_root)
+    )
     # 重复的 deployUnitId 只影响该 ID；清单其余条目仍可供会话加载。
     duplicate_unit_ids: set[str] = set()
     # 清单不可用（缺失/其他非法结构）时降级：所有单元当作未命中，直接走 local 兜底。
     manifest: Optional[Manifest]
     try:
-        manifest = load_manifest(plugin_root, duplicate_unit_ids=duplicate_unit_ids)
+        manifest = load_manifest(
+            plugin_root,
+            duplicate_unit_ids=duplicate_unit_ids,
+            manifest_path=manifest_path,
+        )
     except AgentsManifestError:
         manifest = None
         duplicate_unit_ids.clear()
@@ -934,7 +960,7 @@ def render(
         if uid in duplicate_unit_ids:
             load_status.append({
                 "deployUnitId": uid,
-                "path": display_path_join(get_manifest_path(plugin_root), platform=platform),
+                "path": display_path_join(manifest_path, platform=platform),
                 "loaded": False,
                 "source": "remote",
                 "message": f"agents.manifest.json 中 deployUnitId 重复: {uid}",
@@ -951,12 +977,14 @@ def render(
                 _status, abs_path, content = _resolve_one(
                     uid, system.agents_relpath(), local,
                     plugin_root=plugin_root, platform=platform, allow_local_fallback=False,
+                    knowledge_root=knowledge_root,
                 )
                 if content is not None:
                     content = _fill_plugin_root(
                         content,
                         plugin_root=plugin_root,
                         platform=platform,
+                        knowledge_root=knowledge_root,
                     )
                     title = system.system_id
                     if system.system_name:
@@ -974,6 +1002,7 @@ def render(
                     local,
                     plugin_root=plugin_root,
                     platform=platform,
+                    knowledge_root=knowledge_root,
                 )
                 load_status.append(status)
                 if content is not None:
@@ -981,6 +1010,7 @@ def render(
                         content,
                         plugin_root=plugin_root,
                         platform=platform,
+                        knowledge_root=knowledge_root,
                     )
                     if _append_body(
                         abs_path,
@@ -991,7 +1021,8 @@ def render(
         else:
             # 未命中清单：只走 local 兜底（rel 为空）；引用范围用 UI 传入的 description。
             status, abs_path, content = _resolve_one(
-                uid, "", local, plugin_root=plugin_root, platform=platform
+                uid, "", local, plugin_root=plugin_root, platform=platform,
+                knowledge_root=knowledge_root,
             )
             load_status.append(status)
             if content is not None and _append_body(
