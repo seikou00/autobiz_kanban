@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only completion gate for the staged parallel pipeline.
+"""Evidence audit for the staged parallel pipeline.
 
 No build or test command is executed here. The aggregate validates existing
 evidence against the Plan revision and commit bindings; read-only Git queries
@@ -49,6 +49,45 @@ def _dependency_snapshot(manifest: dict[str, Any], batch: dict[str, Any]) -> dic
             if isinstance(sha, str) and sha:
                 result[str(dependency)] = sha
     return result
+
+
+def repository_heads(manifest: dict[str, Any]) -> dict[str, str]:
+    return {ref: binding.get("headSha") for ref, binding in manifest.get("repositories", {}).items()
+            if isinstance(binding, dict)}
+
+
+def evidence_state_digest(manifest: dict[str, Any]) -> str:
+    """Bind approval to the audit inputs, including missing/corrupt files.
+
+    A failed audit may be accepted by the user, but changing evidence after
+    that report requires a fresh report and confirmation.
+    """
+    batches = {}
+    for scope in ("batches", "validationBatches"):
+        for batch_id, batch in (manifest.get(scope) or {}).items():
+            if not isinstance(batch, dict):
+                batches[f"{scope}/{batch_id}"] = batch
+                continue
+            stages = {}
+            for stage, state in (batch.get("stageStates") or {}).items():
+                if not isinstance(state, dict):
+                    stages[stage] = state
+                    continue
+                path = state.get("evidencePath")
+                try:
+                    file_digest = hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else None
+                except (OSError, TypeError, ValueError):
+                    file_digest = None
+                stages[stage] = dict(state)
+                stages[stage]["fileDigest"] = file_digest
+            batches[f"{scope}/{batch_id}"] = {
+                **{key: batch.get(key) for key in ("status", "commitSha", "mergeCommitSha", "startSha",
+                                                   "preparationBaseSha", "candidateSha", "dependencies", "type",
+                                                   "executionLane", "validationStage", "repositoryRef", "workspaceRef", "lastSeal")},
+                "stages": stages,
+            }
+    return _digest({"batches": batches, "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
+                    "deferredIssues": manifest.get("deferredIssues", []), "mergeTrains": manifest.get("mergeTrains", {})})
 
 
 def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, Any]) -> list[str]:
@@ -126,14 +165,18 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         errors: list[str] = []
+        blocking_errors: list[str] = []
         deliveries = manifest.get("batches", {})
+        if not deliveries:
+            blocking_errors.append("delivery_batches_missing")
         for batch_id, batch in deliveries.items():
             if not isinstance(batch, dict):
-                errors.append(f"{batch_id}.invalid")
+                blocking_errors.append(f"{batch_id}.invalid")
                 continue
             if batch.get("status") != "merged" or not batch.get("mergeCommitSha"):
-                errors.append(f"{batch_id}.not_merged")
+                blocking_errors.append(f"{batch_id}.not_merged")
             errors.extend(_evidence_errors(manifest, batch_id, batch))
+        errors.extend(blocking_errors)
         validations = manifest.get("validationBatches", {})
         for validation_id in ("V-E2E",):
             batch = validations.get(validation_id) if isinstance(validations, dict) else None
@@ -182,8 +225,12 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             "runId": run_id,
             "createdAt": utc_now(),
             "mode": "evidence_aggregate_only",
+            "policy": "report_only",
             "passed": not errors,
             "errors": sorted(set(errors)),
+            "blockingErrors": sorted(set(blocking_errors)),
+            "repositoryHeads": repository_heads(manifest),
+            "evidenceStateDigest": evidence_state_digest(manifest),
             "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
             "deferredIssues": deferred_issues,
             "skippedUtests": skipped_utests(manifest),
@@ -193,21 +240,17 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
         report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)
         if report["hasBlockingDeferredIssues"]:
-            # Delivery gates must already have stopped these findings before
-            # merge.  Keep this final check as a defence against old or
-            # externally-edited manifests, rather than reporting success with
-            # known implementation defects.
+            # Preserve the original severity for review. Final audit findings
+            # are accepted only through explicit approval of this exact report.
             report["errors"] = sorted({*report["errors"], "deferred_implementation_findings_unresolved"})
             report["passed"] = False
+        report["hasIssues"] = bool(report["errors"] or report["hasDeferredIssues"])
+        report["validationStatus"] = "passed" if report["passed"] else "failed"
         manifest["finalEvidenceAggregate"] = report
         manifest["status"] = (
-            "succeeded_with_issues"
-            if report["passed"] and report["hasDeferredIssues"]
-            else "succeeded"
-            if report["passed"]
-            else "blocked"
+            "blocked" if blocking_errors else "succeeded_with_issues" if report["hasIssues"] else "succeeded"
         )
-        if report["passed"]:
+        if not blocking_errors:
             from hooks.parallel_integration import await_confirmation, promotion_view
             await_confirmation(manifest)
             report.update(promotion_view(manifest))
@@ -226,8 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = aggregate_evidence(resolve_workspace(args.workspace), resolve_feature(args.feature), args.run_id)
-        print(json.dumps({"ok": result["passed"], **result}, ensure_ascii=False, indent=2))
-        return 0 if result["passed"] else 1
+        completed = not result["blockingErrors"]
+        print(json.dumps({"ok": completed, "success": completed, **result}, ensure_ascii=False, indent=2))
+        return 0 if completed else 1
     except (ValueError, OSError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 1

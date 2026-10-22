@@ -23,7 +23,7 @@ from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, feature_dir, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import global_worktrees_root, load_manifest, plan_digest, run_dir, run_lock, save_manifest, utc_now
 from hooks.plan_json import load_plan_bundle
-from hooks.repository_snapshot import git_status_porcelain
+from hooks.repository_snapshot import git_status_porcelain, git_worktree_records
 
 PROMOTION_STATES = {"awaiting_user_confirmation", "promotion_prepared", "promoting_main", "integration_retained"}
 
@@ -143,16 +143,32 @@ def _require_ready(manifest: dict) -> None:
     if not isolated(manifest) or not manifest.get("integrationReady"):
         raise ValueError("integration_mode_required")
     report = manifest.get("finalEvidenceAggregate") or {}
-    if not report.get("passed") or report.get("hasBlockingDeferredIssues"):
+    if (report.get("policy") != "report_only" or report.get("runId") != manifest.get("runId")
+            or not isinstance(report.get("passed"), bool) or not isinstance(report.get("errors"), list)):
         raise ValueError("integration_final_validation_required")
-    if any(batch.get("status") != "merged" or not batch.get("mergeCommitSha") for batch in manifest["batches"].values()):
+    batches = manifest.get("batches") or {}
+    if (not batches or report.get("blockingErrors")
+            or any(not isinstance(batch, dict) or batch.get("status") != "merged" or not batch.get("mergeCommitSha")
+                   for batch in batches.values())):
         raise ValueError("integration_deliveries_incomplete")
-    e2e = manifest.get("validationBatches", {}).get("V-E2E", {})
-    expected = json.dumps({ref: b["headSha"] for ref, b in manifest["repositories"].items()}, sort_keys=True)
-    from hooks.parallel_batch_stage import deferred_e2e_errors
-    deferred = e2e.get("status") == "deferred" and not deferred_e2e_errors(manifest)
-    if (e2e.get("status") != "verified" and not deferred) or e2e.get("candidateSha") != expected:
-        raise ValueError("integration_e2e_commit_mismatch")
+    from hooks.parallel_evidence_aggregate import evidence_state_digest, repository_heads
+    if report.get("repositoryHeads") != repository_heads(manifest) or report.get("evidenceStateDigest") != evidence_state_digest(manifest):
+        raise ValueError("integration_evidence_report_stale")
+    # Evidence findings are advisory. Actual delivery membership in the exact
+    # candidate remains a prerequisite, independent of evidence bookkeeping.
+    for batch_id, batch in batches.items():
+        ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
+        binding = manifest.get("repositories", {}).get(ref)
+        if not isinstance(binding, dict):
+            raise ValueError(f"integration_delivery_commit_missing:{batch_id}")
+        repo = integration_repo(binding)
+        for field in ("commitSha", "mergeCommitSha"):
+            sha = batch.get(field)
+            if not isinstance(sha, str) or not sha:
+                raise ValueError(f"integration_delivery_commit_missing:{batch_id}:{field}")
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", sha, binding["headSha"]], cwd=repo, capture_output=True)
+            if ancestor.returncode:
+                raise ValueError(f"integration_delivery_commit_not_integrated:{batch_id}:{field}")
 
 
 def _assert_plan(workspace: Path, feature: str, manifest: dict) -> None:
@@ -179,6 +195,10 @@ def _snapshot(manifest: dict) -> dict:
     return {"runId": manifest["runId"], "repositories": repositories,
             "planDigest": manifest["planDigest"],
             "e2eStatus": manifest["finalEvidenceAggregate"].get("e2eStatus", "passed"),
+            "validationStatus": manifest["finalEvidenceAggregate"]["validationStatus"],
+            "evidencePassed": manifest["finalEvidenceAggregate"]["passed"],
+            "evidenceErrors": manifest["finalEvidenceAggregate"]["errors"],
+            "hasBlockingDeferredIssues": manifest["finalEvidenceAggregate"].get("hasBlockingDeferredIssues", False),
             "deferredIssues": manifest["finalEvidenceAggregate"].get("deferredIssues", []),
             "previousPromotions": [{"approvalDigest": item.get("approvalDigest"), "repositories": item.get("repositories", {})}
                                    for item in manifest.get("mainPromotionHistory", [])],
@@ -186,9 +206,20 @@ def _snapshot(manifest: dict) -> dict:
 
 
 def prepare_promotion(workspace: Path, feature: str, run_id: str) -> dict:
+    initial = load_manifest(workspace, feature, run_id)
+    report = initial.get("finalEvidenceAggregate") or {}
+    allowed = PROMOTION_STATES - {"promoting_main"}
+    # Existing blocked runs can refresh their audit without replaying Batch
+    # work or E2E. Never reset an in-progress/finished promotion this way.
+    if (isolated(initial) and initial.get("status") in allowed | {"blocked"} and report
+            and (initial.get("mainPromotion") or {}).get("status") not in {"promoting", "merged"}):
+        from hooks.parallel_evidence_aggregate import aggregate_evidence, evidence_state_digest, repository_heads
+        if (report.get("policy") != "report_only" or report.get("repositoryHeads") != repository_heads(initial)
+                or report.get("evidenceStateDigest") != evidence_state_digest(initial)):
+            aggregate_evidence(workspace, feature, run_id)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") not in PROMOTION_STATES - {"promoting_main"}:
+        if manifest.get("status") not in allowed | {"blocked"}:
             raise ValueError("integration_not_waiting_for_confirmation")
         _assert_plan(workspace, feature, manifest)
         snapshot = _snapshot(manifest)
@@ -202,12 +233,9 @@ def prepare_promotion(workspace: Path, feature: str, run_id: str) -> dict:
 
 
 def _target_worktree(repo: Path, branch: str) -> Path | None:
-    # -z preserves paths containing spaces, quotes, and non-ASCII characters.
-    records = git(repo, "worktree", "list", "--porcelain", "-z").split("\0\0")
-    for record in records:
-        fields = record.split("\0")
-        if f"branch refs/heads/{branch}" in fields:
-            return Path(next(field[9:] for field in fields if field.startswith("worktree ")))
+    for record in git_worktree_records(repo):
+        if record.get("branch") == f"refs/heads/{branch}":
+            return Path(record["worktree"])
     return None
 
 
@@ -279,7 +307,7 @@ def promote_main(workspace: Path, feature: str, run_id: str, *, approval_digest:
             results[ref] = {"status": "merged", "commitSha": item["candidateSha"], "mergedAt": utc_now()}
             save_manifest(workspace, feature, run_id, manifest)
         promotion.update({"status": "merged", "mergedAt": utc_now()})
-        manifest["status"] = "succeeded_with_issues" if manifest["finalEvidenceAggregate"].get("hasDeferredIssues") else "succeeded"
+        manifest["status"] = "succeeded_with_issues" if manifest["finalEvidenceAggregate"].get("hasIssues") else "succeeded"
         save_manifest(workspace, feature, run_id, manifest)
         return {"success": True, "runId": run_id, "status": manifest["status"], **promotion_view(manifest)}
 

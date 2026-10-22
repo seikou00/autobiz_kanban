@@ -366,6 +366,10 @@ const VERIFICATION_SCHEMA = {
     integrationWorkspaces: { type: "object", additionalProperties: true },
     mainPromotion: { type: ["object", "null"], additionalProperties: true },
     passed: { type: "boolean" },
+    policy: { const: "report_only" },
+    validationStatus: { type: "string" },
+    blockingErrors: { type: "array", items: { type: "string" } },
+    hasIssues: { type: "boolean" },
     commands: { type: "array", items: { type: "object" } },
     errorMessage: { type: "string" },
     errors: { type: "array", items: { type: "string" } },
@@ -3040,10 +3044,14 @@ let verification;
 try {
   verification = unwrap(await workflowAgent(
     `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `这是只读 evidence aggregate：禁止执行任何编译、测试或 E2E 命令。只返回 JSON。`,
+    `这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 交用户审阅，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时继续准备确认报告。原样返回 JSON。`,
     { label: "aggregate-staged-evidence", phase: "最终验证", schema: VERIFICATION_SCHEMA }
   ));
-  if (!verification || verification.unparsedStructuredOutput === true || hasFailureSignal(verification)) {
+  if (!verification || verification.unparsedStructuredOutput === true
+      || verification.ok === false || verification.success === false
+      || verification.policy !== "report_only" || typeof verification.passed !== "boolean"
+      || !Array.isArray(verification.errors) || !Array.isArray(verification.blockingErrors)
+      || verification.blockingErrors.length) {
     recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error: verification });
     return completionReport({
       finalStatus: "completed_with_validation_failure",
@@ -3081,10 +3089,11 @@ if (verification.integrationMode === "isolated") {
   }
 }
 
+const hasAuditIssues = verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
 return completionReport({
-  finalStatus: verification.hasDeferredIssues ? "succeeded_with_issues" : "succeeded",
+  finalStatus: hasAuditIssues ? "succeeded_with_issues" : "succeeded",
   scheduler: finalScheduler || lastScheduler,
   e2e,
   verification,
-  nextAction: verification.hasDeferredIssues ? "review_deferred_issues" : "completed",
+  nextAction: hasAuditIssues ? "review_validation_issues" : "completed",
 });

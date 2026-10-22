@@ -1,6 +1,6 @@
 # 需求集成 Worktree 与最终人工合并
 
-新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支。启动时的当前分支记录为基线分支，也作为最终合入目标。最终 E2E 结果登记、证据汇总通过后，run 等待用户确认；E2E 失败不阻断后续流程，作为明确的非阻断问题交给用户审阅；只有确认入口会修改基线分支。
+新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支。启动时的当前分支记录为基线分支，也作为最终合入目标。最终 E2E 结果登记、证据汇总报告生成后，run 等待用户确认；E2E 失败和聚合校验未通过均作为明确问题交给用户审阅，不阻断准备合入报告；只有确认入口会修改基线分支。
 
 ```text
 启动时的当前分支 → integration → Batch Worktrees
@@ -28,6 +28,8 @@ artifact workspace 的 `.autobiz/runtime_config.json` 可配置：
 
 没有 `integrationMode=isolated` 标记的旧 manifest 保持原来的 direct 模式。显式配置 `integrationMode=direct` 可用于兼容旧流程；切换配置不会改变已存在 run 的模式或基线。
 
+Git 2.20 可使用最终合入入口。读取目标分支的 Worktree 登记时，插件优先使用 `worktree list --porcelain -z`，仅在 Git 返回不支持选项的退出码 129 时回退到 `worktree list --porcelain`；中文、空格和引号按完整路径保留。读取失败或旧格式无法明确解析时会报错，不能当作目标分支未检出而跳过工作区检查。已停在 `promotion_prepared` 的 run，候选、目标及确认内容未变化时，更新插件后可沿用已有确认重试，无需重跑 Batch/E2E。
+
 每个物理仓库创建一个集成 Worktree。同一物理 Git 仓库的多个逻辑 workspaceRef 共用它，并同步记录集成 HEAD；对应 checkout 的当前分支和提交必须一致。多个物理仓库保留同一个 scheduler run，分别从各自当前分支创建集成 Worktree。
 
 ## 开发、验证与恢复
@@ -37,7 +39,9 @@ artifact workspace 的 `.autobiz/runtime_config.json` 可配置：
 - prepare 证据绑定 Batch 的 `startSha`，不会因集成 HEAD 推进而失效。UTest 可新增测试资产、修改 POM 的 test scope 依赖及必要 Surefire/Failsafe 配置；最终聚合读取证据提交到最终提交的真实 Git 差异，复用封存的 POM 内容校验。多次测试封存或 Batch Worktree 清理后仍可核验，既有阶段 evidence 不重写；生产代码、生产依赖和失败屏蔽配置的变更不能沿用旧 Review 证据。
 - Batch 的 `merged` 和 `mergeCommitSha` 表示已合入集成分支。`mainPromotion` 单独记录最终基线分支合并；两者不能混用。`mainPromotion`、`main-promotion.json` 和 `sync-main` 沿用现有接口名称，其中的 main 指本次 run 冻结的基线分支，不限定分支名为 `main`。
 - `cleanup-merged` 可以清理已集成的 Batch，始终保留集成 Worktree。等待确认、保留成果和基线分支同步状态都属于活动 run；launcher 返回验收入口，不重新派发 Batch。
-- 最终 E2E 在集成 SHA 对应的临时验证 Worktree 中运行。证据汇总通过后进入 `awaiting_user_confirmation`，固定 Workflow 准备 `main-promotion.json`，返回目标/集成 SHA、diff stat、diff digest、证据 digest 和 `approvalDigest`。E2E 场景失败、执行超时或环境不可用均登记为带当前集成 SHA 的失败 Evidence 和 `blocksWorkflow=false` 的问题，继续汇总；报告保留 `e2eStatus=failed` 和失败摘要，不声称测试通过、不自动创建修复 Batch。缺失、损坏或过期的证据仍需修复登记，不能直接忽略。用户确认绑定这些问题和本次实际提交。
+- 最终 E2E 在集成 SHA 对应的临时验证 Worktree 中运行。证据汇总采用 `report_only` 策略，保留真实 `passed`、全部 `errors`、`validationStatus`、deferred 问题及原严重性，不重写既有 Evidence、不自动重跑测试。报告成功持久化且所有 Batch 已集成后，校验未通过也进入 `awaiting_user_confirmation`。固定 Workflow 准备 `main-promotion.json`，返回目标/集成 SHA、diff stat、diff digest、`evidencePassed`、`evidenceErrors`、证据 digest 和 `approvalDigest`。E2E 失败仍保留 `e2eStatus=failed`，不声称测试通过。用户明确确认绑定这些问题和本次实际提交。
+- 合入仍要求 Batch 交付及 merge 提交实际包含于当前候选、集成 Worktree 干净且无未解决冲突、目标分支已同步、Plan 和确认内容未变化。报告或证据在确认后变化，必须重新准备并确认；合入带审计问题的候选后状态为 `succeeded_with_issues`。
+- 历史 run 若因聚合校验失败停在 `blocked` 且已有聚合报告，可直接调用下文 `prepare`；插件重新生成审计报告后准备确认，不重跑 Batch 或 E2E。原 stage Evidence 保留。读取状态或持久化报告失败时仍须先解决该执行错误。
 - 固定 Workflow 从不调用 `promote`，也不把阶段成功视为用户同意。Agent 必须展示实际分支、SHA、变更及验证结果，等待用户明确同意后才执行最终合并。
 
 ## 最终确认命令

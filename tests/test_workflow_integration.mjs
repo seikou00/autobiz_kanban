@@ -7,7 +7,8 @@ const source = readFileSync(new URL("../workflows/code-batched-execution.workflo
 const finalization = source.slice(source.indexOf('phase("最终验证");'));
 
 async function finalize({ isolated = true, syncFailure = false, prepareFailure = false,
-  e2eFailure = false, beginFailure = false, recordingFailure = false } = {}) {
+  e2eFailure = false, beginFailure = false, recordingFailure = false,
+  aggregateFailure = false, aggregateUnavailable = false, blockingErrors = [] } = {}) {
   const commands = [];
   const issue = { issueId: "E2E-FAILED-001", kind: "e2e_failure", blocksWorkflow: false, message: "E2E failed" };
   const context = {
@@ -41,7 +42,10 @@ async function finalize({ isolated = true, syncFailure = false, prepareFailure =
         case "record-e2e-failure":
           return { success: !recordingFailure, e2eStatus: "failed", status: "deferred", issue };
         case "aggregate-staged-evidence":
-          return { passed: true, integrationMode: isolated ? "isolated" : "direct", integrationWorkspaces: { default: "/integration" },
+          if (aggregateUnavailable) return { ok: false, error: "report could not be written" };
+          return { ok: true, passed: !aggregateFailure, policy: "report_only", blockingErrors,
+            errors: aggregateFailure ? ["B003.test_batch_commit_stale", "B007.prepare_batch_commit_stale"] : [],
+            integrationMode: isolated ? "isolated" : "direct", integrationWorkspaces: { default: "/integration" },
             e2eStatus: e2eFailure || beginFailure ? "failed" : "passed",
             hasDeferredIssues: Boolean(e2eFailure || beginFailure), deferredIssues: e2eFailure || beginFailure ? [issue] : [] };
         case "prepare-user-confirmed-promotion":
@@ -70,6 +74,29 @@ test("legacy direct finalization preserves its successful result", async () => {
   const { result, commands } = await finalize({ isolated: false });
   assert.equal(result.finalStatus, "succeeded");
   assert.equal(commands.length, 3);
+});
+
+test("failed evidence verification is retained in the report and still prepares user confirmation", async () => {
+  const { result, commands } = await finalize({ aggregateFailure: true });
+  assert.equal(result.finalStatus, "awaiting_user_confirmation");
+  assert.equal(result.verification.passed, false);
+  assert.equal(result.verification.errors.length, 2);
+  assert.equal(commands.at(-1).label, "prepare-user-confirmed-promotion");
+  assert.ok(commands.every(command => !command.prompt.includes('" promote ')));
+});
+
+test("legacy direct runs report unsuccessful evidence verification as issues", async () => {
+  const { result } = await finalize({ isolated: false, aggregateFailure: true });
+  assert.equal(result.finalStatus, "succeeded_with_issues");
+  assert.equal(result.verification.passed, false);
+});
+
+test("missing audit reports and incomplete deliveries cannot prepare a promotion", async () => {
+  for (const options of [{ aggregateUnavailable: true }, { aggregateFailure: true, blockingErrors: ["B001.not_merged"] }]) {
+    const { result, commands } = await finalize(options);
+    assert.equal(result.finalStatus, "completed_with_validation_failure");
+    assert.equal(commands.at(-1).label, "aggregate-staged-evidence");
+  }
 });
 
 test("main sync conflict stops before E2E and preserves the recovery entry", async () => {

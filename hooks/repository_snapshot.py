@@ -85,6 +85,58 @@ def current_git_branch(repo: Path) -> str | None:
     return value if completed.returncode == 0 and value else None
 
 
+def git_worktree_records(repo: Path) -> list[dict[str, str]]:
+    """Read the registry on both Git 2.20 and newer Git installations.
+
+    Prefer NUL fields for arbitrary paths. Older Git rejects that option with
+    usage exit 129; only then retry its line-based porcelain format. Capture
+    bytes so universal-newline conversion cannot change a NUL-delimited path.
+    """
+    args = ["git", "-C", str(repo), "worktree", "list", "--porcelain"]
+    result = subprocess.run([*args, "-z"], capture_output=True, check=False)
+    separator = "\0"
+    if result.returncode == 129:
+        result = subprocess.run(args, capture_output=True, check=False)
+        separator = "\n"
+    if result.returncode:
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        raise RepositorySnapshotError(f"git_worktree_list_failed:git_exit={result.returncode}:{detail}")
+    output = result.stdout.decode("utf-8", errors="surrogateescape")
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    allowed = {"worktree", "HEAD", "branch", "bare", "detached", "locked", "prunable"}
+
+    def finish() -> None:
+        if not current:
+            return
+        head = current.get("HEAD", "")
+        if (not current.get("worktree")
+                or ("bare" not in current and (len(head) not in {40, 64}
+                    or any(char not in "0123456789abcdefABCDEF" for char in head)
+                    or ("branch" in current) == ("detached" in current)))
+                or ("branch" in current and not current["branch"].startswith("refs/heads/"))):
+            raise RepositorySnapshotError("git_worktree_list_invalid:incomplete_record")
+        records.append(dict(current))
+        current.clear()
+
+    for field in output.split(separator):
+        if separator == "\n" and field.endswith("\r"):
+            field = field[:-1]
+        if not field:
+            finish()
+            continue
+        key, _, value = field.partition(" ")
+        if key not in allowed or key in current or (key != "worktree" and "worktree" not in current):
+            # Ambiguous legacy output must never look like an unregistered
+            # target branch, which would permit update-ref on its checkout.
+            raise RepositorySnapshotError("git_worktree_list_invalid:ambiguous_record")
+        current[key] = value
+    finish()
+    if not records:
+        raise RepositorySnapshotError("git_worktree_list_invalid:empty_registry")
+    return records
+
+
 def resolve_repositories(code_workspaces: Path | list[Path]) -> RepositoryMap:
     values = code_workspaces if isinstance(code_workspaces, list) else [code_workspaces]
     repositories: RepositoryMap = {}

@@ -45,7 +45,7 @@ class ParallelIntegrationTest(unittest.TestCase):
     def manifest(self):
         return load_manifest(self.workspace, "alpha", self.run_id)
 
-    def deliver(self, *, filename="delivery.txt", content="delivery\n", batch_id="B001", wave=1, utest_changes=None):
+    def deliver(self, *, filename="delivery.txt", content="delivery\n", batch_id="B001", wave=1, utest_changes=None, stage_commits=None):
         provisioned = provision_parallel_worktree(self.workspace, "alpha", self.run_id, batch_id)
         self.assertTrue(provisioned["success"], provisioned)
         worktree = Path(provisioned["worktreePath"])
@@ -67,7 +67,8 @@ class ParallelIntegrationTest(unittest.TestCase):
                 sealed = seal_parallel_batch(self.workspace, "alpha", self.run_id, batch_id, worktree, lease["ownerToken"])
                 self.assertTrue(sealed["success"], sealed)
                 commit = sealed["commitSha"]
-            complete_stage(self.workspace, "alpha", self.run_id, batch_id, stage, metadata={"batchCommit": commit})
+            complete_stage(self.workspace, "alpha", self.run_id, batch_id, stage,
+                           metadata={"batchCommit": (stage_commits or {}).get(stage, commit)})
             if stage == "test" and utest_changes:
                 release_lease(self.workspace, "alpha", self.run_id, batch_id, lease["ownerToken"], final_status="sealed")
         self.assertTrue(gate_batch(self.workspace, "alpha", self.run_id, batch_id)["success"])
@@ -231,6 +232,87 @@ class ParallelIntegrationTest(unittest.TestCase):
         for path, contents in evidence_before.items():
             self.assertEqual(Path(path).read_bytes(), contents)
 
+    def test_failed_evidence_audit_is_reported_and_requires_explicit_confirmation(self):
+        self.create()
+        candidate = self.deliver(stage_commits={"test": self.baseline})
+        begin_e2e(self.workspace, "alpha", self.run_id)
+        finish_e2e(self.workspace, "alpha", self.run_id, passed=True,
+                   metadata={"environment": {"version": "test", "seedDataDigest": "test", "dependencies": {"db": "none"}}})
+        manifest = self.manifest()
+        batch = manifest["batches"]["B001"]
+        # Model historical prepare binding drift without rewriting evidence.
+        batch["startSha"] = batch["commitSha"]
+        save_manifest(self.workspace, "alpha", self.run_id, manifest)
+        command = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / "hooks/parallel_evidence_aggregate.py"),
+            "--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run_id], capture_output=True, text=True)
+        self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+        report = json.loads(command.stdout)
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["success"])
+        self.assertFalse(report["passed"])
+        self.assertIn("B001.prepare_batch_commit_stale", report["errors"])
+        self.assertIn("B001.test_batch_commit_stale", report["errors"])
+        self.assertEqual(report["blockingErrors"], [])
+        self.assertEqual(self.manifest()["status"], "awaiting_user_confirmation")
+        approval = self.prepare()
+        snapshot = self.manifest()["mainPromotion"]["snapshot"]
+        self.assertEqual(snapshot["validationStatus"], "failed")
+        self.assertEqual(snapshot["evidenceErrors"], report["errors"])
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
+        with self.assertRaisesRegex(ValueError, "explicit_user_confirmation"):
+            self.promote(approval)
+        result = self.promote(approval, confirm=True)
+        self.assertEqual(result["status"], "succeeded_with_issues")
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), candidate["candidateSha"])
+
+    def test_old_blocked_audit_can_prepare_without_rerunning_tests(self):
+        self.create()
+        self.deliver()
+        self.validate()
+        manifest = self.manifest()
+        manifest["status"] = "blocked"
+        manifest["batches"]["B001"]["startSha"] = manifest["batches"]["B001"]["commitSha"]
+        manifest["finalEvidenceAggregate"] = {"passed": False, "errors": ["B001.prepare_batch_commit_stale"]}
+        save_manifest(self.workspace, "alpha", self.run_id, manifest)
+        with patch("hooks.parallel_merge_train.begin_e2e", side_effect=AssertionError("must not rerun E2E")):
+            approval = self.prepare()
+        self.assertTrue(approval)
+        self.assertEqual(self.manifest()["mainPromotion"]["snapshot"]["validationStatus"], "failed")
+
+    def test_changed_merge_evidence_requires_a_new_report_and_confirmation(self):
+        self.create()
+        self.deliver()
+        self.validate()
+        approval = self.prepare()
+        manifest = self.manifest()
+        train_id = next(iter(manifest["mergeTrains"]))
+        manifest["mergeTrains"][train_id]["validation"] = {"commands": [{"passed": False}]}
+        save_manifest(self.workspace, "alpha", self.run_id, manifest)
+        with self.assertRaisesRegex(ValueError, "evidence_report_stale"):
+            self.promote(approval, confirm=True)
+        new_approval = self.prepare()
+        self.assertNotEqual(approval, new_approval)
+        snapshot = self.manifest()["mainPromotion"]["snapshot"]
+        self.assertIn(f"merge_train_validation_failed:{train_id}", snapshot["evidenceErrors"])
+        self.assertEqual(snapshot["validationStatus"], "failed")
+        self.assertEqual(self.promote(new_approval, confirm=True)["status"], "succeeded_with_issues")
+
+    def test_incomplete_or_unintegrated_deliveries_still_block_promotion(self):
+        self.create()
+        self.deliver()
+        self.validate()
+        original = self.manifest()["batches"]["B001"].copy()
+        unrelated = git(self.source, "commit-tree", "HEAD^{tree}", "-m", "unrelated fixture commit")
+        for change in ({"status": "sealed"}, {"mergeCommitSha": unrelated}, {"commitSha": unrelated}):
+            with self.subTest(change=change):
+                manifest = self.manifest()
+                manifest["batches"]["B001"] = dict(original, **change)
+                save_manifest(self.workspace, "alpha", self.run_id, manifest)
+                aggregate_evidence(self.workspace, "alpha", self.run_id)
+                with self.assertRaisesRegex(ValueError, "deliveries_incomplete|not_waiting|delivery_commit"):
+                    self.prepare()
+                self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
+
     def test_failed_e2e_continues_to_confirmation_and_requires_explicit_approval(self):
         self.create()
         candidate = self.deliver()
@@ -280,7 +362,7 @@ class ParallelIntegrationTest(unittest.TestCase):
         self.assertEqual(report["deferredIssues"][0]["message"], metadata["message"])
         self.assertTrue(self.prepare())
 
-    def test_missing_or_changed_e2e_failure_evidence_cannot_authorize_promotion(self):
+    def test_evidence_changes_invalidate_approval_and_are_exposed_in_a_new_report(self):
         self.create()
         self.deliver()
         begin_e2e(self.workspace, "alpha", self.run_id)
@@ -295,10 +377,13 @@ class ParallelIntegrationTest(unittest.TestCase):
                 path.unlink()
             else:
                 path.write_bytes(corrupt)
-            with self.assertRaisesRegex(ValueError, "e2e_commit_mismatch"):
+            with self.assertRaisesRegex(ValueError, "evidence_report_stale"):
                 self.promote(approval, confirm=True)
             report = aggregate_evidence(self.workspace, "alpha", self.run_id)
             self.assertFalse(report["passed"])
+            self.assertEqual(self.manifest()["status"], "awaiting_user_confirmation")
+            self.prepare()
+            self.assertEqual(self.manifest()["mainPromotion"]["snapshot"]["validationStatus"], "failed")
             path.write_bytes(original)
             aggregate_evidence(self.workspace, "alpha", self.run_id)
             approval = self.prepare()
@@ -368,6 +453,55 @@ class ParallelIntegrationTest(unittest.TestCase):
         (self.integration / "manual.txt").write_text("manual change\n")
         with self.assertRaisesRegex(ValueError, "integration_worktree_dirty"):
             self.promote(approval, confirm=True)
+
+    def test_git_220_promotion_retries_without_worktree_list_z(self):
+        renamed = self.source.with_name("客户 拜访 仓库")
+        self.source.rename(renamed)
+        self.source = renamed
+        self.create()
+        candidate = self.deliver()
+        self.validate()
+        approval = self.prepare()
+        original = subprocess.run
+        listed = []
+
+        def old_git(argv, **kwargs):
+            if "worktree" in argv and "list" in argv:
+                listed.append(list(argv))
+                if "-z" in argv:
+                    stderr = "error: unknown switch `z'\nusage: git worktree list [--porcelain]\n"
+                    if not kwargs.get("text"):
+                        stderr = stderr.encode()
+                    return subprocess.CompletedProcess(argv, 129, stdout="" if kwargs.get("text") else b"", stderr=stderr)
+            return original(argv, **kwargs)
+
+        with patch("subprocess.run", side_effect=old_git):
+            self.assertTrue(self.promote(approval, confirm=True)["success"])
+        self.assertTrue(any("-z" in argv for argv in listed))
+        self.assertTrue(any("-z" not in argv for argv in listed))
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), candidate["candidateSha"])
+
+    def test_git_220_promotion_still_checks_dirty_target_before_writing_state(self):
+        self.create()
+        self.deliver()
+        self.validate()
+        approval = self.prepare()
+        (self.source / "user.txt").write_text("user changes\n")
+        original = subprocess.run
+
+        def old_git(argv, **kwargs):
+            if "worktree" in argv and "list" in argv and "-z" in argv:
+                stderr = "error: unknown switch `z'\n"
+                return subprocess.CompletedProcess(argv, 129, stdout="" if kwargs.get("text") else b"",
+                                                   stderr=stderr if kwargs.get("text") else stderr.encode())
+            return original(argv, **kwargs)
+
+        with patch("subprocess.run", side_effect=old_git):
+            with self.assertRaisesRegex(ValueError, "target_worktree_dirty"):
+                self.promote(approval, confirm=True)
+        self.assertEqual(self.manifest()["status"], "promotion_prepared")
+        self.assertEqual(self.manifest()["mainPromotion"]["approvalDigest"], approval)
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
 
     def test_sync_conflict_stays_in_integration_and_resolution_is_revalidated(self):
         self.create()
