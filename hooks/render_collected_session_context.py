@@ -11,9 +11,7 @@
 5. 列表接口不可用时，整次调用委托给旧 ``render_session_context.render``；
 6. 单元未在 collector 列表中或正文接口失败时，先按清单映射加载，再回退本地文件。
 
-``--list-supported-deploy-ids`` 独立返回 collector 和
-``<knowledgePath>/agents.manifest.json`` 中部署单元 ID 的去重 JSON 数组。
-一个来源不可用时返回另一个来源；两个来源都不可用时输出空数组并以状态码 1 退出。
+查询支持的部署单元 ID 列表见独立脚本 ``list_supported_deploy_ids.py``。
 
 清单映射也不可用时仍可回退到 ``<localRepoPath>/AGENTS.md``。除入参 JSON
 非法外，外部接口故障不会中断会话。
@@ -309,73 +307,6 @@ def list_supported_deploy_units(
         len(units), json.dumps(units, ensure_ascii=False),
     ), limit=DIAGNOSTIC_LOG_LIMIT)
     return units
-
-
-def _manifest_deploy_ids(knowledge_path: str) -> List[str]:
-    """从知识库清单提取 ID；兼容旧 serviceUnits/serviceUnitId 字段。"""
-    manifest_path = Path(knowledge_path) / MANIFEST_NAME
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise KnowledgeCollectorError(f"读取 {manifest_path} 失败: {exc}") from exc
-    systems = payload.get("systems") if isinstance(payload, dict) else None
-    if not isinstance(systems, list):
-        raise KnowledgeCollectorError(f"{manifest_path} 的 systems 必须是数组")
-
-    ids: List[str] = []
-    for system_index, system in enumerate(systems):
-        units = (
-            system.get("deployUnits", system.get("serviceUnits"))
-            if isinstance(system, dict) else None
-        )
-        if not isinstance(units, list):
-            raise KnowledgeCollectorError(
-                f"{manifest_path} 的 systems[{system_index}].deployUnits 必须是数组"
-            )
-        for unit_index, unit in enumerate(units):
-            unit_id = (
-                unit.get("deployUnitId", unit.get("serviceUnitId"))
-                if isinstance(unit, dict) else None
-            )
-            if not isinstance(unit_id, str) or not unit_id.strip():
-                raise KnowledgeCollectorError(
-                    f"{manifest_path} 的 systems[{system_index}].deployUnits[{unit_index}] "
-                    "缺少非空 deployUnitId"
-                )
-            ids.append(unit_id.strip())
-    return list(dict.fromkeys(ids))
-
-
-def get_supported_deploy_ids(
-    collector_script: str,
-    *,
-    knowledge_path: str,
-    node_command: str = "node",
-    npm_command: str = "npm",
-) -> List[str]:
-    """合并两个来源的 ID，保留 collector 顺序，再补充清单独有的 ID。"""
-    collector_ids: List[str] = []
-    manifest_ids: List[str] = []
-    errors: List[str] = []
-    try:
-        collector_ids = list_supported_deploy_units(
-            collector_script,
-            knowledge_path=knowledge_path,
-            node_command=node_command,
-            npm_command=npm_command,
-        )
-    except KnowledgeCollectorError as exc:
-        errors.append(f"collect-knowledge.js: {exc}")
-    try:
-        manifest_ids = _manifest_deploy_ids(knowledge_path)
-    except KnowledgeCollectorError as exc:
-        errors.append(f"agents.manifest.json: {exc}")
-
-    if len(errors) == 2:
-        raise KnowledgeCollectorError("；".join(errors))
-    for error in errors:
-        _timing_log("supported.deploy_ids", "warning", error)
-    return list(dict.fromkeys([*collector_ids, *manifest_ids]))
 
 
 def _deploy_unit_prompt(
@@ -830,34 +761,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--node-command", dest="node_command", default="node")
     parser.add_argument("--npm-command", dest="npm_command", default="npm")
-    parser.add_argument(
-        "--list-supported-deploy-ids",
-        action="store_true",
-        help="输出 collector 与 agents.manifest.json 的去重部署单元 ID 数组",
-    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
-
-    if args.list_supported_deploy_ids:
-        knowledge_path = (args.knowledge_path or "").strip() or str(get_agents_root().resolve())
-        collector_script = (
-            str(ROOT / "hooks" / DEFAULT_KNOWLEDGE_COLLECTOR)
-            if args.collector_script == DEFAULT_KNOWLEDGE_COLLECTOR
-            else args.collector_script
-        )
-        try:
-            ids = get_supported_deploy_ids(
-                collector_script,
-                knowledge_path=knowledge_path,
-                node_command=args.node_command,
-                npm_command=args.npm_command,
-            )
-        except KnowledgeCollectorError as exc:
-            _timing_log("supported.deploy_ids", "error", str(exc))
-            print("[]")
-            return 1
-        _timed_call("output.json", json.dump, ids, sys.stdout, ensure_ascii=False, indent=2)
-        print()
-        return 0
 
     try:
         selected = _parse_selected(args.selected)
