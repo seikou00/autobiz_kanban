@@ -1,81 +1,37 @@
 ---
 name: autodev-design
-description: Dev 阶段技术设计生成与定稿。
-version: v1.1.0905
+description: 基于行为规格与必要代码证据生成精简技术设计并锁定 Design 到 Plan 的契约。
+version: v2.0
 ---
 
-# /autodev-design - Technical Design
+# /autodev-design — Technical Design
 
-本技能只负责探索、澄清、生成并定稿 `design.md`，并生成与其一致的 `.design-contract.lock.json`。
+产物目录：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/`。默认由主会话生成 `design.md` 与 `.design-contract.lock.json`。
 
-进入本技能时先使用 `write_todos` 建立任务清单：`探索澄清` / `生成 design.md` / `裁定未决项并校验设计` / `锁定设计契约并推进 design_done`。
-
-## 探索与准入
-
-先读取当前 Feature 状态、上游产物和相关代码现实：
+## 输入与查证
 
 ```bash
 python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_in_progress --stage "技术设计"
 ```
 
-- 读取 `proposal.md`、`specs/**/*.md`、`UI_CONTEXT.json`、已有 `design.md`（如有），以及相关代码、测试、配置和接口定义。
-- 探索只用于澄清和调查，不得修改业务代码、测试、配置或迁移脚本。
-- 将需求目标、范围、非目标、现有代码约束、集成点、接口、数据模型、验证边界与用户讨论。未确认且影响实现路径的事项不得自行假设。
-- 稳定 ID：Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 是本阶段输出的技术决策；规格决策 `DEC-001` 仅来自 proposal 中可选的 `## Decision Log`，本阶段只引用、不新增 `DEC-NNN`。没有规格决策时追踪表的 Decision 写「无」。
-- 如果新增或改变可观察行为，写进 `design.md`。
-- 回检发现缺失或矛盾的 REQ/SCN（例如某能力没有行为契约）时，立即停止并向用户询问；按照用户回答更新对应产物。
+- 读取 proposal、specs、`IMPLEMENTATION_SCOPE.json`、`UI_CONTEXT.json` 与已有设计；复用已有代码证据，只补查会影响当前技术决策的入口和必要直接依赖，不修改业务代码。
+- 局部查证由主会话完成；独立检索确有价值时，向 `Explore-autodev` 提供 1–3 个具体问题、目录/入口和已有证据。证据足以支持设计即停止；未找到返回范围与未知项，不自动扩大为全仓调查。
+- 只有影响行为、公开契约或实现路径的真实未决项才提问，届时读取 `${pluginPath}/skills/references/ask-user-question.md`。已确认结论直接复用，无未决项直接生成；采纳的方案和信息实体落盘后才移除未决标记。
+- 新增或改变可观察行为先更新对应 Specs；上游存在缺失、冲突时解决行为问题再定稿，不在 Design 中另建行为事实源。
 
-探索足以支持设计时，先给出目标、影响范围、已确认事实、待确认事项和代码证据的简短结论，再使用 `request_user_input` 询问是否进入设计生成。按 `${pluginPath}/skills/references/ask-user-question.md` 执行：未拿到明确答复前，不得写入 `design_in_progress` 或生成 `design.md`。用户直接补充实质信息时吸收后继续探索，不机械重复同一选择。
+## 产出
 
-用户确认后进入本节点：
+使用 `templates/design.md`，保留变更与证据、技术决策、行为覆盖与验证；风险按需添加。旧设计可保留原章节，无需整体重写。
 
-```bash
-python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_in_progress --stage "技术设计（来源: Specs）"
-```
+- 变更与证据写影响范围及真实代码锚点；无需独立 EVD 编号或固定证据表，不重复上游需求。
+- 技术决策使用稳定 `D-NNN` 表格行（如 `D-001`），写方案与理由。接口/数据契约涉及 `API-NNN` / `DATA-NNN` 时才读取 `references/contracts.md`；无对应变更保留 `x-auto-no-http-api: true` / `x-auto-no-sql: true` 和简短原因，不生成空表。
+- Spec Traceability 表用 `Requirement | Scenarios | Design Coverage | Verification` 关联本期 REQ/SCN 与真实 API/DATA/D，说明可观察的验证结果；后续 Plan 引用稳定 ID。规格决策 `DEC-NNN`（如 `DEC-001`）只引用 proposal 的 `## Decision Log`，不新增或当成技术决策。
+- 仅在有实际风险时写风险、影响和应对；关键接口、数据约束和依赖未解决前不得锁定设计。
 
-## 生成 design.md
+## 自检与完成
 
-在 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 生成稳定技术设计契约。使用 `${pluginPath}/skills/autodev/autodev-design/templates/design.md` 的结构；行为契约仍以 `specs/**/*.md` 为准。
-
-至少包含以下真实内容：
-
-- **Context / 输入上下文**：proposal、specs、UI 范围、现有代码和约束。
-- **Code Evidence**：实际打开的代码、测试或配置锚点；不能凭印象写路径。
-- **Spec Traceability**：Requirement / Scenario 与设计覆盖关系。`Decision` 列只引用 `DEC-NNN`，`Design Coverage` 列使用 `D-NNN`。
-- **API Decisions**：无 HTTP/API 时写 `x-auto-no-http-api: true` 和原因；有 API 时记录入口、请求、响应、错误、Auth/Tenant/Audit 和确认状态。
-- **Data Decisions**：无数据变更时写 `x-auto-no-sql: true` 和原因；有数据变更时记录模型、字段、索引、迁移、回滚与状态。
-- **Technical Design**：模块边界、技术决策、备选方案、集成点和验证思路。每个 `D-NNN` 必须被后续任务真正引用；不要按任务编号机械生成 `D-NNN`。
-- **Risks / Open Questions**：明确风险、信息缺口和其影响，不能把会改变实现路径的未知事项留给下一阶段。
-
-不得把未确认的接口字段、数据约束或外部依赖写成硬约束。不要写「实现时再决定」「以实际接口为准」等延后占位语。
-
-## 未决项裁定
-
-展示设计的 API / Data / Technical Design / Risks 关键内容后，只裁定真正未决的条目；裁定完成后直接进入产物校验。
-
-### 待确认项逐条裁定
-
-- 范围为 Status/Type 为「待确认」或「读码差异」的 API / DATA / D / R 条目；没有时直接进入产物校验。
-- 裁定即消解：对应行必须回写为「已确认」，且采纳的方案、链接、字段或约束已经写入设计实体；信息实体必须先落盘再标记确认。声称拥有 ≠ 提供。
-- 用 `request_user_input` 逐条提问，每轮最多 3 项；选项只能是「按当前设计确认 (Recommended)」「采纳备选：<具体方案>」「需要调整」以及信息缺口型条目的「调整设计移除该依赖」「暂停，拿到材料后继续」。
-- 信息缺口型条目中，用户在「其他」提供实体后，立即写入 design.md 再回写「已确认」。不存在「先假设 / 先按默认方案 / 先占位」后推进的出口，不得以任何措辞重新引入。
-- 选项 label 或 description 不得含「待确认」「先占位」「后续补充」「稍后提供」「编码阶段再」等延后语义；探索期的「后续补充并继续」模板禁止搬进裁定门。
-- 展示不等于裁定。全部条目逐条裁定后做消解自查：design.md 不得再含待确认、读码差异、TBD、待补充、待提供、占位或对缺失材料的引用；否则继续裁定，不能进入产物校验。
-
-未决项全部消解后，`design.md` 即为下一阶段的只读事实源。锁定后 `.design-contract.lock.json` 是 Plan 的机器读取快照，包含 Design 已校验的 SHA、API/DATA/D ID 与 no-API/no-SQL 标记。
-
-```bash
-python -X utf8 "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"
-python -X utf8 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design --feature "${feature}"
-```
-
-读取全部失败项，按返回的 `artifact` / `target` / `problem` / `action` / `route` 一次性修复；`ask_user` 必须回到用户确认。通过前不得推进 checkpoint。
-
-## 回检与完成
-
-按 `${pluginPath}/skills/references/review-protocol-design.md` 派发 `critic-autodev-design-zh` 回检：必须先读取并完整遵循该文件，不得凭记忆执行本节。
-
-回检导致设计变化时，重新完成受影响的未决项裁定、重新锁定设计契约并重跑产物契约预检（机器校验）。完成后立即调用统一 checkpoint 更新脚本推进 `design_done`；不得自行增加文本确认或绕过该命令。项目会话会在这条命令执行前由平台触发 Human Gate，Auto 托管会话须等用户在该门禁中批准后再进入下游阶段：
+主会话一次核对行为遗漏、方案合理性、验证思路和关键代码事实。破坏性接口、数据迁移、跨仓协议等高风险变更或用户要求独立审查时，才读取 `${pluginPath}/skills/references/review-protocol-design.md`；常规任务不派发 critic、不生成固定回检报告。
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/design_contract_lock.py" sync --feature "${feature}"
@@ -83,4 +39,4 @@ python -X utf8 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.design -
 python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint design_done
 ```
 
-技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
+失败按返回的产物和问题修复；涉及真实取舍再问用户。产物变化才重做受影响的查证、自检和契约锁；同一问题修复后仍失败则报告阻断。`design_done` 保留平台 Human Gate，不得自行增加文本确认或绕过该命令。简报产物与验证结果，再按 `${pluginPath}/skills/references/ui-continuation-guide.md` 处理阶段完成。

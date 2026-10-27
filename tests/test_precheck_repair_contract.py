@@ -269,12 +269,11 @@ class StructuredOutputTest(unittest.TestCase):
         error = parse_postcheck_output(output)[0]
         self.assertEqual(error["diagnostics"], diagnostics)
 
-    def test_pending_design_cells_route_to_the_user(self) -> None:
-        ctx = HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp"))
+    def test_pending_design_cells_allow_evidence_based_resolution(self) -> None:
+        ctx = HookContext(skill="autodev-design", slug="alpha", root=Path("/tmp"))
         _, output = run_capture(lambda: fail_line(ctx, "design_has_pending_cells", " count=2", target="2 处"))
         error = parse_postcheck_output(output)[0]
-        self.assertEqual(error["route"], "ask_user")
-        self.assertIn("禁止自行填值", error["action"])
+        self.assertEqual(error["route"], "fix_current")
 
     def test_plan_json_code_gets_a_specific_action(self) -> None:
         ctx = HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp"))
@@ -417,13 +416,13 @@ class RepresentativeSpecsFailuresTest(unittest.TestCase):
             error = self._assert_actionable(errors, "spec_requirement_without_scenario")
             self.assertIn("Scenario", error["action"])
 
-    def test_design_pending_cells_ask_the_user(self) -> None:
+    def test_design_pending_cells_block_until_resolved_in_design(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project, feature_dir = self._feature(tmp)
             (feature_dir / "design.md").write_text(DESIGN_WITH_PENDING, encoding="utf-8")
-            errors = self._errors(validate_design_contract, project, skill="autodev-plan")
+            errors = self._errors(validate_design_contract, project, skill="autodev-design")
             error = self._assert_actionable(errors, "design_has_pending_cells")
-            self.assertEqual(error["route"], "ask_user")
+            self.assertEqual(error["route"], "fix_current")
 
 
 class RepresentativePlanFailuresTest(unittest.TestCase):

@@ -145,7 +145,7 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_p
 
 ### 唯一 Code 策略
 
-根 `plan.json.taskValidationPolicy` 必须同时满足 `mode=defer_to_test_stages`、`orchestration=inline`、`codeGate=review_only`。Code 只实现生产代码；Plan V2 的 `testPoints` 与 `verificationIntent` 只作为后续 UTest/E2E 阶段的只读测试意图，不得创建或修改测试文件，也不得生成或执行测试命令。当前批次所有 TASK 成为 `implemented` 后，固定 Workflow 进入 Review，再进入 UTest。
+根 `plan.json.taskValidationPolicy` 必须同时满足 `mode=defer_to_test_stages`、`orchestration=inline`、`codeGate=review_only`。Code 只实现生产代码；Plan 的 `testPoints` 与 `verificationIntent` 只作为后续 UTest/E2E 阶段的只读测试意图，不得创建或修改测试文件，也不得生成或执行测试命令。当前批次所有 TASK 成为 `implemented` 后，固定 Workflow 进入 Review，再进入 UTest。
 
 策略字段缺失、组合不完整或值不匹配时立即停止并回流 `/autodev-plan` 重建；不得根据测试文件是否存在自行猜测策略，也不得调用已移除的逐 TASK 验证或 batch-check 接口。
 
@@ -392,7 +392,7 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 固定脚本按以下顺序执行：
 
 - Workflow 启动时先执行 scheduler `ensure`：没有活动 run 时创建一个；已有交付物完整的活动 run 时复用同一个 runId；`needs_resolution` 或缺失已密封交付物时 fail-closed 并保留现场。随后 scheduler 选择依赖已经 `merged` 的 pending Batch，并在任一 Batch 完成后重新计算可运行集。
-- scheduler 按剩余 `maxParallel` 槽位派发任务：`proto`、`global`、`integration` 阶段逐 Batch 串行；普通 `parallel` 阶段依据真实依赖、仓库绑定与调度策略选择任务；Plan v2 不预报写集，隔离工作树允许同仓库任务乐观并行，真实文件冲突交给 Merge Train。只要有槽位，就立即补充符合条件的任务，不等待不相关 Batch 完成。插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner。
+- scheduler 按剩余 `maxParallel` 槽位派发任务：`proto`、`global`、`integration` 阶段逐 Batch 串行；普通 `parallel` 阶段依据真实依赖、仓库绑定与调度策略选择任务；Plan 不预报写集，隔离工作树允许同仓库任务乐观并行，真实文件冲突交给 Merge Train。只要有槽位，就立即补充符合条件的任务，不等待不相关 Batch 完成。插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner。
 - `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：delivery `test` 拥有该 Batch 的 unit/integration 测试意图；仅 `e2e_test` 意图归属最终 B-E2E。Review 只检查生产实现。固定 Batch Workflow 的生产问题回到同一 Worktree 一次性 Rework，完成后端纯编译、封存和 `single_repair_accepted` 登记后直接继续 UTest，不再派发第二次 Review；UTest 来源重跑原失败命令。测试/fixture/mock 问题只在 UTest 修复一次；耗尽与外部环境失败按 Runtime 的真实 deferred/阻断结果收口，不把 deferred 当通过。独立手动修复仍按其自身阶段契约执行。
 - 每个 `ready_to_candidate` Batch 都可立即由 `parallel_merge_train.py` 在独立临时候选 Worktree 合成并推广，不必等待同一安全波的其他 Batch 完成编码、Review 或 UTest。候选不执行额外测试：其前置条件就是该 Batch 的 Review、UTest（通过或失败已记录）和 re-seal 均已有证据。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
 - Merge Train 冲突由模型解决文件、插件完成提交：Workflow 先调用 `prepare-resolution` 登记候选及冲突文件写入授权，冲突 Agent 只编辑这些文件并返回 `success=true,status=resolved`，不运行 Git 写操作；Agent 返回后由 `complete-resolution` 精确暂存、非交互创建带 task-card 信息的 merge commit 并登记候选 SHA。即时恢复和最终恢复共用此协议；`ready_to_complete` 只恢复插件提交登记，不再次派发模型编辑。不要为冲突重启生产 TASK 或调用 `seal`。

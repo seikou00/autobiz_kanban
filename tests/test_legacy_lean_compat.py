@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import contextlib
+import io
 from pathlib import Path
 
 from board_core.contracts import load_board_config, load_record_workflow_contracts
@@ -25,20 +27,21 @@ class LegacyLeanCompatibilityTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_template_catalog_exposes_the_configured_lean_route(self) -> None:
+    def test_template_catalog_only_offers_the_current_default(self) -> None:
         options = configured_template_options(load_board_config(BOARD_CONFIG_PATH))
 
-        lean = next(option for option in options if option["id"] == "lean")
-        self.assertEqual(["dev.specs", "dev.code", "ops.archive"], lean["nodes"])
+        self.assertEqual([option["id"] for option in options], ["standard"])
 
-    def test_new_feature_can_use_the_configured_lean_route(self) -> None:
-        create_feature(self.project, "fresh-lean", workflow_template="lean")
+    def test_new_feature_rejects_the_retired_lean_route(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+            create_feature(self.project, "fresh-lean", workflow_template="lean")
+        self.assertEqual(raised.exception.code, 1)
         records, errors, exists = load_state_json_records(self.project)
         self.assertTrue(exists)
         self.assertEqual([], errors)
-        self.assertEqual("lean", records["fresh-lean"]["workflowTemplate"])
-        contracts = load_record_workflow_contracts(ROOT, records["fresh-lean"], workspace=self.project)
-        self.assertEqual(["dev.specs", "dev.code", "ops.archive"], [node["id"] for node in contracts.nodes])
+        self.assertNotIn("fresh-lean", records)
+        self.assertFalse((self.project / ".autobizdevops/features/fresh-lean").exists())
 
     def test_existing_lean_feature_remains_loadable_and_routable(self) -> None:
         feature = "legacy-lean"

@@ -1,7 +1,7 @@
-# Plan V2 UTest runtime optimization
+# Plan UTest runtime optimization
 
 UTest now uses finite test presets, bound test-environment writes, cached module
-diagnostics and generated Bash execution. Plan V2 remains unchanged: outcomes,
+diagnostics and generated Bash execution. Plan remains unchanged: outcomes,
 implementationPoints, testPoints and verification.intent define the work;
 runtime owns dependency/preset/file/command choices.
 

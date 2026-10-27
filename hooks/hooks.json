@@ -16,12 +16,6 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python -X utf8 hooks/augment_explore_task_prompt.py",
-          "timeout": 30,
-          "persistAfterInterrupt": true
-        },
-        {
-          "type": "command",
           "command": "python -X utf8 hooks/augment_test_engineer_task_prompt.py",
           "timeout": 30,
           "persistAfterInterrupt": true

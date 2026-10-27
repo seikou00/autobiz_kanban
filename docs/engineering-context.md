@@ -1,6 +1,6 @@
 # Code Workflow 工程事实与阶段交接
 
-本机制在 Code Workflow 内按需运行。Design 阶段、Design 产物格式和 Plan V2
+本机制在 Code Workflow 内按需运行。Design 阶段、Design 产物格式和 Plan
 不变；Workflow 启动前不增加探索、索引或全仓扫描。首次 Code 遇到未知 API
 才查询，得到结论立即发布，后续 Batch、UTest、Fix、Rework 复用相同版本的事实。
 

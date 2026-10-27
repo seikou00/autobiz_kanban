@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The one Plan-v2 guard that protects scenario coverage accounting."""
+"""The one Plan guard that protects scenario coverage accounting."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 SCN_SUBSTRING = re.compile(r"SCN-\d{3}")
 
 # Legacy writer subcommands still import these names to describe their own
-# retired input formats.  Plan v2 never consumes them and therefore has no
+# retired input formats.  Plan never consumes them and therefore has no
 # corresponding cardinality gate.
 PLAN_TASK_MAX_SCENARIOS = 1_000_000
 PLAN_TASK_MAX_APIS = 1_000_000
@@ -81,5 +81,5 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
 
 
 def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -> list[dict[str, Any]]:
-    """Compatibility entry point for the stage gate; Plan v2 has no size gate."""
+    """Compatibility entry point for the stage gate; Plan has no size gate."""
     return validate_plan_task_grouping_item(task, task_id=task_id)

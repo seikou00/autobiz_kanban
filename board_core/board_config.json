@@ -329,7 +329,7 @@
         "skill": "autodev-specs",
         "order": 30,
         "runtimePolicy": {
-          "agentMode": "multi",
+          "agentMode": "solo",
           "toolCustomConfig": {
             "task": {
               "enabled": true
@@ -341,8 +341,7 @@
               "critic"
             ],
             "customSubagentFiles": [
-              "agents/explore.md",
-              "agents/critic.md"
+              "agents/explore.md"
             ]
           }
         },
@@ -446,7 +445,7 @@
         "skill": "autodev-design",
         "order": 40,
         "runtimePolicy": {
-          "agentMode": "multi",
+          "agentMode": "solo",
           "toolCustomConfig": {
             "task": {
               "enabled": true
@@ -560,7 +559,7 @@
         "skill": "autodev-plan",
         "order": 50,
         "runtimePolicy": {
-          "agentMode": "multi",
+          "agentMode": "solo",
           "toolCustomConfig": {
             "task": {
               "enabled": true

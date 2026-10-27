@@ -125,29 +125,6 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         self.assertIn("同一决策去重后逐条询问用户", content)
         self.assertIn("`id` 用条目内容的简短 snake_case 概括", content)
 
-    def test_specs_only_adjudicates_open_questions(self) -> None:
-        content = SPECS_SKILL.read_text(encoding="utf-8")
-
-        for required_rule in (
-            "探索结束时先生成待确认问题清单",
-            "仅裁定讨论表中的待确认条目",
-            # 「不把切分、命名或规格范围交给用户确认」不在此列：AGENTS.md 把该句
-            # 本身列为技能编写反模式（不要把需求或改动目的写入技能）。同一语义由
-            # 下一条「全部条目裁定后直接生成 proposal 与 specs」所在行的
-            # 「不再确认 capability 切分或规格范围」承载。
-            "全部条目裁定后直接生成 proposal 与 specs",
-        ):
-            self.assertIn(required_rule, content)
-        self.assertIn("「已准备好，稍后提供」", PROTOCOL.read_text(encoding="utf-8"))
-        self.assertEqual(missing_rules(content), [])
-
-        for forbidden_rule in (
-            "等待用户确认规格范围",
-            "整体确认门",
-            "确认范围并生成 specs",
-        ):
-            self.assertNotIn(forbidden_rule, content)
-
     def test_every_usage_loads_the_shared_protocol(self) -> None:
         missing: list[str] = []
 

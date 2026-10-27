@@ -1,4 +1,4 @@
-"""Plan v2 only enforces reference integrity, not artificial task size."""
+"""Plan only enforces reference integrity, not artificial task size."""
 
 from __future__ import annotations
 

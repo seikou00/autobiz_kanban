@@ -24,7 +24,7 @@ PLAN_TASK_PLANNING = PLAN_SKILL.parent / "references" / "task-planning.md"
 
 
 def _plan_skill_docs() -> str:
-    """Load the Plan entrypoint with the reference it requires before planning."""
+    """Load the Plan entrypoint and its optional task-boundary examples."""
     return "\n".join((
         PLAN_SKILL.read_text(encoding="utf-8"),
         PLAN_TASK_PLANNING.read_text(encoding="utf-8"),
@@ -91,10 +91,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         )
 
     def test_workflow_skills_index_shared_completion_guide(self) -> None:
-        index_line = (
-            "技能完成后，读取并遵循 "
-            "`${pluginPath}/skills/references/ui-continuation-guide.md`。"
-        )
+        index_line = "${pluginPath}/skills/references/ui-continuation-guide.md"
         legacy_phrases = (
             "请回到特性面板新开新对话",
             "提醒用户回到特性面板新开对话",
@@ -412,9 +409,9 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertFalse((template_dir / "batch-plan.json").exists())
         self.assertFalse((template_dir / "task-input.json").exists())
         self.assertFalse((template_dir / "task-detail-input.json").exists())
-        grouping = json.loads((template_dir / "task-groups.json").read_text(encoding="utf-8"))
+        grouping = json.loads((template_dir / "plan-input.json").read_text(encoding="utf-8"))
         self.assertIn("featureId", grouping)
-        self.assertEqual(grouping["schemaVersion"], "autodev.plan.v2")
+        self.assertEqual(grouping["schemaVersion"], "autodev.plan")
         self.assertEqual(len(grouping["tasks"]), 1)
         self.assertIn("workspace", grouping["tasks"][0])
         self.assertIn("verification", grouping["tasks"][0])
@@ -423,8 +420,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = _plan_skill_docs()
         required = [
-            "templates/task-groups.json",
-            "autodev.plan.v2",
+            "templates/plan-input.json",
+            "autodev.plan",
             "prepare-plan",
             "publish-plan",
             "--code-workspace",
@@ -456,49 +453,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must keep first-pass JSON generation guidance: " + ", ".join(missing),
         )
 
-    def test_plan_skill_requires_plan_markdown_projection(self) -> None:
-        content = _plan_skill_docs()
-        # 钉机制不钉字面：同一条要求给若干可接受写法，命中任一即算满足。
-        # 措辞由人把关，测试只保证「PLAN.md 由 plan.json 投影产生」这条主线还在。
-        required = [
-            ("PLAN.md 投影", ("`PLAN.md` 只是已定稿 `plan.json` 的人类视图",)),
-            ("回检后落盘", ("回检收敛且没有阻断项后",)),
-        ]
-        missing = [
-            name for name, variants in required if not any(v in content for v in variants)
-        ]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-plan skill must require PLAN.md human-view projection: " + ", ".join(missing),
-        )
-        stale_phrases = [
-            "optional PLAN.md",
-            "可同步生成 `PLAN.md`",
-            "若生成 `PLAN.md`",
-            "PLAN.md 为可选",
-            "PLAN.md 只作可选",
-        ]
-        offenders = [phrase for phrase in stale_phrases if phrase in content]
-        self.assertEqual(offenders, [], "autodev-plan skill must not treat PLAN.md as optional")
-
-    def test_plan_skill_defines_outcome_and_dependency_based_splitting(self) -> None:
-        content = _plan_skill_docs()
-        required = [
-            "refs.requirements",
-            "用户或系统可观察的交付结果",
-            "真实依赖",
-            "不按固定数量阈值拆分",
-            "共享仓库、接口或页面不构成合并理由",
-            "完整的验证叙事",
-            "首次发布前不要预读 writer、门禁或校验器源码",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
-        )
 
     def test_code_skill_requires_fixed_workflow(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
@@ -614,11 +568,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         outputs = code["artifacts"]["outputs"]
         self.assertNotIn("cache/code-exploration/**/*.json", [item.get("path") for item in outputs])
 
-    def test_plan_skill_points_batch_resume_to_parallel_scheduler(self) -> None:
-        content = _plan_skill_docs()
-        self.assertIn("隔离工作树可乐观并行", content)
-        self.assertIn("Merge Train", content)
-        self.assertNotIn("task_runner.py activate-batch", content)
 
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []

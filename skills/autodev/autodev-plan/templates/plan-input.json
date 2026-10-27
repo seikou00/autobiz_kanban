@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "autodev.plan",
+  "featureId": "[feature]",
+  "tasks": [
+    {
+      "id": "T001",
+      "outcome": "[one observable delivery result]",
+      "workspace": "default",
+      "dependsOn": [],
+      "implementationPoints": [
+        "[behavior or boundary needed for this one outcome]"
+      ],
+      "testPoints": [
+        "[behavior, boundary, or failure path proving this one outcome]"
+      ],
+      "refs": {
+        "requirements": [
+          "specs/[capability]/spec.md#REQ-001"
+        ],
+        "scenarios": [
+          "specs/[capability]/spec.md#SCN-001"
+        ],
+        "decisions": []
+      },
+      "verification": {
+        "intent": "[behavior that a later test should prove]"
+      }
+    }
+  ]
+}

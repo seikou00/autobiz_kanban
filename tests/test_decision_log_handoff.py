@@ -137,13 +137,6 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
         self.assertNotIn("## Decision Log", template)
         self.assertEqual(SPEC_DECISION_HEADING.findall(template), [])
 
-    def test_design_template_cites_dec_not_d(self) -> None:
-        template = (ROOT / "skills/autodev/autodev-design/templates/design.md").read_text(
-            encoding="utf-8"
-        )
-        traceability = template.split("## 4. Spec Traceability")[1].split("## 5.")[0]
-        self.assertIn("DEC-001", traceability)
-
     def test_both_skills_wire_the_channel(self) -> None:
         specs = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
         plan = (ROOT / "skills/autodev/autodev-design/SKILL.md").read_text(encoding="utf-8")

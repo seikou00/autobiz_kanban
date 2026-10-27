@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prepare a machine Plan v2 for review, then emit its Markdown projection."""
+"""Prepare a machine Plan for review, then emit its Markdown projection."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from hooks.plan_review import review_changes, review_context_digest  # noqa: E402
 
 from hooks.json_writer_common import (  # noqa: E402
     WriterResult,
@@ -90,7 +92,8 @@ TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 TASK_GROUP_API_ID_RE = re.compile(r"^API-\d{3}$")
 TASK_GROUP_PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 TASK_GROUP_INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
-PLAN_SCHEMA = "autodev.plan.v2"
+PLAN_SCHEMA = "autodev.plan"
+LEGACY_PLAN_SCHEMA = "autodev.plan.v2"  # Accepted only when reading historical model input.
 DEFAULT_TASK_VALIDATION_POLICY = {
     "mode": "defer_to_test_stages",
     "orchestration": "inline",
@@ -224,10 +227,10 @@ def _compact_string_list(value: Any, *, task_id: str, field: str) -> list[str]:
     return [item.strip() for item in value]
 
 
-def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
-    """Project the intentionally small Plan v2 input into runtime groups.
+def _plan_to_groups(data: dict[str, Any]) -> dict[str, Any]:
+    """Project the intentionally small Plan input into runtime groups.
 
-    Plan v2 is the only model-facing contract. It contains outcomes, repository
+    Plan is the only model-facing contract. It contains outcomes, repository
     ownership, dependencies, references, outcome-level implementation points
     and test points. File lists, symbols, concrete commands and batch mechanics
     are discovered or derived by later stages.
@@ -235,9 +238,9 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     feature_id = data.get("featureId")
     raw_tasks = data.get("tasks")
     if not isinstance(feature_id, str) or not feature_id.strip():
-        raise PlanWriterInputError("plan_v2_feature_id_missing")
+        raise PlanWriterInputError("plan_feature_id_missing")
     if not isinstance(raw_tasks, list) or not raw_tasks:
-        raise PlanWriterInputError("plan_v2_tasks_missing")
+        raise PlanWriterInputError("plan_tasks_missing")
 
     groups: list[dict[str, Any]] = []
     allowed_task_fields = {
@@ -247,32 +250,32 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     }
     for index, raw in enumerate(raw_tasks, start=1):
         if not isinstance(raw, dict):
-            raise PlanWriterInputError("plan_v2_task_must_be_object", f"index={index}")
+            raise PlanWriterInputError("plan_task_must_be_object", f"index={index}")
         task_id = raw.get("id")
         if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
-            raise PlanWriterInputError("plan_v2_task_id_invalid", f"index={index};task={task_id}")
+            raise PlanWriterInputError("plan_task_id_invalid", f"index={index};task={task_id}")
         unknown = sorted(set(raw) - allowed_task_fields)
         if unknown:
-            raise PlanWriterInputError("plan_v2_task_field_unknown", f"task={task_id};fields={','.join(unknown)}")
+            raise PlanWriterInputError("plan_task_field_unknown", f"task={task_id};fields={','.join(unknown)}")
         outcome = raw.get("outcome")
         if not isinstance(outcome, str) or not outcome.strip():
-            raise PlanWriterInputError("plan_v2_task_outcome_missing", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_outcome_missing", f"task={task_id}")
         implementation_points = _compact_string_list(
             raw.get("implementationPoints"), task_id=task_id, field="implementationPoints",
         )
         if not implementation_points:
-            raise PlanWriterInputError("plan_v2_task_implementation_points_missing", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_implementation_points_missing", f"task={task_id}")
         test_points = _compact_string_list(
             raw.get("testPoints"), task_id=task_id, field="testPoints",
         )
         if not test_points:
-            raise PlanWriterInputError("plan_v2_task_test_points_missing", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_test_points_missing", f"task={task_id}")
         refs = raw.get("refs")
         if not isinstance(refs, dict):
-            raise PlanWriterInputError("plan_v2_task_refs_missing", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_refs_missing", f"task={task_id}")
         unknown_refs = sorted(set(refs) - {"requirements", "scenarios", "api", "design", "data", "decisions"})
         if unknown_refs:
-            raise PlanWriterInputError("plan_v2_task_refs_field_unknown", f"task={task_id};fields={','.join(unknown_refs)}")
+            raise PlanWriterInputError("plan_task_refs_field_unknown", f"task={task_id};fields={','.join(unknown_refs)}")
         requirements = _compact_string_list(refs.get("requirements"), task_id=task_id, field="refs.requirements")
         scenarios = _compact_string_list(refs.get("scenarios"), task_id=task_id, field="refs.scenarios")
         api_ids = _compact_string_list(refs.get("api", []), task_id=task_id, field="refs.api")
@@ -280,21 +283,21 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         design_refs = [ref if "#" in ref else f"design.md#{ref}" for ref in design_refs]
         if any(ref.startswith("design.md#D-") for ref in design_refs):
             raise PlanWriterInputError(
-                "plan_v2_task_decision_must_use_refs_decisions",
+                "plan_task_decision_must_use_refs_decisions",
                 f"task={task_id};field=refs.design",
             )
         data_ids = _compact_string_list(refs.get("data", []), task_id=task_id, field="refs.data")
         decision_ids = _compact_string_list(refs.get("decisions", []), task_id=task_id, field="refs.decisions")
         verification = raw.get("verification")
         if not isinstance(verification, dict):
-            raise PlanWriterInputError("plan_v2_task_verification_invalid", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_verification_invalid", f"task={task_id}")
         if set(verification) - {"intent"}:
-            raise PlanWriterInputError("plan_v2_task_verification_field_unknown", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_verification_field_unknown", f"task={task_id}")
         intent = verification.get("intent")
         if not isinstance(intent, str) or not intent.strip():
-            raise PlanWriterInputError("plan_v2_task_verification_intent_invalid", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_verification_intent_invalid", f"task={task_id}")
         if not isinstance(raw.get("workspace"), str) or not raw["workspace"].strip():
-            raise PlanWriterInputError("plan_v2_task_workspace_missing", f"task={task_id}")
+            raise PlanWriterInputError("plan_task_workspace_missing", f"task={task_id}")
         group: dict[str, Any] = {
             "id": task_id,
             "title": outcome.strip(),
@@ -318,11 +321,11 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         group["uiRequired"] = ui is not None
         if ui is not None:
             if not isinstance(ui, dict):
-                raise PlanWriterInputError("plan_v2_task_ui_invalid", f"task={task_id}")
+                raise PlanWriterInputError("plan_task_ui_invalid", f"task={task_id}")
             unknown_ui_fields = sorted(set(ui) - {"pages", "interactions", "route"})
             if unknown_ui_fields:
                 raise PlanWriterInputError(
-                    "plan_v2_task_ui_field_unknown",
+                    "plan_task_ui_field_unknown",
                     f"task={task_id};fields={','.join(unknown_ui_fields)}",
                 )
             group["uiRefs"] = {
@@ -338,11 +341,11 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
         groups.append(group)
     by_id = {group["id"]: group for group in groups}
     if len(by_id) != len(groups):
-        raise PlanWriterInputError("plan_v2_task_id_duplicate")
+        raise PlanWriterInputError("plan_task_id_duplicate")
     for group in groups:
         unknown = sorted(set(group["deps"]) - set(by_id))
         if unknown:
-            raise PlanWriterInputError("plan_v2_dependency_unknown", f"task={group['id']};ids={','.join(unknown)}")
+            raise PlanWriterInputError("plan_dependency_unknown", f"task={group['id']};ids={','.join(unknown)}")
     # ``graphlib.TopologicalSorter`` is only available from Python 3.9.  Keep
     # ordering deterministic while supporting the project's Python 3.7 floor.
     pending = {group["id"]: set(group["deps"]) for group in groups}
@@ -350,7 +353,7 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     while pending:
         ready = [group["id"] for group in groups if group["id"] in pending and not pending[group["id"]]]
         if not ready:
-            raise PlanWriterInputError("plan_v2_dependency_cycle", "dependency cycle detected")
+            raise PlanWriterInputError("plan_dependency_cycle", "dependency cycle detected")
         for task_id in ready:
             del pending[task_id]
         for dependencies in pending.values():
@@ -361,7 +364,7 @@ def _plan_v2_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     return {"featureId": feature_id, "groups": [by_id[task_id] for task_id in order]}
 
 
-def _materialize_v2_ui_visual_sources(feature_dir: Path, group_data: dict[str, Any]) -> None:
+def _materialize_plan_ui_visual_sources(feature_dir: Path, group_data: dict[str, Any]) -> None:
     """Derive each UI task's visual-source union from UI_CONTEXT.json."""
     ui_groups = [
         group for group in _task_groups(group_data)
@@ -375,7 +378,7 @@ def _materialize_v2_ui_visual_sources(feature_dir: Path, group_data: dict[str, A
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PlanWriterInputError("plan_v2_ui_context_invalid", str(exc)) from exc
+        raise PlanWriterInputError("plan_ui_context_invalid", str(exc)) from exc
     capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
     if not isinstance(capabilities, list):
         return
@@ -421,7 +424,7 @@ def _spec_source_reference_index(feature_dir: Path) -> dict[str, set[str]]:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise PlanWriterInputError("plan_v2_spec_unreadable", str(path)) from exc
+            raise PlanWriterInputError("plan_spec_unreadable", str(path)) from exc
         section = _markdown_section_body(text, "Source References / 外部资料引用")
         if section is None:
             continue
@@ -439,7 +442,7 @@ def _spec_source_reference_index(feature_dir: Path) -> dict[str, set[str]]:
     return index
 
 
-def _materialize_v2_source_references(feature_dir: Path, group_data: dict[str, Any]) -> None:
+def _materialize_plan_source_references(feature_dir: Path, group_data: dict[str, Any]) -> None:
     """Project Specs' source-to-behavior mappings onto the owning Plan tasks.
 
     Specs is the semantic bridge from a source ID to REQ/SCN; the planner never
@@ -835,7 +838,7 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
             "detail": f"return_to_scenario_matrix;ids={','.join(missing)}",
             "repairSuggestion": (
                 f"有 {missing_count} 个场景未被任务覆盖：{missing_preview}。"
-                "请在 Plan v2 输入的 refs.scenarios 中添加或调整任务引用，确保所有场景都被覆盖。"
+                "请在 Plan 输入的 refs.scenarios 中添加或调整任务引用，确保所有场景都被覆盖。"
             ),
         }]))
     return errors
@@ -1301,7 +1304,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
     return task
 
 
-def _plan_v2_runtime_task(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
+def _plan_runtime_task(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
     """Create a complete runtime task without asking the planner for code detail.
 
     The generated fields preserve the planner's high-level implementation and
@@ -1470,13 +1473,16 @@ def _context_for_workspace_root(
 def _code_workspace_preflight_errors(
     data: dict[str, Any],
     code_workspaces: list[str] | None,
+    *,
+    contexts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     tasks_with_roots = [task for task in _tasks(data) if task_workspace_roots(task)]
     if not tasks_with_roots:
         return []
     if not code_workspaces:
         return [{"reason": "code_workspace_preflight_required"}]
-    contexts = _code_workspace_contexts(code_workspaces)
+    if contexts is None:
+        contexts = _code_workspace_contexts(code_workspaces)
     errors: list[dict[str, str]] = []
     for task in tasks_with_roots:
         task_id = str(task.get("id", "task"))
@@ -1495,10 +1501,13 @@ def _task_set_preflight_errors(
     data: dict[str, Any],
     group_data: dict[str, Any],
     code_workspaces: list[str] | None = None,
+    *,
+    group_errors: list[dict[str, Any]] | None = None,
+    workspace_contexts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    errors = _task_group_preflight_errors(feature_dir, group_data)
-    if errors:
-        return errors
+    group_issues = _task_group_preflight_errors(feature_dir, group_data) if group_errors is None else group_errors
+    if any(issue.get("severity") != "warning" for issue in group_issues):
+        return group_issues
     contract_errors = _task_group_contract_errors(group_data, _tasks(data))
     if contract_errors:
         return contract_errors
@@ -1533,7 +1542,7 @@ def _task_set_preflight_errors(
         ownership_scope_by_task=projected_scopes,
     ))
     errors.extend(_task_set_validation_errors(data))
-    errors.extend(_code_workspace_preflight_errors(data, code_workspaces))
+    errors.extend(_code_workspace_preflight_errors(data, code_workspaces, contexts=workspace_contexts))
     if not errors:
         root, batches = _project_batches(data)
         bundle_errors = validate_plan_bundle_data(root, batches)
@@ -1547,7 +1556,7 @@ def _task_set_preflight_errors(
             "field": "specRefs",
             "repairTarget": "task_group",
         })
-    return errors
+    return [*group_issues, *errors]
 
 
 def _task_set_summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -1563,15 +1572,16 @@ def _task_set_summary(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_prepare_plan(args: argparse.Namespace) -> int:
-    """Write a complete, critic-ready Plan v2 bundle without ``PLAN.md``.
+    """Write a complete, critic-ready Plan bundle without ``PLAN.md``.
 
-    A review-ready machine bundle may be replaced by another complete Plan v2
+    A review-ready machine bundle may be replaced by another complete Plan
     input while the Plan stage is still open.  Once ``plan.json`` is
     finalized, subsequent corrections must use the normal rollback flow;
     ``PLAN.md`` is only its human-readable projection.
     """
     workspace, feature = _resolve(args)
     plan_path = _path(workspace, feature)
+    existing = None
     if plan_path.is_file():
         try:
             existing = _load(workspace, feature)
@@ -1583,19 +1593,19 @@ def _cmd_prepare_plan(args: argparse.Namespace) -> int:
         return render_result(fail("orphan_plan_markdown", path=_md_path(workspace, feature)))
     body = _plan_writer_stdin_body() if args.body_stdin else read_object_file(Path(args.body_file))
     if not isinstance(body, dict):
-        return render_result(fail("plan_v2_body_must_be_object"))
-    if body.get("schemaVersion") != PLAN_SCHEMA:
-        return render_result(fail("plan_v2_schema_required", f"expected={PLAN_SCHEMA};actual={body.get('schemaVersion')}"))
+        return render_result(fail("plan_body_must_be_object"))
+    if body.get("schemaVersion") not in {PLAN_SCHEMA, LEGACY_PLAN_SCHEMA}:
+        return render_result(fail("plan_schema_required", f"expected={PLAN_SCHEMA};actual={body.get('schemaVersion')}"))
     try:
-        group_data = _plan_v2_to_groups(body)
+        group_data = _plan_to_groups(body)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))
     if group_data.get("featureId") != feature:
-        return render_result(fail("plan_v2_feature_mismatch", f"expected={feature};actual={group_data.get('featureId')}"))
+        return render_result(fail("plan_feature_mismatch", f"expected={feature};actual={group_data.get('featureId')}"))
     feature_dir = _path(workspace, feature).parent
     try:
-        _materialize_v2_ui_visual_sources(feature_dir, group_data)
-        _materialize_v2_source_references(feature_dir, group_data)
+        _materialize_plan_ui_visual_sources(feature_dir, group_data)
+        _materialize_plan_source_references(feature_dir, group_data)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))
     group_errors = _task_group_preflight_errors(feature_dir, group_data)
@@ -1618,33 +1628,41 @@ def _cmd_prepare_plan(args: argparse.Namespace) -> int:
             {str(group.get("workspaceRef")) for group in _task_groups(group_data)},
         )
         data["tasks"] = [
-            _plan_v2_runtime_task(group, _draft_task_workspace_roots(group, workspace_contexts))
+            _plan_runtime_task(group, _draft_task_workspace_roots(group, workspace_contexts))
             for group in _task_groups(group_data)
         ]
         data["scopeReport"] = _feature_scope_report(feature_dir, _tasks(data))
         data["taskSetStatus"] = "reviewing"
+        data["reviewContextDigest"] = review_context_digest(feature_dir, data["codeWorkspaces"])
         plan_errors = _task_set_preflight_errors(
             feature_dir,
             data,
             group_data,
             [str(Path(value).expanduser().resolve()) for value in args.code_workspace],
+            group_errors=group_errors,
+            workspace_contexts=workspace_contexts,
         )
         blocking_plan_errors = [item for item in plan_errors if item.get("severity") != "warning"]
         if blocking_plan_errors:
             return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=blocking_plan_errors))
-        result = _write(workspace, feature, data)
+        changes = review_changes(existing, data)
+        root, batches = _project_batches(data)
+        unchanged = (existing is not None and root == load_json(plan_path)
+                     and batches == existing.get("_batchPlans"))
+        result = WriterResult(ok=True, path=plan_path, changed=False) if unchanged else _write(workspace, feature, data)
         return render_result(with_result_data(
             result,
             planSchema=PLAN_SCHEMA,
             publicationStatus="reviewing",
-            warnings=[item for item in [*group_errors, *plan_errors] if item.get("severity") == "warning"],
+            reviewChanges=changes,
+            warnings=[item for item in plan_errors if item.get("severity") == "warning"],
             materialized=_task_set_summary(data),
             scopeReport=_feature_scope_report(feature_dir, _tasks(data)),
         ))
     except (PlanWriterInputError, ValueError) as exc:
         if isinstance(exc, PlanWriterInputError):
             return render_result(fail(exc.reason, exc.detail))
-        return render_result(fail("plan_v2_prepare_failed", str(exc)))
+        return render_result(fail("plan_prepare_failed", str(exc)))
 
 
 def _cmd_publish_plan(args: argparse.Namespace) -> int:
@@ -1658,6 +1676,9 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
         data = _load(workspace, feature)
         if data.get("taskSetStatus") != "reviewing":
             return render_result(fail("review_plan_not_ready", "taskSetStatus must be reviewing"))
+        current_context = review_context_digest(_path(workspace, feature).parent, data.get("codeWorkspaces", {}))
+        if data.get("reviewContextDigest") != current_context:
+            return render_result(fail("plan_review_context_changed", "Run prepare-plan again and review the current upstream contracts before publishing."))
         data["taskSetStatus"] = "finalized"
         root, batches = _project_batches(copy.deepcopy(data))
         errors = validate_plan_bundle_data(root, batches, require_initial_status=True)
@@ -1674,7 +1695,7 @@ def _cmd_publish_plan(args: argparse.Namespace) -> int:
             materialized=_task_set_summary(data),
         ))
     except (PlanWriterInputError, ValueError) as exc:
-        return render_result(fail("plan_v2_publish_failed", str(exc)))
+        return render_result(fail("plan_publish_failed", str(exc)))
 
 
 def set_task_execution_status(
@@ -1942,10 +1963,10 @@ def _common(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare a machine Plan v2 for review, then emit PLAN.md")
+    parser = argparse.ArgumentParser(description="Prepare a machine Plan for review, then emit PLAN.md")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    prepare = sub.add_parser("prepare-plan", help="write one critic-ready Plan v2 bundle without PLAN.md")
+    prepare = sub.add_parser("prepare-plan", help="write one critic-ready Plan bundle without PLAN.md")
     _common(prepare)
     prepare.add_argument("--code-workspace", required=True, action="append")
     prepare_input = prepare.add_mutually_exclusive_group(required=True)

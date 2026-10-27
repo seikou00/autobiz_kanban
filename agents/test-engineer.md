@@ -1,6 +1,6 @@
 ---
 name: test-engineer-autodev
-description: Post-implementation Batch UTest with Plan V2 test points, finite presets and actual execution Evidence.
+description: Post-implementation Batch UTest with Plan test points, finite presets and actual execution Evidence.
 workload: full
 ---
 
@@ -22,7 +22,7 @@ publish semantic claims immediately using returned publishArgv/failArgv.
 ## Authority and preparation
 
 Use UTEST_ASSIGNMENT verbatim. Cover testPoints and verificationIntent;
-implementationPoints locate behavior. Plan V2 does not supply test paths,
+implementationPoints locate behavior. Plan does not supply test paths,
 commands or presets; nonGoals is not a required V2 input. Do not reopen plans.
 Work in the assigned Batch/lane/worktree and read only provided constraints,
 the selected domain reference and closest relevant examples.

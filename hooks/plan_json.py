@@ -28,7 +28,7 @@ REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 API_ID_RE = re.compile(r"^API-\d{3}$")
 DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
-# 技术决策：plan 阶段写进 design 技术决策表，任务用 `decisionIds` 引用。
+# 技术决策由 Design 定稿，Plan 任务用 `decisionIds` 引用其只读契约。
 # 别与规格决策 `DEC-NNN` 混淆，那个由 specs 阶段在 proposal 定义
 # （见 skills/autodev/hooks/artifact_check.SPEC_DECISION_ID）。
 TECH_DECISION_ID_RE = re.compile(r"^D-\d{3}$")
@@ -1258,7 +1258,7 @@ def _bundle_consistency_errors(
         ))
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
     task_by_id = {str(item.get("id")): item for item in all_tasks}
-    # Plan v2 has no speculative physical write set. When a producer later
+    # Plan has no speculative physical write set. When a producer later
     # records actual changes, impact analysis invalidates same-repository
     # concurrent evidence conservatively; Merge Train handles real conflicts.
     errors.extend(write_ownership_error_codes(

@@ -1,4 +1,4 @@
-"""Finite, version-aware test choices. Plan V2 owns behavior, not tooling."""
+"""Finite, version-aware test choices. Plan owns behavior, not tooling."""
 from __future__ import annotations
 
 import re

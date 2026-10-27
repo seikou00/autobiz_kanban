@@ -236,11 +236,11 @@ class PlanJsonTest(unittest.TestCase):
 
         self.assertIn("legacy_plan_requires_rebuild", validate_plan_data(plan))
 
-    def test_plan_v2_requires_no_task_command_coverage(self) -> None:
+    def test_plan_requires_no_task_command_coverage(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         self.assertEqual(validate_test_tasks(plan), [])
 
-    def test_plan_v2_ignores_legacy_task_validation_fields_when_reading_existing_runs(self) -> None:
+    def test_plan_ignores_legacy_task_validation_fields_when_reading_existing_runs(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         plan["tasks"][0]["validationCommands"] = []
 

@@ -480,7 +480,7 @@ def execute_utest_command(
         if not command_executes_tests({"argv": command_argv}):
             raise UTestCommandError(
                 "test 模式 argv 不会执行测试用例。修复：先生成测试，再传入真实的精确测试命令；"
-                "Plan V2 不提供测试 argv。"
+                "Plan 不提供测试 argv。"
             )
         authority = dict(authority)
         authority["argv"] = list(command_argv)

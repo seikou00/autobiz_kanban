@@ -168,7 +168,7 @@ class UTestAssignmentRouterTest(unittest.TestCase):
         self.assertIn("workspaceRef", str(caught.exception))
         self.assertIn("修复：", str(caught.exception))
 
-    def test_plan_v2_assignment_contains_no_test_command_hints(self):
+    def test_plan_assignment_contains_no_test_command_hints(self):
         source = task("T008", behavior="限时时间段、商品范围与次数限制")
         feature_dir = self._feature([("B008", "backend", [source])])
 
@@ -177,7 +177,7 @@ class UTestAssignmentRouterTest(unittest.TestCase):
         self.assertIn("限时时间段、商品范围与次数限制", assignment["promptContent"])
         self.assertNotIn("mvn", assignment["promptContent"])
 
-    def test_plan_v2_assignment_defaults_to_workspace_root(self):
+    def test_plan_assignment_defaults_to_workspace_root(self):
         source = task("T001", workspace_ref="ruoyi-vue-pro")
         feature_dir = self._feature([("B001", "backend", [source])])
 

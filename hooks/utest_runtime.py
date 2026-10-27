@@ -3,7 +3,7 @@
 
 Tests are launched by the generated Bash script, never by this Python process.
 The runtime supervises the Bash process group and records its real output via
-run_utest_command.py. All state is bound to a live Batch lease and Plan V2 task.
+run_utest_command.py. All state is bound to a live Batch lease and Plan task.
 """
 from __future__ import annotations
 

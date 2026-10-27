@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from board_core.state_store import load_state_json_records, write_state_records
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.inspect_skill_contract import (
     ROOT,
@@ -24,7 +25,15 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _create_feature(self, feature: str, *, workflow_template: str = "standard") -> None:
-        create_feature(self.workspace, feature, workflow_template=workflow_template)
+        create_feature(self.workspace, feature)
+        if workflow_template != "standard":
+            # Seed an existing record: retired templates are read-compatible,
+            # but intentionally unavailable to the new-Feature entry point.
+            records, errors, _ = load_state_json_records(self.workspace)
+            self.assertEqual(errors, [])
+            records[feature]["workflowTemplate"] = workflow_template
+            records[feature]["checkpoint"] = "specs_in_progress"
+            write_state_records(self.workspace, records)
 
     def _plain(self, skill: str, feature: str) -> str:
         contract, workflow_context, extra_skipped_inputs = _find_feature_contract(

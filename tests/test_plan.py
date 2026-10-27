@@ -1,9 +1,11 @@
-"""End-to-end coverage for Plan v2 review preparation and publication."""
+"""End-to-end coverage for Plan review preparation and publication."""
 
 from __future__ import annotations
 
 import json
 import copy
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
@@ -25,10 +27,10 @@ from hooks.implementation_scope import write_scope  # noqa: E402
 from hooks.plan_scope import write_partition  # noqa: E402
 
 
-class PlanV2Test(unittest.TestCase):
+class PlanTest(unittest.TestCase):
     def _payload(self) -> dict:
         return {
-            "schemaVersion": "autodev.plan.v2", "featureId": "alpha",
+            "schemaVersion": "autodev.plan", "featureId": "alpha",
             "tasks": [{
                 "id": "T001", "outcome": "Users retrieve capability state", "workspace": "default",
                 "dependsOn": [],
@@ -102,11 +104,11 @@ class PlanV2Test(unittest.TestCase):
         self.assertTrue(result.ok, result.errors)
         return workspace, feature
 
-    def test_publish_plan_v2_derives_runtime_contract_without_file_or_command_hints(self) -> None:
+    def test_publish_plan_derives_runtime_contract_without_file_or_command_hints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace, feature = self._feature(Path(directory))
             payload = {
-                "schemaVersion": "autodev.plan.v2",
+                "schemaVersion": "autodev.plan",
                 "featureId": "alpha",
                 "tasks": [{
                     "id": "T001",
@@ -177,7 +179,109 @@ class PlanV2Test(unittest.TestCase):
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("formal_plan_already_exists", rejected.stdout)
 
-    def test_publish_plan_v2_derives_visual_sources_from_all_matching_capabilities(self) -> None:
+    def test_unchanged_prepare_preserves_files_and_returns_no_new_review_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            first = self._prepare(workspace, payload)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertEqual(json.loads(first.stdout)["reviewChanges"]["reviewScope"], "full")
+            paths = [feature / "plan.json", *sorted((feature / "plans").glob("*/plan.json"))]
+            before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+            repeated = self._prepare(workspace, payload)
+            self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+            result = json.loads(repeated.stdout)
+            self.assertFalse(result["changed"])
+            self.assertEqual(result["reviewChanges"]["reviewScope"], "none")
+            self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths})
+
+    def test_local_revision_reports_the_changed_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            self.assertEqual(self._prepare(workspace, payload).returncode, 0)
+            payload["tasks"][0]["testPoints"].append("Reject invalid input")
+            result = self._prepare(workspace, payload)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            changes = json.loads(result.stdout)["reviewChanges"]
+            self.assertEqual(changes["reviewScope"], "affected")
+            self.assertEqual(changes["changedTaskIds"], ["T001"])
+
+    def test_upstream_change_blocks_publication_until_plan_is_prepared_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            self.assertEqual(self._prepare(workspace, payload).returncode, 0)
+            (feature / "proposal.md").write_text("# Clarified delivery boundary\n")
+            rejected = subprocess.run(
+                [sys.executable, str(ROOT / "hooks/plan_writer.py"), "publish-plan",
+                 "--workspace", str(workspace), "--feature", "alpha"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("plan_review_context_changed", rejected.stdout)
+            self.assertFalse((feature / "PLAN.md").exists())
+            refreshed = self._prepare(workspace, payload)
+            self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+            self.assertEqual(json.loads(refreshed.stdout)["reviewChanges"]["reviewScope"], "full")
+
+    def test_same_input_still_runs_global_coverage_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            self.assertEqual(self._prepare(workspace, payload).returncode, 0)
+            original = (feature / "plan.json").read_bytes()
+            spec = feature / "specs/cap/spec.md"
+            spec.write_text(spec.read_text() + "\n#### Scenario SCN-002: Newly required behavior\n")
+            rejected = self._prepare(workspace, payload)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("SCN-002", rejected.stdout)
+            self.assertEqual((feature / "plan.json").read_bytes(), original)
+
+    def test_historical_input_schema_is_accepted_but_output_uses_plan(self):
+        from hooks.plan_writer import LEGACY_PLAN_SCHEMA
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            payload["schemaVersion"] = LEGACY_PLAN_SCHEMA
+            result = self._prepare(workspace, payload)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout)["planSchema"], "autodev.plan")
+            self.assertNotIn(LEGACY_PLAN_SCHEMA, result.stdout)
+
+    def test_prepare_reuses_repository_and_group_inspection_results(self):
+        from hooks import plan_writer
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, _ = self._feature(Path(directory))
+            output = io.StringIO()
+            with patch.object(plan_writer, "read_object_stdin", return_value=self._payload()), \
+                 patch.object(plan_writer, "_task_group_preflight_errors", wraps=plan_writer._task_group_preflight_errors) as groups, \
+                 patch.object(plan_writer, "_code_workspace_contexts", wraps=plan_writer._code_workspace_contexts) as repositories, \
+                 contextlib.redirect_stdout(output):
+                code = plan_writer.main(["prepare-plan", "--workspace", str(workspace), "--feature", "alpha",
+                                         "--code-workspace", str(ROOT), "--body-stdin"])
+            self.assertEqual(code, 0, output.getvalue())
+            self.assertEqual(groups.call_count, 1)
+            self.assertEqual(repositories.call_count, 1)
+
+    def test_advisory_warning_does_not_skip_global_reference_checks(self):
+        from hooks import plan_writer
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            payload["tasks"][0]["refs"]["api"] = ["API-999"]
+            warning = {"reason": "advisory_only", "severity": "warning"}
+            output = io.StringIO()
+            with patch.object(plan_writer, "read_object_stdin", return_value=payload), \
+                 patch.object(plan_writer, "_task_group_preflight_errors", return_value=[warning]), \
+                 contextlib.redirect_stdout(output):
+                code = plan_writer.main(["prepare-plan", "--workspace", str(workspace), "--feature", "alpha",
+                                         "--code-workspace", str(ROOT), "--body-stdin"])
+            self.assertNotEqual(code, 0)
+            self.assertIn("API-999", output.getvalue())
+            self.assertFalse((feature / "plan.json").exists())
+
+    def test_publish_plan_derives_visual_sources_from_all_matching_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace, feature = self._feature(Path(directory))
             (feature / "UI_CONTEXT.json").write_text(json.dumps({
@@ -197,7 +301,7 @@ class PlanV2Test(unittest.TestCase):
                 ],
             }), encoding="utf-8")
             payload = {
-                "schemaVersion": "autodev.plan.v2", "featureId": "alpha",
+                "schemaVersion": "autodev.plan", "featureId": "alpha",
                 "tasks": [{
                     "id": "T001", "outcome": "Users configure the capability", "workspace": "default",
                     "dependsOn": [],
@@ -218,7 +322,7 @@ class PlanV2Test(unittest.TestCase):
             task = load_plan_bundle(feature).batches["B001"]["tasks"][0]
             self.assertEqual(task["uiRefs"]["visualSourceRefs"], ["VIS-001", "VIS-002"])
 
-    def test_publish_plan_v2_accepts_unbracketed_scenarios(self) -> None:
+    def test_publish_plan_accepts_unbracketed_scenarios(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace, feature = self._feature(Path(directory))
             (feature / "specs" / "cap" / "spec.md").write_text(
@@ -230,7 +334,7 @@ class PlanV2Test(unittest.TestCase):
                 encoding="utf-8",
             )
             payload = {
-                "schemaVersion": "autodev.plan.v2", "featureId": "alpha",
+                "schemaVersion": "autodev.plan", "featureId": "alpha",
                 "tasks": [{
                     "id": "T001", "outcome": "Users retrieve the capability state",
                     "workspace": "default", "dependsOn": [],
@@ -253,7 +357,7 @@ class PlanV2Test(unittest.TestCase):
             self.assertEqual({item["anchor"] for item in specs}, {"REQ-001", "SCN-001"})
             self.assertEqual({item["anchor"] for item in design}, {"API-001", "DATA-001", "D-001"})
 
-    def test_publish_plan_v2_projects_file_level_source_refs_to_code_context(self) -> None:
+    def test_publish_plan_projects_file_level_source_refs_to_code_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace, feature = self._feature(Path(directory))
             snapshot = feature / "sources" / "SRC-001" / "capability.md"
@@ -363,14 +467,14 @@ class PlanV2Test(unittest.TestCase):
 
     def test_invalid_inputs_fail_before_publishing_any_bundle(self) -> None:
         mutations = [
-            (lambda p: p["tasks"][0]["dependsOn"].append("T404"), "plan_v2_dependency_unknown"),
-            (lambda p: p["tasks"][0]["dependsOn"].append("T001"), "plan_v2_dependency_cycle"),
-            (lambda p: p["tasks"].append(copy.deepcopy(p["tasks"][0])), "plan_v2_task_id_duplicate"),
-            (lambda p: p["tasks"][0].update({"validationCommands": []}), "plan_v2_task_field_unknown"),
-            (lambda p: p["tasks"][0]["refs"].update({"scenario": []}), "plan_v2_task_refs_field_unknown"),
-            (lambda p: p["tasks"][0]["verification"].update({"command": "pytest"}), "plan_v2_task_verification_field_unknown"),
-            (lambda p: p["tasks"][0]["verification"].clear(), "plan_v2_task_verification_intent_invalid"),
-            (lambda p: p["tasks"][0].pop("workspace"), "plan_v2_task_workspace_missing"),
+            (lambda p: p["tasks"][0]["dependsOn"].append("T404"), "plan_dependency_unknown"),
+            (lambda p: p["tasks"][0]["dependsOn"].append("T001"), "plan_dependency_cycle"),
+            (lambda p: p["tasks"].append(copy.deepcopy(p["tasks"][0])), "plan_task_id_duplicate"),
+            (lambda p: p["tasks"][0].update({"validationCommands": []}), "plan_task_field_unknown"),
+            (lambda p: p["tasks"][0]["refs"].update({"scenario": []}), "plan_task_refs_field_unknown"),
+            (lambda p: p["tasks"][0]["verification"].update({"command": "pytest"}), "plan_task_verification_field_unknown"),
+            (lambda p: p["tasks"][0]["verification"].clear(), "plan_task_verification_intent_invalid"),
+            (lambda p: p["tasks"][0].pop("workspace"), "plan_task_workspace_missing"),
         ]
         for mutate, reason in mutations:
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
@@ -384,7 +488,7 @@ class PlanV2Test(unittest.TestCase):
                 self.assertFalse((feature / "PLAN.md").exists())
 
     def test_scope_partitions_match_publisher_and_stage_gate(self) -> None:
-        from hooks.plan_writer import _plan_v2_to_groups, _task_group_preflight_errors
+        from hooks.plan_writer import _plan_to_groups, _task_group_preflight_errors
         # artifact_check is loaded by the production stage-gate environment.
         hooks_dir = str(ROOT / "skills/autodev/hooks")
         if hooks_dir not in sys.path:
@@ -420,7 +524,7 @@ class PlanV2Test(unittest.TestCase):
             self.assertEqual(validate_plan_scenario_coverage(ctx), 0)
             _, errors = write_partition(feature, {"includedScenarioRefs": ["specs/cap/spec.md#SCN-999"]})
             self.assertEqual(errors, [])
-            issues = _task_group_preflight_errors(feature, _plan_v2_to_groups(payload))
+            issues = _task_group_preflight_errors(feature, _plan_to_groups(payload))
             self.assertIn("implementation_scope_unknown_ref", [issue["reason"] for issue in issues])
             self.assertGreater(validate_plan_scenario_coverage(ctx), 0)
 

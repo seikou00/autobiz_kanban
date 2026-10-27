@@ -65,7 +65,7 @@ def load_design_contract(base: Path) -> tuple[dict[str, Any], list[dict[str, Any
     if not path.is_file() or path.stat().st_size <= 0:
         return empty, [_contract_error(
             "missing_design",
-            suggestion="需要先创建 design.md 文件，包含 API Decisions 和 Data Decisions 表格"
+            suggestion="先创建 design.md，写必要技术决策、行为覆盖与验证及 API/数据标记；仅在涉及变更时添加对应契约表"
         )]
     try:
         raw = path.read_bytes()
@@ -110,13 +110,13 @@ def load_design_contract(base: Path) -> tuple[dict[str, Any], list[dict[str, Any
         errors.append(_contract_error(
             "design_api_marker_conflicts_with_definitions",
             "x-auto-no-http-api=true cannot coexist with API Decisions rows",
-            suggestion=f"将 x-auto-no-http-api 改为 false，或删除 API Decisions 表格中的 {len(api_ids)} 行定义"
+            suggestion="按已确认的接口变化修正标记与契约；涉及 HTTP 接口时标记为 false，不为通过校验删除真实接口定义"
         ))
     if no_sql is True and data_ids:
         errors.append(_contract_error(
             "design_data_marker_conflicts_with_definitions",
             "x-auto-no-sql=true cannot coexist with Data Decisions rows",
-            suggestion=f"将 x-auto-no-sql 改为 false，或删除 Data Decisions 表格中的 {len(data_ids)} 行定义"
+            suggestion="按已确认的数据变化修正标记与契约；涉及数据结构时标记为 false，不为通过校验删除真实数据定义"
         ))
     pending_matches = PENDING_CELL_RE.findall(text)
     pending_count = len(pending_matches)
@@ -135,7 +135,7 @@ def load_design_contract(base: Path) -> tuple[dict[str, Any], list[dict[str, Any
         errors.append(_contract_error(
             "design_has_pending_cells",
             f"count={pending_count}",
-            suggestion=f"design.md 中有 {pending_count} 个单元格包含「待确认」或「读码差异」{location_info}。请逐条与用户确认后，将单元格内容改为具体值并标记为「已确认」"
+            suggestion=f"design.md 中有 {pending_count} 个单元格包含「待确认」或「读码差异」{location_info}。依据已确认需求和必要代码证据写入具体结论；仅影响行为、公开契约或实现路径的真实未决项需要用户澄清，无需添加确认状态列"
         ))
 
     return {
@@ -179,7 +179,7 @@ def _unknown_design_id_issue(
         "currentValue": value,
         "repairTarget": repair_target,
         "designMutationAllowed": False,
-        "repairSuggestion": f"任务 {task_id} 引用了 design.md 中不存在的{kind_label} ID：{value}。请在 Plan v2 输入的 refs 中删除该引用，或先在 design.md 的对应表格中添加该 ID 定义"
+        "repairSuggestion": f"任务 {task_id} 引用了已锁定设计中不存在的{kind_label} ID：{value}。核对并修正 Plan 输入的 refs；上游确实缺少契约时回到 /autodev-design 修复并刷新设计锁，再重新 prepare-plan，不在 Plan 中补写设计 ID"
     }
 
 
@@ -239,7 +239,7 @@ def validate_task_group_design_contract(
                     "currentValue": api_id,
                     "repairTarget": "task_group",
                     "designMutationAllowed": False,
-                    "repairSuggestion": f"design.md 标记了 x-auto-no-http-api=true（无 HTTP API），但任务 {task_id} 引用了 API ID：{api_id}。请删除任务的 apiIds 引用，或将 design.md 中的 x-auto-no-http-api 改为 false"
+                    "repairSuggestion": f"已锁定设计声明无 HTTP API，但任务 {task_id} 引用了 {api_id}。修正 Plan 输入的 refs.api；确有接口变化时回到 /autodev-design 修复契约并刷新设计锁，再重新 prepare-plan"
                 })
             elif api_id not in known:
                 errors.append(_unknown_design_id_issue(

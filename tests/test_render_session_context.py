@@ -251,10 +251,12 @@ class RuntimePolicyTest(unittest.TestCase):
 
     def test_explicit_project_and_feature_select_node_policy(self):
         project, feature, arguments = self._feature_arguments()
-        # 常规节点采用 multi；代码实现节点改用 workflow。
+        # Specs/Design 主会话执行，Code 使用固定 Workflow。
         cases = (
             ("prd_in_progress", "multi", True),
-            ("specs_in_progress", "multi", True),
+            ("specs_in_progress", "solo", True),
+            ("design_in_progress", "solo", True),
+            ("plan_in_progress", "solo", True),
             ("code_in_progress", "workflow", True),
         )
 
@@ -296,11 +298,11 @@ class RuntimePolicyTest(unittest.TestCase):
         self._write_checkpoint(project, feature, "prd_done")
 
         policy = render([], **arguments)["agentConfig"]
-        self.assertEqual(policy["agentMode"], "multi")
+        self.assertEqual(policy["agentMode"], "solo")
         self.assertTrue(policy["toolConfig"]["task"]["enabled"])
         self.assertEqual(
             [Path(item).name for item in policy["subagentConfig"]["customSubagentFiles"]],
-            ["explore.md", "critic.md"],
+            ["explore.md"],
         )
 
     def test_done_checkpoint_resolves_policy_through_next_action(self):
@@ -421,7 +423,7 @@ class RuntimePolicyTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
-    def test_board_config_defaults_code_to_workflow_and_all_other_nodes_to_multi(self):
+    def test_board_config_uses_solo_planning_and_workflow_code(self):
         config = json.loads(
             (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
         )
@@ -429,7 +431,7 @@ class RuntimePolicyTest(unittest.TestCase):
         for node in nodes:
             with self.subTest(node=node["id"]):
                 policy = _runtime_policy(node["id"])
-                expected_mode = "workflow" if node["id"] == "dev.code" else "multi"
+                expected_mode = "workflow" if node["id"] == "dev.code" else ("solo" if node["id"] in {"dev.specs", "dev.design", "dev.plan"} else "multi")
                 self.assertEqual(policy["agentMode"], expected_mode)
                 self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
 

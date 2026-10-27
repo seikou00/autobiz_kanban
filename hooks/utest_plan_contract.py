@@ -106,7 +106,7 @@ def _batch_path(feature_dir, raw_path):
 
 
 def validation_locations(task):
-    """Return the Plan V2 workspace boundary for UTest-generated commands."""
+    """Return the Plan workspace boundary for UTest-generated commands."""
     if not isinstance(task, dict):
         return []
     workspace_ref = task.get("workspaceRef")

@@ -120,7 +120,7 @@ POM 修改可用 `apply-pom`、同一绑定参数和 `--content-file <worktree�
 
 有实际证据时 `select --preset <ID> --reason <原因>` 允许执行前调整一次；执行后冻结。静态依赖读取 `reference/legacy-static-test-patterns.md`，只复用可验证的 inline/PowerMock/隔离 fixture 模板。无法隔离时返回 `testability_gap`，不得静态推导 source_bug；H2/mapper 测试不替代 Service 授权逻辑。
 
-Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan V2 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。所有 Maven 命令（含版本查询、依赖诊断、classpath、编译和测试）都由 Bash 直接执行，禁止 Python 原生 subprocess 启动 mvn，不要求创建 mvn.exe 包装器。Maven setup 统一经 `utest_runtime.py preflight-setup` 携带上述全部绑定参数和精确 argv；`status=prepared` 时原样执行返回的 `bashCommand`，`status=cached` 时复用实际结果。runner 仅用 `--kind setup --record-only` 登记，setup 不算行为测试，也不重置首次真实测试期限。相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类先用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；再用 `inspect-class` 读取并缓存 source JAR/javap；缺 snapshot 时只执行一次受控 classpath setup。不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
+Runtime 保存 UTEST_ENVIRONMENT.json/UTEST_EXECUTION.json，恢复复用决策与预算，不复用历史 PASS。Plan 不增加 preset/依赖/路径/argv，不要求 nonGoals 输入。所有 Maven 命令（含版本查询、依赖诊断、classpath、编译和测试）都由 Bash 直接执行，禁止 Python 原生 subprocess 启动 mvn，不要求创建 mvn.exe 包装器。Maven setup 统一经 `utest_runtime.py preflight-setup` 携带上述全部绑定参数和精确 argv；`status=prepared` 时原样执行返回的 `bashCommand`，`status=cached` 时复用实际结果。runner 仅用 `--kind setup --record-only` 登记，setup 不算行为测试，也不重置首次真实测试期限。相同模块/配置/argv 缓存成功及失败；仅外部依赖环境实际变化后使用 `--refresh-diagnostics`。classpath 查类先用 `lookup-class --classpath-file <已有文件> --class-name <完整包名>`；再用 `inspect-class` 读取并缓存 source JAR/javap；缺 snapshot 时只执行一次受控 classpath setup。不递归扫描本地 Maven 仓库。命中、缺失、超时均复用，同一 jar 的源码/反编译结果也复用。
 
 ## 测试域路由
 

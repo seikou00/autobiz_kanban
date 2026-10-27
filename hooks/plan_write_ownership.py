@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Ownership helpers for plans that already have observed write paths.
 
-Plan v2 does not ask the model to predict files or symbols. These helpers keep
+Plan does not ask the model to predict files or symbols. These helpers keep
 the integrity checks for an artifact after a producer has recorded actual
 paths; optimistic scheduling and Merge Train handle the absence of that data.
 """

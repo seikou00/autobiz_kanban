@@ -435,7 +435,7 @@ def create_manifest(
     if runtime_config is None:
         runtime_config = {}
     final_runtime_config = {
-        # Plan v2 deliberately does not predict implementation file lists.
+        # Plan deliberately does not predict implementation file lists.
         # Isolated worktrees can therefore start dependency-ready work in
         # parallel; the merge train remains the authority for real conflicts.
         "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
@@ -872,7 +872,7 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
     - optimistic (default): starts dependency-ready isolated worktrees up to maxParallel
     - conservative: serializes batches with declared write-set conflicts
 
-    Optimistic mode deliberately accepts unknown Plan-v2 write scope; Merge
+    Optimistic mode deliberately accepts unknown Plan write scope; Merge
     Train resolves actual conflicts. Conservative mode serializes unknown scope
     within a repository. Known paths conflict when they are equal or one is an
     ancestor of the other. Special stages (proto/global/integration) are always

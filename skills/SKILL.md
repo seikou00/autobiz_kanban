@@ -7,7 +7,7 @@ version: v1.1.08311
 # 核心工作原则
 
 - 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。用户请求完整链路时，`biz -> dev -> ops` 按状态自动续跑，不因内部阶段切换反复确认；仅在存在关键歧义、真实方案取舍、外部授权或不可逆操作时暂停。用户明确只请求某个阶段时，完成该阶段后直接汇报，不追问是否继续。
-- Dev 阶段除 `/autodev-reviewer` 可启动独立只读 reviewer 外，其余阶段均由当前会话内联执行，不得委派给下级 agent。
+- Specs、Design、Plan 默认在主会话执行，局部问题定向查证；只有范围明确且有独立检索价值时才使用 `Explore-autodev`。Design 独立审查用于用户要求或高风险变更；Plan 保留一次聚焦的语义回检，修复后按影响范围复核；Code 按固定 Workflow 执行。
 - 所有阶段启动 Python 脚本时统一使用 `python -X utf8 <script.py>`；它等效于设置 `PYTHONUTF8=1`，并兼容 Windows、macOS 与 Linux。不得裸运行 `python <script.py>`，也不得只依赖 `PYTHONIOENCODING`。
 
 ## 目录结构与路径约定

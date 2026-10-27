@@ -44,7 +44,7 @@ from hooks.e2e_trust_common import (  # noqa: E402
     validate_scan_current,
 )
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
-from hooks.plan_scope import resolve_plan_scope, scope_report  # noqa: E402
+from hooks.plan_scope import load_plan_scope, resolve_plan_scope, scope_report  # noqa: E402
 from hooks.spec_contract import SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE  # noqa: E402
 from hooks.candidate_digest import compute as compute_candidate_digest  # noqa: E402
 from hooks.artifact_ref_validator import (  # noqa: E402
@@ -602,39 +602,95 @@ def validate_design_contract(ctx: HookContext) -> int:
 
     text = read_text(design)
     failures = validate_no_template_guidance(ctx, design, text)
-    required_sections = [
-        "Context / 输入上下文",
-        "Code Evidence",
-        "Spec Traceability",
-        "API Decisions",
-        "Data Decisions",
-        "Technical Design",
-        "Risks / Open Questions",
-    ]
+    # Keep the two downstream contracts; evidence can be concise prose or the
+    # legacy Context + Code Evidence sections. API/Data/Risks are conditional.
+    required_sections = ["Technical Design", "Spec Traceability"]
+    if not has_heading(text, "Change"):
+        required_sections.extend(["Context / 输入上下文", "Code Evidence"])
     for section in required_sections:
-        if section not in text:
+        if not has_heading(text, section):
             failures += fail_line(ctx, "invalid_design_missing_section", f" section={section!r}", target=section)
 
-    no_http_api = design_marker_value(text, "x-auto-no-http-api")
-    no_sql = design_marker_value(text, "x-auto-no-sql")
-    if no_http_api is None:
-        failures += fail_line(ctx, "missing_design_api_marker")
-    if no_sql is None:
-        failures += fail_line(ctx, "missing_design_data_marker")
-    design_ids, _ = collect_design_definition_index(ctx)
-    if no_http_api is True and design_ids["API"]:
-        failures += fail_line(ctx, "design_api_marker_conflicts_with_definitions")
-    if no_sql is True and design_ids["DATA"]:
-        failures += fail_line(ctx, "design_data_marker_conflicts_with_definitions")
-    pending = PENDING_CELL.findall(text)
-    if pending:
-        failures += fail_line(
-            ctx,
-            "design_has_pending_cells",
-            f" count={len(pending)}",
-            target=f"{len(pending)} 处",
-        )
+    contract, issues = load_design_contract(ctx.feature_dir)
+    for issue in issues:
+        failures += _emit_artifact_issue(ctx, issue, "design.md")
+    for marker, kind, reason in (
+        ("x-auto-no-http-api", "API", "missing_design_api_id"),
+        ("x-auto-no-sql", "DATA", "missing_design_data_id"),
+    ):
+        if design_marker_value(text, marker) is False and not contract["ids"][kind]:
+            failures += fail_line(ctx, reason, target=kind)
+    failures += _validate_design_traceability(ctx, text, contract["ids"])
     failures += _unresolved_decision_refs(ctx, text)
+    return failures
+
+
+def _validate_design_traceability(ctx: HookContext, text: str, design_ids: dict) -> int:
+    """Prove scoped Scenario coverage without requiring a critic or report.
+
+    The four-column compact table and the legacy Decision/Evidence table share
+    Requirement, Scenarios and Design Coverage. Compact tables must retain
+    Verification; legacy Decision/Evidence tables remain readable.
+    """
+    body = _markdown_section_body(text, "Spec Traceability")
+    if body is None:
+        return 0  # The required-section check owns this error.
+    specs = spec_files(ctx)
+    if not specs:
+        return fail_line(ctx, "missing_specs")
+    index, failures = collect_spec_definition_index(ctx)
+    failures += _report_implementation_scope_errors(ctx)
+    scenario_refs: dict[str, str] = {}
+    parents: dict[str, str] = {}
+    for spec in specs:
+        spec_text = read_text(spec)
+        requirements = list(SPEC_REQUIREMENT_DEF_RE.finditer(spec_text))
+        for pos, requirement in enumerate(requirements):
+            end = requirements[pos + 1].start() if pos + 1 < len(requirements) else len(spec_text)
+            for scenario in SPEC_SCENARIO_DEF_RE.findall(spec_text[requirement.end():end]):
+                parents[scenario] = requirement.group(1)
+                scenario_refs[scenario] = f"{spec.relative_to(ctx.feature_dir).as_posix()}#{scenario}"
+    scope, scope_errors = load_plan_scope(ctx.feature_dir)
+    selection, selection_errors = scope.select("scenario", set(scenario_refs.values()))
+    for issue in scope_errors + selection_errors:
+        failures += _emit_artifact_issue(ctx, issue, "IMPLEMENTATION_SCOPE.json")
+    known_design = set().union(*design_ids.values())
+    covered: set[str] = set()
+    columns: dict[str, int] = {}
+    for line_number, line in enumerate(body.splitlines(), 1):
+        if not line.strip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        headers = [cell.strip("`* ").casefold() for cell in cells]
+        if {"requirement", "scenarios", "design coverage"}.issubset(headers):
+            columns = {name: pos for pos, name in enumerate(headers)}
+            continue
+        if not columns or len(cells) <= max(columns.values()):
+            continue
+        requirements = set(REQ_ID.findall(cells[columns["requirement"]]))
+        scenarios = set(SCN_ID.findall(cells[columns["scenarios"]]))
+        coverage = set(re.findall(r"\b(?:API|DATA|D)-\d{3}\b", cells[columns["design coverage"]]))
+        if not (requirements or scenarios or coverage):
+            continue
+        target = ",".join(sorted(requirements | scenarios)) or f"row={line_number}"
+        unknown = (requirements - index["REQ"]) | (scenarios - index["SCN"]) | (coverage - known_design)
+        if unknown:
+            failures += fail_line(ctx, "design_traceability_unresolved_ref", target=",".join(sorted(unknown)))
+        if not requirements or not scenarios or not coverage:
+            failures += fail_line(ctx, "design_traceability_incomplete", target=target)
+            continue
+        mismatched = {scenario for scenario in scenarios if parents.get(scenario) not in requirements}
+        if mismatched:
+            failures += fail_line(ctx, "design_traceability_requirement_mismatch", target=",".join(sorted(mismatched)))
+        legacy_evidence = {"decision", "evidence"}.issubset(columns)
+        if (("verification" not in columns and not legacy_evidence)
+                or ("verification" in columns and not cells[columns["verification"]].strip(" -—"))):
+            failures += fail_line(ctx, "design_verification_missing", target=target)
+        if not unknown and not mismatched:
+            covered.update(scenario_refs[scenario] for scenario in scenarios)
+    missing = selection.included - covered
+    if missing:
+        failures += fail_line(ctx, "design_scenario_uncovered", target=",".join(sorted(missing)))
     return failures
 
 

@@ -210,7 +210,7 @@ class BatchedPlanContractTest(unittest.TestCase):
         self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
 
-    def test_bundle_allows_plan_v2_without_task_validation_commands(self) -> None:
+    def test_bundle_allows_plan_without_task_validation_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
