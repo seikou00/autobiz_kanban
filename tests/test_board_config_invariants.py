@@ -313,27 +313,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(missing_platforms),
         )
 
-        skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        first_command = 'python -X utf8 "${pluginPath}/hooks/inspect_skill_contract.py"'
-        self.assertIn(execution_rule, skill)
-        self.assertIn(first_command, skill)
-        self.assertLess(skill.index(execution_rule), skill.index(first_command))
-        self.assertIn(
-            "`${pluginWorkspace}/${projectDir}` 只作为产物路径或脚本的 `--workspace` 参数",
-            skill,
-        )
-        self.assertIn(
-            "仓库根目录与执行目录只使用环境检查器返回值，不作为模型填写的脚本参数",
-            skill,
-        )
-        self.assertIn("每次需要当前状态或 checkpoint 时重新运行该脚本", skill)
-        self.assertIn(
-            "不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、"
-            "`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`",
-            skill,
-        )
 
     def test_skill_output_sections_never_declare_global_state_files(self) -> None:
         state_files = (".autobizdevops/state.json", ".autobizdevops/STATE.md")
@@ -454,110 +433,19 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         )
 
 
-    def test_code_skill_requires_fixed_workflow(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            "workflow_launcher.py",
-            "唯一的 Code 启动入口",
-            "不得调用 `task_runner.py code-session`",
-            "固定 Workflow",
-            "原生 Git Worktree",
-            "Task Run 的 Git 快照",
-            "batchExecutionPlan",
-            "展示给用户",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-code must enforce fixed Workflow execution: " + ", ".join(missing),
-        )
 
-    def test_code_skill_requires_same_batch_continuation(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            "continue_active_batch",
-            "continueCurrentBatch=true",
-            "nextTaskId",
-            "同批仍有可执行任务时禁止询问用户是否继续",
-            "立即进入下一个 Task",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-code must continue runnable tasks in the active batch: " + ", ".join(missing),
-        )
 
-    def test_code_skill_protects_task_runner_snapshot_baseline(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            ".cmbdevclaw/large_tool_results/",
-            "task_runner.py\" resume",
-            "staging / unstaging",
-            "同一个 run",
-            "--no-code-change-why",
-            "仓库根相对路径",
-            "integritySha256",
-            "task_run_integrity_mismatch",
-            "禁止直接编辑 `plan.json`",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-code must protect task snapshot baselines: " + ", ".join(missing),
-        )
 
-    def test_code_skill_forbids_test_file_changes(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            "不得创建或修改测试文件",
-            "code_stage_test_changes_forbidden",
-            "测试文件变更会被拒绝",
-            "后续 UTest/E2E 阶段",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-code must define transient validation file handling: " + ", ".join(missing),
-        )
 
-    def test_code_skill_displays_batch_execution_plan_before_starting_workflow(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            "batchExecutionPlan",
-            "逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集",
-            "`waves` 仅是 Plan 的兼容预览/审计分组",
-            "不是整波屏障",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-code must display the batch execution plan: " + ", ".join(missing),
-        )
 
-    def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
-        plan = _plan_skill_docs()
-        code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        plan_required = []
-        code_required = [
-            "必须与 task `scope.workspaceRoots` 声明的位置完全一致",
-            "`scopePathBase=requested_code_workspace`",
-            "`task_run_requested_workspace_mismatch`",
-            "DTO/domain/resources/迁移/配置",
-            "测试文件变更会被拒绝",
-        ]
-        missing = [phrase for phrase in plan_required if phrase not in plan]
-        missing.extend(phrase for phrase in code_required if phrase not in code)
-        self.assertEqual(
-            missing,
-            [],
-            "Plan and Code must share the requested-workspace scope contract: "
-            + ", ".join(missing),
-        )
+
+    def test_default_code_material_is_small_and_conditional_references_resolve(self):
+        root = ROOT / "skills/autodev/autodev-code"
+        self.assertLess((root / "SKILL.md").stat().st_size, 10000)
+        for filename in ("task-execution.md", "frontend-route.md", "batch-workflow-guide.md"):
+            self.assertTrue((root / "references" / filename).is_file())
+        code = next(node for _, node in _iter_nodes(_board_config()) if node.get("id") == "dev.code")
+        self.assertEqual(code["runtimePolicy"]["agentMode"], "workflow")
 
     def test_code_exploration_cache_is_not_a_code_output(self) -> None:
         code = next(

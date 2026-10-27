@@ -1626,6 +1626,13 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
     if not isinstance(repair_rounds, int) or not 0 <= repair_rounds <= 3:
         failures += fail_line(ctx, "invalid_e2e_repair_rounds")
 
+    from hooks.e2e_reuse import valid_inherited
+    inherited = valid_inherited(ctx.feature_dir, data)
+    inherited_run_ids = {row["runId"] for row in inherited.values()}
+    raw_cases = data.get("cases")
+    inherited_evidence_ids = {execution.get("evidenceId") for case in (raw_cases if isinstance(raw_cases, list) else []) if isinstance(case, dict)
+                              for execution in (case.get("executions") or []) if isinstance(execution, dict)
+                              and execution.get("runId") in inherited_run_ids}
     pass_claimed = root_verdict == "PASS"
     cases = data.get("cases")
     if not isinstance(cases, list) or not cases:
@@ -1752,8 +1759,9 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
             if (
                 result == "PASS"
                 and gate_code == 0
-                and execution.get("roundIndex") == current.get("index")
-                and is_fresh(evidence.get("createdAt"), current.get("startedAt"))
+                and ((execution.get("roundIndex") == current.get("index")
+                      and is_fresh(evidence.get("createdAt"), current.get("startedAt")))
+                     or inherited.get(case.get("caseId"), {}).get("runId") == execution.get("runId"))
             ):
                 current_pass = True
                 for error in validate_execution_hash_chain(
@@ -1794,7 +1802,7 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
                         "invalid_e2e_coverage_evidence_source",
                         f" item=scenarioCoverage[{row_index}] evidenceId={evidence_id}",
                     )
-                elif not is_fresh(evidence.get("createdAt"), current.get("startedAt")):
+                elif not is_fresh(evidence.get("createdAt"), current.get("startedAt")) and evidence_id not in inherited_evidence_ids:
                     failures += fail_line(
                         ctx,
                         "stale_e2e_coverage_evidence",

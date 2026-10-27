@@ -177,6 +177,14 @@ class UTestAssignmentRouterTest(unittest.TestCase):
         self.assertIn("限时时间段、商品范围与次数限制", assignment["promptContent"])
         self.assertNotIn("mvn", assignment["promptContent"])
 
+    def test_batch_filter_preserves_exact_assignment_and_omits_other_batches(self):
+        feature_dir = self._feature([("B001", "backend", [task("T001")]),
+                                     ("B002", "backend", [task("T002")])])
+        all_assignments = build_assignments(feature_dir)
+        current = build_assignments(feature_dir, batch_id="B002")
+        self.assertEqual(current, [row for row in all_assignments if row["batchId"] == "B002"])
+        self.assertEqual(current[0]["taskIds"], ["T002"])
+
     def test_plan_assignment_defaults_to_workspace_root(self):
         source = task("T001", workspace_ref="ruoyi-vue-pro")
         feature_dir = self._feature([("B001", "backend", [source])])
@@ -191,22 +199,6 @@ class UTestAssignmentRouterTest(unittest.TestCase):
             prompt["tasks"][0]["validationLocations"],
         )
 
-
-class UTestWorkflowTextContractTest(unittest.TestCase):
-    def test_inline_fallback_and_plan_authority_are_explicit(self):
-        skill = SKILL_PATH.read_text(encoding="utf-8")
-
-        self.assertIn("task 工具不可用时，不模拟子任务", skill)
-        self.assertIn("系统约束与工程事实冲突：`contract_gap`", skill)
-        self.assertIn("assignment 的 `promptContent`", skill)
-        self.assertIn("`implementationPoints`", skill)
-        self.assertIn("`testPoints`、`verificationIntent` 和 `validationLocations.repo/cwd`", skill)
-        self.assertIn("Batch plan 的绝对路径", skill)
-        self.assertIn("不得附加 plan TASK JSON", skill)
-        self.assertIn("--test-file \"<RELATIVE_TEST_FILE>\"", skill)
-        self.assertNotIn("--task-digest \"<TASK_DIGEST>\"", skill)
-        self.assertNotIn("validationTestPlan.commandId", skill)
-        self.assertNotIn("set-verdict --feature", skill)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``
         }
       } }
 
-``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
+``sessionContext`` 分段拼接，各层次各用一对
 **裸 XML 风格标签**外包（不再用反引号包成 inline code——那会让标签变字面量、id 不成锚点）：
   ① 适用范围 ``<SCOPE>``：清单 description（引用范围）+ UI localRepoPath（代码地址）。每行
      ``deployUnitId`` 用 ``[id](#slug)`` 跳到 ③ 里对应单元的 ``## 标题``（slug 见 _heading_slug）。

@@ -670,6 +670,16 @@ def scan(
         scanned_paths.add(normalized)
     scanned_inputs.sort(key=lambda entry: str(entry.get("path", "")))
     current_hashes = {entry["path"]: entry["sha256"] for entry in scanned_inputs}
+    import hashlib
+    request = {"specs": sorted(str(x.relative_to(code_root)) for x in resolved_specs),
+               "inputs": sorted(str(x.relative_to(code_root)) for x in explicit),
+               "directories": sorted(str(x.relative_to(code_root)) for x in directories),
+               "tsconfig": sha256_path(code_root / "tsconfig.json") if (code_root / "tsconfig.json").is_file() else None,
+               "scannerDigest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    if (previous.get("codeWorkspace") == str(code_root) and previous.get("scanRequest") == request
+            and previous.get("scannedInputs") == scanned_inputs
+            and previous.get("unresolvedImports") == unresolved):
+        return {**previous, "reused": True}
     findings: List[Dict[str, Any]] = []
     for spec in resolved_specs:
         relative = spec.relative_to(code_root).as_posix()
@@ -697,6 +707,7 @@ def scan(
         findings.append(copied)
     payload: Dict[str, Any] = {
         "version": 1,
+        "scanRequest": request,
         "codeWorkspace": str(code_root),
         "scannedAt": utc_now(),
         "scannedInputs": scanned_inputs,

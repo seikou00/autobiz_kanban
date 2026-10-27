@@ -976,6 +976,8 @@ def execute_e2e_command(
     child_env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(report_path.resolve())
     child_env.pop("PLAYWRIGHT_JSON_OUTPUT_DIR", None)
     child_env.pop("PLAYWRIGHT_JSON_OUTPUT_NAME", None)
+    from hooks.e2e_reuse import capture_binding, binding_matches
+    reuse_before = capture_binding(feature_dir, code_root, case, entry_url=entry_url, auth_status=auth_status)
     started_at = utc_now()
     process_code, stdout, stderr, process_blocked = _run(
         command_argv, command_cwd, timeout, env=child_env
@@ -1049,6 +1051,9 @@ def execute_e2e_command(
         "startedAt": started_at,
         "finishedAt": finished_at,
     }
+    reuse_after = capture_binding(feature_dir, code_root, case, entry_url=entry_url, auth_status=auth_status)
+    if binding_matches(reuse_before, reuse_after):
+        execution["reuseBinding"] = reuse_before
     e2e_run = {
         key: execution[key]
         for key in (
@@ -1068,6 +1073,8 @@ def execute_e2e_command(
             "playwrightVersion",
         )
     }
+    if execution.get("reuseBinding"):
+        e2e_run["reuseBinding"] = execution["reuseBinding"]
     e2e_run["caseId"] = case_id
     evidence_record = {
         "featureId": resolved_feature,

@@ -30,8 +30,6 @@ is automatically generated in the same directory. This Markdown file:
 - Plan → MD: automatic (on every formal Plan write, to refresh TASK/PAGE/UIX/VIS mappings)
 - Legacy MD list sections → JSON: manual (using `python -X utf8 hooks/ui_context_writer.py sync-from-md --feature <feature>`); edit generated mappings through the source JSON/Plan writers instead
 
-See `docs/ui-context-md-generation.md` for detailed documentation.
-
 ## Required Root Fields
 
 - `version`: must be `1`.

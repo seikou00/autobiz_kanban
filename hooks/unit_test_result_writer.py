@@ -55,6 +55,8 @@ def _feature_dir(workspace, feature):
 
 def _write(workspace, feature, data):
     changed = atomic_write_json(_path(workspace, feature), data)
+    from hooks.validation_reports import render_unit_report
+    render_unit_report(_feature_dir(workspace, feature), feature, data)
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 
 

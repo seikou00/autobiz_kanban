@@ -842,7 +842,9 @@ def prepare_test(workspace: Path, feature: str, run_id: str, batch_id: str) -> d
                 selected_policy = stage_budget(manifest, batch, execution)["utestPolicy"]
             else:
                 selected_policy = policy_snapshot(manifest.get("timeoutPerBatch", POLICY["stageSeconds"]))
-            return {"success": True, "batchId": batch_id, "status": "test_required",
+            from hooks.utest_assignment_router import build_assignments
+            assignments = build_assignments(workspace / ".autobizdevops" / "features" / feature, batch_id=batch_id)
+            return {"success": True, "batchId": batch_id, "status": "test_required", "assignments": assignments,
                     "runtimeContractDigest": runtime_contract()["digest"],
                     "utestPolicy": selected_policy,
                     "engineeringContext": context_reference(context) if context else {"status": "worktree_not_provisioned"}}
@@ -914,15 +916,30 @@ def record_test_failure(
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
         state = states.get("test")
-        if not isinstance(state, dict) or state.get("status") != "running":
+        completed = None
+        failure = {"type": failure_type, "message": message, "nextStage": None}
+        if isinstance(state, dict) and state.get("status") == "deferred":
+            issue = next((row for row in manifest.get("deferredIssues", [])
+                          if row.get("issueId") == state.get("deferredIssueId")), None)
+            if issue and state.get("failure") == failure:
+                return {"success": True, "batchId": batch_id, "stage": "test", "status": "deferred", "issue": issue, "reused": True}
+        if isinstance(state, dict) and state.get("status") == "passed":
+            evidence_path = Path(state.get("evidencePath") or "")
+            if not evidence_path.resolve().is_relative_to(run_dir(workspace, feature, run_id).resolve()):
+                raise ValueError("utest_failure_recovery_evidence_path_invalid")
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            body = {key: value for key, value in evidence.items() if key != "digest"}
+            prior_metadata = evidence.get("metadata", {})
+            if (evidence.get("digest") != _digest(body) or prior_metadata.get("testFailure") != failure
+                    or prior_metadata.get("testFailureDisposition") != "recorded_deferred"
+                    or evidence.get("evidenceId") != state.get("latestEvidenceId")):
+                raise ValueError("utest_failure_recovery_evidence_mismatch")
+            completed = {"evidenceId": evidence["evidenceId"], "evidence": evidence}
+            metadata = prior_metadata
+        elif not isinstance(state, dict) or state.get("status") != "running":
             raise ValueError(f"parallel_batch_stage_not_running:{batch_id}:test")
-        failure = {
-            "type": failure_type,
-            "message": message,
-            "nextStage": None,
-        }
         repair_context = {}
-        if batch.get("worktreePath"):
+        if batch.get("worktreePath") and completed is None:
             from hooks.engineering_context import record_repair
             repair_context = record_repair(workspace, feature, run_id, batch_id, batch, "test", dict(failure))
         issue_index = 1 + sum(
@@ -933,12 +950,12 @@ def record_test_failure(
             and item.get("stage") == "test"
             and item.get("kind") == "test_failure"
         )
-        issue_id = f"TEST-FAILED-{batch_id}-{issue_index:03d}"
+        issue_id = (metadata.get("testFailureIssueId") if completed else None) or f"TEST-FAILED-{batch_id}-{issue_index:03d}"
 
     # Record the failure in normal immutable stage evidence before changing
     # state to ``deferred``.  This lets aggregate/reporting distinguish it
     # from a passed UTest without treating it as a successful test run.
-    completed = complete_stage(
+    completed = completed or complete_stage(
         workspace,
         feature,
         run_id,
@@ -1073,7 +1090,7 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
-        if batch.get("utestClosurePending"):
+        if batch.get("utestClosurePending") or (batch.get("testClosure") and batch["testClosure"].get("phase") != "released"):
             return {"success": False, "batchId": batch_id, "error": "utest_asset_closure_pending"}
         states = _ensure_stage_states(batch)
         deferred = [stage for stage in stage_names(batch) if states[stage].get("status") == "deferred"]
@@ -1134,10 +1151,219 @@ def triage_failure(workspace: Path, feature: str, run_id: str, batch_id: str, st
     return fail_stage(workspace, feature, run_id, batch_id, stage, failure_type=failure_type, message=message)
 
 
+def prepare_review(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Recoverable implement closure + Review start + exact context, without discovery."""
+    finalize_implementation(workspace, feature, run_id, batch_id)
+    started = start_stage(workspace, feature, run_id, batch_id, "review")
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        root = batch.get("worktreePath")
+    from types import SimpleNamespace
+    from hooks.engineering_context import execute, context_reference
+    if started.get("status") in {"passed", "skipped", "deferred"}:
+        return {"success": True, **started, "requiredAction": "reuse_review_result",
+                "reviewResult": validate_review_result(workspace, feature, run_id, batch_id)}
+    context = execute(SimpleNamespace(action="prepare", workspace=str(workspace), feature=feature,
+        run_id=run_id, batch_id=batch_id, batch_worktree=root,
+        task_id=batch.get("taskIds", []), stage="review", owner_token=None))
+    append_event(workspace, feature, run_id, "control_operation", operation="prepare-review", batchId=batch_id, reused=bool(started.get("reused")))
+    return {"success": True, **started, "engineeringContext": context_reference(context)}
+
+
+def finish_review(workspace: Path, feature: str, run_id: str, batch_id: str, *,
+                  decision: str, message: str = "") -> dict[str, Any]:
+    """Record a semantic decision, then expose only its durable representation."""
+    existing = validate_review_result(workspace, feature, run_id, batch_id)
+    if existing.get("status") not in {"passed", "failed", "needs_triage"}:
+        if decision == "passed":
+            with run_lock(workspace, feature, run_id):
+                batch = _batch(load_manifest(workspace, feature, run_id), batch_id)
+                metadata = {key: batch.get(key) for key in ("worktreePath", "branchName")}
+                metadata["batchCommit"] = batch.get("commitSha")
+            complete_stage(workspace, feature, run_id, batch_id, "review", metadata=metadata)
+        else:
+            if decision not in {"implementation", "documentation", "needs_triage"} or not message.strip():
+                raise ValueError("parallel_review_decision_requires_finding")
+            fail_stage(workspace, feature, run_id, batch_id, "review", failure_type=decision, message=message)
+    return validate_review_result(workspace, feature, run_id, batch_id)
+
+
+def review_checkpoint(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Independent durable verification and next-stage preparation in one crossing."""
+    result = validate_review_result(workspace, feature, run_id, batch_id)
+    if result.get("status") == "passed":
+        result["utestPreparation"] = prepare_test(workspace, feature, run_id, batch_id)
+    append_event(workspace, feature, run_id, "control_operation", operation="review-checkpoint", batchId=batch_id)
+    return result
+
+
+def _current_test_evidence(workspace: Path, feature: str, run_id: str, batch_id: str) -> list[str]:
+    from hooks.engineering_context import read_json
+    from hooks.evidence_store import read_records, stream_path
+    path = run_dir(workspace, feature, run_id) / "utest" / batch_id / "UTEST_EXECUTION.json"
+    execution = read_json(path)
+    with run_lock(workspace, feature, run_id):
+        batch = _batch(load_manifest(workspace, feature, run_id), batch_id)
+        task_ids = list(batch.get("taskIds", []))
+    evidence = {row["evidenceId"]: row for row in read_records(stream_path(workspace / ".autobizdevops" / "features" / feature))}
+    ids = []
+    for task_id in task_ids:
+        commands = execution.get("tasks", {}).get(task_id, {}).get("commands", {})
+        if not commands or any(row.get("status") != "recorded" or row.get("passed") is not True for row in commands.values()):
+            raise ValueError(f"utest_closure_requires_actual_pass:{task_id}")
+        for execution_id, command in commands.items():
+            response = command.get("response", {})
+            row = evidence.get(command.get("evidenceId"), {})
+            validation = row.get("validation", {})
+            if (row.get("skill") != "autodev-utest" or row.get("action") != "validation"
+                    or row.get("taskId") != task_id or validation.get("executionId") != execution_id
+                    or row.get("taskDigest") != execution.get("tasks", {}).get(task_id, {}).get("taskDigest")
+                    or validation.get("result") != "pass" or validation.get("exitCode") != 0
+                    or validation.get("logExitCode") != 0 or not isinstance(validation.get("testsExecuted"), int)
+                    or validation["testsExecuted"] <= 0 or response.get("result") != "PASS"):
+                raise ValueError(f"utest_closure_evidence_invalid:{task_id}")
+            from hooks.evidence_kernel import check_record_artifacts
+            if check_record_artifacts(workspace / ".autobizdevops" / "features" / feature, row):
+                raise ValueError(f"utest_closure_evidence_log_invalid:{task_id}")
+            hashes = command.get("testInputHashes", {})
+            root = Path(execution.get("worktree", ""))
+            if not hashes or any(not (root / name).resolve().is_relative_to(root.resolve())
+                                 or not (root / name).is_file()
+                                 or hashlib.sha256((root / name).read_bytes()).hexdigest() != expected
+                                 for name, expected in hashes.items()):
+                raise ValueError(f"utest_closure_test_inputs_changed:{task_id}")
+            from hooks.utest_runtime import fingerprint
+            if command.get("environmentFingerprint") != fingerprint(Path(command["executionRoot"])):
+                raise ValueError(f"utest_closure_environment_changed:{task_id}")
+            ids.append(command["evidenceId"])
+    if not ids:
+        raise ValueError("utest_closure_requires_actual_pass")
+    return sorted(set(ids))
+
+
+def close_test(workspace: Path, feature: str, run_id: str, batch_id: str, *,
+               owner_token: str, commit_summary: str, failure_type: str | None = None,
+               message: str = "", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resume seal/record/release from durable steps; never rerun a behavior command.
+
+    The original owners keep validating leases, source/test boundaries and content.
+    The coordinator still independently reads the final gate before promotion.
+    """
+    from hooks.parallel_runtime import check_lease, release_lease
+    from hooks.worktree_manager import seal_parallel_batch
+    metadata = dict(metadata or {})
+    if metadata.get("testFailure") is not None and not isinstance(metadata["testFailure"], dict):
+        raise ValueError("utest_closure_failure_metadata_must_be_object")
+    if not failure_type:
+        metadata["testEvidenceIds"] = _current_test_evidence(workspace, feature, run_id, batch_id)
+    owner_hash = hashlib.sha256(owner_token.encode()).hexdigest()
+    request = _digest({"owner": owner_hash, "failureType": failure_type,
+                       "message": message, "metadata": metadata or {}, "summary": commit_summary})
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        closure = batch.get("testClosure", {})
+        if (closure.get("phase") == "released" and batch.get("stageStates", {}).get("test", {}).get("status") == "running"
+                and check_lease(workspace, feature, run_id, batch_id, owner_token)):
+            batch.setdefault("testClosureHistory", []).append(closure)
+            batch.pop("testClosure", None)
+            save_manifest(workspace, feature, run_id, manifest)
+            closure = {}
+        if closure and closure.get("requestDigest") != request:
+            raise ValueError("utest_closure_request_changed")
+        if closure.get("phase") == "released":
+            if closure.get("commitSha") != batch.get("commitSha"):
+                raise ValueError("utest_closure_commit_changed")
+            return {**closure["result"], "reused": True}
+        released_before_receipt = (closure.get("phase") == "recorded" and batch.get("lease") is None
+                                   and closure.get("commitSha") == batch.get("commitSha") and batch.get("status") == "sealed")
+        if not check_lease(workspace, feature, run_id, batch_id, owner_token) and not released_before_receipt:
+            raise ValueError("utest_closure_lease_invalid")
+        if failure_type and (failure_type not in FAILURE_NEXT_STAGE or not message.strip()):
+            raise ValueError("utest_closure_failure_requires_message")
+        root = Path(batch["worktreePath"])
+    if not closure:
+        sealed = seal_parallel_batch(workspace, feature, run_id, batch_id, root, owner_token,
+                                     commit_stage="utest", commit_summary=commit_summary)
+        if not sealed.get("success"):
+            raise ValueError(str(sealed.get("error") or "utest_closure_seal_failed"))
+        closure = {"requestDigest": request, "phase": "sealed", "commitSha": sealed["commitSha"]}
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            _batch(manifest, batch_id)["testClosure"] = closure
+            save_manifest(workspace, feature, run_id, manifest)
+    if closure["phase"] == "sealed":
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            batch = _batch(manifest, batch_id)
+            state = _ensure_stage_states(batch)["test"]
+            prior = dict(state)
+        values = {**(metadata or {}), "batchCommit": closure["commitSha"],
+                  "worktreePath": str(root), "branchName": batch["branchName"]}
+        failure_type = closure.get("resolvedFailureType") or failure_type
+        message = closure.get("resolvedMessage") or message
+        try:
+            if failure_type:
+                recorded = record_test_failure(workspace, feature, run_id, batch_id,
+                    failure_type=failure_type, message=message, metadata=values)
+            elif prior.get("status") in {"passed", "deferred"}:
+                recorded = {"stageEvidenceId": prior.get("latestEvidenceId")}
+            else:
+                recorded = complete_stage(workspace, feature, run_id, batch_id, "test", metadata=values)
+        except ValueError as exc:
+            if str(exc) not in {"utest_stop_requested_cannot_pass", "utest_stop_requires_asset_seal_before_closure"}:
+                raise
+            # Budget may expire between the test command and stage closure.
+            # Keep the original request for replay, while persisting the actual
+            # Runtime outcome before any further effect. No test is rerun.
+            failure_type = failure_type or "environment"
+            message = message or "UTest stage budget expired during asset closure"
+            sealed = seal_parallel_batch(workspace, feature, run_id, batch_id, root, owner_token,
+                commit_stage="utest", commit_summary=commit_summary)
+            if not sealed.get("success"):
+                raise ValueError(str(sealed.get("error") or "utest_closure_deadline_seal_failed"))
+            closure.update(commitSha=sealed["commitSha"], resolvedFailureType=failure_type, resolvedMessage=message)
+            values["batchCommit"] = closure["commitSha"]
+            with run_lock(workspace, feature, run_id):
+                manifest = load_manifest(workspace, feature, run_id)
+                _batch(manifest, batch_id)["testClosure"] = closure
+                save_manifest(workspace, feature, run_id, manifest)
+            recorded = record_test_failure(workspace, feature, run_id, batch_id,
+                failure_type=failure_type, message=message, metadata=values)
+        closure.update(phase="recorded", stageEvidenceId=recorded.get("stageEvidenceId") or recorded.get("evidenceId"))
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            _batch(manifest, batch_id)["testClosure"] = closure
+            save_manifest(workspace, feature, run_id, manifest)
+    failure_type = closure.get("resolvedFailureType") or failure_type
+    message = closure.get("resolvedMessage") or message
+    if check_lease(workspace, feature, run_id, batch_id, owner_token):
+        release_lease(workspace, feature, run_id, batch_id, owner_token, final_status="sealed")
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        test_state = batch["stageStates"]["test"]
+        result = {"success": True, "status": "success", "batchId": batch_id,
+                  "testStatus": "deferred" if failure_type else "passed",
+                  "worktreePath": str(root), "branchName": batch["branchName"],
+                  "commitSha": closure["commitSha"], "stageEvidenceId": test_state.get("latestEvidenceId"),
+                  "testEvidenceIds": (metadata or {}).get("testEvidenceIds", [])}
+        if failure_type:
+            result["testFailure"] = {**(metadata or {}).get("testFailure", {}), "message": message}
+        closure.update(phase="released", result=result)
+        batch["testClosure"] = closure
+        save_manifest(workspace, feature, run_id, manifest)
+    from hooks.validation_reports import render_batch_report
+    result["reportPath"] = str(render_batch_report(workspace, feature, run_id))
+    append_event(workspace, feature, run_id, "control_operation", operation="close-test", batchId=batch_id)
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = RuntimeArgumentParser(description="Advance a staged parallel Batch")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("next", "start", "complete", "finalize-implementation", "prepare-test", "check-test-budget", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair"):
+    for name in ("next", "start", "complete", "finalize-implementation", "prepare-test", "check-test-budget", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair", "prepare-review", "finish-review", "review-checkpoint", "close-test"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -1161,6 +1387,15 @@ def build_parser() -> argparse.ArgumentParser:
             item.add_argument("--candidate-sha", required=True)
             item.add_argument("--candidate-base-sha", required=True)
             item.add_argument("--train-id", required=True)
+        if name == "finish-review":
+            item.add_argument("--decision", required=True, choices=("passed", "implementation", "documentation", "needs_triage"))
+            item.add_argument("--message", default="")
+        if name == "close-test":
+            item.add_argument("--owner-token", required=True)
+            item.add_argument("--commit-summary", required=True)
+            item.add_argument("--failure-type", choices=tuple(FAILURE_NEXT_STAGE))
+            item.add_argument("--message", default="")
+            item.add_argument("--metadata-json", default="{}")
         if name == "record-single-repair":
             item.add_argument("--failed-stage", required=True)
             item.add_argument("--metadata-json", required=True)
@@ -1169,6 +1404,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    operation_started = time.monotonic()
     authority = _CLI_DISPATCH_AUTH.set({"generation": args.dispatch_generation, "token": args.dispatch_token})
     try:
         workspace = resolve_workspace(args.workspace)
@@ -1224,6 +1460,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "validate-review-result":
             result = validate_review_result(workspace, feature, args.run_id, args.batch_id)
+        elif args.command == "prepare-review":
+            result = prepare_review(workspace, feature, args.run_id, args.batch_id)
+        elif args.command == "finish-review":
+            result = finish_review(workspace, feature, args.run_id, args.batch_id, decision=args.decision, message=args.message)
+        elif args.command == "review-checkpoint":
+            result = review_checkpoint(workspace, feature, args.run_id, args.batch_id)
+        elif args.command == "close-test":
+            metadata = json.loads(args.metadata_json)
+            if not isinstance(metadata, dict):
+                raise ValueError("parallel_batch_stage_metadata_must_be_object")
+            result = close_test(workspace, feature, args.run_id, args.batch_id, owner_token=args.owner_token,
+                commit_summary=args.commit_summary, failure_type=args.failure_type, message=args.message, metadata=metadata)
         elif args.command == "record-single-repair":
             metadata = json.loads(args.metadata_json)
             result = record_single_repair_resolution(
@@ -1236,6 +1484,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = gate_batch(workspace, feature, args.run_id, args.batch_id)
+        if args.command in {"prepare-review", "finish-review", "review-checkpoint", "close-test"}:
+            result["controlMetrics"] = {"operation": args.command, "elapsedMs": round((time.monotonic() - operation_started) * 1000),
+                                        "reused": bool(result.get("reused"))}
+            append_event(workspace, feature, args.run_id, "control_operation_result", batchId=args.batch_id,
+                         status=result.get("status"), **result["controlMetrics"])
         print(json.dumps({"ok": result.get("success", True), **result}, ensure_ascii=False, indent=2))
         return 0 if result.get("success", True) else 1
     except (OSError, ValueError, json.JSONDecodeError) as exc:

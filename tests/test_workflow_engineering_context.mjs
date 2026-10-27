@@ -92,7 +92,7 @@ test("Review needs_triage cannot launch UTest even with success true", async () 
   vm.runInContext(source.slice(source.indexOf("function normalizeStructuredOutput("), source.indexOf("const input = unwrap(args);")), c);
   vm.runInContext(source.slice(source.indexOf("async function runDeliveryReviewTestAndGate("), source.indexOf("async function reworkDeliveryImplementation(")), c);
   await assert.rejects(c.runDeliveryReviewTestAndGate({ batchId: "B001", worktreePath: "/batch", branchName: "branch", commitSha: "sha" }), /review_not_passed:needs_triage/);
-  assert.deepEqual(calls, ["stage-implement-B001", "stage-review-B001-attempt-1", "validate-review-B001-attempt-1"]);
+  assert.deepEqual(calls, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1"]);
 });
 
 test("Workflow dispatch works when ambient clock and random globals are unavailable", () => {

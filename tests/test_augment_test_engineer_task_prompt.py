@@ -74,79 +74,16 @@ class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
         )
         return emitted, stdout, stderr
 
-    def test_appends_complete_post_implementation_contract(self):
+    def test_validated_assignment_is_preserved_without_a_second_protocol(self):
         emitted, stdout, stderr = self._augment()
-
         self.assertTrue(emitted)
-        description = json.loads(stdout.getvalue())["updatedInput"]["description"]
-        required = (
-            "<AGENTS_INSTRUCTIONS>",
-            "<SCOPE>",
-            "<SYSTEM>",
-            "<UNIT>",
-            "executionLane",
-            "workspaceRef",
-            "batchPlanPath",
-            "post_implementation=true",
-            "tdd_rebuild=false",
-            "source_fix_request",
-            "contract_gap",
-            "implementationPoints",
-            "nonGoals",
-            "validationLocations",
-            "non-zero Evidence",
-        )
-        for marker in required:
-            with self.subTest(marker=marker):
-                self.assertIn(marker, description)
-        fields = (
-            "assignment",
-            "constraint_files",
-            "lane",
-            "framework",
-            "runner",
-            "environment_initialization",
-            "test_targets",
-            "command_results",
-            "failure_classification",
-            "source_bug_attestation",
-            "source_fix_request",
-            "e2e_handoff",
-        )
-        for field in fields:
-            with self.subTest(field=field):
-                self.assertIn("`{}`".format(field), description)
-        for classification in (
-            "test_bug",
-            "source_bug",
-            "contract_gap",
-            "environment",
-            "flaky",
-            "unknown",
-        ):
-            with self.subTest(classification=classification):
-                self.assertIn("`{}`".format(classification), description)
-        self.assertIn("appended", stderr.getvalue())
-
-    def test_framework_and_runner_sources_are_explicit(self):
-        _, stdout, _ = self._augment()
-        description = json.loads(stdout.getvalue())["updatedInput"]["description"]
-
-        self.assertIn("actually opened", description)
-        self.assertIn("real manifests", description)
-        self.assertIn("blocking `contract_gap`", description)
-        self.assertIn("fall back to repository facts", description)
-
-    def test_source_bug_contract_matches_utest_skill(self):
-        _, stdout, _ = self._augment()
-        description = json.loads(stdout.getvalue())["updatedInput"]["description"]
-
-        self.assertIn("may modify pom.xml", description)
-        self.assertIn("Preserve production dependencies", description)
-        self.assertIn("machine-validated attestation", description)
-        self.assertIn("static observation and exit 0 are invalid", description)
-        self.assertIn("performs one controlled production repair", description)
-        self.assertIn("candidate promotion, and final B-E2E continue", description)
+        result = json.loads(stdout.getvalue())["updatedInput"]
+        description = result["description"]
+        self.assertEqual(description.split("</UTEST_ASSIGNMENT>")[0],
+                         self.assignment.split("</UTEST_ASSIGNMENT>")[0])
+        self.assertTrue(MODULE.validate_assignment_block(description, io.StringIO()))
+        self.assertEqual(set(result), {"description"})
+        self.assertLess(len(MODULE.APPEND_INSTRUCTION.encode()), 2048)
 
     def test_only_target_role_is_modified(self):
         stdout = io.StringIO()

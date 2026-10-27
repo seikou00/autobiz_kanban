@@ -245,8 +245,8 @@ provisioned.
    unmerged upstream result, but unrelated Batches do not wait for a failed peer.
 7. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
    `done`. A Review-and-UTest-processed delivery remains `implemented` /
-   `sealed` until this source-branch integration succeeds; Code itself has no
-   independent compile result.
+   `sealed` until this source-branch integration succeeds; each backend TASK has already recorded its current production-only compile
+   before finish-implementation. Review does not rerun it.
    If promotion succeeds but the Plan writer fails, the run is retained in
    `needs_resolution` until its Plan state is recovered.
 8. Once all Batches are `merged`, B-E2E runs in a temporary validation
@@ -327,7 +327,7 @@ state.
   `recoveryArchivePath`; active leases and recorded delivery commits prevent
   this replacement.
 - The fixed Workflow defaults to four hours per Batch; UTest keeps its separate
-  15-minute stage budget. The scheduler measures a repair attempt from its
+  Runtime-owned policy/deadlines (utest_policy.py). The scheduler measures a repair attempt from its
   current lease acquisition, not from the Batch's first implementation.
   Do not rely on the lease CLI's 15-minute default for an unguarded Batch.
   A lease naturally expires if the agent cannot reach another lease-bearing plugin
@@ -385,4 +385,4 @@ state.
 Use engineering_context.py prepare inside the existing Workflow, without a pre-Workflow exploration pass or Design/Plan changes. Read only its exact contextPath/allowedReads/commandCatalogPath. Resolve common API facts once per content version, publish immediately and reuse across Batches. finish-implementation produces actual-source handoffs. Runtime records immutable repair snapshots before resetting stages; Rework targets repairTaskIds after bounded attribution, preserving unrelated completed TASKs. Metadata does not authorize source writes or replace Evidence. Fixed Batch repairs record single_repair_accepted and resume UTest without a second reviewer. Full protocol: docs/engineering-context.md.
 
 
-共享事实：Code 的 TASK start 前准备与后续实现均先通过 engineering_context.py lookup 查询；缺失时仅解析准确来源。finish 自动保存可提取的声明片段与实现交接，语义 claim 必须 publish/fail 收口。不同 Batch 同一 Feature/仓库按内容版本复用；UTest 继承有效上下文，在当前实现上实际运行测试，不重新探索整个工程。
+共享事实：Code 的 TASK start 前准备与后续实现直接使用有效交接；未知或失效 API 才通过 engineering_context.py lookup 查询，仅解析准确来源。finish 自动保存可提取的声明片段与实现交接，语义 claim 必须 publish/fail 收口。不同 Batch 同一 Feature/仓库按内容版本复用；UTest 继承有效上下文，在当前实现上实际运行测试，不重新探索整个工程。

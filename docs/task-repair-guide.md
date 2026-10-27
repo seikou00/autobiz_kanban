@@ -1,200 +1,37 @@
 # 任务修复指南
 
-## 概述
+用于修复当前状态为 `implemented` 或 `done` 的 TASK，并通过 `priorEvidenceId` 保留实现证据链。由固定 Code Workflow 准备当前 Batch 的受控修复，再恢复同一 run；任务命令不能代替 Batch 阶段准备或租约领取。
 
-当在 Code 阶段发现某个已完成的任务存在问题时，可以使用任务修复功能来修正实现，同时保留完整的证据链。
+## 修复步骤
 
-## 适用场景
-
-- ✅ 任务状态为 `implemented` 或 `done`
-- ✅ 发现实现有 bug 或不符合预期
-- ✅ 需要保留修复历史的引用链
-- ✅ 需要由固定 Workflow 重新走 Review 与 UTest
-
-## 在 Claw 对话中触发修复
-
-### 方式一：直接说明需要修复的任务
-
-```
-用户: "我发现 T001 的实现有问题，登录验证码校验不正确，需要修复"
-```
-
-Claude 会自动：
-1. 查看 T001 的当前状态和 evidence ID
-2. 启动任务修复流程
-3. 根据你的描述修改代码
-4. 完成修复并记录新的 evidence
-5. 由固定 Workflow 继续该 Batch 的 Review/UTest
-
-### 方式二：明确请求修复流程
-
-```
-用户: "帮我修复 T002，它的实现不对"
-```
-
-Claude 会询问具体问题，然后执行完整的修复流程。
-
-## 命令行手动执行
-
-如果需要手动控制修复流程：
-
-### 步骤 1：查看任务信息
+1. 从 Runtime 当前任务摘要取得最新 `latestImplementationEvidenceId`，确认问题和修复范围。
+2. 使用 Workflow 提供的 artifact workspace、Feature、TASK、Batch Worktree、parallel run 和当前 lease token 启动修复。多仓库任务原样传入 Runtime 提供的 `--workspace-ref`，不能自行推导仓库绑定。
 
 ```bash
-# 查看 PLAN.md 或使用 inspect 命令
-python -X utf8 hooks/task_runner.py inspect \
-  --feature <FEATURE> \
-  --task-id T001 \
-  --code-workspace <BUSINESS_REPO>
+python -X utf8 "<pluginPath>/hooks/task_runner.py" start-task-repair \
+  --workspace "<artifact-workspace>" --feature "<feature>" --task-id "<TASK>" \
+  --code-workspace "<batch-worktree>" --parallel-run-id "<parallel-run-id>" \
+  --lease-token "<current-lease-token>" --prior-evidence-id "<latestImplementationEvidenceId>"
 ```
 
-从输出中获取 `latestImplementationEvidenceId`。
-
-### 步骤 2：启动任务修复
+3. 保存返回的真实 TASK `runId`。只有启动成功后才能修改授权范围内的生产代码；恢复已有活动 TASK 时使用 Runtime 的 `resume` 指引。
+4. 后端修改仍按[编译登记协议](./code-compile-guard.md)完成当前 TASK/run 的实际生产编译，保存原始日志和退出码。不得以历史 PASS 代替当前编译证据。
+5. 用相同绑定和本次 TASK `runId` 完成实现登记。
 
 ```bash
-python -X utf8 hooks/task_runner.py start-task-repair \
-  --feature <FEATURE> \
-  --task-id T001 \
-  --prior-evidence-id ev-20240818-abc123 \
-  --code-workspace <BUSINESS_REPO>
+python -X utf8 "<pluginPath>/hooks/task_runner.py" finish-implementation \
+  --workspace "<artifact-workspace>" --feature "<feature>" --task-id "<TASK>" \
+  --code-workspace "<batch-worktree>" --parallel-run-id "<parallel-run-id>" \
+  --lease-token "<current-lease-token>" --run-id "<TASK-runId>" --repair-mode
 ```
 
-命令会返回：
-```json
-{
-  "ok": true,
-  "runId": "run-20240818-xyz789",
-  "priorEvidenceId": "ev-20240818-abc123",
-  "taskId": "T001"
-}
-```
+6. 恢复固定 Workflow，由它基于本次实现证据继续当前 Batch 的评审、测试和交付门禁。单次修复等特殊恢复分支以 Runtime 返回的阶段协议为准，不手改 Plan、manifest 或历史 Evidence 推进状态。
 
-### 步骤 3：修改代码
+## 失败与恢复
 
-在你的代码仓库中修复问题。
+- `task_repair_requires_implemented_or_done_status:<TASK>`：检查实际状态，不能用修复入口启动尚未实现的任务。
+- `task_repair_prior_evidence_mismatch:<TASK>`：重新取得最新实现证据 ID，避免修复旧版本。
+- 租约、阶段或 Worktree 绑定失败：回到固定 Workflow 恢复当前授权，不更换参数绕过检查。
+- 编译或测试失败：保留真实输出，按当前修复预算处理；预算耗尽则保存延期问题和已有资产。
 
-### 步骤 4：完成修复
-
-```bash
-python -X utf8 hooks/task_runner.py finish-implementation \
-  --feature <FEATURE> \
-  --task-id T001 \
-  --run-id run-20240818-xyz789 \
-  --code-workspace <BUSINESS_REPO> \
-  --repair-mode
-```
-
-返回新的 evidence ID：
-```json
-{
-  "ok": true,
-  "implementationEvidenceId": "ev-20240818-def456",
-  "status": "implemented"
-}
-```
-
-注意：如果原任务状态是 `done`，会自动恢复为 `done`（见下方"状态保持"特性）。
-
-### 步骤 5：继续固定 Workflow
-
-修复完成后，固定 Workflow 会从该 Batch 的 Review 继续，并在同一 Worktree 执行 UTest。
-
-## 核心特性
-
-### ✅ 状态保持
-
-- 如果原任务状态是 `done`，修复后会自动恢复为 `done`
-- 如果原任务状态是 `implemented`，修复后保持 `implemented`
-
-### ✅ 证据链
-
-每次修复都会创建新的 evidence，通过 `priorEvidenceId` 链接到上一个版本：
-
-```
-ev-001 (初始实现)
-  ↓ priorEvidenceId
-ev-002 (第一次修复)
-  ↓ priorEvidenceId
-ev-003 (第二次修复)
-```
-
-### ✅ 固定交付续跑
-
-修复任务后，固定 Workflow 会针对新的 implementation evidence 重新完成 Review 与 UTest。
-
-## 错误处理
-
-### 任务状态不正确
-
-```
-Error: task_repair_requires_implemented_or_done_status:T001
-```
-
-解决方案：只能修复状态为 `implemented` 或 `done` 的任务。
-
-### Evidence ID 不匹配
-
-```
-Error: prior_evidence_mismatch
-```
-
-解决方案：检查提供的 `prior-evidence-id` 是否是该任务的最新 evidence ID。
-
-## 最佳实践
-
-1. **修复前先检查**：确认任务的最新 evidence ID，避免基于旧版本修复
-2. **小步修复**：每次只修复一个明确的问题，而不是多个问题一起改
-3. **继续交付**：修复后让固定 Workflow 重新完成 Review 和 UTest
-4. **查看证据链**：通过 evidence 的 `priorEvidenceId` 可以追溯完整的修复历史
-
-## 示例场景
-
-### 场景 1：修复单个任务的 bug
-
-```bash
-# 1. 发现 T001 有 bug
-# 2. 启动修复
-python -X utf8 hooks/task_runner.py start-task-repair \
-  --feature login \
-  --task-id T001 \
-  --prior-evidence-id ev-20240818-001 \
-  --code-workspace ./business-repo
-
-# 3. 修改代码
-# ... 修复 bug ...
-
-# 4. 完成修复
-python -X utf8 hooks/task_runner.py finish-implementation \
-  --feature login \
-  --task-id T001 \
-  --run-id run-20240818-001 \
-  --code-workspace ./business-repo \
-  --repair-mode
-```
-
-### 场景 2：修复后继续 Batch 交付
-
-完成修复后恢复同一固定 Workflow；它会重新完成 Review 与 UTest。
-
-### 场景 3：在 Claw 对话中快速修复
-
-```
-用户: "T003 的密码加密算法用错了，应该用 bcrypt 而不是 md5"
-
-Claude:
-好的，我来修复 T003：
-1. 检查当前实现...
-2. 启动任务修复（prior-evidence-id: ev-20240818-003）
-3. 将密码加密从 md5 改为 bcrypt...
-4. 完成修复，新的 evidence ID: ev-20240818-004
-5. 固定 Workflow 完成 Review 与 UTest
-
-修复完成！
-```
-
-## 相关文档
-
-- [Code 阶段技能文档](../skills/autodev/autodev-code/SKILL.md)
-- [计划系统设计](../hooks/plan_writer.py) - 查看 `update_task_evidence_only` 函数
-- [证据存储实现](../hooks/evidence_store.py) - 查看 `priorEvidenceId` 字段
+执行边界见 [Code 技能](../skills/autodev/autodev-code/SKILL.md)，上下文与恢复协议见[工程事实与阶段交接](./engineering-context.md)。

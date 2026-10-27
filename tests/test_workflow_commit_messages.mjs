@@ -19,7 +19,7 @@ function harness(testPreparation = { success: true, batchId: "B001", status: "te
     leasePath: "/plugin/lease.py", stagePath: "/plugin/stage.py",
     schedulerPath: "/plugin/scheduler.py", worktreeManagerPath: "/plugin/worktree_manager.py",
     routeResolverPath: "/plugin/route.py", utestCommandPath: "/plugin/utest.py",
-    utestRuntimePath: "/plugin/utest_runtime.py",
+    utestRuntimePath: "/plugin/utest_runtime.py", utestRouterPath: "/plugin/router.py",
     usableString: value => typeof value === "string" && value.trim().length > 0,
     batchTaskWorkspace: (_batchId, worktree) => worktree,
     unwrap: value => value, requireSuccess: value => value,
@@ -97,9 +97,9 @@ test("UTest success and failure paths share the UTest seal command", async () =>
   await context.runBatchUtestAndSeal(delivery);
   const prompt = prompts.find(item => item.options.label === "stage-utest-B001").prompt;
   assert.match(prompt, /seal --commit-stage utest --commit-summary/);
-  assert.match(prompt, /第一次 source_compile\/source_bug 时，先按步骤 8 的封存命令 seal/);
-  assert.match(prompt, /按步骤 8 的同一封存命令 seal 后执行 record-test-failure/);
-  assert.match(prompt, /不写测试通过/);
+  assert.match(prompt, /close-test/);
+  assert.match(prompt, /--failure-type/);
+  assert.match(prompt, /不可把 deferred\/skipped 当 PASS/);
 });
 
 test("frontend UTest skips before launching any test generation or execution agent", async () => {
@@ -121,7 +121,7 @@ test("backend UTest continues through its existing test agent", async () => {
   await context.runBatchUtestAndSeal(delivery);
   assert.deepEqual(prompts.map(item => item.options.label), ["prepare-utest-B001", "stage-utest-B001"]);
   assert.match(prompts[1].prompt, /example.SharedApi/);
-  assert.match(prompts[1].prompt, /不要求从零探索/);
+  assert.match(prompts[1].prompt, /只有未知或失效问题/);
   assert.equal(prompts[1].options.timeoutMs, 600000);
 });
 
@@ -273,4 +273,16 @@ test("invalid UTest policy output stops before a test agent can run", async () =
   const { context, prompts } = harness({ batchId: "B001", status: "unknown" });
   await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_preparation_invalid/);
   assert.equal(prompts.length, 1);
+});
+
+test("durable Review preparation eliminates the separate UTest preparation agent", async () => {
+  const prepared = { success: true, batchId: "B001", status: "test_required",
+    utestPolicy: { stageSeconds: 600, firstExecutionSeconds: 600, commandSeconds: 300, digest: "policy" },
+    assignments: [{ batchId: "B001", promptContent: "<UTEST_ASSIGNMENT>exact scoped context</UTEST_ASSIGNMENT>" }],
+    engineeringContext: { brief: { facts: [] } } };
+  const { context, prompts } = harness();
+  await context.runBatchUtestAndSeal(delivery, null, prepared);
+  assert.deepEqual(prompts.map(item => item.options.label), ["stage-utest-B001"]);
+  assert.match(prompts[0].prompt, /exact scoped context/);
+  assert.match(prompts[0].prompt, /close-test/);
 });

@@ -1,8 +1,8 @@
 # 前端 UTest 临时跳过
 
-当前固定 Code Workflow 在 Review 后先调用
-`parallel_batch_stage.py prepare-test`，按 manifest 的真实 `executionLane`
-决定是否执行 UTest。
+当前固定 Code Workflow 在 Review 通过后调用
+`parallel_batch_stage.py review-checkpoint`，由其中的 `prepare-test`
+按 manifest 的真实 `executionLane` 决定是否执行 UTest。
 
 - `frontend`：记录 `stageStates.test.status=skipped` 和
   `frontend_utest_temporarily_disabled`，保存 `outcome=SKIP` 的阶段审计记录。

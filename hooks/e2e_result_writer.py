@@ -225,6 +225,7 @@ def _coverage_errors(
     coverage: Any,
     evidence_by_id: Dict[str, Dict[str, Any]],
     current: Optional[Dict[str, Any]],
+    inherited_evidence: Optional[set] = None,
 ) -> List[Dict[str, str]]:
     errors: List[Dict[str, str]] = []
     if not isinstance(coverage, list) or not coverage:
@@ -261,7 +262,7 @@ def _coverage_errors(
             ):
                 errors.append({"reason": "invalid_e2e_coverage_evidence", "detail": str(evidence_id)})
                 continue
-            if current is None or not is_fresh(evidence.get("createdAt"), current.get("startedAt")):
+            if (current is None or not is_fresh(evidence.get("createdAt"), current.get("startedAt"))) and evidence_id not in (inherited_evidence or set()):
                 errors.append({"reason": "stale_e2e_coverage_evidence", "detail": str(evidence_id)})
                 continue
             if scenario in scenario_refs_from_record(evidence):
@@ -411,11 +412,21 @@ def _cmd_begin_round(args: argparse.Namespace) -> int:
                 )
             )
         repair_rounds += 1
+    reuse_candidates = {}
+    if args.kind == "repair":
+        for case in _cases(data):
+            if case.get("verdict") == "PASS" and case.get("verdictSource") == "finalize":
+                eligible = [x for x in case.get("executions", []) if x.get("result") == "PASS" and x.get("gateExitCode") == 0 and x.get("reuseBinding")]
+                if eligible:
+                    reuse_candidates[case["caseId"]] = eligible[-1]["runId"]
     data["currentRound"] = {
         "index": current_index + 1,
         "kind": args.kind,
         "startedAt": _utc_now(),
+        "reuseCandidates": reuse_candidates,
     }
+    from hooks.e2e_reuse import reuse_plan
+    data["currentRound"].update(reuse_plan(_feature_dir(workspace, feature), data))
     data["repairRounds"] = repair_rounds
     data["verdict"] = "BLOCKED"
     data.pop("verdictSource", None)
@@ -430,6 +441,17 @@ def _cmd_begin_round(args: argparse.Namespace) -> int:
             _write(workspace, feature, data), currentRound=data["currentRound"], repairRounds=repair_rounds
         )
     )
+
+
+def _cmd_refresh_reuse(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    if data.get("currentRound", {}).get("kind") != "repair":
+        return render_result(fail("e2e_reuse_requires_repair_round"))
+    from hooks.e2e_reuse import reuse_plan
+    selection = reuse_plan(_feature_dir(workspace, feature), data)
+    data["currentRound"].update(selection)
+    return render_result(with_result_data(_write(workspace, feature, data), **selection))
 
 
 def _cmd_sync_quality(args: argparse.Namespace) -> int:
@@ -449,6 +471,16 @@ def _cmd_derive_coverage(args: argparse.Namespace) -> int:
     data["scenarioCoverage"] = derive_coverage_from_evidence(
         _feature_dir(workspace, feature), action="validation", skill="autodev-e2e"
     )
+    from hooks.e2e_reuse import valid_inherited
+    inherited = valid_inherited(_feature_dir(workspace, feature), data)
+    current_index = data.get("currentRound", {}).get("index")
+    allowed = {execution.get("evidenceId") for case in _cases(data) for execution in case.get("executions", [])
+               if execution.get("result") == "PASS" and (execution.get("roundIndex") == current_index
+                  or inherited.get(case.get("caseId"), {}).get("runId") == execution.get("runId"))}
+    for row in data["scenarioCoverage"]:
+        row["evidenceIds"] = [value for value in row["evidenceIds"] if value in allowed]
+        if row["verdict"] == "pass" and not row["evidenceIds"]:
+            row["verdict"] = "missing"
     return render_result(_write(workspace, feature, data))
 
 
@@ -523,6 +555,9 @@ def _finalize_data(feature_dir: Path, data: Dict[str, Any]) -> Tuple[Dict[str, A
         errors.append({"reason": "e2e_execution_evidence_run_set_mismatch"})
     if execution_run_ids != set(verdict_logs):
         errors.append({"reason": "e2e_execution_log_run_set_mismatch"})
+    from hooks.e2e_reuse import valid_inherited
+    inherited = valid_inherited(feature_dir, data)
+    inherited_evidence = set()
     used_run_ids = set()
     for case in cases:
         case_id = str(case.get("caseId", ""))
@@ -539,7 +574,8 @@ def _finalize_data(feature_dir: Path, data: Dict[str, Any]) -> Tuple[Dict[str, A
             and execution.get("result") == "PASS"
             and execution.get("gateExitCode") == 0
             and current is not None
-            and execution.get("roundIndex") == current.get("index")
+            and (execution.get("roundIndex") == current.get("index")
+                 or inherited.get(case_id, {}).get("runId") == execution.get("runId"))
         ]
         case_failures: List[str] = []
         selected: Optional[Dict[str, Any]] = None
@@ -565,7 +601,8 @@ def _finalize_data(feature_dir: Path, data: Dict[str, Any]) -> Tuple[Dict[str, A
                         case.get("specRefs"),
                     )
                 )
-                if current is None or not is_fresh(evidence.get("createdAt"), current.get("startedAt")):
+                inherited_run = inherited.get(case_id, {}).get("runId") == run_id
+                if (current is None or not is_fresh(evidence.get("createdAt"), current.get("startedAt"))) and not inherited_run:
                     current_failures.append("execution_evidence_stale")
                 current_failures.extend(
                     validate_execution_hash_chain(feature_dir, quality_gate, candidate, evidence)
@@ -596,6 +633,8 @@ def _finalize_data(feature_dir: Path, data: Dict[str, Any]) -> Tuple[Dict[str, A
         else:
             run_id = selected.get("runId")
             used_run_ids.add(run_id)
+            if inherited.get(case_id, {}).get("runId") == run_id:
+                inherited_evidence.add(selected["evidenceId"])
         if case_failures:
             errors.extend(
                 {"reason": reason, "detail": case_id} for reason in case_failures
@@ -611,7 +650,7 @@ def _finalize_data(feature_dir: Path, data: Dict[str, Any]) -> Tuple[Dict[str, A
 
     errors.extend(
         _coverage_errors(
-            feature_dir, data.get("scenarioCoverage"), evidence_by_id, current
+            feature_dir, data.get("scenarioCoverage"), evidence_by_id, current, inherited_evidence
         )
     )
     if errors:
@@ -758,6 +797,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _common(begin)
     begin.add_argument("--kind", choices=["initial", "repair"], required=True)
     begin.set_defaults(func=_cmd_begin_round)
+
+    reuse = sub.add_parser("refresh-reuse")
+    _common(reuse)
+    reuse.set_defaults(func=_cmd_refresh_reuse)
 
     quality = sub.add_parser("sync-quality-gate")
     _common(quality)

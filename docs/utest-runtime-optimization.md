@@ -1,4 +1,4 @@
-# Plan UTest runtime optimization
+# UTest Runtime 协议
 
 UTest now uses finite test presets, bound test-environment writes, cached module
 diagnostics and generated Bash execution. Plan remains unchanged: outcomes,
@@ -80,6 +80,12 @@ production task. It does not classify every XML/POM as a test asset. Changed fil
 collection is NUL-delimited so nested Chinese/spaced POM paths work correctly.
 
 ## Durable state and validation
+
+Workflow closes a test stage through `parallel_batch_stage.py close-test`, which
+recovers sealing, result registration and lease release from durable `testClosure`
+state. A passing result still requires the current command, source/test hashes,
+environment and intact execution logs. Runtime derives `UNIT_TEST_REPORT.md` and
+the run's `validation-summary.md` from recorded results; no manual report is needed.
 
 Environment and execution state are stored under the current run/Batch's
 `utest` directory. They are Runtime-owned; generated Bash scripts have a stored

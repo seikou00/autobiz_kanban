@@ -50,7 +50,7 @@ def closure_command(command: str, run_id: str, batch_id: str) -> bool:
     if value("--run-id") != run_id or value("--batch-id") != batch_id:
         return False
     action = args[0] if args else ""
-    return ((script.name == "parallel_batch_stage.py" and action in {"record-test-failure", "check-test-budget"})
+    return ((script.name == "parallel_batch_stage.py" and action in {"record-test-failure", "check-test-budget", "close-test"})
             or (script.name == "batch_lease_manager.py" and action in {"check", "release"})
             or (script.name == "worktree_manager.py" and "seal" in args)
             or (script.name == "run_utest_command.py" and "--record-only" in args))

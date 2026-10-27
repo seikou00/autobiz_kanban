@@ -219,17 +219,11 @@ class SpringTestReferenceIntegrationContractTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, content)
 
-    def test_utest_skill_has_one_runtime_entrypoint(self):
+    def test_utest_reference_is_routed_once_without_loading_all_domains(self):
         content = UTEST_SKILL.read_text(encoding="utf-8")
-
         self.assertEqual(1, content.count("render_spring_test_reference.py"))
-        self.assertIn(
-            'python -X utf8 "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>',
-            content,
-        )
-        self.assertIn("version: v1.2.08311", content)
-        self.assertNotIn("绝不 mock 自己的类或内部协作者", content)
-        self.assertNotIn("别走侧信道（如直接查库断言）", content)
+        self.assertLess(UTEST_SKILL.stat().st_size, 10000)
+        self.assertTrue((UTEST_SKILL.parent / "reference/test-engineer-task-protocol.md").is_file())
 
     def test_shared_quality_rules_cover_slice_and_persistence_exceptions(self):
         content = QUALITY_REFERENCE.read_text(encoding="utf-8")

@@ -225,7 +225,10 @@ def prepare(args, ctx):
         action="prepare", workspace=str(ctx[0]), feature=ctx[1], run_id=args.run_id,
         batch_id=args.batch_id, batch_worktree=str(ctx[2]), task_id=[args.task_id],
         stage="utest", owner_token=args.owner_token))
-    return {"status": env["status"], "environmentReused": reused,
+    from hooks.compile_coverage import compile_coverage
+    verification_scope = compile_coverage(ctx[0] / ".autobizdevops" / "features" / ctx[1], args.run_id,
+                                          args.batch_id, task, ctx[2])
+    return {"status": env["status"], "verificationScope": verification_scope, "environmentReused": reused,
             "sharedEnvironmentReused": env.get("sharedCacheStatus") == "hit", "environment": env,
             "recipe": entry["recipe"], "referenceContent": recipe_reference(env, entry["recipe"]),
             "testPoints": task["testPoints"], "policy": state["utestPolicy"],
@@ -364,6 +367,7 @@ def preflight(args, ctx, kind="test"):
         if claim["status"] == "in_progress":
             return claim
         command["diagnosticClaimToken"] = claim["token"]
+    command["testInputHashes"] = {name: hashlib.sha256((worktree / name).read_bytes()).hexdigest() for name in files} if kind == "test" else {}
     command.update(pendingAttempt=command["attempts"] + 1, status="prepared", environmentFingerprint=fingerprint(root),
                    executionRoot=str(root), diagnosticCachePath=str(cache_path) if cache_path else None)
     command.setdefault("preparedEpoch", now)

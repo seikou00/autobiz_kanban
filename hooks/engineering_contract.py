@@ -5,7 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 
-FILES = ("agents/test-engineer.md", "hooks/augment_test_engineer_task_prompt.py", "hooks/hooks.json",
+FILES = ("skills/autodev/autodev-code/references/task-execution.md",
+         "skills/autodev/autodev-code/references/frontend-route.md",
+         "skills/autodev/autodev-reviewer/SKILL.md", "skills/autodev/autodev-e2e/SKILL.md",
+         "skills/autodev/autodev-e2e/reference/execution.md", "hooks/e2e_reuse.py", "hooks/compile_coverage.py",
+         "agents/test-engineer.md", "hooks/augment_test_engineer_task_prompt.py", "hooks/hooks.json",
          "hooks/utest_policy.py", "hooks/utest_control.py", "hooks/utest_deadline_guard.py",
          "hooks/engineering_context.py", "hooks/engineering_facts.py", "hooks/engineering_cache.py",
          "hooks/engineering_dependencies.py", "hooks/engineering_environment.py", "hooks/runtime_guidance.py",

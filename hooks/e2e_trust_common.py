@@ -324,6 +324,8 @@ def validate_execution_evidence_chain(
         errors.append("execution_evidence_validation_result_mismatch")
 
     evidence_run = evidence.get("e2eRun") if isinstance(evidence.get("e2eRun"), dict) else {}
+    if evidence_run.get("reuseBinding") != execution.get("reuseBinding"):
+        errors.append("execution_reuse_binding_mismatch")
     if evidence_run.get("caseId") != case_id:
         errors.append("execution_evidence_case_mismatch")
     for field in (

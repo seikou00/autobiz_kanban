@@ -1167,7 +1167,9 @@ def prepare_compile(workspace: Path, feature: str, task_id: str, code_workspace:
                 target = (cwd / file).resolve()
                 if not any(target.is_relative_to(repo) for repo in repositories.values()):
                     raise TaskRunnerError("compile_build_file_workspace_mismatch", reason=f"Maven 构建文件 {target} 超出当前 TASK 的业务工作区")
+        from hooks.compile_coverage import production_fingerprint
         attempt = {
+            "productionFingerprint": production_fingerprint(repositories, argv),
             "attemptId": "compile-" + uuid.uuid4().hex,
             "taskId": task_id, "runId": run_id, "parallelRunId": parallel_run_id,
             "batchId": state["batchId"], "taskContractSha256": state["taskContractSha256"],

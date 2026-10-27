@@ -134,13 +134,15 @@ def validate_assignment_prompt_payload(payload):
     return expected
 
 
-def build_assignments(feature_dir):
+def build_assignments(feature_dir, batch_id=None):
     try:
         plan = load_utest_plan(feature_dir)
     except UTestPlanContractError as exc:
         raise UTestAssignmentError(str(exc))
     assignments = []
     for batch in plan["batches"]:
+        if batch_id is not None and batch["batchId"] != batch_id:
+            continue
         groups = []
         by_workspace = {}
         for task in batch["tasks"]:
@@ -181,6 +183,7 @@ def main(argv=None):
     parser.add_argument("--workspace")
     parser.add_argument("--feature")
     parser.add_argument("--feature-dir")
+    parser.add_argument("--batch-id", help="只返回当前 Batch 的 assignment")
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON（默认格式）")
     try:
         args = parser.parse_args(argv)
@@ -198,7 +201,7 @@ def main(argv=None):
             workspace = resolve_workspace(args.workspace)
             feature = resolve_feature(args.feature)
             feature_dir = workspace / ".autobizdevops" / "features" / feature
-        result = {"assignments": build_assignments(feature_dir)}
+        result = {"assignments": build_assignments(feature_dir, args.batch_id)}
     except UTestAssignmentError as exc:
         print("utest_assignment_router_failed: {}".format(exc), file=sys.stderr)
         return 1
