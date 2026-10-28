@@ -73,7 +73,7 @@ def record_utest_block(workspace, feature, payload):
     status = payload.get("status")
     if status not in BLOCKING_STATUSES:
         raise ValueError(
-            "status={} 不是可落盘的 UTest 阻断状态。修复：ready 继续测试，init_required 完成初始化，ambiguous 等待用户选择。".format(
+            "status={} 不是可落盘的 UTest 阻断状态。修复：ready 继续测试，init_required 完成初始化；工程定位由执行 Agent 根据实际代码确定。".format(
                 status
             )
         )

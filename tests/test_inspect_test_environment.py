@@ -23,6 +23,7 @@ from hooks.inspect_test_environment import (  # noqa: E402
     inspect_feature_environments,
     main,
 )
+from hooks.utest_workspace_binding import resolve_task_workspace, select_task_execution_target  # noqa: E402
 
 
 class InspectTestEnvironmentTest(unittest.TestCase):
@@ -274,22 +275,18 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertEqual("ready", json.loads(stdout.getvalue())["status"])
 
-    def test_feature_inspector_uses_scope_module_instead_of_aggregator_root(self):
+    def test_coarse_component_hint_discovers_nested_build_root(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
-        module = repo / "yudao-module-mkt"
+        module = repo / "component" / "yudao-module-mkt"
         module.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        (repo / "pom.xml").write_text(
-            "<project><packaging>pom</packaging><modules><module>yudao-module-mkt</module></modules></project>",
-            encoding="utf-8",
-        )
         (module / "pom.xml").write_text(
             "<dependency><artifactId>spring-boot-starter-test</artifactId></dependency>",
             encoding="utf-8",
         )
-        self._feature(workspace, repo, modules=["yudao-module-mkt"])
+        self._feature(workspace, repo, modules=["component"])
 
         result = inspect_feature_environments(workspace, "alpha")
 
@@ -312,25 +309,27 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual("workspace_binding_missing", payload["status"])
         self.assertEqual("utest_workspace_binding", payload["owner"])
 
-    def test_missing_scope_module_is_contract_gap_with_task_repair(self):
+    def test_missing_component_hint_does_not_block_actual_build_root(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        (repo / "pom.xml").write_text("<project/>", encoding="utf-8")
+        (repo / "pom.xml").write_text(
+            "<project><dependency><artifactId>spring-boot-starter-test</artifactId></dependency></project>",
+            encoding="utf-8",
+        )
         self._feature(workspace, repo, modules=["missing-module"])
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             exit_code = main(["--workspace", str(workspace), "--feature", "alpha"])
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(2, exit_code)
-        self.assertEqual("contract_gap", payload["status"])
-        self.assertIn("T001", payload["errors"][0])
-        self.assertIn("scope.modules", payload["errors"][0])
+        self.assertEqual(0, exit_code)
+        self.assertEqual("ready", payload["status"])
+        self.assertEqual(str(repo.resolve()), payload["targets"][0]["projectRoot"])
 
-    def test_empty_scope_modules_discovers_nested_project_from_batch_changes(self):
+    def test_actual_changes_determine_build_root_regardless_of_component_hints(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "comparison-repo"
@@ -365,15 +364,15 @@ class InspectTestEnvironmentTest(unittest.TestCase):
             ["git", "-C", str(repo), "commit", "-qm", "implement module A"],
             check=True,
         )
-        self._feature(workspace, repo)
+        for hints in ([], [module_b.name], ["missing-component"], ["后台服务/零售客户经营/LF39.05_bccompliancemng/src/main"]):
+            with self.subTest(hints=hints):
+                self._feature(workspace, repo, modules=hints)
+                result = inspect_feature_environments(workspace, "alpha")
+                self.assertEqual("ready", result["status"])
+                self.assertEqual([str(module_a.resolve())], [item["projectRoot"] for item in result["targets"]])
+                self.assertTrue(any("Git 改动" in warning for warning in result["locationWarnings"]))
 
-        result = inspect_feature_environments(workspace, "alpha")
-
-        self.assertEqual("ready", result["status"])
-        self.assertEqual([str(module_a.resolve())], [item["projectRoot"] for item in result["targets"]])
-        self.assertTrue(any("Git 改动" in warning for warning in result["locationWarnings"]))
-
-    def test_ambiguous_discovery_lists_candidates_and_allows_runtime_selection(self):
+    def test_project_discovery_does_not_require_user_selection(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "comparison-repo"
@@ -409,23 +408,27 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         )
         self._feature(workspace, repo)
 
-        ambiguous = inspect_feature_environments(workspace, "alpha")
+        discovered = inspect_feature_environments(workspace, "alpha")
 
-        self.assertEqual("environment_target_ambiguous", ambiguous["status"])
-        self.assertEqual([], ambiguous["targets"])
-        candidates = ambiguous["targetSelectionRequired"][0]["candidates"]
-        self.assertEqual(2, len(candidates))
+        self.assertEqual("ready", discovered["status"])
+        self.assertEqual(2, len(discovered["targets"]))
+        self.assertNotIn("targetSelectionRequired", discovered)
+        self.assertNotIn("requiredAction", discovered)
+        targets = discovered["targets"]
+        binding = resolve_task_workspace(workspace, "alpha", "T001")
+        automatic = select_task_execution_target(binding, ["module-b/src/test/java/ExampleTest.java"])
+        self.assertEqual(str(module_b.resolve()), automatic["executionRoot"])
         selected = inspect_feature_environments(
             workspace,
             "alpha",
             selected_environment_targets={
-                "T001": candidates[0]["environmentTargetId"]
+                "T001": targets[0]["environmentTargetId"]
             },
         )
 
         self.assertEqual("ready", selected["status"])
         self.assertEqual(1, len(selected["targets"]))
-        self.assertEqual(candidates[0]["projectRoot"], selected["targets"][0]["projectRoot"])
+        self.assertEqual(targets[0]["projectRoot"], selected["targets"][0]["projectRoot"])
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             exit_code = main(
@@ -437,7 +440,7 @@ class InspectTestEnvironmentTest(unittest.TestCase):
                     "--task-id",
                     "T001",
                     "--environment-target",
-                    "T001={}".format(candidates[0]["environmentTargetId"]),
+                    "T001={}".format(targets[0]["environmentTargetId"]),
                     "--batch-worktree",
                     str(repo),
                 ]
@@ -448,7 +451,7 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual("ready", cli_payload["status"])
         self.assertEqual(1, len(cli_payload["targets"]))
 
-    def test_invalid_plan_module_is_contract_gap_not_environment_failure(self):
+    def test_workspace_escape_is_contract_gap_not_environment_failure(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
@@ -458,7 +461,7 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         feature_dir = self._feature(workspace, repo)
         batch_path = feature_dir / "plans" / "B001" / "plan.json"
         batch = json.loads(batch_path.read_text(encoding="utf-8"))
-        batch["tasks"][0]["scope"]["modules"] = ["../outside"]
+        batch["tasks"][0]["scope"]["workspaceRoots"] = {repo.name: "../outside"}
         batch_path.write_text(json.dumps(batch), encoding="utf-8")
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):

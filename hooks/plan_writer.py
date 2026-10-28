@@ -53,6 +53,7 @@ from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     defer_to_test_stages_enabled,
     normalize_status,
+    normalize_repository_relative_path,
     task_execution_lane,
     task_execution_mode,
     task_contract_sha256,
@@ -246,7 +247,7 @@ def _plan_to_groups(data: dict[str, Any]) -> dict[str, Any]:
     allowed_task_fields = {
         "id", "outcome", "workspace", "dependsOn", "refs", "implementationPoints",
         "testPoints", "verification",
-        "ui", "mode", "stage", "external", "atomic",
+        "ui", "mode", "stage", "external", "atomic", "components",
     }
     for index, raw in enumerate(raw_tasks, start=1):
         if not isinstance(raw, dict):
@@ -298,6 +299,12 @@ def _plan_to_groups(data: dict[str, Any]) -> dict[str, Any]:
             raise PlanWriterInputError("plan_task_verification_intent_invalid", f"task={task_id}")
         if not isinstance(raw.get("workspace"), str) or not raw["workspace"].strip():
             raise PlanWriterInputError("plan_task_workspace_missing", f"task={task_id}")
+        modules = []
+        for path in _compact_string_list(raw.get("components", []), task_id=task_id, field="components"):
+            normalized = normalize_repository_relative_path(path)
+            if normalized is None:
+                raise PlanWriterInputError("plan_task_component_path_invalid", f"task={task_id};path={path}")
+            modules.append(normalized)
         group: dict[str, Any] = {
             "id": task_id,
             "title": outcome.strip(),
@@ -307,6 +314,7 @@ def _plan_to_groups(data: dict[str, Any]) -> dict[str, Any]:
             "writeTargets": [],
             "deps": _compact_string_list(raw.get("dependsOn", []), task_id=task_id, field="dependsOn"),
             "workspaceRef": raw["workspace"].strip(),
+            "modules": sorted(set(modules)),
             "specRefs": [*requirements, *scenarios],
             "apiIds": api_ids,
             "designRefs": design_refs,
@@ -846,6 +854,7 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
 
 def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
     ui_refs = item.get("uiRefs") if isinstance(item.get("uiRefs"), dict) else {}
+    scope = item.get("scope") if isinstance(item.get("scope"), dict) else {}
     result = {
         "id": item.get("id"),
         "title": item.get("title"),
@@ -867,6 +876,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "frontendRoute": ui_refs.get("frontendRoute"),
         "validationBoundary": item.get("validationBoundary"),
         "workspaceRef": item.get("workspaceRef"),
+        "modules": item.get("modules", scope.get("modules", [])),
         "executionMode": item.get("executionMode", "code"),
         "executionStage": item.get("executionStage", "parallel"),
         "atomicGroup": copy.deepcopy(item.get("atomicGroup")) if isinstance(item.get("atomicGroup"), dict) else None,
@@ -1257,7 +1267,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "deps": copy.deepcopy(group.get("deps", [])),
         "uiRequired": ui_required,
         "scope": {
-            "modules": [],
+            "modules": copy.deepcopy(group.get("modules", [])),
             "entrypoints": [],
             "pages": copy.deepcopy(ui_refs.get("pageRefs", [])) if ui_refs else [],
             "dataObjects": [],
@@ -1404,26 +1414,24 @@ def _append_unique(values: list[str], items: list[str]) -> list[str]:
 
 def _code_workspace_contexts(values: list[str] | None) -> list[dict[str, Any]]:
     contexts: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
     for raw in values or []:
         requested = Path(raw).expanduser().resolve()
         try:
             git_root = resolve_git_root(requested)
         except RepositorySnapshotError as exc:
             raise PlanWriterInputError("code_workspace_invalid", str(exc)) from exc
-        try:
-            relative = requested.relative_to(git_root)
-        except ValueError as exc:
-            raise PlanWriterInputError("code_workspace_outside_git_root", str(requested)) from exc
-        workspace_root = "." if relative == Path(".") else relative.as_posix()
-        key = (git_root.name, workspace_root)
-        if key in seen:
-            continue
+        if requested != git_root:
+            raise PlanWriterInputError(
+                "code_workspace_requires_git_root",
+                f"requested={requested};gitRoot={git_root};use_git_root_and_task_components",
+            )
         existing = next(
             (item for item in contexts if item.get("repo") == git_root.name),
             None,
         )
         if existing is not None:
+            if existing["gitRoot"] == git_root:
+                continue
             raise PlanWriterInputError(
                 "code_workspace_repository_id_duplicate",
                 (
@@ -1434,10 +1442,9 @@ def _code_workspace_contexts(values: list[str] | None) -> list[dict[str, Any]]:
         contexts.append({
             "repo": git_root.name,
             "gitRoot": git_root,
-            "workspaceRoot": workspace_root,
+            "workspaceRoot": ".",
             "requestedPath": requested,
         })
-        seen.add(key)
     return contexts
 
 
@@ -1488,11 +1495,20 @@ def _code_workspace_preflight_errors(
         task_id = str(task.get("id", "task"))
         workspace_roots = task_workspace_roots(task)
         for key, workspace_root in workspace_roots.items():
-            if _context_for_workspace_root(contexts, key, workspace_root) is None:
+            context = _context_for_workspace_root(contexts, key, workspace_root)
+            if context is None:
                 errors.append({
                     "reason": "code_workspace_contract_mismatch",
                     "detail": f"task={task_id};repo={key};workspaceRoot={workspace_root}",
                 })
+                continue
+            for module in task.get("scope", {}).get("modules", []):
+                component = (context["gitRoot"] / module).resolve()
+                if not component.is_relative_to(context["gitRoot"]) or (component.exists() and not component.is_dir()):
+                    errors.append({
+                        "reason": "code_workspace_component_invalid",
+                        "detail": f"task={task_id};repo={key};component={module}",
+                    })
     return errors
 
 
@@ -1968,7 +1984,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prepare = sub.add_parser("prepare-plan", help="write one critic-ready Plan bundle without PLAN.md")
     _common(prepare)
-    prepare.add_argument("--code-workspace", required=True, action="append")
+    prepare.add_argument("--code-workspace", required=True, action="append", help="actual Git root; repeat for multiple repositories")
     prepare_input = prepare.add_mutually_exclusive_group(required=True)
     prepare_input.add_argument("--body-stdin", action="store_true")
     prepare_input.add_argument("--body-file")

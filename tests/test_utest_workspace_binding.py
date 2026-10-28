@@ -4,11 +4,14 @@
 from __future__ import print_function
 
 import json
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +22,7 @@ from hooks.utest_workspace_binding import (  # noqa: E402
     UTestWorkspaceBindingError,
     resolve_workspace_binding,
 )
+from hooks.utest_runtime import main as runtime_main  # noqa: E402
 
 
 class UTestWorkspaceBindingTest(unittest.TestCase):
@@ -89,6 +93,22 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
                 "business-repo",
                 repository_path=str(self.first),
             )
+
+    def test_project_lookup_continues_in_execution_agent_instead_of_blocking(self):
+        lookup = UTestWorkspaceBindingError(
+            "project_context_required", "inspect actual code", "resolve_project_from_code"
+        )
+        output = io.StringIO()
+        with patch("hooks.utest_runtime.context", side_effect=lookup), contextlib.redirect_stdout(output):
+            code = runtime_main([
+                "prepare", "--workspace", str(self.workspace), "--feature", "alpha",
+                "--run-id", "run", "--batch-id", "B001", "--batch-worktree", str(self.first),
+                "--task-id", "T001", "--owner-token", "token",
+            ])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["status"], "project_context_required")
+        self.assertEqual(payload["requiredAction"], "resolve_project_from_code")
 
 
 if __name__ == "__main__":

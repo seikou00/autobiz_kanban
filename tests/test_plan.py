@@ -25,6 +25,12 @@ from hooks.utest_plan_contract import load_utest_plan  # noqa: E402
 from hooks.code_task_context import build_context, resolve_task_refs  # noqa: E402
 from hooks.implementation_scope import write_scope  # noqa: E402
 from hooks.plan_scope import write_partition  # noqa: E402
+from hooks import task_runner  # noqa: E402
+from hooks.inspect_test_environment import inspect_feature_environments  # noqa: E402
+from hooks.utest_plan_contract import canonical_task_digest  # noqa: E402
+from hooks.utest_workspace_binding import resolve_task_workspace, select_task_execution_target  # noqa: E402
+from hooks.parallel_runtime import batch_component_roots  # noqa: E402
+from tests.test_task_runner import _git, _configure_runtime_ignore  # noqa: E402
 
 
 class PlanTest(unittest.TestCase):
@@ -45,16 +51,16 @@ class PlanTest(unittest.TestCase):
             }],
         }
 
-    def _prepare(self, workspace: Path, payload: dict) -> subprocess.CompletedProcess:
+    def _prepare(self, workspace: Path, payload: dict, code_workspace: Path = ROOT) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(ROOT / "hooks/plan_writer.py"), "prepare-plan",
              "--workspace", str(workspace), "--feature", "alpha",
-             "--code-workspace", str(ROOT), "--body-stdin"],
+             "--code-workspace", str(code_workspace), "--body-stdin"],
             input=json.dumps(payload), text=True, capture_output=True, check=False,
         )
 
-    def _publish(self, workspace: Path, payload: dict) -> subprocess.CompletedProcess:
-        prepared = self._prepare(workspace, payload)
+    def _publish(self, workspace: Path, payload: dict, code_workspace: Path = ROOT) -> subprocess.CompletedProcess:
+        prepared = self._prepare(workspace, payload, code_workspace)
         if prepared.returncode != 0:
             return prepared
         return subprocess.run(
@@ -103,6 +109,123 @@ class PlanTest(unittest.TestCase):
         result = sync_design_contract_lock(workspace, "alpha")
         self.assertTrue(result.ok, result.errors)
         return workspace, feature
+
+    def test_components_keep_root_binding_and_module_compile_test_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, feature = self._feature(root)
+            code = root / "business-repo"
+            code.mkdir()
+            _git(code, "init", "-b", "main")
+            _git(code, "config", "user.email", "test@example.com")
+            _git(code, "config", "user.name", "Test")
+            _configure_runtime_ignore(code)
+            components = ["PC/bcpcmktui", "packages/across-comp"]
+            for component in components:
+                module = code / component
+                module.mkdir(parents=True)
+                (module / "pom.xml").write_text(
+                    "<project><dependency><artifactId>spring-boot-starter-test</artifactId></dependency></project>",
+                    encoding="utf-8",
+                )
+            _git(code, "add", ".")
+            _git(code, "commit", "-m", "initial modules")
+            worktree = root / "worktree"
+            _git(code, "worktree", "add", "--detach", str(worktree))
+            payload = self._payload()
+            payload["tasks"][0].update(
+                workspace=code.name, components=[components[1].replace("/", "\\"), *components],
+            )
+            result = self._publish(workspace, payload, code)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            bundle = load_plan_bundle(feature)
+            task = bundle.batches["B001"]["tasks"][0]
+            self.assertEqual(bundle.root["codeWorkspaces"], {code.name: str(code.resolve())})
+            self.assertEqual(task["scope"]["workspaceRoots"], {code.name: "."})
+            self.assertEqual(task["scope"]["modules"], components)
+            self.assertEqual(batch_component_roots(bundle.batches["B001"]), (".",))
+            context = build_context(workspace=workspace, feature="alpha", task_id="T001", code_workspaces=[worktree])
+            self.assertTrue(context.ok, context.errors)
+            self.assertEqual(context.data["taskContract"]["scope"]["modules"], components)
+
+            run = task_runner.start_task(workspace, "alpha", "T001", worktree, workspace_ref=code.name)
+            module = worktree / components[1]
+            (module / "production.txt").write_text("shared behavior\n", encoding="utf-8")
+            attempt = task_runner.prepare_compile(
+                workspace, "alpha", "T001", worktree, run["runId"],
+                argv=["mvn", "compile", "-o"], execution_cwd=module, workspace_ref=code.name,
+            )
+            self.assertEqual(attempt["executionCwd"], str(module.resolve()))
+            log = root / "compile.log"
+            log.write_text("fixture compiler output\n", encoding="utf-8")
+            compiled = task_runner.record_compile(
+                workspace, "alpha", "T001", worktree, run["runId"], attempt_id=attempt["attemptId"],
+                exit_code=0, log_exit_code=0, output_file=log, workspace_ref=code.name,
+            )
+            self.assertTrue(compiled["passed"])
+            finished, _ = task_runner.finish_implementation(
+                workspace, "alpha", "T001", worktree, run["runId"],
+                no_code_change_why=None, supporting_files=[], workspace_ref=code.name,
+            )
+            self.assertTrue(finished)
+
+            targets = resolve_task_workspace(workspace, "alpha", "T001", code_workspace=worktree)
+            self.assertEqual([item["executionCwd"] for item in targets["targets"]], [components[1]])
+            selected = select_task_execution_target(targets, [components[1] + "/src/test/java/ExampleTest.java"])
+            self.assertEqual(selected["executionRoot"], str(module.resolve()))
+            environment = inspect_feature_environments(workspace, "alpha", code_workspace=worktree)
+            self.assertEqual(environment["status"], "ready")
+            self.assertEqual([item["projectRoot"] for item in environment["targets"]], [str(module.resolve())])
+
+    def test_component_hints_are_per_task_and_affect_plan_review_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            payload = self._payload()
+            payload["tasks"][0]["components"] = ["./hooks/", "hooks"]
+            sibling = copy.deepcopy(payload["tasks"][0])
+            sibling.update(id="T002", outcome="Callers access shared behavior", components=["skills"])
+            sibling["refs"]["decisions"] = []
+            payload["tasks"].append(sibling)
+            prepared = self._prepare(workspace, payload)
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            tasks = load_plan_bundle(feature).tasks
+            self.assertEqual([task["scope"]["modules"] for task in tasks], [["hooks"], ["skills"]])
+            before = canonical_task_digest(tasks[0])
+            payload["tasks"][0]["components"] = ["skills"]
+            prepared = self._prepare(workspace, payload)
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            self.assertIn("T001", json.loads(prepared.stdout)["reviewChanges"]["changedTaskIds"])
+            self.assertEqual(before, canonical_task_digest(load_plan_bundle(feature).tasks[0]))
+
+    def test_component_paths_and_git_root_are_validated_before_plan_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            for components in (["../outside"], ["/absolute"], ["D:\\code\\component"], "hooks", [""]):
+                with self.subTest(components=components):
+                    payload = self._payload()
+                    payload["tasks"][0]["components"] = components
+                    prepared = self._prepare(workspace, payload)
+                    self.assertNotEqual(prepared.returncode, 0)
+                    self.assertIn("component", prepared.stdout)
+                    self.assertFalse((feature / "plan.json").exists())
+            prepared = self._prepare(workspace, self._payload(), ROOT / "hooks")
+            self.assertNotEqual(prepared.returncode, 0)
+            self.assertIn("code_workspace_requires_git_root", prepared.stdout)
+            self.assertIn(str(ROOT), prepared.stdout)
+            self.assertFalse((feature / "plan.json").exists())
+            code = Path(directory) / "repo"
+            code.mkdir()
+            _git(code, "init")
+            (code / "file").write_text("not a directory", encoding="utf-8")
+            (code / "external").symlink_to(Path(directory), target_is_directory=True)
+            for component in ("file", "external"):
+                payload = self._payload()
+                payload["tasks"][0]["components"] = [component]
+                prepared = self._prepare(workspace, payload, code)
+                self.assertNotEqual(prepared.returncode, 0)
+                self.assertIn("code_workspace_component_invalid", prepared.stdout)
+                self.assertFalse((feature / "plan.json").exists())
 
     def test_publish_plan_derives_runtime_contract_without_file_or_command_hints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

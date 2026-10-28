@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
+from hooks.plan_write_ownership import normalize_owned_path  # noqa: E402
+from hooks.task_run_integrity import task_run_integrity_error  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
     load_utest_plan,
@@ -242,27 +244,6 @@ def _task_from_plan(plan, task_id):
     )
 
 
-def _task_modules(task):
-    raw_task = task.get("rawTask") if isinstance(task, dict) else None
-    scope = raw_task.get("scope") if isinstance(raw_task, dict) else None
-    modules = scope.get("modules") if isinstance(scope, dict) else []
-    if modules is None:
-        return []
-    if not isinstance(modules, list) or not all(isinstance(item, str) and item.strip() for item in modules):
-        raise UTestWorkspaceBindingError(
-            "contract_gap",
-            "{} scope.modules 不是字符串数组。修复：在 /autodev-plan 修正该 TASK 的模块声明。".format(
-                task.get("id", "TASK")
-            ),
-            "repair_plan_task_location",
-        )
-    result = []
-    for item in modules:
-        if item not in result:
-            result.append(item)
-    return result
-
-
 def _workspace_prefix(task):
     raw_task = task.get("rawTask") if isinstance(task, dict) else None
     scope = raw_task.get("scope") if isinstance(raw_task, dict) else None
@@ -281,32 +262,6 @@ def _location_roots(task, repository_root):
         "cwd": ".",
         "root": Path(repository_root).resolve(),
     }]
-
-
-def _module_root(repository_root, workspace_root, locations, module, task_id):
-    relative = _safe_relative(module, "scope.modules", task_id)
-    candidates = [repository_root / relative]
-    if workspace_root != Path("."):
-        candidates.append(repository_root / workspace_root / relative)
-    for location in locations:
-        candidates.append(location["root"] / relative)
-        if location["root"].name == module:
-            candidates.append(location["root"])
-    seen = set()
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if resolved.is_dir() and path_within(resolved, repository_root):
-            return resolved
-    raise UTestWorkspaceBindingError(
-        "contract_gap",
-        "{} scope.modules 声明的 {} 在绑定仓库中不存在。修复：在 /autodev-plan 修正该 TASK 的模块声明。".format(
-            task_id, module
-        ),
-        "repair_plan_task_location",
-    )
 
 
 _PROJECT_MANIFESTS = {
@@ -336,8 +291,7 @@ _PROJECT_SCAN_PRUNED_DIRS = {
 def _discover_project_roots(repository_root):
     """Find build roots only inside the Plan-bound repository/worktree.
 
-    This is a fallback for Plans that intentionally omit implementation module
-    paths. Symlinked directories and nested Git repositories are not traversed.
+    Symlinked directories and nested Git repositories are not traversed.
     """
     root = Path(repository_root).resolve()
     found = []
@@ -408,6 +362,22 @@ def _projects_for_changed_paths(repository_root, project_roots, changed_paths):
     return sorted(matched_roots, key=lambda path: (len(path.parts), str(path).casefold()))
 
 
+def _task_implementation_paths(feature_dir, task, repository_root):
+    """Reuse the current Task's verified Code handoff before Batch-wide diffs."""
+    evidence_id = task["rawTask"].get("latestImplementationEvidenceId")
+    if not evidence_id:
+        return []
+    for path in (feature_dir / ".task-runs" / task["id"]).glob("*.json"):
+        state = _read_json(path)
+        if not state or state.get("implementationEvidenceId") != evidence_id or task_run_integrity_error(state):
+            continue
+        if not any(Path(item["path"]).resolve() == repository_root for item in state.get("repositories", [])):
+            continue
+        return [normalized for raw in [*state.get("changedFiles", []), *state.get("supportingFiles", [])]
+                if (normalized := normalize_owned_path(raw, task["workspaceRef"])) is not None]
+    return []
+
+
 def _execution_target_id(task_id, repository_root, execution_root):
     relative = execution_root.relative_to(repository_root).as_posix()
     digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:8].upper()
@@ -435,69 +405,33 @@ def resolve_task_workspace(
     repository_root, binding = _resolve_execution_repository(binding, code_workspace)
     locations = _location_roots(task, repository_root)
     workspace_root = _workspace_prefix(task)
-    modules = _task_modules(task)
-    execution_roots = []
-    location_warnings = []
-    auto_discovery_ambiguous = False
-    if modules:
-        for module in modules:
-            execution_roots.append(
-                (module, _module_root(repository_root, workspace_root, locations, module, task_id))
-            )
-    else:
-        scan_root = (repository_root / workspace_root).resolve()
-        if not path_within(scan_root, repository_root) or not scan_root.is_dir():
-            raise UTestWorkspaceBindingError(
-                "contract_gap",
-                "{} scope.workspaceRoots 指向绑定仓库外或不存在的目录：{}。修复：在 /autodev-plan 修正 workspaceRoots。".format(
-                    task_id, workspace_root
-                ),
-                "repair_plan_task_location",
-            )
-        discovered_roots = _discover_project_roots(scan_root)
-        changed_paths = _git_changed_paths(repository_root)
-        changed_roots = _projects_for_changed_paths(
-            repository_root, discovered_roots, changed_paths
+    scan_root = (repository_root / workspace_root).resolve()
+    if not path_within(scan_root, repository_root) or not scan_root.is_dir():
+        raise UTestWorkspaceBindingError(
+            "contract_gap",
+            "{} scope.workspaceRoots 指向绑定仓库外或不存在的目录：{}。修复：在 /autodev-plan 修正 workspaceRoots。".format(
+                task_id, workspace_root
+            ),
+            "repair_plan_task_location",
         )
-        if changed_roots:
-            discovered_roots = changed_roots
-            location_warnings.append(
-                "{} 未声明 scope.modules；已按当前 Batch 的 Git 改动把环境检查范围收敛到：{}。".format(
-                    task_id,
-                    ", ".join(
-                        path.relative_to(repository_root).as_posix() or "."
-                        for path in discovered_roots
-                    ),
-                )
+    discovered_roots = _discover_project_roots(scan_root)
+    changed_paths = _task_implementation_paths(feature_dir, task, repository_root) or _git_changed_paths(repository_root)
+    changed_roots = _projects_for_changed_paths(repository_root, discovered_roots, changed_paths)
+    location_warnings = []
+    if changed_roots:
+        discovered_roots = changed_roots
+        location_warnings.append(
+            "{} 已按实现文件或 Git 改动定位工程：{}。".format(
+                task_id, ", ".join(path.relative_to(repository_root).as_posix() for path in discovered_roots)
             )
-        if discovered_roots:
-            if not changed_roots:
-                auto_discovery_ambiguous = len(discovered_roots) > 1
-                location_warnings.append(
-                    "{} 未声明 scope.modules，且当前 Batch 改动未能定位到工程；仅在 Plan 绑定的当前 worktree/workspaceRoot 内发现候选：{}。".format(
-                        task_id,
-                        ", ".join(
-                            path.relative_to(repository_root).as_posix() or "."
-                            for path in discovered_roots
-                        ),
-                    )
-                )
-            execution_roots.extend(
-                (path.relative_to(repository_root).as_posix() or ".", path)
-                for path in discovered_roots
-            )
-        else:
-            location_warnings.append(
-                "{} 未声明 scope.modules，且当前 Plan 绑定的 worktree/workspaceRoot 内没有发现构建清单；保留 workspaceRoot 作为检查目标。".format(
-                    task_id
-                )
-            )
-            execution_roots.append(
-                (workspace_root.as_posix() or ".", scan_root)
-            )
+        )
+    if not discovered_roots:
+        location_warnings.append("{} 未发现构建清单；保留 workspaceRoot 作为检查目标。".format(task_id))
+        discovered_roots = [scan_root]
 
     targets = []
-    for module, execution_root in execution_roots:
+    for execution_root in discovered_roots:
+        module = execution_root.relative_to(repository_root).as_posix()
         allowed = [
             item
             for item in locations
@@ -520,9 +454,7 @@ def resolve_task_workspace(
             "module": module,
             "repositoryRoot": str(repository_root),
             "executionRoot": str(execution_root),
-            "projectBoundary": str(
-                scan_root if not modules else repository_root
-            ),
+            "projectBoundary": str(scan_root),
             "executionCwd": execution_root.relative_to(repository_root).as_posix(),
             "planLocation": {"repo": plan_location["repo"], "cwd": plan_location["cwd"]},
         }
@@ -549,7 +481,6 @@ def resolve_task_workspace(
         "binding": binding,
         "targets": targets,
         "locationWarnings": location_warnings,
-        "autoDiscoveryAmbiguous": auto_discovery_ambiguous and selected_target_id is None,
     }
 
 
@@ -576,18 +507,18 @@ def select_task_execution_target(context, test_files=None):
             return matches[0]
         raise UTestWorkspaceBindingError(
             "contract_gap",
-            "{} 的测试文件不属于本 TASK 解析出的环境目标。修复：把测试写入其所属项目目录，或用 scope.modules 在 /autodev-plan 显式限定目录。".format(
+            "{} 的测试文件不属于本 TASK 的实现工程。修复：依据实际实现文件和构建清单定位测试目录。".format(
                 context.get("taskId", "TASK")
             ),
             "align_test_file_with_task_module",
         )
     if len(targets) != 1:
         raise UTestWorkspaceBindingError(
-            "environment_target_ambiguous",
-            "{} 对应多个环境目录。修复：使用环境检查器返回的 environmentTargetId 逐个执行 setup。".format(
+            "project_context_required",
+            "{} 需要进一步定位测试工程。执行 Agent 应检查当前 TASK 的实现、编译目录和构建清单，自动确定 environmentTargetId 或测试文件后继续，不向用户提问。".format(
                 context.get("taskId", "TASK")
             ),
-            "select_environment_target_id",
+            "resolve_project_from_code",
             targets,
         )
     return targets[0]

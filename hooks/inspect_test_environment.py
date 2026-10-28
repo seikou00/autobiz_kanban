@@ -374,7 +374,7 @@ def inspect_environment(workspace, framework):
     normalized = str(framework or "").strip().lower()
     if not root.is_dir():
         raise TestEnvironmentError(
-            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 scope.workspaceRoots 或显式 scope.modules。".format(
+            "自动解析的 projectRoot 不存在或不是目录：{}。修复：检查绑定 worktree 和实际构建清单后重新解析。".format(
                 root
             )
         )
@@ -483,7 +483,6 @@ def inspect_feature_environments(
     task_targets = []
     bindings = {}
     location_warnings = []
-    target_selection_required = []
     for task_id in selected_task_ids:
         context = resolve_task_workspace(
             artifact_workspace,
@@ -496,30 +495,6 @@ def inspect_feature_environments(
         for warning in context.get("locationWarnings", []):
             if warning not in location_warnings:
                 location_warnings.append(warning)
-        if context.get("autoDiscoveryAmbiguous"):
-            target_selection_required.append(
-                {
-                    "taskId": task_id,
-                    "candidates": [
-                        {
-                            "environmentTargetId": target["environmentTargetId"],
-                            "projectRoot": target["executionRoot"],
-                        }
-                        for target in context["targets"]
-                    ],
-                }
-            )
-            for target in context["targets"]:
-                task_targets.append(
-                    {
-                        "taskId": task_id,
-                        "environmentTargetId": target["environmentTargetId"],
-                        "projectRoot": target["executionRoot"],
-                    }
-                )
-            # Do not inspect or initialize candidates until runtime selection.
-            # An unrelated malformed manifest must not block a resolvable task.
-            continue
         for target in context["targets"]:
             execution_root = Path(target["executionRoot"])
             repository_root = Path(target["repositoryRoot"])
@@ -529,7 +504,7 @@ def inspect_feature_environments(
             if framework is None:
                 inspection = _base_result("unknown")
                 inspection["errors"].append(
-                    "{} 的 UTest 执行目录未发现受支持的测试工程清单。修复：在当前 Plan 绑定仓库内补齐项目真实使用的构建清单；必要时再用 scope.modules 限定执行目录。".format(
+                    "{} 的 UTest 执行目录未发现受支持的测试工程清单。修复：检查实际实现目录和项目使用的构建清单。".format(
                         task_id
                     )
                 )
@@ -559,13 +534,8 @@ def inspect_feature_environments(
     for target in targets:
         warnings.extend(target.get("warnings", []))
         errors.extend(target.get("errors", []))
-    status = (
-        "environment_target_ambiguous"
-        if target_selection_required
-        else _status_for_targets(targets)
-    )
     result = {
-        "status": status,
+        "status": _status_for_targets(targets),
         "bindings": bindings,
         "targets": targets,
         "taskTargets": task_targets,
@@ -573,12 +543,6 @@ def inspect_feature_environments(
         "warnings": warnings,
         "errors": errors,
     }
-    if target_selection_required:
-        result["targetSelectionRequired"] = target_selection_required
-        result["requiredAction"] = "select_environment_target"
-        result["errors"].append(
-            "多个自动发现的项目无法由当前 Batch Git 改动定位。请依据 TASK 的实际实现目录，使用列出的 environmentTargetId 重跑该 TASK 的环境检查；不要修改 Plan 或初始化所有候选。"
-        )
     return result
 
 

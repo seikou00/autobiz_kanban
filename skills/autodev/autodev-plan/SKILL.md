@@ -24,7 +24,7 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_p
 使用 `templates/plan-input.json`（`schemaVersion=autodev.plan`）：
 
 - 一个 Task 交付同一仓库内完整、可独立评审的行为；同一行为的正常、边界、权限和失败分支放一起。不同独立交付结果或跨仓库工作才拆分，不按文件、方法或断言拆；边界难判断时再读 `references/task-planning.md`。
-- `id` 为稳定 `TNNN`，`outcome` 写可观察交付结果，`workspace` 写仓库逻辑 ID，`dependsOn` 只写真实前置交付。数组顺序不代表依赖。
+- `id` 为稳定 `TNNN`，`outcome` 写可观察交付结果，`workspace` 写仓库逻辑 ID，`dependsOn` 只写真实前置交付。可选 `components` 仅记录粗粒度组件归属（相对 Git 根），投影为 `scope.modules` 参考；具体编译、测试目录由后续阶段按实际代码确定，无需预测子模块。数组顺序不代表依赖。
 - `implementationPoints` 写关键改动与边界，`testPoints` 写需证明的行为及失败路径，`verification.intent` 写一句验收目标；避免重复描述，不预测实现文件、方法、测试命令或 Batch。
 - `refs.requirements` / `refs.scenarios` 引用真实 `specs/<capability>/spec.md#REQ-NNN` / `#SCN-NNN`，逐条覆盖本期场景。`refs.api` / `refs.data` 按需填写；每个本期 `D-NNN` 在 `refs.decisions` 中只有一个主交付 Task。其他协作任务引用 API/Data/Scenario，既有范围不得为通过校验而缩小。
 - UI Task 才填写 `ui.pages`、`ui.interactions`、`ui.route`；只读页面 interactions 可为空。writer 从 UI capability 投影视觉源，从 Spec 的 Source References 投影外部资料，不由模型重复维护这些派生字段。
@@ -33,10 +33,10 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_p
 
 ```bash
 python -X utf8 "${pluginPath}/hooks/plan_writer.py" prepare-plan \
-  --feature "${feature}" --code-workspace "<ACTUAL_CODE_WORKSPACE>" --body-stdin
+  --feature "${feature}" --code-workspace "<ACTUAL_CODE_GIT_ROOT>" --body-stdin
 ```
 
-多仓库重复传入 `--code-workspace`，单仓库可用逻辑 ID `default`。writer 校验引用、覆盖、设计归属、仓库绑定及 DAG，生成 `reviewing` 的完整计划；失败按结构化问题修正输入，重新 prepare，不手改机器产物。
+`--code-workspace` 必须是实际 Git 根，多仓库重复传入；单仓库可用逻辑 ID `default`。writer 校验引用、覆盖、设计归属、仓库绑定及 DAG，生成 `reviewing` 的完整计划；失败按结构化问题修正输入，重新 prepare，不手改机器产物。
 
 按 `${pluginPath}/skills/references/review-protocol-plan.md` 做一次 Plan Critic 语义回检：只查交付边界、仓库职责和真实依赖，不重做设计探索。修复后根据 `reviewChanges` 复核受影响任务与依赖；共享需求/设计/范围变化时全量复核。输入与上下文未变且已有通过结论时复用结论，不重复生成或回检。
 

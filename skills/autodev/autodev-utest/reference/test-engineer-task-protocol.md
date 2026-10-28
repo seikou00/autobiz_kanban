@@ -5,6 +5,8 @@ workspace, TASK testPoints/verificationIntent/AC and runtime-owned nonGoals. Use
 promptContent unchanged; batchPlanPath is traceability, not permission to reopen Plan.
 Runtime owns repository/cwd selection. Use inspector-resolved paths and actual
 manifests/lockfiles. Constraint conflicts are contract_gap, not grounds to guess.
+For resolve_project_from_code, inspect the current Task's implementation/build
+files and retry with the matching target; do not ask the user or mark it blocked.
 
 Every Runtime call carries current workspace, feature, run-id, batch-id,
 batch-worktree, task-id and owner-token; take exact operations from Runtime.

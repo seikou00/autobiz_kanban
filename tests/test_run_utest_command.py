@@ -409,7 +409,7 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertNotIn("mvn validate", result["command"])
 
-    def test_scope_module_selects_execution_cwd_without_model_path_input(self):
+    def test_component_hint_does_not_override_actual_test_project(self):
         module = self.repo / "yudao-module-mkt"
         module.mkdir()
         (module / "pom.xml").write_text("<project/>\n", encoding="utf-8")
@@ -422,7 +422,7 @@ class RunUTestCommandTest(unittest.TestCase):
         )
         task = self._task()
         task["scope"] = {
-            "modules": ["yudao-module-mkt"],
+            "modules": ["unrelated-component"],
             "workspaceRoots": {self.repo.name: "."},
         }
         self._write_plan(task)
@@ -560,15 +560,15 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertFalse((self.feature_dir / "evidence" / "EVIDENCE.jsonl").exists())
         self.assertFalse((self.feature_dir / "UNIT_TEST_RESULT.json").exists())
 
-    def test_plan_module_escape_is_rejected_before_execution(self):
+    def test_plan_workspace_escape_is_rejected_before_execution(self):
         broken = self._task()
-        broken["scope"] = {"modules": ["../outside"]}
+        broken["scope"] = {"workspaceRoots": {self.repo.name: "../outside"}}
         self._write_plan(broken)
 
         with self.assertRaises(UTestCommandError) as caught:
             self._execute()
 
-        self.assertIn("scope.modules", str(caught.exception))
+        self.assertIn("scope.workspaceRoots", str(caught.exception))
         self.assertIn("修复：", str(caught.exception))
         self.assertFalse((self.feature_dir / "test-output.log").exists())
 

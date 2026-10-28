@@ -580,6 +580,9 @@ def main(argv=None):
                 ctx = context(args)
                 result = handlers[args.action](args, ctx)
     except (ValueError, OSError, KeyError, WriterError, UTestWorkspaceBindingError, SourceBugValidationError) as exc:
+        if isinstance(exc, UTestWorkspaceBindingError) and exc.code == "project_context_required":
+            print(json.dumps(exc.payload(), ensure_ascii=False))
+            return 2
         print(json.dumps({"status": "blocked", "reasonCode": str(exc),
                           "requiredAction": "retain_output_and_seal_or_record_blocked; do not repeat unchanged probes"}, ensure_ascii=False))
         return 2

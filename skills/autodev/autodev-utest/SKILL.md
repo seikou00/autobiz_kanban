@@ -12,7 +12,7 @@ version: v2.0
 
 1. 复用 Runtime 的 UTEST_ASSIGNMENT、engineeringContext brief、有效事实、实际实现交接和恢复位置。不重新打开 Plan 补字段，不从零探索工程。未知或失效部分才定向查证；已有适用测试/fixture 直接复用并补缺。
 2. 当前前端 UTest 暂时禁用：prepare-test 记录 skipped、原因 frontend_utest_temporarily_disabled；不初始化环境、不生成测试、不编译、不记 PASS。后端保持实际测试。
-3. 使用 `utest_runtime.py prepare` 的真实仓库/模块、preset、能力缺口和固化预算。环境信息由当前 Worktree 绑定，模型不重选仓库。多目标歧义只依据返回候选与 TASK 判断，无法判断时明确阻断。
+3. 使用 `utest_runtime.py prepare` 的真实仓库/模块、preset、能力缺口和固化预算。仓库固定为当前 Batch 的 Worktree；`scope.modules` 仅供参考。工程目录由 TASK 实现文件、编译目录、构建清单及测试文件自动定位；需要补查时由执行 Agent 读取相关代码确定，不向用户询问或要求修改 Plan。
 4. 根据 testPoints、verificationIntent 与绑定 AC 编写真实行为断言；implementationPoints 仅用于定位。先用现有测试与最近相关示例，不做全仓覆盖分析。框架领域确有需要时使用 `render_spring_test_reference.py` / `render_frontend_test_reference.py` 读取对应 domain。
 5. 测试文件落地后 `preflight --test-file <相对文件> -- <精确argv>`，原样执行返回 bashCommand。Bash 执行真实测试，Runtime 验证身份、期限、测试文件、argv、退出码、tee 状态和实际用例数，并登记 Evidence。登记成功不是测试通过；零/未知用例数不能 PASS。awaiting_record 只补登记原输出，不能重跑命令修复登记。
 
