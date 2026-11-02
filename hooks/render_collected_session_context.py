@@ -754,6 +754,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
         dest="knowledge_path",
         default="",
     )
+    parser.add_argument("--knowledge-path-platform", default="")
     parser.add_argument(
         "--knowledge-collector",
         dest="collector_script",
@@ -792,7 +793,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             project=args.project,
             feature=args.feature,
             collector_script=args.collector_script,
-            knowledge_path=args.knowledge_path,
+            knowledge_path=args.knowledge_path_platform.strip() or args.knowledge_path,
             node_command=args.node_command,
             npm_command=args.npm_command,
         )
