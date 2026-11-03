@@ -970,6 +970,8 @@ def schedule(
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
             return {"runId": run_id, "status": manifest["status"], "scheduledGroups": [],
+                    "controlProtocolVersion": manifest.get("controlProtocolVersion", 1),
+                    "controlRevision": manifest.get("controlRevision", 0),
                     "readyBatches": [], "allReadyBatches": [], "mergeableBatches": [],
                     "implementationRecoveryBatches": [], "stageRecoveryBatches": [], "retryPendingBatches": [],
                     "blockedBatches": [], "parallelGroups": [], "allParallelGroups": [], "dispatchGrants": {},
@@ -1251,6 +1253,12 @@ def schedule(
             )
         result = {
             "runId": run_id,
+            "controlProtocolVersion": manifest.get("controlProtocolVersion", 1),
+            "controlRevision": manifest.get("controlRevision", 0),
+            "cleanupPending": [
+                {key: job.get(key) for key in ("jobId", "batchId", "kind", "status", "error")}
+                for job in manifest.get("cleanupQueue", {}).values() if job.get("status") != "completed"
+            ],
             "observedEpochMs": int(time.time() * 1000),
             "status": manifest.get("status"),
             "readyBatches": scoped_ready,
@@ -2008,6 +2016,7 @@ def _emit(ok: bool, **payload: Any) -> int:
 
 
 _WORKFLOW_STATUS_FIELDS = (
+    "controlProtocolVersion", "controlRevision", "cleanupPending",
     "integrationMode", "integrationWorkspaces", "mainPromotion",
     "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
     "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",

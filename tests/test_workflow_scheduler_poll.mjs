@@ -64,7 +64,7 @@ for (const capacityPoll of [false, true]) {
       };
       await c.runDispatchWorker(2, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
       const label = capacityPoll ? "drain-capacity-poll-2-1" : "drain-poll-2-1";
-      assert.deepEqual(labels, [label, label]);
+      assert.deepEqual(labels, [label, "drain-shared-scheduler-retry"]);
       assert.deepEqual(events, ["wait", "read", "wait", "read"]);
       assert.equal(failures.length, 1);
       assert.equal(c.lastScheduler.activeWorkers, 0);

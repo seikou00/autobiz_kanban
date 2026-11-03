@@ -197,11 +197,13 @@ provisioned.
    whose write sets are safe with every active Batch lifecycle, and for which a
    `maxParallel` slot is free. Active includes running Review/UTest stages after
    a delivery has been sealed. The Workflow runs a fixed `maxParallel` worker
-   pool: each worker executes one lifecycle, refreshes immediately on completion,
-   and idle workers poll every thirty minutes while another lifecycle is active.
-   Periodic idle/capacity polls make one model call without empty-response
-   retries. A failed poll preserves the last state and waits for the next poll
-   or local wake; it does not trigger dispatch from a fallback snapshot.
+   pool. New isolated runs use control protocol v2: one `settle-delivery`
+   operation gates, queues, builds and promotes a delivery, records cleanup,
+   finishes its dispatch and returns a revisioned scheduler snapshot. Completion
+   immediately wakes idle workers. Workers share a 60-second fallback and failed
+   reads retry after 5/10/20/30 seconds, capped at 30 seconds. Capacity waits are
+   at most 30 seconds and denied claims wait 15 seconds or an earlier completion.
+   No worker dispatches from an unavailable or superseded snapshot.
    A failure releases that worker to dispatch an unrelated Batch; dependents
    remain blocked until their dependency is merged.
 2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
@@ -212,7 +214,26 @@ provisioned.
    scheduler manifest. In conservative mode, same-repository write-set overlap
    is excluded before launch; optimistic mode records that risk for Merge Train
    handling. Each Merge Train candidate contains exactly one `--batch-id`; its
-   `--wave` value is only a unique candidate-record sequence.
+   `--wave` is allocated by Runtime. Physical repository locks cover construction
+   through promotion/Plan reconciliation. A retained conflict reserves its
+   integration target while releasing the OS lock for model editing; another
+   repository can keep merging. Independent Review checkpoint validation remains
+   mandatory before UTest.
+
+   Protocol v2 durably queues both candidate and delivery cleanup. A single
+   managed cleanup worker runs after delivery drain, alongside final validation;
+   cleanup errors never undo `merged` or delay dependent Batch dispatch. Remaining
+   jobs appear as `cleanupPending` and resume on a later invocation. No detached
+   cleanup process is started. Successful finalization uses one authoritative
+   `prepare-finalization` instead of four unconditional snapshot reads.
+
+   Existing runs without `controlProtocolVersion=2` retain legacy delivery and
+   cleanup behavior. To upgrade a stopped isolated run, first stop its old
+   Workflow and finish pending Git/Plan recovery, then run
+   `hooks/parallel_delivery.py upgrade-control-protocol` with its exact
+   `--workspace`, `--feature`, and `--run-id`. Active leases, dispatches and TASK
+   runs block this upgrade. Use the launcher for a fresh platform invocation;
+   do not edit published Workflow copies or replay a terminal platform journal.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
    invokes `worktree_manager.py seal --purpose review --commit-stage code
    --commit-summary "<actual feature summary>"` to create a

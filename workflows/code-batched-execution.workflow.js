@@ -17,7 +17,9 @@ const MAX_SCHEDULER_CYCLES = 100;
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
 // outside the worker that currently owns the only active lifecycle.
-const DISPATCH_POLL_INTERVAL_MS = 30 * 60 * 1000;
+const DISPATCH_POLL_INTERVAL_MS = 60 * 1000;
+const schedulerControlState = { available: true, failures: 0 };
+const deliveryControl = { deliveries: new Map(), finalized: new Map() };
 // The scheduler is the authority for the per-Batch retry budget (currently
 // two failure admissions). Keep one extra pass to let the scheduler turn a
 // legacy retry marker with a zero counter into its explicit exhausted state.
@@ -232,9 +234,19 @@ const WORKFLOW_MANIFEST_SCHEMA = {
   required: ["batches", "mergeTrains", "deferredIssues"],
   additionalProperties: false
 };
+const CLEANUP_PENDING_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    jobId: { type: "string" }, batchId: { type: ["string", "null"] },
+    kind: { type: "string" }, status: { type: "string" }, error: { type: ["string", "null"] }
+  },
+  required: ["jobId", "kind", "status"], additionalProperties: false
+};
 const SCHEDULER_RESULT_SCHEMA = {
   type: "object",
   properties: {
+    controlProtocolVersion: { type: "integer" }, controlRevision: { type: "integer" },
+    cleanupPending: { type: "array", items: CLEANUP_PENDING_ITEM_SCHEMA },
     ok: { type: "boolean" }, success: { type: "boolean" }, error: { type: "string" },
     integrationMode: { type: "string" },
     integrationWorkspaces: { type: "object", additionalProperties: true },
@@ -294,6 +306,30 @@ const SCHEDULER_RESULT_SCHEMA = {
   // the complete successful snapshot before it can affect dispatch.
   required: [],
   additionalProperties: true
+};
+const DELIVERY_SETTLEMENT_SCHEMA = {
+  type: "object",
+  properties: {
+    success: { type: "boolean" }, status: { type: "string" }, error: { type: "string" },
+    runId: { type: "string" }, batchId: { type: "string" }, dispatchGeneration: { type: "integer" },
+    operationId: { type: "string" }, deliverySha: { type: "string" }, mergeCommitSha: { type: "string" },
+    dispatchFinalized: { type: "boolean" }, wave: { type: "integer" }, repositoryRef: { type: "string" },
+    conflictContext: { type: "object" }, worktreePath: { type: "string" },
+    repairRequired: { type: "boolean" }, batchIds: { type: "array", items: { type: "string" } },
+    receipt: { type: "object", properties: {
+      digest: { type: "string" }, planDigest: { type: "string" },
+      heads: { type: "object", additionalProperties: { type: "string" } },
+      deliveryCommits: { type: "object", additionalProperties: { type: "string" } },
+      productionCommits: { type: "object", additionalProperties: { type: ["string", "null"] } },
+      stageEvidence: { type: "object", additionalProperties: { type: "object", properties: {
+        review: { type: ["string", "null"] }, test: { type: ["string", "null"] }
+      } } }
+    } },
+    cleanupPending: { type: "array", items: CLEANUP_PENDING_ITEM_SCHEMA },
+    schedulerSnapshot: SCHEDULER_RESULT_SCHEMA,
+    durationMs: { type: "number" }, reused: { type: "boolean" }
+  },
+  required: ["success", "status"], additionalProperties: true
 };
 // Review can return either `parallel_batch_stage.py complete` evidence or a
 // `fail` transition. Keep that response structured so a failed Review cannot
@@ -803,7 +839,7 @@ const taskCardId = input.taskCardId;
 const resumeMode = input.resumeMode === "manual" ? "manual" : "automatic";
 const resumeRunId = input.resumeRunId;
 const workflowHostGitRoot = input.workflowHostGitRoot;
-const maxParallel = Number.isInteger(input.maxParallel) && input.maxParallel > 0
+let maxParallel = Number.isInteger(input.maxParallel) && input.maxParallel > 0
   ? input.maxParallel
   : DEFAULT_MAX_PARALLEL;
 const timeoutPerBatch = Number.isInteger(input.timeoutPerBatch) && input.timeoutPerBatch > 0
@@ -858,7 +894,7 @@ const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 const WORKFLOW_AUTONOMY_PREFIX = "固定 Code Workflow 已启动：不得调用 request_user_input、要求用户确认、等待用户回复或把控制权交回用户。按本提示和持久化契约自主执行；只返回本步骤的最终结构化结果。" +
   "插件脚本后台执行协议：仅本 Workflow 提示中明确调用的插件 Python 脚本（例如 worktree_manager.py、parallel_batch_scheduler.py、task_runner.py、parallel_batch_stage.py、parallel_merge_train.py、engineering_context.py、query_json_fields.py 及其他插件 .py 入口）使用 execute({command:<原来的完整 Python 脚本命令>,run_in_background:true})，保持原命令、参数和工作目录，每次脚本调用只启动一次。保存 task_id，在启动它的同一子 Agent 内反复 task_output({task_id:<同一 ID>,timeout:60000}) 直到取得最终退出码和完整输出；轮询等待超时或任务仍在运行只继续等待同一任务，不重启脚本。依赖该脚本结果的后续步骤、lease release 和子 Agent 返回均须等待脚本终态；不得把启动回执当作成功结果。只返回最终脚本 stdout 的完整 JSON 或本阶段要求的最终结构化结果，保留真实错误和非零退出码；原阶段预算、Runtime deadline 和显式子 Agent 超时继续生效。此规则仅豁免插件脚本的工具托管后台调用，不适用于业务命令、Bash 编译/测试/环境查询、Git 命令或 Runtime 返回的 bashCommand；这些命令及其执行方式保持原有要求，禁止把它们合并进插件脚本的后台调用。禁止自行启动 heartbeat 或使用 &、nohup、setsid、Start-Process 脱管执行。不支持脚本后台工具协议时返回明确失败，不退回默认 60 秒前台执行。\n" +
   `凡本 Workflow 任一阶段执行 Python 命令，均使用 python -X utf8 <script.py> 启动（等效于 PYTHONUTF8=1，兼容 Windows/macOS/Linux），禁止裸 python。凡确需读取 JSON 文件中的字段，且该文件在当前阶段允许访问范围内，禁止用 read_file/cat 或分段读取整个文件来取字段；改用 python -X utf8 "${pluginPath}/hooks/query_json_fields.py" --file "<JSON_PATH>" --field "<FIELD_PATH>"，多个字段重复传入 --field。数组下标使用 [0]，对象集合可用 *；不要因此扩大当前阶段允许访问的文件范围。\n`;
-const workflowControlMetrics = { agentCalls: 0, promptCharacters: 0, labels: {} };
+const workflowControlMetrics = { agentCalls: 0, promptCharacters: 0, labels: {}, categories: {} };
 async function workflowAgent(instruction, options = {}) {
   const label = usableString(options.label) ? options.label : "workflow-agent";
   const batchMatch = label.match(/(?:^|-)(B\d{3,})(?:-|$)/);
@@ -867,6 +903,10 @@ async function workflowAgent(instruction, options = {}) {
   workflowControlMetrics.agentCalls += 1;
   workflowControlMetrics.promptCharacters += (WORKFLOW_AUTONOMY_PREFIX + instruction).length;
   workflowControlMetrics.labels[label] = (workflowControlMetrics.labels[label] || 0) + 1;
+  const category = /cleanup/.test(label) ? "cleanup" : /poll|snapshot|scheduler-retry|finalization/.test(label)
+    ? "scheduler" : /^(fixed-batch|rework-implement|stage-review|stage-utest|run-e2e-validation)|-edit$/.test(label)
+      ? "execution" : "control";
+  workflowControlMetrics.categories[category] = (workflowControlMetrics.categories[category] || 0) + 1;
   return await agent(WORKFLOW_AUTONOMY_PREFIX + instruction, options);
 }
 const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py");
@@ -969,11 +1009,16 @@ try {
 }
 
 const runId = prepared.runId;
+maxParallel = prepared.maxParallel;
+const controlProtocolVersion = prepared.controlProtocolVersion || 1;
 if (["awaiting_user_confirmation", "promotion_prepared", "promoting_main", "integration_retained",
      "integration_sync_required", "integration_sync_conflicted"].includes(prepared.status)) {
+  const cleanup = controlProtocolVersion >= 2 ? await runDeferredCleanup() : null;
   return { ok: !prepared.status.startsWith("integration_sync"), feature, runId,
     finalStatus: prepared.status, integrationWorkspaces: prepared.integrationWorkspaces,
-    mainPromotion: prepared.mainPromotion, nextAction: "review_integration_and_confirm_promotion" };
+    mainPromotion: prepared.mainPromotion, cleanupResult: cleanup,
+    cleanupPending: cleanup && cleanup.cleanupPending || prepared.cleanupPending || [],
+    nextAction: "review_integration_and_confirm_promotion" };
 }
 
 let retryRecoveryInFlight = null;
@@ -1184,9 +1229,13 @@ function markSchedulerRecovered() {
 
 function applySchedulerState(scheduler) {
   if (!scheduler || typeof scheduler !== "object") return lastScheduler;
+  if (lastScheduler && lastScheduler.runId && scheduler.runId !== lastScheduler.runId) return lastScheduler;
+  if (Number.isInteger(lastScheduler && lastScheduler.controlRevision)
+      && Number.isInteger(scheduler.controlRevision)
+      && scheduler.controlRevision < lastScheduler.controlRevision) return lastScheduler;
   // A status command can finish before resume but return after it. Neither its
   // timestamp nor any durable dispatch generation may roll back local state.
-  if ((Number.isFinite(lastScheduler && lastScheduler.observedEpochMs)
+  if ((!Number.isInteger(scheduler.controlRevision) && Number.isFinite(lastScheduler && lastScheduler.observedEpochMs)
       && Number.isFinite(scheduler.observedEpochMs)
       && scheduler.observedEpochMs < lastScheduler.observedEpochMs)
     || Object.entries(scheduler.dispatchGrants || {}).some(([batchId, generation]) =>
@@ -1235,6 +1284,7 @@ function applySchedulerState(scheduler) {
 async function readSchedulerState(label, phaseName = "准备") {
   if (schedulerReadInFlight) return schedulerReadInFlight;
   schedulerReadInFlight = (async () => {
+    const startedRevision = lastScheduler && lastScheduler.controlRevision;
     try {
       const state = requireSchedulerResult(await workflowAgent(
         `执行 python -X utf8 "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
@@ -1250,9 +1300,15 @@ async function readSchedulerState(label, phaseName = "准备") {
         throw new Error(`parallel_scheduler_manifest_view_incomplete:${missingBatches.join(",")}`);
       }
       const applied = applySchedulerState(state);
+      schedulerControlState.available = true;
+      schedulerControlState.failures = 0;
       markSchedulerRecovered();
       return applied;
     } catch (error) {
+      if (Number.isInteger(startedRevision) && lastScheduler.controlRevision > startedRevision
+          && schedulerControlState.available) return lastScheduler;
+      schedulerControlState.available = false;
+      schedulerControlState.failures += 1;
       recordSchedulerFailure(label, error);
       // Read failures wait for a later scheduler refresh. Model transport
       // recovery belongs to the platform; never dispatch from a stale snapshot.
@@ -1578,7 +1634,7 @@ async function runBatchUtestAndSeal(batchResult, retryFailure = null, prepared =
     `4. 文件落地后执行 preflight，带同一绑定、--test-file <精确相对文件>、--command-timeout ${utestCommandTimeout} 与 -- <精确argv>，原样执行返回 bashCommand。Runtime 捕获 PIPESTATUS/tee 和实际用例数，run_utest_command.py 只登记真实输出。登记失败保留输出，awaiting_record 只补登记；不得重启已完成命令。零/未知用例不能 PASS。首次/总期限和计数以 utestPolicy 固化值为准，blocked/timeout 立即停止探索。\n` +
     `5. test_bug 最多修一次，用 retry-kind test_bug 原 target/argv 续跑；source_compile 或 validator 证明的 source_bug 首次交受控生产修复：先用 worktree_manager.py seal --commit-stage utest --commit-summary "<实际测试变更>" --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --repo "${batchWorktree}" --owner-token <真实token> 封存，再用 parallel_batch_stage.py fail ${binding} --stage test --failure-type implementation --message "<targetId/commandId/evidenceId/file:line根因>"，以 sealed 释放 lease，返回 source_repair_required 和 testFailure。只读本次 evidenceLogPath；根因缺失才读本 target 的完整命令段。\n` +
     `6. 通过或耗尽时只执行 python -X utf8 "${stagePath}" close-test ${binding} --owner-token <真实token> --commit-summary "<实际测试改动中文摘要>" --metadata-json '<testEvidenceIds及必要testFailure对象>'。失败额外传 --failure-type <implementation|environment|test_definition> --message "<真实失败>"；该操作可恢复地封存、登记、释放，不重跑测试。受控 source_repair 再失败时必须 deferred，不再次修生产代码。返回 Runtime 原始 JSON，保持真实 testStatus/testFailure/commitSha/stageEvidenceId；不可把 deferred/skipped 当 PASS。\n`;
-  // Independent deadline checks; the dispatch poll can remain thirty minutes.
+  // Independent quality deadlines do not depend on dispatcher polling.
   let finished = false;
   let timer;
   let wake;
@@ -1681,7 +1737,9 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     }
     batchResult = testedDelivery;
   }
-  requireSuccess(await workflowAgent(
+  if (typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2) {
+    deliveryControl.deliveries.set(batchId, batchResult);
+  } else requireSuccess(await workflowAgent(
     `Batch ${batchId} 的 Review 与 UTest 已收口（前端 UTest 明确跳过）。执行 python -X utf8 "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
     `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
     { label: `stage-gate-${batchId}`, phase: "Batch 阶段" }
@@ -1987,7 +2045,67 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
   return promotion;
 }
 
+async function settleReadyBatch(batchId) {
+  const grant = activeDispatchGrants.get(batchId);
+  const delivery = deliveryControl.deliveries.get(batchId)
+    || (lastScheduler.manifest && lastScheduler.manifest.batches[batchId]);
+  if (!grant || !delivery || !usableString(delivery.commitSha)) throw new Error(`delivery_context_missing:${batchId}`);
+  const command = `python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" settle-delivery ` +
+    `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ` +
+    `--dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}" --expected-commit "${delivery.commitSha}"`;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const result = unwrap(await workflowAgent(
+      `只执行 ${command}。插件连续完成 gate、仓库队列、候选构建与推广、Plan 对账、清理登记及 dispatch 收尾。` +
+      `遵循托管后台协议，仅启动一次并等同一 task_id 的终态；不得拆成旧 build/promote/gate 命令，不得自行执行 Git 或删除目录。` +
+      `完整保留 schedulerSnapshot、dispatchFinalized、operationId、generation、SHA 与 conflictContext；冲突原样返回，不能当成成功。`,
+      { label: `settle-delivery-${batchId}-${attempt}`, phase: "候选验证", schema: DELIVERY_SETTLEMENT_SCHEMA }
+    ));
+    if (result.status === "candidate_conflicted" && attempt === 1) {
+      const resolved = await resolveMergeCandidate(result.repositoryRef, result.wave,
+        `resolve-settlement-${batchId}-${result.wave}`, "候选验证");
+      if (resolved && resolved.success === true && resolved.status === "built") continue;
+      recordUnresolved({ kind: "merge_candidate", batchId, batchIds: [batchId], repositoryRef: result.repositoryRef,
+        wave: result.wave, status: "needs_resolution", durable: true, error: resolved || result });
+      throw new Error(`delivery_resolution_required:${batchId}`);
+    }
+    requireSuccess(result, `settle delivery ${batchId}`);
+    if (result.status !== "merged" || result.batchId !== batchId || result.runId !== runId
+        || result.dispatchGeneration !== grant.generation || result.deliverySha !== delivery.commitSha
+        || result.dispatchFinalized !== true || !usableString(result.mergeCommitSha) || !usableString(result.operationId)
+        || !usableString(result.repositoryRef) || !Number.isInteger(result.wave) || result.wave < 1) {
+      throw new Error(`delivery_settlement_incomplete:${batchId}`);
+    }
+    const snapshot = requireSchedulerResult(result.schedulerSnapshot, `delivery snapshot ${batchId}`);
+    const merged = snapshot.manifest && snapshot.manifest.batches[batchId];
+    if (snapshot.runId !== runId || !Number.isInteger(snapshot.controlRevision) || snapshot.controlProtocolVersion !== 2
+        || !merged || merged.status !== "merged" || merged.mergeCommitSha !== result.mergeCommitSha) {
+      throw new Error(`delivery_snapshot_invalid:${batchId}`);
+    }
+    applySchedulerState(snapshot);
+    schedulerControlState.available = true;
+    schedulerControlState.failures = 0;
+    deliveryControl.finalized.set(batchId, grant.generation);
+    markBatchResolved(batchId);
+    markCandidateResolved(result.repositoryRef, result.wave);
+    mergeResults.push({ success: true, batchId, wave: result.wave, settlement: result });
+    return { batchId, status: "merged", wave: result.wave };
+  }
+  throw new Error(`delivery_settlement_exhausted:${batchId}`);
+}
+
+async function runDeferredCleanup() {
+  try {
+    return requireSuccess(await workflowAgent(
+      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_cleanup.py" drain --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --budget-seconds 120。插件按已登记所有权清理候选和交付 Worktree；pending 原样保留，不自行删除、重试或修改业务状态。只返回最终 JSON。`,
+      { label: "drain-delivery-cleanup", phase: "最终验证" }
+    ), "delivery cleanup");
+  } catch (error) { return { success: false, error: errorText(error) }; }
+}
+
 async function promoteReadyBatch(batchId) {
+  if (typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2) {
+    return settleReadyBatch(batchId);
+  }
   const promotionWave = ++mergeSequence;
   phase("候选验证");
   try {
@@ -2311,17 +2429,33 @@ async function dispatchCommand(action, job, extra, label) {
 }
 
 function signalDispatchChange(state) {
+  state.changeSequence = (state.changeSequence || 0) + 1;
   for (const wake of state.waiters || []) wake();
   if (state.waiters) state.waiters.clear();
 }
 
-function waitForDispatchChange(state) {
+function waitForDispatchChange(state, observedSequence, delayOverride) {
+  if (observedSequence !== undefined && observedSequence !== (state.changeSequence || 0)) return Promise.resolve("signal");
   if (!state.waiters) state.waiters = new Set();
-  return new Promise(resolve => {
-    const wake = (reason = "signal") => { clearTimeout(timer); state.waiters.delete(wake); resolve(reason); };
-    const timer = setTimeout(() => wake("poll"), DISPATCH_POLL_INTERVAL_MS);
+  const failed = typeof schedulerControlState !== "undefined" && !schedulerControlState.available;
+  const delay = failed ? Math.min(30000, 5000 * (2 ** Math.min(3, schedulerControlState.failures - 1)))
+    : delayOverride || DISPATCH_POLL_INTERVAL_MS;
+  if (state.waitPromise) {
+    if (delay < state.waitDelay) {
+      clearTimeout(state.waitTimer);
+      state.waitDelay = delay;
+      state.waitTimer = setTimeout(() => state.waitWake(failed ? "retry" : "poll"), delay);
+    }
+    return state.waitPromise;
+  }
+  state.waitDelay = delay;
+  state.waitPromise = new Promise(resolve => {
+    const wake = (reason = "signal") => { clearTimeout(state.waitTimer); state.waiters.delete(wake); state.waitPromise = null; resolve(reason); };
+    state.waitWake = wake;
+    state.waitTimer = setTimeout(() => wake(failed ? "retry" : "poll"), delay);
     state.waiters.add(wake);
   });
+  return state.waitPromise;
 }
 
 // All wall-clock observations come from the Runtime's scheduler response.
@@ -2413,11 +2547,28 @@ async function refreshSchedulerForDispatch(label) {
   return state;
 }
 
+function canReuseDispatchWake(reason, revision) {
+  return typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2
+    && reason === "signal" && schedulerControlState.available
+    && Number.isInteger(revision) && lastScheduler.controlRevision > revision;
+}
+
 async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispatcherState) {
   let idlePolls = 0;
   let idleStarted = dispatchSnapshotEpoch(lastScheduler);
   const maxIdlePolls = Math.ceil(((timeoutPerBatch + 60) * 1000) / DISPATCH_POLL_INTERVAL_MS);
   for (;;) {
+    const waitSequence = dispatcherState.changeSequence || 0;
+    const waitRevision = lastScheduler && lastScheduler.controlRevision;
+    if (typeof schedulerControlState !== "undefined" && !schedulerControlState.available) {
+      const reason = await waitForDispatchChange(dispatcherState, waitSequence);
+      const fresh = canReuseDispatchWake(reason, waitRevision) ? lastScheduler
+        : await refreshSchedulerForDispatch(`${drainLabel}-shared-scheduler-retry`);
+      if (!fresh) {
+        if (schedulerControlState.failures >= 8 && dispatcherState.active === 0) return;
+        continue;
+      }
+    }
     // Resume retry-pending work as soon as it is visible to the drain. The
     // candidate selector keeps these retries behind every available non-retry
     // lifecycle, so recovery does not delay independent work.
@@ -2436,10 +2587,10 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
     // their arrays are recovery candidates rather than scheduler reservations.
     if (dispatchOccupiedSlots(lastScheduler, dispatcherState) >= maxParallel) {
       if (dispatcherState.active === 0 && lastScheduler && lastScheduler.activeWorkers === 0) return;
-      if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
-      await refreshSchedulerForDispatch(
-        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`
-      );
+      const reason = await waitForDispatchChange(dispatcherState, waitSequence, 30000);
+      if (reason === "poll") idlePolls += 1;
+      if (!canReuseDispatchWake(reason, waitRevision)) await refreshSchedulerForDispatch(
+        `${drainLabel}-capacity-poll-${workerIndex}-${schedulerCycles}`);
       if (dispatchIdleExpired(idleStarted, lastScheduler, idlePolls, maxIdlePolls)) {
         recordUnresolved({
           kind: "scheduler",
@@ -2495,7 +2646,10 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       } finally {
         if (grant) {
           try {
-            await dispatchCommand("finish", { ...job, ...grant }, `--outcome "${outcome}"`, `dispatch-finish-${job.batchId}-${job.generation}`);
+            if (!(typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2
+                && deliveryControl.finalized.get(job.batchId) === job.generation)) {
+              await dispatchCommand("finish", { ...job, ...grant }, `--outcome "${outcome}"`, `dispatch-finish-${job.batchId}-${job.generation}`);
+            }
           } catch (error) {
             recordUnresolved({ kind: "scheduler", batchId: job.batchId, status: "dispatch_finish_failed", durable: false, error: errorText(error) });
           }
@@ -2506,21 +2660,22 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
         signalDispatchChange(dispatcherState);
       }
 
-      // Every outcome, including retry_pending, triggers an immediate refresh.
-      // A null result from a real scheduler error blocks new dispatch until a
-      // later successful poll; it never causes us to reuse stale grants.
-      const state = await refreshSchedulerForDispatch(
-        `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`
-      );
+      // Every outcome publishes or refreshes authoritative state. Protocol v2
+      // already returned that snapshot while closing the dispatch; other paths
+      // still refresh immediately and stop admission on a failed read.
+      const state = typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2
+          && deliveryControl.finalized.get(job.batchId) === job.generation && schedulerControlState.available
+        ? lastScheduler
+        : await refreshSchedulerForDispatch(`${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`);
       if (!state) {
-        if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
+        if (await waitForDispatchChange(dispatcherState, dispatcherState.changeSequence || 0) === "poll") idlePolls += 1;
         const recovered = await refreshSchedulerForDispatch(
           `${drainLabel}-worker-${workerIndex}-scheduler-retry`
         );
         if (!recovered && dispatcherState.active === 0) return;
       }
       if (claimDeferred) {
-        if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
+        if (await waitForDispatchChange(dispatcherState, dispatcherState.changeSequence || 0, 15000) === "poll") idlePolls += 1;
         if (dispatchIdleExpired(idleStarted, lastScheduler, idlePolls, maxIdlePolls)) {
           recordUnresolved({ kind: "scheduler", status: "dispatcher_idle_timeout", durable: false,
             error: `dispatcher_claim_wait_timeout:${workerIndex}:${maxIdlePolls}` });
@@ -2550,10 +2705,10 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
           notSelected: snapshot.dispatchDiagnostics && snapshot.dispatchDiagnostics.notSelected } });
       return;
     }
-    if (await waitForDispatchChange(dispatcherState) === "poll") idlePolls += 1;
-    await refreshSchedulerForDispatch(
-      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`
-    );
+    const reason = await waitForDispatchChange(dispatcherState, waitSequence);
+    if (reason === "poll") idlePolls += 1;
+    if (!canReuseDispatchWake(reason, waitRevision)) await refreshSchedulerForDispatch(
+      `${drainLabel}-poll-${workerIndex}-${schedulerCycles}`);
     if (dispatchIdleExpired(idleStarted, lastScheduler, idlePolls, maxIdlePolls)) {
       recordUnresolved({
         kind: "scheduler",
@@ -2902,7 +3057,18 @@ async function attemptFinalCandidateRepair(record) {
 
 async function runFinalRepairAndReport() {
   phase("最终修复与报告");
-  await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
+  if (typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2) {
+    const result = requireSuccess(await workflowAgent(
+      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" prepare-finalization --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。完整返回 JSON，不执行测试或清理。`,
+      { label: "prepare-delivery-finalization", phase: "最终修复与报告", schema: DELIVERY_SETTLEMENT_SCHEMA }
+    ), "prepare finalization");
+    const snapshot = requireSchedulerResult(result.schedulerSnapshot, "finalization snapshot");
+    applySchedulerState(snapshot);
+    schedulerControlState.available = true;
+    schedulerControlState.failures = 0;
+    markSchedulerRecovered();
+    if (result.status === "ready" && result.repairRequired === false) return lastScheduler;
+  } else await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
   await persistUndurableBatchFailures();
   await queueRetryExhaustedBatchRepairs();
 
@@ -2970,7 +3136,7 @@ async function runFinalRepairAndReport() {
 // A resumed run can already contain merged deliveries from a prior interrupted
 // Workflow. Cleanup is non-blocking: a temporary-worktree error never turns a
 // durable delivery back into a failed Batch.
-await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
+if (controlProtocolVersion < 2) await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
 applySchedulerState(prepared);
 
 // Drain every currently runnable branch, including retry-pending Batches.
@@ -2991,6 +3157,7 @@ if (!allWorkflowDeliveriesMerged(finalScheduler)) {
   });
 }
 
+async function runFinalValidation() {
 phase("最终验证");
 if (prepared.integrationMode === "isolated") {
   try {
@@ -3096,3 +3263,20 @@ return completionReport({
   verification,
   nextAction: hasAuditIssues ? "review_validation_issues" : "completed",
 });
+
+}
+
+if (controlProtocolVersion >= 2) {
+  let finalResult;
+  let cleanupResult;
+  await parallel([
+    async () => { finalResult = await runFinalValidation(); },
+    async () => {
+      cleanupResult = await runDeferredCleanup();
+    }
+  ]);
+  cleanupResults.push(cleanupResult);
+  return { ...finalResult, cleanupPending: cleanupResult.cleanupPending || lastScheduler.cleanupPending || [],
+    cleanupResult, workflowMetrics: { ...workflowControlMetrics, labels: { ...workflowControlMetrics.labels }, scope: "current_invocation" } };
+}
+return await runFinalValidation();

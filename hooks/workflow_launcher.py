@@ -192,6 +192,7 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     """Load and validate runtime configuration from .autobiz/runtime_config.json."""
     defaults: dict[str, Any] = {
         "integrationMode": "isolated",
+        "controlProtocolVersion": 2,
         "parallelSchedulingMode": "optimistic",
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
         "conflictResolution": {
@@ -214,6 +215,10 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     max_parallel = raw.get("maxParallel")
     resolution = raw.get("conflictResolution")
     config = dict(defaults)
+    if "controlProtocolVersion" in raw:
+        if type(raw["controlProtocolVersion"]) is not int or raw["controlProtocolVersion"] not in {1, 2}:
+            raise ValueError("control_protocol_version_invalid")
+        config["controlProtocolVersion"] = raw["controlProtocolVersion"]
     if "integrationMode" in raw:
         if raw["integrationMode"] not in {"isolated", "direct"}:
             raise ValueError("integration_mode_invalid")

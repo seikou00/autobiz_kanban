@@ -448,6 +448,9 @@ def create_manifest(
 
     manifest = {
         "schemaVersion": RUN_SCHEMA_VERSION,
+        "controlProtocolVersion": (runtime_config.get("controlProtocolVersion", 2)
+                                   if integration_mode == "isolated" else 1),
+        "controlRevision": 0,
         "runId": run_id,
         "featureId": feature,
         "status": "created",
@@ -528,9 +531,14 @@ def _strip_legacy_parallel_flags(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_manifest(workspace: Path, feature: str, run_id: str, manifest: dict[str, Any]) -> None:
-    manifest = dict(manifest)
+    path = manifest_path(workspace, feature, run_id)
+    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    revision = int(current.get("controlRevision", 0))
+    if manifest.get("controlProtocolVersion", 1) >= 2 and int(manifest.get("controlRevision", 0)) != revision:
+        raise ValueError("parallel_manifest_stale_revision")
+    manifest["controlRevision"] = revision + 1
     manifest["updatedAt"] = utc_now()
-    atomic_write_json(manifest_path(workspace, feature, run_id), manifest)
+    atomic_write_json(path, manifest)
 
 
 def append_event(workspace: Path, feature: str, run_id: str, event: str, **details: Any) -> None:

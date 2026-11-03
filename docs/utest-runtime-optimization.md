@@ -120,8 +120,9 @@ process-tree termination still need an integration run in that environment.
 
 The authoritative defaults live in hooks/utest_policy.py. A test attempt freezes
 its policy and deadlines; scheduler, tools and Workflow consume the same values.
-Legacy running attempts retain their earlier known deadline. Dispatch fallback
-polling is thirty minutes and does not enforce quality-stage deadlines.
+Legacy running attempts retain their earlier known deadline. Shared dispatch
+fallback polling is 60 seconds; failed reads retry after 5/10/20/30 seconds.
+These scheduling waits do not enforce or change quality-stage deadlines.
 
 Workflow check-test-budget and the tool-boundary deadline guard independently
 request a stop. Preserve the owner lease to seal existing assets before deferral;

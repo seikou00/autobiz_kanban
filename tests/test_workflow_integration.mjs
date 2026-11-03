@@ -4,7 +4,9 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("../workflows/code-batched-execution.workflow.js", import.meta.url), "utf8");
-const finalization = source.slice(source.indexOf('phase("最终验证");'));
+const finalization = source.slice(source.indexOf('async function runFinalValidation() {'),
+  source.indexOf('\nif (controlProtocolVersion >= 2) {', source.indexOf('async function runFinalValidation() {')))
+  + '\nreturn await runFinalValidation();';
 
 async function finalize({ isolated = true, syncFailure = false, prepareFailure = false,
   e2eFailure = false, beginFailure = false, recordingFailure = false,
