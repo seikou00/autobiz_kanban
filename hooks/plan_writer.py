@@ -325,7 +325,12 @@ def _plan_to_groups(data: dict[str, Any]) -> dict[str, Any]:
             "implementationPoints": implementation_points,
             "testPoints": test_points,
         }
-        ui = raw.get("ui")
+        if "ui" not in raw:
+            raise PlanWriterInputError(
+                "plan_task_ui_decision_missing",
+                f"task={task_id};前端任务填写 ui 对象，无 HTML 时 route=spec-driven-ui；后端任务显式填写 ui=null",
+            )
+        ui = raw["ui"]
         group["uiRequired"] = ui is not None
         if ui is not None:
             if not isinstance(ui, dict):

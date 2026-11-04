@@ -6,6 +6,7 @@
       "id": "T001",
       "outcome": "[one observable delivery result]",
       "workspace": "default",
+      "ui": null,
       "dependsOn": [],
       "implementationPoints": [
         "[behavior or boundary needed for this one outcome]"

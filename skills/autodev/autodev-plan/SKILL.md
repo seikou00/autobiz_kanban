@@ -27,7 +27,20 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_p
 - `id` 为稳定 `TNNN`，`outcome` 写可观察交付结果，`workspace` 写仓库逻辑 ID，`dependsOn` 只写真实前置交付。可选 `components` 仅记录粗粒度组件归属（相对 Git 根），投影为 `scope.modules` 参考；具体编译、测试目录由后续阶段按实际代码确定，无需预测子模块。数组顺序不代表依赖。
 - `implementationPoints` 写关键改动与边界，`testPoints` 写需证明的行为及失败路径，`verification.intent` 写一句验收目标；避免重复描述，不预测实现文件、方法、测试命令或 Batch。
 - `refs.requirements` / `refs.scenarios` 引用真实 `specs/<capability>/spec.md#REQ-NNN` / `#SCN-NNN`，逐条覆盖本期场景。`refs.api` / `refs.data` 按需填写；每个本期 `D-NNN` 在 `refs.decisions` 中只有一个主交付 Task。其他协作任务引用 API/Data/Scenario，既有范围不得为通过校验而缩小。
+- 每个 Task 必须显式填写 `ui`：前端实现任务（UI Task）填写对象，后端任务填写 `null`。`uiRequired` 表示需要前端实现，与是否提供 HTML 或高保真稿无关；无 HTML 使用 `ui.route="spec-driven-ui"`，普通 HTML 使用 `standard-html`，高保真 HTML 使用 `absolute-html`。禁止因缺少 HTML 而省略 `ui` 或填写 `null`。
 - 交付页面、前端组件或界面交互的 Task 必须填写 `ui.pages`、`ui.interactions`、`ui.route`；只读页面 interactions 可为空。调用已有接口或处理展示数据的纯前端任务仍归 frontend；同一需求涉及前后端实现时按 lane 分开交付。writer 根据 `ui` 投影 lane，从 UI capability 投影视觉源，从 Spec 的 Source References 投影外部资料，不由模型重复维护这些派生字段。
+
+无 HTML 的前端 Task 可使用以下 `ui` 结构，页面 ID 使用 UI_CONTEXT.json 中的真实引用，不要求绑定视觉源：
+
+```json
+{
+  "ui": {
+    "pages": ["PAGE-001"],
+    "interactions": [],
+    "route": "spec-driven-ui"
+  }
+}
+```
 
 ## 生成、回检与发布
 

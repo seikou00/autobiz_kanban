@@ -10,6 +10,7 @@ The planner submits one `autodev.plan` document through `plan_writer.py prepare-
     "id": "T001",
     "outcome": "observable delivery result",
     "workspace": "repository-id",
+    "ui": null,
     "dependsOn": [],
     "implementationPoints": ["main behavior or boundary to implement"],
     "testPoints": ["behavior, boundary, or failure path to prove"],
@@ -23,7 +24,9 @@ The planner submits one `autodev.plan` document through `plan_writer.py prepare-
 }
 ```
 
-`D-NNN` belongs in `refs.decisions`, which names its primary behavior-delivery task. `refs.design` supplies API/Data context and does not accept decisions. For a UI task, `ui` contains only `pages`, `interactions` and `route`; the writer derives `visualSourceRefs` from every UI capability matched by the task's scenario references.
+`D-NNN` belongs in `refs.decisions`, which names its primary behavior-delivery task. `refs.design` supplies API/Data context and does not accept decisions. Every task must explicitly declare `ui`: an object for frontend implementation, or `null` for backend implementation. Omitting it fails with `plan_task_ui_decision_missing` instead of silently selecting the backend lane. A frontend `ui` object contains only `pages`, `interactions` and `route`; the writer derives `visualSourceRefs` from every UI capability matched by the task's scenario references.
+
+Frontend implementation does not require HTML or a high-fidelity mockup. With no HTML, use `{"pages": ["PAGE-001"], "interactions": [], "route": "spec-driven-ui"}` with real page references from UI_CONTEXT. Standard HTML uses `standard-html`; high-fidelity HTML uses `absolute-html`. All three remain frontend tasks with `uiRequired=true`; the `ui` object does not require visual-source bindings.
 
 `prepare-plan` generates the critic-ready machine bundle: root `plan.json`, Batch plans, Task acceptance records, test intentions, workspace bindings and the parallel pipeline projection. After Critic accepts the bundle, `publish-plan` finalizes `plan.json` and renders its human-readable `PLAN.md` projection. Batch identifiers, command identifiers, execution state and the rendered Markdown are writer-owned.
 
@@ -33,7 +36,7 @@ Plan carries outcome-level `implementationPoints` and `testPoints`, but delibera
 
 The scheduler uses task dependencies and repository bindings to start isolated worktrees. It may run same-repository tasks optimistically; Merge Train resolves actual conflicts. When an unscoped concurrent change may affect another task, evidence invalidation is conservative.
 
-Required task input is `id`, `outcome`, `workspace`, nonempty `implementationPoints` and `testPoints`, `refs.requirements`, `refs.scenarios`, and `verification.intent`. `dependsOn` defaults to `[]`; optional reference lists default to `[]`. Unknown fields are errors rather than silently discarded instructions. Task IDs are unique `TNNN` values and may have gaps; task array order has no scheduling meaning. Writer topologically orders dependencies without changing IDs, rejecting missing dependencies and cycles.
+Required task input is `id`, `outcome`, `workspace`, explicit `ui` (object or `null`), nonempty `implementationPoints` and `testPoints`, `refs.requirements`, `refs.scenarios`, and `verification.intent`. `dependsOn` defaults to `[]`; optional reference lists default to `[]`. Unknown fields are errors rather than silently discarded instructions. Task IDs are unique `TNNN` values and may have gaps; task array order has no scheduling meaning. Writer topologically orders dependencies without changing IDs, rejecting missing dependencies and cycles.
 
 `workspace` is a logical ID: `default` for a single repository or the Git root directory name for explicit repository bindings. Supply each actual Git root with a repeated `--code-workspace`; component subdirectories are rejected. New Plans bind `codeWorkspaces` to Git roots and `scope.workspaceRoots` to `"."`. Optional `components` records coarse component directories relative to that Git root, projected into the existing `scope.modules` as ownership hints only. Code/UTest determine build and test directories from actual implementation files, changes and build manifests; these hints never select or restrict execution directories. The execution agent resolves project location from code without asking the user. `refs.api`/`refs.data` use bare `API-NNN`/`DATA-NNN`; `refs.decisions` uses bare `D-NNN`. Optional `refs.design` accepts API/Data IDs or `design.md#ID` for extra context; do not duplicate the same context in both fields. Code resolves design snippets from all these fields. Confirmed public API paths and domain fields are valid context in points, while implementation paths, symbols, algorithms and commands remain Code/UTest choices.
 
