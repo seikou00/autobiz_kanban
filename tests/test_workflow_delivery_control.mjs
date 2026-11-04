@@ -74,13 +74,13 @@ async function execute(frontend = false, fault = null) {
       }
       return current;
     }
-    if (label === "sync-main-into-integration" || label === "begin-e2e-validation") return { success: true };
-    if (label === "run-e2e-validation") {
+    if (label === "sync-main-into-integration") return { success: true };
+    if (label === "skip-e2e-validation") {
       // Cleanup can be waiting independently while final validation advances.
       await Promise.resolve();
       assert.equal(cleanupStarted, true);
       releaseCleanup();
-      return { success: true };
+      return { success: true, status: "skipped", e2eStatus: "skipped", skipReason: "e2e_temporarily_disabled" };
     }
     if (label === "aggregate-staged-evidence") return { ok: true, policy: "report_only", passed: true,
       errors: [], blockingErrors: [], integrationMode: "isolated" };
@@ -108,13 +108,17 @@ test("nonblocking Review uncertainty survives through final baseline confirmatio
   assert.equal(result.deferredIssues[0].kind, "review_advisory");
   assert.equal(result.deferredIssues[0].blocksWorkflow, false);
   assert.equal(labels.some(label => label.startsWith("triage-review-")), false);
-  assert.ok(labels.includes("run-e2e-validation"));
+  assert.ok(labels.includes("skip-e2e-validation"));
 });
 
 for (const frontend of [false, true]) {
   test(`complete ${frontend ? "frontend" : "backend"} workflow settles without individual control agents`, async () => {
     const { labels, result } = await execute(frontend);
     assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+    assert.equal(result.e2e.e2eStatus, "skipped");
+    assert.equal(result.e2eSkippedReason, "e2e_temporarily_disabled");
+    assert.equal(labels.includes("begin-e2e-validation"), false);
+    assert.equal(labels.includes("run-e2e-validation"), false);
     const chain = labels.filter(label => /^(stage-review|validate-review|stage-utest|settle-delivery)/.test(label));
     assert.equal(chain.length, frontend ? 3 : 4);
     assert.equal(labels.filter(label => label === "prepare-delivery-finalization").length, 1);

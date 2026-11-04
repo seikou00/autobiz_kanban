@@ -6,13 +6,15 @@ export const meta = {
     { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 集合" },
     { title: "Batch 阶段", detail: "编码 → review → UTest/封存；Review 可定向修复一次，UTest 失败记录后继续" },
     { title: "候选验证", detail: "Merge Train 合成并推广已完成 Review 与 UTest 记录的候选 SHA" },
-    { title: "最终验证", detail: "合并后运行 B-E2E，最终只聚合既有证据、不重复执行命令" }
+    { title: "最终验证", detail: "E2E 暂时跳过并记录原因；聚合证据后准备基线合并确认" }
   ]
 };
 
 const DEFAULT_MAX_PARALLEL = 5;
 const DEFAULT_BATCH_TIMEOUT_SECONDS = 4 * 60 * 60;
 const MAX_SCHEDULER_CYCLES = 100;
+// Temporary policy: retain an explicit skip receipt without running E2E.
+const E2E_TEMPORARILY_DISABLED = true;
 // Idle dispatch workers keep checking the durable scheduler snapshot while
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
@@ -27,7 +29,7 @@ const deliveryControl = { deliveries: new Map(), finalized: new Map() };
 const MAX_FINAL_RETRY_DRAINS = 3;
 // Review findings and production defects proven by UTest each receive one
 // targeted repair. A deferred UTest remains explicit evidence and may proceed
-// through an unverified candidate to mandatory final B-E2E.
+// through an unverified candidate; final reporting preserves that disposition.
 const SINGLE_REPAIRABLE_STAGES = new Set(["review", "test"]);
 const BATCH_RESULT_SCHEMA = {
   type: "object",
@@ -436,6 +438,7 @@ const VERIFICATION_SCHEMA = {
     hasDeferredIssues: { type: "boolean" },
     hasBlockingDeferredIssues: { type: "boolean" },
     e2eStatus: { type: "string" },
+    e2eSkipReason: { type: ["string", "null"] },
     deferredIssues: { type: "array", items: { type: "object" } },
     skippedUtests: { type: "array", items: { type: "object" } }
   },
@@ -2960,7 +2963,7 @@ function completionReport({
     retryPendingBatches: batches.filter(batch => batch.status === "retry_pending").map(batch => batch.batchId),
     blockedBatches: batches.filter(batch => ["blocked", "needs_resolution"].includes(batch.status)).map(batch => batch.batchId),
     deferredIssues,
-    e2eSkippedReason,
+    e2eSkippedReason: e2eSkippedReason || (e2e && e2e.skipReason) || null,
     skippedUtests: skippedUtestDetails(scheduler, verification),
     finalRepair: {
       attempted: true,
@@ -3229,8 +3232,27 @@ if (prepared.integrationMode === "isolated") {
       verification: { error: errorText(error) }, nextAction: "inspect_integration_sync_then_resume" });
   }
 }
-let e2eStarted;
 let e2e;
+if (E2E_TEMPORARILY_DISABLED) {
+  try {
+    e2e = requireSuccess(await workflowAgent(
+      `E2E 当前暂时禁用。只执行 python -X utf8 "${mergeTrainPath}" skip-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+      `仅登记当前集成 SHA 的 skipped Evidence 和 e2e_temporarily_disabled 原因，不创建验证 Worktree，不运行测试或环境准备，不登记 passed。原样返回 JSON。`,
+      { label: "skip-e2e-validation", phase: "最终验证", schema: {
+        type: "object", properties: { ok: { type: "boolean" }, success: { type: "boolean" },
+          status: { type: "string" }, e2eStatus: { type: "string" }, skipReason: { type: "string" },
+          reused: { type: "boolean" }, error: { type: "string" } }, required: [], additionalProperties: false
+      } }
+    ), "record E2E skip");
+    if (e2e.success !== true || e2e.status !== "skipped" || e2e.e2eStatus !== "skipped"
+        || e2e.skipReason !== "e2e_temporarily_disabled") throw new Error("parallel_e2e_skip_result_invalid");
+  } catch (error) {
+    recordUnresolved({ kind: "validation", status: "e2e_skip_record_failed", durable: false, error });
+    return completionReport({ finalStatus: "completed_with_validation_failure", scheduler: finalScheduler || lastScheduler,
+      e2e: { error: errorText(error) }, nextAction: "record_e2e_skip_then_resume" });
+  }
+} else {
+let e2eStarted;
 try {
   e2eStarted = requireSuccess(await workflowAgent(
     `所有 delivery Batch 已推广后，创建 B-E2E。执行 python -X utf8 "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
@@ -3262,6 +3284,7 @@ try {
   }
 }
 void e2eStarted;
+}
 
 let verification;
 try {

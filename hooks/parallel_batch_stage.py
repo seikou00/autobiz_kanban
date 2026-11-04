@@ -46,6 +46,7 @@ FAILURE_NEXT_STAGE = {
 from hooks.utest_policy import POLICY, policy_snapshot, stage_budget
 UTEST_STAGE_TIMEOUT_SECONDS = POLICY["stageSeconds"]
 FRONTEND_UTEST_SKIP_REASON = "frontend_utest_temporarily_disabled"
+E2E_SKIP_REASON = "e2e_temporarily_disabled"
 
 
 def _utc_now() -> str:
@@ -326,6 +327,91 @@ def record_e2e_failure(workspace: Path, feature: str, run_id: str, *, metadata: 
         save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "e2e_failure_recorded", issueId=issue_id, evidenceId=evidence_id)
     return {"success": True, "batchId": "V-E2E", "status": "deferred", "e2eStatus": "failed", "issue": issue, "reused": False}
+
+
+def skipped_e2e_errors(manifest: dict) -> list[str]:
+    """A skip is valid only for the exact delivery heads and immutable receipt."""
+    batch = (manifest.get("validationBatches") or {}).get("V-E2E", {})
+    candidate = json.dumps({ref: binding.get("headSha") for ref, binding in manifest["repositories"].items()}, sort_keys=True)
+    if (batch.get("status") != "skipped" or batch.get("candidateSha") != candidate
+            or batch.get("skipReason") != E2E_SKIP_REASON):
+        return ["V-E2E.skip_inputs_stale"]
+    for stage in stage_names(batch):
+        state = (batch.get("stageStates") or {}).get(stage, {})
+        try:
+            evidence = json.loads(Path(state["evidencePath"]).read_text(encoding="utf-8"))
+        except (KeyError, OSError, ValueError, TypeError):
+            return [f"V-E2E.{stage}_skip_evidence_missing"]
+        inputs, metadata = evidence.get("inputs", {}), evidence.get("metadata", {})
+        if (state.get("status") != "skipped" or state.get("skipReason") != E2E_SKIP_REASON
+                or evidence.get("digest") != _digest({key: value for key, value in evidence.items() if key != "digest"})
+                or evidence.get("batchId") != "V-E2E" or evidence.get("stage") != stage
+                or evidence.get("evidenceId") != state.get("latestEvidenceId") or evidence.get("outcome") != "SKIP"
+                or metadata != {"skipReason": E2E_SKIP_REASON, "executionOutcome": "not_run"}
+                or inputs != _stage_input(manifest, batch, stage, {}) or state.get("inputDigest") != _digest(inputs)):
+            return [f"V-E2E.{stage}_skip_evidence_invalid"]
+    return []
+
+
+def record_e2e_skip(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
+    """Record the temporary policy without creating a validation worktree."""
+    from hooks.parallel_delivery import prepare_finalization, finalization_inputs
+    from hooks.parallel_integration import git, integration_repo, _assert_plan
+    if load_manifest(workspace, feature, run_id).get("finalizationReceiptInvalidated"):
+        if prepare_finalization(workspace, feature, run_id).get("repairRequired"):
+            raise ValueError("parallel_e2e_finalization_repair_required")
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        if not manifest.get("batches") or any(batch.get("status") != "merged" or not batch.get("mergeCommitSha")
+                                              for batch in manifest["batches"].values()):
+            raise ValueError("parallel_e2e_delivery_incomplete")
+        batch = _batch(manifest, "V-E2E")
+        if manifest.get("finalizationReceipt"):
+            _assert_plan(workspace, feature, manifest)
+            expected = {key: value for key, value in manifest["finalizationReceipt"].items() if key != "digest"}
+            if expected != finalization_inputs(manifest):
+                raise ValueError("parallel_e2e_finalization_changed")
+        for binding in manifest["repositories"].values():
+            if git(integration_repo(binding), "rev-parse", "HEAD") != binding.get("headSha"):
+                raise ValueError("parallel_e2e_integration_head_changed")
+        if (manifest.get("mainPromotion") or {}).get("status") in {"promoting", "merged"}:
+            raise ValueError("integration_promotion_already_started")
+        if not skipped_e2e_errors(manifest):
+            return {"success": True, "status": "skipped", "e2eStatus": "skipped", "skipReason": E2E_SKIP_REASON, "reused": True}
+        if batch.get("status") == "running" or any(
+            state.get("status") == "running" for state in (batch.get("stageStates") or {}).values()
+        ):
+            raise ValueError("parallel_e2e_skip_requires_stopped_validation")
+        candidate = json.dumps({ref: binding.get("headSha") for ref, binding in manifest["repositories"].items()}, sort_keys=True)
+        batch.update(status="skipped", activeStage=None, candidateSha=candidate, candidateBaseSha=candidate,
+                     dependencies=sorted(manifest["batches"]), trainId="merged-main", skipReason=E2E_SKIP_REASON)
+        for stage, state in _ensure_stage_states(batch).items():
+            attempt = int(state.get("attempt", 0)) + 1
+            while _evidence_path(workspace, feature, run_id, "V-E2E", stage, attempt).exists():
+                attempt += 1
+            inputs = _stage_input(manifest, batch, stage, {})
+            evidence_id = f"STAGE-V-E2E-{stage.upper()}-{attempt:03d}"
+            evidence = {"evidenceId": evidence_id, "batchId": "V-E2E", "stage": stage, "attempt": attempt,
+                        "createdAt": _utc_now(), "inputs": inputs, "outcome": "SKIP",
+                        "metadata": {"skipReason": E2E_SKIP_REASON, "executionOutcome": "not_run"}}
+            evidence["digest"] = _digest(evidence)
+            path = _evidence_path(workspace, feature, run_id, "V-E2E", stage, attempt)
+            atomic_write_json(path, evidence)
+            state.update(status="skipped", attempt=attempt, latestEvidenceId=evidence_id, evidencePath=str(path),
+                         inputDigest=_digest(inputs), skipReason=E2E_SKIP_REASON, completedAt=evidence["createdAt"],
+                         evidenceIds=[*state.get("evidenceIds", []), evidence_id])
+        issue_id = "E2E-SKIPPED-" + _digest({"candidate": candidate, "plan": _pipeline(manifest).get("planRevision")}).split(":")[-1][:16]
+        issues = manifest.setdefault("deferredIssues", [])
+        if not any(issue.get("issueId") == issue_id for issue in issues):
+            issues.append({"issueId": issue_id, "kind": "e2e_skipped", "batchId": "V-E2E", "stage": "e2e_test",
+                           "failureType": "e2e_skipped", "message": "E2E 未执行：" + E2E_SKIP_REASON,
+                           "disposition": "recorded_skip", "blocksWorkflow": False, "status": "open",
+                           "evidenceId": batch["stageStates"]["e2e_test"]["latestEvidenceId"],
+                           "batchCommit": candidate, "createdAt": _utc_now()})
+        manifest.pop("finalEvidenceAggregate", None)
+        save_manifest(workspace, feature, run_id, manifest)
+    append_event(workspace, feature, run_id, "e2e_skipped", skipReason=E2E_SKIP_REASON)
+    return {"success": True, "status": "skipped", "e2eStatus": "skipped", "skipReason": E2E_SKIP_REASON, "reused": False}
 
 
 def next_stage(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:

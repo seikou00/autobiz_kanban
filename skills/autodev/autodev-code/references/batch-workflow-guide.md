@@ -239,6 +239,13 @@ provisioned.
    dependent DAG branch. No active, runnable or recoverable work ends the invocation.
    The final baseline promotion still requires explicit user confirmation.
 
+   E2E is temporarily disabled by `E2E_TEMPORARILY_DISABLED=true` in the fixed
+   Workflow template. Finalization calls `skip-e2e` to persist SHA-bound SKIP
+   evidence and `e2e_temporarily_disabled`, without creating validation
+   worktrees, preparing environments or running tests. Aggregation and the final
+   baseline confirmation preserve `e2eStatus=skipped`; they never claim a pass.
+   Restore the template flag to resume the retained E2E execution path.
+
    Existing runs without `controlProtocolVersion=2` retain legacy delivery and
    cleanup behavior. To upgrade a stopped isolated run, first stop its old
    Workflow and finish pending Git/Plan recovery, then run

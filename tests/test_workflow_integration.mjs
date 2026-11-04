@@ -10,7 +10,8 @@ const finalization = source.slice(source.indexOf('async function runFinalValidat
 
 async function finalize({ isolated = true, syncFailure = false, prepareFailure = false,
   e2eFailure = false, beginFailure = false, recordingFailure = false,
-  aggregateFailure = false, aggregateUnavailable = false, blockingErrors = [] } = {}) {
+  aggregateFailure = false, aggregateUnavailable = false, blockingErrors = [],
+  e2eDisabled = false, skipFailure = false } = {}) {
   const commands = [];
   const issue = { issueId: "E2E-FAILED-001", kind: "e2e_failure", blocksWorkflow: false, message: "E2E failed" };
   const context = {
@@ -18,6 +19,7 @@ async function finalize({ isolated = true, syncFailure = false, prepareFailure =
     finalScheduler: {}, lastScheduler: {}, artifactWorkspace: "/artifacts", feature: "feature", runId: "run",
     pluginPath: "/plugin", mergeTrainPath: "/plugin/merge-train", aggregatePath: "/plugin/aggregate",
     VERIFICATION_SCHEMA: {},
+    E2E_TEMPORARILY_DISABLED: e2eDisabled,
     phase() {}, recordUnresolved() {},
     completionReport: value => value,
     joinPath: (...parts) => parts.join("/"),
@@ -34,6 +36,8 @@ async function finalize({ isolated = true, syncFailure = false, prepareFailure =
       switch (options.label) {
         case "sync-main-into-integration":
           return { success: !syncFailure };
+        case "skip-e2e-validation":
+          return { success: !skipFailure, status: "skipped", e2eStatus: "skipped", skipReason: "e2e_temporarily_disabled" };
         case "begin-e2e-validation":
           return { success: !beginFailure, worktrees: { default: "/validation" } };
         case "run-e2e-validation":
@@ -48,7 +52,7 @@ async function finalize({ isolated = true, syncFailure = false, prepareFailure =
           return { ok: true, passed: !aggregateFailure, policy: "report_only", blockingErrors,
             errors: aggregateFailure ? ["B003.test_batch_commit_stale", "B007.prepare_batch_commit_stale"] : [],
             integrationMode: isolated ? "isolated" : "direct", integrationWorkspaces: { default: "/integration" },
-            e2eStatus: e2eFailure || beginFailure ? "failed" : "passed",
+            e2eStatus: e2eDisabled ? "skipped" : e2eFailure || beginFailure ? "failed" : "passed",
             hasDeferredIssues: Boolean(e2eFailure || beginFailure), deferredIssues: e2eFailure || beginFailure ? [issue] : [] };
         case "prepare-user-confirmed-promotion":
           return { success: !prepareFailure, mainPromotion: { status: "prepared", approvalDigest: "review-this",
@@ -82,6 +86,22 @@ test("legacy direct finalization preserves its successful result", async () => {
   const { result, commands } = await finalize({ isolated: false });
   assert.equal(result.finalStatus, "succeeded");
   assert.equal(commands.length, 3);
+});
+
+test("disabled E2E records a skip and reaches baseline confirmation without running tests", async () => {
+  const { result, commands } = await finalize({ e2eDisabled: true });
+  assert.equal(result.finalStatus, "awaiting_user_confirmation");
+  assert.equal(result.e2e.e2eStatus, "skipped");
+  assert.equal(result.e2e.skipReason, "e2e_temporarily_disabled");
+  assert.deepEqual(commands.map(command => command.label), ["sync-main-into-integration", "skip-e2e-validation",
+    "aggregate-staged-evidence", "prepare-user-confirmed-promotion"]);
+});
+
+test("a failed E2E skip registration stops before aggregation and confirmation", async () => {
+  const { result, commands } = await finalize({ e2eDisabled: true, skipFailure: true });
+  assert.equal(result.finalStatus, "completed_with_validation_failure");
+  assert.equal(result.nextAction, "record_e2e_skip_then_resume");
+  assert.equal(commands.at(-1).label, "skip-e2e-validation");
 });
 
 test("failed evidence verification is retained in the report and still prepares user confirmation", async () => {

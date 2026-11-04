@@ -367,7 +367,7 @@ def _batch_execution_plan(
     notes = [
         "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后执行 UTest 并重新封存，随后进入候选合并；成功合并后才释放下游。",
         "每个 Batch 在自己的 Worktree 完成业务 Review 与 UTest；Merge Train 只合成并推广这些已通过的 candidate SHA，成功后才释放下游 Batch。",
-        "所有 delivery Batch 推广后，B-E2E 在交付 HEAD 对应的临时验证 Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
+        "所有 delivery Batch 推广后，E2E 当前暂时跳过并登记 e2e_temporarily_disabled；最终仅聚合证据，保留跳过原因后准备基线合并确认。",
     ]
 
     if optimistic_mode:

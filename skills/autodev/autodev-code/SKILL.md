@@ -1,13 +1,13 @@
 ---
 name: autodev-code
-description: 启动或恢复固定 Code Workflow，在隔离工作树完成实现、Review、UTest 和最终 E2E。
+description: 启动或恢复固定 Code Workflow，在隔离工作树完成实现、Review、UTest 和最终证据汇总。
 version: v2.0
 allowed-tools: execute task_output read_file grep glob write_file edit_file request_user_input
 ---
 
 # /autodev-code
 
-主会话只负责启动、恢复与展示最终交付；固定 Workflow 管 Batch DAG、原生 Worktree、每个 Batch `review` 子阶段、UTest、Merge Train 和 B-E2E。不要生成替代 Workflow 或在共享 checkout 手工执行 Batch。
+主会话只负责启动、恢复与展示最终交付；固定 Workflow 管 Batch DAG、原生 Worktree、每个 Batch `review` 子阶段、UTest、Merge Train 和最终验证登记。E2E 当前暂时禁用，不另外调用 E2E 技能或测试命令补跑。不要生成替代 Workflow 或在共享 checkout 手工执行 Batch。
 
 ## 启动与恢复
 
@@ -35,7 +35,7 @@ python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}"
 
 ## 收口与合入
 
-Review/UTest 处理后的交付由 Merge Train 集成；全部 Batch 交付后运行 B-E2E。最终 aggregate 只校验已有证据，不重复编译或测试，也不增加独立 Verify。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
+Review/UTest 处理后的交付由 Merge Train 集成；全部 Batch 交付后通过 `skip-e2e` 登记 `skipped`，原因 `e2e_temporarily_disabled`，不创建 E2E 验证 Worktree、不准备环境、不运行 E2E、不记为通过。最终 aggregate 校验含跳过记录的既有证据，报告保留 E2E 未执行及原因，再准备用户确认；不重复编译或测试，不增加独立 Verify。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
 
 `review_integration_and_confirm_promotion` 是最终交付入口：展示 `mainPromotion` 报告中的各仓库代码位置、集成分支、冻结的基线分支、候选 SHA、diff、验证结果和遗留问题。`validationStatus` / `evidencePassed` 为失败时仍如实展示，report-only 不是 PASS。
 

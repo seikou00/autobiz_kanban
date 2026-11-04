@@ -200,6 +200,7 @@ def _snapshot(manifest: dict) -> dict:
     return {"runId": manifest["runId"], "repositories": repositories,
             "planDigest": manifest["planDigest"],
             "e2eStatus": manifest["finalEvidenceAggregate"].get("e2eStatus", "passed"),
+            "e2eSkipReason": manifest["finalEvidenceAggregate"].get("e2eSkipReason"),
             "validationStatus": manifest["finalEvidenceAggregate"]["validationStatus"],
             "evidencePassed": manifest["finalEvidenceAggregate"]["passed"],
             "evidenceErrors": manifest["finalEvidenceAggregate"]["errors"],

@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import FRONTEND_UTEST_SKIP_REASON, deferred_e2e_errors
+from hooks.parallel_batch_stage import FRONTEND_UTEST_SKIP_REASON, deferred_e2e_errors, skipped_e2e_errors
 from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, skipped_utests, utc_now
 from hooks.utest_test_environment import validate_test_commit_change
 
@@ -180,6 +180,9 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
         validations = manifest.get("validationBatches", {})
         for validation_id in ("V-E2E",):
             batch = validations.get(validation_id) if isinstance(validations, dict) else None
+            if isinstance(batch, dict) and batch.get("status") == "skipped":
+                errors.extend(skipped_e2e_errors(manifest))
+                continue
             if isinstance(batch, dict) and batch.get("status") == "deferred":
                 errors.extend(deferred_e2e_errors(manifest))
                 continue
@@ -234,8 +237,10 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
             "deferredIssues": deferred_issues,
             "skippedUtests": skipped_utests(manifest),
-            "e2eStatus": "failed" if (validations.get("V-E2E") or {}).get("status") == "deferred" else "passed"
+            "e2eStatus": "skipped" if (validations.get("V-E2E") or {}).get("status") == "skipped" else "failed"
+                if (validations.get("V-E2E") or {}).get("status") == "deferred" else "passed"
                 if (validations.get("V-E2E") or {}).get("status") == "verified" else "incomplete",
+            "e2eSkipReason": (validations.get("V-E2E") or {}).get("skipReason"),
         }
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
         report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)

@@ -1,5 +1,7 @@
 # 需求集成 Worktree 与最终人工合并
 
+当前固定 Workflow 暂时禁用 E2E：以 `skip-e2e` 登记绑定集成 SHA 的 `skipped` Evidence 和 `e2e_temporarily_disabled` 原因，不创建验证 Worktree、不执行 E2E。证据汇总和最终合并报告展示未执行及原因，最终基线合并仍需用户确认。下文 E2E 执行/恢复协议保留供重新启用时使用；开关为固定模板中的 `E2E_TEMPORARILY_DISABLED`。
+
 新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支。启动时的当前分支记录为基线分支，也作为最终合入目标。最终 E2E 结果登记、证据汇总报告生成后，run 等待用户确认；E2E 失败和聚合校验未通过均作为明确问题交给用户审阅，不阻断准备合入报告；只有确认入口会修改基线分支。
 
 ```text

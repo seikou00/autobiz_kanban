@@ -26,7 +26,7 @@ from hooks.conflict_resolution_agent import ModelBasedResolver
 from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure
+from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure, record_e2e_skip
 from hooks.parallel_runtime import append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_integration import integration_repo, assert_integration, isolated, record_integration_head
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
@@ -1255,7 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--attempt-id", default="", help="stable identity for one Workflow resolution step")
     e2e_begin = sub.add_parser("begin-e2e")
     e2e_finish = sub.add_parser("finish-e2e")
-    for item in (e2e_begin, e2e_finish):
+    e2e_skip = sub.add_parser("skip-e2e")
+    for item in (e2e_begin, e2e_finish, e2e_skip):
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
         item.add_argument("--run-id", required=True)
@@ -1304,6 +1305,8 @@ def main(argv: list[str] | None = None) -> int:
             result = discard_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "begin-e2e":
             result = begin_e2e(workspace, feature, args.run_id)
+        elif args.command == "skip-e2e":
+            result = record_e2e_skip(workspace, feature, args.run_id)
         else:
             metadata = json.loads(base64.b64decode(args.metadata_base64, validate=True).decode("utf-8")
                                   if args.metadata_base64 else args.metadata_json)
