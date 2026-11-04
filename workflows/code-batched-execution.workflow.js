@@ -331,19 +331,41 @@ const DELIVERY_SETTLEMENT_SCHEMA = {
   },
   required: ["success", "status"], additionalProperties: true
 };
+const FINALIZATION_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    success: { type: "boolean" }, status: { type: "string" },
+    repairRequired: { type: "boolean" }, batchIds: { type: "array", items: { type: "string" } },
+    cleanupPending: { type: "array", items: CLEANUP_PENDING_ITEM_SCHEMA },
+    ok: { type: "boolean" }, error: { type: "string" }
+  },
+  // Preserve command errors too; validate every successful field before use.
+  required: [], additionalProperties: false
+};
 // Review can return either `parallel_batch_stage.py complete` evidence or a
 // `fail` transition. Keep that response structured so a failed Review cannot
 // lose the durable finding while passing through the agent boundary.
+const REVIEW_FAILURE_SCHEMA = {
+  type: "object", properties: {
+    type: { type: "string" }, message: { type: "string" }, nextStage: { type: ["string", "null"] }
+  }, additionalProperties: true
+};
+const REVIEW_ADVISORIES_SCHEMA = {
+  type: "array", items: { type: "object", properties: {
+    issueId: { type: "string" }, type: { type: "string" }, message: { type: "string" }
+  }, additionalProperties: false }
+};
 const REVIEW_STAGE_RESULT_SCHEMA = {
   type: "object",
   properties: {
     ok: { type: "boolean" }, success: { type: "boolean" }, error: { type: "string" },
     batchId: { type: "string" },
     stage: { type: "string" },
-    status: { enum: ["passed", "failed", "needs_triage"] },
+    status: { enum: ["passed", "failed"] },
+    advisories: REVIEW_ADVISORIES_SCHEMA,
     nextStage: { type: "string" },
     failureType: { type: "string" },
-    failure: { type: "object" },
+    failure: REVIEW_FAILURE_SCHEMA,
     evidenceId: { type: "string" },
     evidence: { type: "object" },
     repairContextPath: { type: "string" },
@@ -365,9 +387,10 @@ const REVIEW_VALIDATION_SCHEMA = {
     success: { type: "boolean" },
     batchId: { type: "string" },
     stage: { const: "review" },
-    status: { enum: ["passed", "failed", "needs_triage", "incomplete"] },
+    status: { enum: ["passed", "failed", "incomplete"] },
+    advisories: REVIEW_ADVISORIES_SCHEMA,
     nextStage: { type: "string" },
-    failure: { type: "object" },
+    failure: REVIEW_FAILURE_SCHEMA,
     evidenceId: { type: "string" },
     durableState: { type: "string" },
     error: { type: "string" },
@@ -661,7 +684,7 @@ function isFinalReviewDecision(value, batchId) {
     result
     && result.batchId === batchId
     && result.stage === "review"
-    && ["passed", "failed", "needs_triage"].includes(result.status)
+    && ["passed", "failed"].includes(result.status)
   );
 }
 
@@ -899,7 +922,7 @@ async function workflowAgent(instruction, options = {}) {
   const label = usableString(options.label) ? options.label : "workflow-agent";
   const batchMatch = label.match(/(?:^|-)(B\d{3,})(?:-|$)/);
   const grant = batchMatch && typeof activeDispatchGrants !== "undefined" ? activeDispatchGrants.get(batchMatch[1]) : null;
-  if (grant) instruction += `\n派发身份：本子任务中每条 parallel_batch_stage.py 命令，以及 batch_lease_manager.py acquire 命令，必须追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。仅追加到以上命令，不能替代 TASK/UTest 的业务 lease-token/owner-token；stale_stage_owner 立即停止，禁止强制 reclaim。`;
+  if (grant) instruction += `\n派发身份：本子任务中每条 parallel_batch_stage.py 命令，以及 batch_lease_manager.py acquire 命令，必须追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。仅追加到以上命令，不能替代 TASK/UTest 的业务 lease-token/owner-token；业务凭证只取 acquire 返回的 businessLeaseToken（兼容旧返回 lease.ownerToken），后续优先直接执行 engineering prepare 返回的 operations.argv，保留其中真实 lease-token/owner-token；stale_stage_owner 立即停止，禁止强制 reclaim。`;
   workflowControlMetrics.agentCalls += 1;
   workflowControlMetrics.promptCharacters += (WORKFLOW_AUTONOMY_PREFIX + instruction).length;
   workflowControlMetrics.labels[label] = (workflowControlMetrics.labels[label] || 0) + 1;
@@ -1684,24 +1707,25 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
         `对已草稿封存的 Batch ${batchId} 做只读评审。Review execution mode=fixed_code_workflow；代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。不得调用 request_user_input、要求用户确认或等待用户裁定；只返回可执行的阶段结果。${retryContext}` +
         `先读取只读角色 "${stagePath.replace(/hooks[/\\][^/\\]+$/, "agents/reviewer.md")}"；执行 python -X utf8 "${stagePath}" prepare-review --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。Runtime 会复用已完成的 implement、Review attempt 和准确工程上下文；requiredAction=reuse_review_result 时直接返回已有 reviewResult，不重新审查；只按返回 contextPath/allowedReads 读取当前任务交接、生产差异及必要契约，不领取新事实。完整审相关函数，只有具体证据不足才扩展读取，不强制全文读所有文本或生成长报告。` +
         `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。Review 是完全只读阶段：禁止执行任何构建、编译、打包、typecheck、lint、测试、E2E 或验证命令，包括 mvn/mvnw、Gradle/gradlew、npm/pnpm/yarn、npx/tsc/vite/webpack、jest/vitest/pytest。后端 compile-only 已在 implement 的 finish-implementation 前完成；UTest 的行为测试及收尾编译通过 Bash 执行，再由 run_utest_command.py 登记 Evidence 和结果。` +
-        `使用 python -X utf8 "${stagePath}" finish-review --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --decision <passed|implementation|documentation|needs_triage>，失败必须带 --message "<具体TASK、file:line、触发条件、期望/实际、影响及建议>"。只返回 Runtime 规范化 JSON，不写全局完成声明或空报告。生产问题由 Workflow 定向修复一次，完成纯编译和封存后直接 UTest，不重复 Review。` +
-        `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
+        `使用 python -X utf8 "${stagePath}" finish-review --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --decision <passed|failed>。只有可证实的生产实现缺陷判 failed，并带 --message "<具体TASK、file:line、触发条件、期望/实际、影响及建议>"。` +
+        `外部 API 行为未知、契约资料不足、无法证实的疑点和改进建议，使用 --advisory-message "<具体信息缺口、影响范围与待核实事项>" 记录非阻断问题；没有可证实的阻断缺陷时仍判 passed，有真实缺陷时可同时登记 advisory。生产问题由 Workflow 定向修复一次，完成纯编译和封存后直接 UTest，不重复 Review。` +
+        `Review 业务结论只有 passed/failed；执行中断或缺少输出由 Workflow 有限重试，禁止把未执行评审当通过。只返回 Runtime 规范化 JSON，不写全局完成声明或长报告，不要求人工确认。`,
         { label: `stage-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_STAGE_RESULT_SCHEMA }
-      ));
+      ).catch(error => ({ error: errorText(error) })));
       // The reviewer itself is prompted to validate its result. Re-run the
       // validator in a read-only child so a prose/raw-JSON response cannot
       // bypass the plugin-owned state machine.
       reviewValidation = unwrap(await workflowAgent(
-        `只验证 Batch ${batchId} 已持久化的 Review 阶段，不评审代码、不修改任何文件、不运行 TASK，也不得运行构建、编译、打包、typecheck、lint、测试或 E2E。唯一允许的命令是 python -X utf8 "${stagePath}" review-checkpoint --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。该操作独立校验持久化 Review，只有通过才准备当前 Batch 的 UTest assignment/policy，完整保留 utestPreparation。只返回 JSON。`,
+        `只验证 Batch ${batchId} 已持久化的 Review 阶段，不评审代码、不修改业务文件、不运行 TASK，也不得运行构建、编译、打包、typecheck、lint、测试或 E2E。唯一允许的命令是 python -X utf8 "${stagePath}" review-checkpoint --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。该操作将旧 needs_triage/documentation 信息缺口归档为非阻断 advisory，独立校验持久化的 passed/failed 结论，通过时准备 UTest assignment/policy，完整保留 advisories 和 utestPreparation。只返回 JSON。`,
         { label: `validate-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_VALIDATION_SCHEMA }
-      ));
+      ).catch(error => ({ status: "incomplete", error: errorText(error) })));
       if (isFinalReviewDecision(reviewValidation, batchId)) {
         review = reviewValidation;
         break;
       }
       // Preserve the raw reviewer output only as diagnostic context. The next
       // attempt is driven entirely by the durable validator result.
-      review = reviewRaw;
+      review = { ...reviewValidation, reviewerOutput: reviewRaw };
     }
     if (!isFinalReviewDecision(review, batchId)) {
       throw new Error(`review_stage_not_finalized:${batchId}:${JSON.stringify(reviewValidation || review)}`);
@@ -1777,7 +1801,23 @@ async function reworkDeliveryImplementation(recovery) {
       (testLogPath ? `这是 UTest 打回；先读取 Runtime 修复包中的本次失败片段；旧运行缺修复包时，才按 target/command/evidence 读取 "${testLogPath}" 中的准确命令段，不扫描公共日志。` : "")
     : "这是未完成 implement 的中断恢复，没有 review/test 打回上下文；按原 TASK 恢复执行。";
   const engineeringPath = leasePath.replace(/[^/\\]+$/, "engineering_context.py");
-  return requireSuccess(await workflowAgent(
+  if (failureContext) {
+    const preparation = requireSuccess(await workflowAgent(
+      `只执行 python -X utf8 "${stagePath}" prepare-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failureContext.failedStage}"。由 Runtime 核对已登记缺陷、打开必要阶段或对账既有修复提交。只返回 JSON，不修改代码、不领取 lease、不启动 TASK。`,
+      { label: `prepare-repair-${batchId}`, phase: "Batch 阶段", schema: {
+        type: "object", properties: { success: { type: "boolean" }, ok: { type: "boolean" }, error: { type: "string" }, status: { type: "string" },
+          batchId: { type: "string" }, worktreePath: { type: "string" }, branchName: { type: "string" }, commitSha: { type: "string" } },
+        required: [], additionalProperties: false
+      } }
+    ), `prepare repair ${batchId}`);
+    if (preparation.success !== true || preparation.batchId !== batchId
+        || preparation.worktreePath !== batchWorktree || preparation.branchName !== batchBranch
+        || !usableString(preparation.commitSha) || !["ready", "reused"].includes(preparation.status)) {
+      throw new Error(`parallel_repair_preparation_invalid:${batchId}`);
+    }
+    if (preparation.status === "reused") return { ...preparation, status: "success", repairReused: true };
+  }
+  const repaired = requireSuccess(await workflowAgent(
     `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。不得调用 request_user_input、要求用户确认或等待用户裁定；按既定契约自动完成最小兼容修复并继续。${repairBrief}` +
     CODE_STAGE_EXECUTION_BOUNDARY +
     CODE_STAGE_COMPILE_COMMAND_GUIDANCE +
@@ -1789,6 +1829,7 @@ async function reworkDeliveryImplementation(recovery) {
     `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",worktreePath,branchName,commitSha}。`,
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `implementation rework ${batchId}`);
+  return { ...repaired, repairReused: false };
 }
 
 async function recordSingleRepairResolution(recovery, repaired) {
@@ -1844,7 +1885,7 @@ async function runDeliveryWithImplementationRepair(batchResult, initialOptions =
     // first-version policy.
     const priorCommitSha = delivery.commitSha;
     const repaired = await reworkDeliveryImplementation(staged.recovery);
-    if (!usableString(repaired.commitSha) || repaired.commitSha === priorCommitSha) {
+    if (!usableString(repaired.commitSha) || (repaired.commitSha === priorCommitSha && repaired.repairReused !== true)) {
       await blockImplementationFinding(delivery, staged, "no_new_commit");
       return { batchId: delivery.batchId, status: "retry_pending", failedStage: staged.failedStage };
     }
@@ -3055,20 +3096,31 @@ async function attemptFinalCandidateRepair(record) {
   }
 }
 
+async function prepareDeliveryFinalization(label) {
+  try {
+    const result = requireSuccess(await workflowAgent(
+      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" prepare-finalization --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。原样返回 success、status、repairRequired、batchIds；不返回调度快照，不执行测试或清理。`,
+      { label, phase: "最终修复与报告", schema: FINALIZATION_RESULT_SCHEMA }
+    ), "prepare finalization");
+    if (result.success !== true || !Array.isArray(result.batchIds)
+        || !["ready", "repair_required"].includes(result.status)
+        || result.repairRequired !== (result.status === "repair_required")
+        || (result.status === "ready" && result.batchIds.length)) throw new Error("parallel_finalization_result_invalid");
+    return result;
+  } catch (error) {
+    recordSchedulerFailure(label, error);
+    return null;
+  }
+}
+
 async function runFinalRepairAndReport() {
   phase("最终修复与报告");
-  if (typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2) {
-    const result = requireSuccess(await workflowAgent(
-      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" prepare-finalization --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。完整返回 JSON，不执行测试或清理。`,
-      { label: "prepare-delivery-finalization", phase: "最终修复与报告", schema: DELIVERY_SETTLEMENT_SCHEMA }
-    ), "prepare finalization");
-    const snapshot = requireSchedulerResult(result.schedulerSnapshot, "finalization snapshot");
-    applySchedulerState(snapshot);
-    schedulerControlState.available = true;
-    schedulerControlState.failures = 0;
-    markSchedulerRecovered();
-    if (result.status === "ready" && result.repairRequired === false) return lastScheduler;
-  } else await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
+  const v2 = typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2;
+  const admission = v2 ? await prepareDeliveryFinalization("prepare-delivery-finalization") : null;
+  if (v2 && !admission) return null;
+  const initial = await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
+  if (!initial) return null;
+  if (admission && admission.status === "ready") return initial;
   await persistUndurableBatchFailures();
   await queueRetryExhaustedBatchRepairs();
 
@@ -3130,7 +3182,13 @@ async function runFinalRepairAndReport() {
     repairState = await readSchedulerState(`final-repair-after-drain-${retryDrain}`, "最终修复与报告");
     if (!repairState || !retryPendingBatchesOf(repairState).length) break;
   }
-  return readSchedulerState("final-report-snapshot", "最终修复与报告");
+  const final = await readSchedulerState("final-report-snapshot", "最终修复与报告");
+  if (v2 && final && allWorkflowDeliveriesMerged(final)) {
+    const ready = await prepareDeliveryFinalization("prepare-delivery-finalization-after-repair");
+    if (!ready || ready.status !== "ready") return null;
+    return readSchedulerState("final-repair-admitted-snapshot", "最终修复与报告");
+  }
+  return final;
 }
 
 // A resumed run can already contain merged deliveries from a prior interrupted

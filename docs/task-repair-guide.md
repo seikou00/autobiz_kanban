@@ -2,6 +2,10 @@
 
 用于修复当前状态为 `implemented` 或 `done` 的 TASK，并通过 `priorEvidenceId` 保留实现证据链。由固定 Code Workflow 准备当前 Batch 的受控修复，再恢复同一 run；任务命令不能代替 Batch 阶段准备或租约领取。
 
+Workflow 先调用 `parallel_batch_stage.py prepare-repair --failed-stage review|test`，校验 Runtime 已登记缺陷并打开必要阶段。已有匹配的 rework 封存提交时，只补齐阶段证据并返回 `reused`，跳过 TASK 重启。无对应缺陷或提交无法证明归属时保留阻塞原因。该过程自动执行，不要求中途确认；最终合入基线仍由用户确认。
+
+业务租约只使用 `batch_lease_manager.py acquire` 返回的 `businessLeaseToken`（兼容 `lease.ownerToken`），优先原样执行工程上下文中的 `operations.argv`。派发 token 仅用于 dispatch 校验，不能代替业务租约；同一有效派发重复领取会复用已有业务凭证，旧代次仍被拒绝。
+
 ## 修复步骤
 
 1. 从 Runtime 当前任务摘要取得最新 `latestImplementationEvidenceId`，确认问题和修复范围。

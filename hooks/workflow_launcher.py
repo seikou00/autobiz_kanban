@@ -372,7 +372,7 @@ def _batch_execution_plan(
 
     if optimistic_mode:
         notes.append(
-            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中检测并自动解决或人工介入。"
+            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中自动检测并有限恢复，无法恢复时记录阻塞并结束，不等待中途人工确认；最终合入基线仍需用户确认。"
         )
     else:
         notes.append(

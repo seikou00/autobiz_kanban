@@ -26,6 +26,7 @@ function harness(testPreparation = { success: true, batchId: "B001", status: "te
     workflowAgent: async (prompt, options) => {
       prompts.push({ prompt, options });
       if (options.label === "prepare-utest-B001") return testPreparation;
+      if (options.label === "prepare-repair-B001") return { success: true, status: "ready", ...delivery };
       return { status: "success" };
     },
   });
@@ -79,9 +80,11 @@ test("review and UTest production repairs seal as Rework with full binding", asy
   for (const failedStage of ["review", "test"]) {
     const { context, prompts } = harness();
     await context.reworkDeliveryImplementation({ ...delivery, failureContext: { failedStage, message: "筛选失效" } });
-    assert.match(prompts[0].prompt, /seal --purpose review --commit-stage rework --commit-summary/);
+    assert.equal(prompts[0].options.label, "prepare-repair-B001");
+    const prompt = prompts.find(item => item.options.label === "rework-implement-B001").prompt;
+    assert.match(prompt, /seal --purpose review --commit-stage rework --commit-summary/);
     for (const binding of ["--artifact-workspace", "--feature", "--run-id", "--batch-id", "--repo", "--owner-token"]) {
-      assert.ok(prompts[0].prompt.includes(binding), binding);
+      assert.ok(prompt.includes(binding), binding);
     }
   }
 });

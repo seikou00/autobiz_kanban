@@ -227,6 +227,29 @@ class DispatchGrantTest(unittest.TestCase):
         self.assertIn("parallel_dispatch_stale_lease_owner", output.getvalue())
         self.assertFalse(lease_path(self.workspace, "alpha", self.run, "B001").exists())
 
+    def test_same_dispatch_can_recover_its_business_lease_after_a_lost_acquire_response(self):
+        from hooks.batch_lease_manager import main
+        from hooks.parallel_runtime import check_lease
+        owner, worktree, branch = self._single_slot_worktree()
+        auth = {"generation": 1, "token": owner["ownerToken"]}
+        lease = acquire_lease(self.workspace, "alpha", self.run, "B001", lease_guard=True, dispatch_auth=auth)
+        mark_batch(self.workspace, "alpha", self.run, "B001", "running", worktreePath=str(worktree), branchName=branch)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["acquire", "--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run,
+                         "--batch-id", "B001", "--lease-guard", "--dispatch-generation", "1", "--dispatch-token", owner["ownerToken"]])
+        self.assertEqual(code, 0, output.getvalue())
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["businessLeaseToken"], lease["ownerToken"])
+        self.assertNotEqual(result["businessLeaseToken"], owner["ownerToken"])
+        self.assertTrue(check_lease(self.workspace, "alpha", self.run, "B001", result["businessLeaseToken"]))
+        self.assertFalse(check_lease(self.workspace, "alpha", self.run, "B001", owner["ownerToken"]))
+        self.assertEqual(load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["status"], "running")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, check=True).stdout.strip()
+        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed", commitSha=head)
+        repeated = acquire_lease(self.workspace, "alpha", self.run, "B001", lease_guard=True, dispatch_auth=auth)
+        self.assertEqual(repeated["ownerToken"], lease["ownerToken"])
+
     def test_poll_recovers_expired_dispatch_without_waiting_for_final_drain(self):
         owner = self.claim()
         manifest = load_manifest(self.workspace, "alpha", self.run)

@@ -188,7 +188,8 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
     from hooks.json_writer_common import feature_dir
     from hooks.parallel_integration import assert_integration, git
     from hooks.parallel_cleanup import pending
-    snapshot = _snapshot(workspace, feature, run_id)
+    # Tick recovery here; the Workflow reads the view through scheduler status.
+    _snapshot(workspace, feature, run_id)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         unfinished = [key for key, batch in manifest["batches"].items()
@@ -196,7 +197,7 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
                       or (batch.get("dispatch") or {}).get("status") == "running"]
         if unfinished:
             return {"success": True, "status": "repair_required", "repairRequired": True,
-                    "batchIds": unfinished, "schedulerSnapshot": snapshot}
+                    "batchIds": unfinished}
         if plan_digest(load_plan_bundle(feature_dir(workspace, feature))) != manifest["planDigest"]:
             raise ValueError("parallel_plan_contract_changed")
         heads = {}
@@ -210,9 +211,8 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
         manifest["finalizationReceipt"] = receipt
         manifest.pop("finalizationReceiptInvalidated", None)
         save_manifest(workspace, feature, run_id, manifest)
-        snapshot["controlRevision"] = manifest["controlRevision"]
     return {"success": True, "status": "ready", "repairRequired": False,
-            "receipt": receipt, "cleanupPending": pending(manifest), "schedulerSnapshot": snapshot}
+            "batchIds": [], "cleanupPending": pending(manifest)}
 
 
 def upgrade_protocol(workspace: Path, feature: str, run_id: str) -> dict:

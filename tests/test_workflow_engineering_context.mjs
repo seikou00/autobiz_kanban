@@ -80,9 +80,9 @@ test("failure diagnostics survive shell metacharacters and Unicode without execu
   assert.match(c.encodeFailure(message), /^[A-Za-z0-9+/=]+$/);
 });
 
-test("Review needs_triage cannot launch UTest even with success true", async () => {
+test("a nonbinary agent response cannot replace Runtime advisory normalization", async () => {
   const calls = [], c = vm.createContext({ batchTaskIds: { B001: ["T001"] },
-    stagePath: "/plugin/hooks/parallel_batch_stage.py", artifactWorkspace: "/artifacts", feature: "f", runId: "r",
+    pluginPath: "/plugin", stagePath: "/plugin/hooks/parallel_batch_stage.py", artifactWorkspace: "/artifacts", feature: "f", runId: "r",
     requiresImplementationRework: () => false,
     workflowAgent: async (_, options) => { calls.push(options.label); return options.label.startsWith("stage-implement")
       ? { success: true, status: "passed" } : { success: true, batchId: "B001", stage: "review", status: "needs_triage" }; },
@@ -91,8 +91,8 @@ test("Review needs_triage cannot launch UTest even with success true", async () 
   vm.runInContext(source.slice(0, source.indexOf("function normalizeStructuredOutput(")).replace("export const meta =", "const meta ="), c);
   vm.runInContext(source.slice(source.indexOf("function normalizeStructuredOutput("), source.indexOf("const input = unwrap(args);")), c);
   vm.runInContext(source.slice(source.indexOf("async function runDeliveryReviewTestAndGate("), source.indexOf("async function reworkDeliveryImplementation(")), c);
-  await assert.rejects(c.runDeliveryReviewTestAndGate({ batchId: "B001", worktreePath: "/batch", branchName: "branch", commitSha: "sha" }), /review_not_passed:needs_triage/);
-  assert.deepEqual(calls, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1"]);
+  await assert.rejects(c.runDeliveryReviewTestAndGate({ batchId: "B001", worktreePath: "/batch", branchName: "branch", commitSha: "sha" }), /review_stage_not_finalized/);
+  assert.deepEqual(calls, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1", "stage-review-B001-attempt-2", "validate-review-B001-attempt-2"]);
 });
 
 test("Workflow dispatch works when ambient clock and random globals are unavailable", () => {

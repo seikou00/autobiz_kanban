@@ -12,7 +12,7 @@ version: v2.0
 
 审查只判断行为兑现、正确性、权限/数据风险、公开契约和必要兼容性。测试资产在后续 UTest 生成，缺少尚未生成的测试不构成 finding。Code 已完成后端纯编译；Review 不执行构建、编译、lint、typecheck 或测试。
 
-通过 Runtime 的 Review 准备与收口操作记录结果，最后以 `validate-review-result` 的持久化结果为准。finding 写具体 TASK、file:line、触发条件、期望/实际、影响与修复方向；无问题直接通过，不生成空报告、逐类台账或主观评分。`documentation` / `needs_triage` 保持 Runtime 原有阻断语义。
+通过 Runtime 的 Review 准备与收口操作记录结果，最后以 `validate-review-result` 的持久化结果为准。业务结论只有 `passed` / `failed`：可证实的生产实现缺陷判 failed，finding 写具体 TASK、file:line、触发条件、期望/实际、影响与修复方向；没有阻断缺陷则 passed。外部信息不足、未知 API 行为、资料缺口和待核实疑点用 `--advisory-message` 记录为非阻断问题，保留到最终报告；Runtime 将旧 `documentation` / `needs_triage` 记录兼容转换为 advisory。不生成空报告、逐类台账或主观评分。
 
 固定 Batch 不再要求全局 completion-proposal.json 或 REQUIREMENTS_EVAL.md；最终人类摘要从持久化结果派生，避免并行 Batch 覆盖同一文件。既有文件可只读作历史参考，其旧格式位于 `references/schemas.md`，不据此改变当前 Workflow 状态。
 

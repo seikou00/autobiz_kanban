@@ -181,8 +181,11 @@ launcher 在复制固定模板前检查已知禁用全局，并校验发布副�
 ready 但没有可领取许可时报告
 ready_batches_not_dispatchable 及原因，不再无提示等待数小时。
 
-Review 只在 durable decision 明确 passed 时放行 UTest；success=true 和
-needs_triage 的组合仍阻断。handoff/路径/契约/阶段顺序类错误记录 precondition_blocked，
+Review 业务结论只有 passed/failed，只有持久化 passed 才放行 UTest。外部行为未知和
+资料缺口通过 --advisory-message 记录为非阻断问题；review-checkpoint 将旧 needs_triage/
+documentation 记录转换为带 advisory 的 passed，不增加分类 Agent，不以信息缺口阻塞。
+可证实的实现缺陷仍 failed；未完成评审的执行中断有限重试，不冒充通过。
+handoff/路径/契约/阶段顺序类执行错误记录 precondition_blocked，
 相同前置条件下重复错误记录 unchanged_failure，不反复消耗模型重跑。
 暂时失败仍用原有限重试预算；final-repair 和新建 drain 不重置该预算。
 本交付不新增旧运行 handoff 重建、路径迁移或批量修复入口。

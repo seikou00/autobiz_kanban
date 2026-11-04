@@ -590,6 +590,29 @@ def acquire_lease(
                     or dispatch.get("tokenSha256") != hashlib.sha256((dispatch_auth.get("token") or "").encode()).hexdigest()):
                 raise ValueError(f"parallel_dispatch_stale_lease_owner:{batch_id}")
             dispatch["expiresEpoch"] = time.time() + max(60, int(dispatch.get("ttlSeconds", 14400)))
+            # A lost acquire response may be retried by the same fenced worker.
+            # Reuse its business capability; never replace a live owner's token.
+            states = batch.get("stageStates") or {}
+            mutable_seal = ((states.get("implement") or {}).get("status") == "pending"
+                            or ((states.get("review") or {}).get("status") == "passed"
+                                and (states.get("test") or {}).get("status") in {"pending", "running", "failed"}))
+            if batch.get("status") in {"leased", "running"} or (batch.get("status") == "sealed" and mutable_seal):
+                path = lease_path(workspace, feature, run_id, batch_id)
+                with FileLock(path.with_suffix(".lock")):
+                    try:
+                        existing = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        existing = {}
+                if (isinstance(existing, dict) and existing.get("expiresEpoch", 0) > time.time()
+                        and existing.get("dispatchGeneration") == dispatch_auth["generation"]
+                        and existing.get("dispatchTokenSha256") == dispatch.get("tokenSha256")
+                        and (not owner_token or owner_token == existing.get("ownerToken"))
+                        and (not lease_guard or existing.get("guardMode") == "command_boundary_renewal")):
+                    lease = renew_lease(workspace, feature, run_id, batch_id, existing["ownerToken"],
+                                        ttl_seconds=max(ttl_seconds, int(existing["ttlSeconds"])))
+                    batch["lease"] = {key: value for key, value in lease.items() if key not in {"expiresEpoch", "ownerToken"}}
+                    save_manifest(workspace, feature, run_id, manifest)
+                    return lease
         states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
         rework_stage = (states.get("implement") or {}).get("status")
         review_stage = (states.get("review") or {}).get("status")

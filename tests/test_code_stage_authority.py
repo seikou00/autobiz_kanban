@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from hooks.code_execution_guard import guard
 from hooks.parallel_batch_scheduler import create_run, mark_batch
-from hooks.parallel_batch_stage import complete_stage, fail_stage, finalize_implementation, start_stage
+from hooks.parallel_batch_stage import complete_stage, fail_stage, finalize_implementation, prepare_implementation_repair, start_stage
 from hooks.parallel_evidence_aggregate import _evidence_errors
 from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease, save_manifest
 from hooks.task_runner import TaskRunnerError, abort_task, finish_implementation, prepare_compile, record_compile, resume_task, start_task, start_task_repair
@@ -185,6 +185,32 @@ class CodeStageAuthorityTest(unittest.TestCase):
         self.assertEqual(self._batch()["stageStates"]["implement"]["attempt"], 1)
         self.assertIsNone(self._guard("mvn clean compile 2>&1 | tail -100"))
         self.assertEqual((self.worktree / "production.txt").read_text(encoding="utf-8"), "preserve\n")
+
+    def test_already_sealed_repair_reuses_current_compile_and_task_evidence_without_a_new_commit(self) -> None:
+        finished, _ = self._initial_delivery()
+        release_lease(self.workspace, "alpha", self.parallel_id, "B001", self.token, final_status="sealed")
+        start_stage(self.workspace, "alpha", self.parallel_id, "B001", "review")
+        fail_stage(self.workspace, "alpha", self.parallel_id, "B001", "review", failure_type="implementation", message="production.txt:1 defect")
+        self.token = self._acquire()
+        repaired = start_task_repair(self.workspace, "alpha", "T001", self.worktree,
+                                    prior_evidence_id=finished["implementationEvidenceId"], parallel_run_id=self.parallel_id,
+                                    lease_token=self.token, workspace_ref="default")
+        (self.worktree / "production.txt").write_text("repaired production\n", encoding="utf-8")
+        self._finish(repaired, repair=True)
+        sealed = self._seal()
+        release_lease(self.workspace, "alpha", self.parallel_id, "B001", self.token, final_status="sealed")
+        args = (self.workspace, "alpha", self.parallel_id, "B001", "review")
+        finalize_implementation(*args[:4])  # Interrupted after Code closure, before Review receipt.
+        implementation_evidence = self._batch()["stageStates"]["implement"]["latestEvidenceId"]
+        result = prepare_implementation_repair(*args)
+        self.assertEqual(result["status"], "reused")
+        self.assertEqual(result["commitSha"], sealed["commitSha"])
+        before = self._batch()["stageStates"]
+        self.assertEqual(before["review"]["status"], "passed")
+        self.assertEqual(before["test"]["status"], "pending")
+        self.assertEqual(before["implement"]["latestEvidenceId"], implementation_evidence)
+        self.assertEqual(prepare_implementation_repair(*args), result)
+        self.assertEqual(self._batch()["stageStates"], before)
 
     def test_finalize_cannot_hide_an_active_task(self) -> None:
         self._task()

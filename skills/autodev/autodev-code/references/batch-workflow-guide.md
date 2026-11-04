@@ -224,8 +224,20 @@ provisioned.
    managed cleanup worker runs after delivery drain, alongside final validation;
    cleanup errors never undo `merged` or delay dependent Batch dispatch. Remaining
    jobs appear as `cleanupPending` and resume on a later invocation. No detached
-   cleanup process is started. Successful finalization uses one authoritative
-   `prepare-finalization` instead of four unconditional snapshot reads.
+   cleanup process is started. Finalization uses a compact `prepare-finalization`
+   admission followed by one authoritative `status --workflow-view`; it does not
+   transport a nested scheduler snapshot. Admission/read failures finish with an
+   explicit unresolved report rather than replaying the drain.
+
+   Between task-card ID input and the final baseline promotion confirmation,
+   the Workflow never asks for human confirmation. Review interruption gets one
+   retry. Review decisions are only `passed` or `failed`: proven implementation
+   defects fail; external uncertainties and missing contracts are recorded with
+   `--advisory-message` as non-blocking issues. Legacy `needs_triage`/documentation
+   records are normalized by Runtime into advisories without an extra classifier
+   agent. Proven unresolved defects retain their Worktree and block only their
+   dependent DAG branch. No active, runnable or recoverable work ends the invocation.
+   The final baseline promotion still requires explicit user confirmation.
 
    Existing runs without `controlProtocolVersion=2` retain legacy delivery and
    cleanup behavior. To upgrade a stopped isolated run, first stop its old
