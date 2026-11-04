@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.render_collected_session_context import render  # noqa: E402
+from hooks.render_collected_session_context import _main, render  # noqa: E402
 
 
 def _proc(payload, *, returncode=0, stderr=""):
@@ -311,6 +311,21 @@ class CollectedSessionContextTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["sessionContext"], "")
 
+    def test_cli_knowledge_path_platform_takes_precedence_or_falls_back(self):
+        cases = (
+            ([], "legacy path"),
+            (["--knowledge-path-platform", ""], "legacy path"),
+            (["--knowledge-path-platform", "platform path"], "platform path"),
+        )
+        for extra_args, expected in cases:
+            with self.subTest(extra_args=extra_args):
+                with patch(
+                    "hooks.render_collected_session_context.render",
+                    return_value={"ok": True, "message": "", "sessionContext": ""},
+                ) as mocked_render, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(_main(["--knowledge-path", "legacy path", *extra_args]), 0)
+                self.assertEqual(mocked_render.call_args.kwargs["knowledge_path"], expected)
+
     def test_board_config_routes_session_hook_to_adapter(self):
         config = json.loads(
             (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
@@ -319,6 +334,7 @@ class CollectedSessionContextTest(unittest.TestCase):
             command = config["inspectCommands"][platform]["session_context_inject"]
             separator = "\\" if platform == "win32" else "/"
             self.assertIn("render_collected_session_context.py", command)
+            self.assertIn('--knowledge-path-platform "${knowledge-path}"', command)
             self.assertIn(
                 "--knowledge-collector ${{pluginPath}}{0}hooks{0}collect-knowledge.js".format(
                     separator
@@ -326,7 +342,7 @@ class CollectedSessionContextTest(unittest.TestCase):
                 command,
             )
             self.assertIn(
-                "--knowledge-path ${{pluginPath}}{0}sys".format(separator),
+                '--knowledge-path "${{pluginPath}}{0}sys"'.format(separator),
                 command,
             )
         self.assertTrue((ROOT / "hooks" / "collect-knowledge.js").is_file())
