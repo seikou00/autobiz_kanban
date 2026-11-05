@@ -14,6 +14,13 @@ async function execute(frontend = false, fault = null) {
     requestedPath: "/source", worktreePath: "/worktree", branchName: "batch" };
   let revision = 1;
   let queuedOnce = false;
+  let syncCompletions = 0;
+  let workspaceState = fault && fault.startsWith("workspace-") ? {
+    success: true, status: fault === "workspace-synced" ? "synced" : "conflicted", repositoryRef: "default",
+    sourcePath: "/source", sourceBranch: "main", sourceHead: "original", lastSyncedSha: null,
+    targetSha: "candidate", worktreePath: "/sync-worktree", backupPath: "/sync-backup",
+    contextPath: "/sync-backup/conflicts.json", attemptId: "c".repeat(32), conflictedFiles: ["file.txt"]
+  } : null;
   let reviewAdvisoryRecorded = false;
   const advisory = { issueId: "REVIEW-ADVISORY-B001-1", kind: "review_advisory", batchId: "B001", stage: "review",
     failureType: "external_uncertainty", message: "External API behavior is undocumented", disposition: "recorded_advisory",
@@ -26,6 +33,7 @@ async function execute(frontend = false, fault = null) {
     implementationRecoveryBatches: [], stageRecoveryBatches: [], retryPendingBatches: [], blockedBatches: [],
     parallelGroups: [], allParallelGroups: [], dispatchGrants: { B001: 1 },
     batchTaskIds: { B001: ["T001"] }, batchWorkspaces: { B001: workspace }, cleanupPending: [],
+    ...(workspaceState ? { workspaceSync: [workspaceState] } : {}),
     manifest: { batches: { B001: { ...delivery, dispatchGeneration: 1, status: merged ? "merged" : "pending",
       dependencies: [], mergeCommitSha: merged ? "candidate" : null, recovery: {} } },
       mergeTrains: {}, deferredIssues: reviewAdvisoryRecorded ? [advisory] : [], skippedUtests: [] },
@@ -77,13 +85,36 @@ async function execute(frontend = false, fault = null) {
       }
       return { success: true, status: "merged", batchId: "B001", runId: "run", dispatchGeneration: 1,
         deliverySha: "sealed", mergeCommitSha: "candidate", dispatchFinalized: true,
-        repositoryRef: "default", wave: 1, operationId: "operation", schedulerSnapshot: snapshot(true) };
+        repositoryRef: "default", wave: 1, operationId: "operation", schedulerSnapshot: snapshot(true),
+        ...(workspaceState ? { workspaceSync: workspaceState } : {}) };
+    }
+    if (label.startsWith("workspace-sync-resolve-")) {
+      assert.match(prompt, /仅允许编辑临时 Worktree "\/sync-worktree"/);
+      assert.match(prompt, /不得修改用户目录 "\/source"/);
+      assert.match(prompt, /无须人工确认/);
+      return fault === "workspace-unresolved" ? { success: false, status: "needs_resolution", error: "unresolved" }
+        : { success: true, status: "resolved" };
+    }
+    if (label.startsWith("workspace-sync-complete-")) {
+      assert.match(prompt, /parallel_workspace_sync\.py" complete/);
+      assert.match(prompt, /不移动用户分支 HEAD、不改用户暂存区、不提交代码/);
+      workspaceState = { ...workspaceState, status: fault === "workspace-refresh" && syncCompletions++ === 0
+        ? "refresh_required" : "synced" };
+      return workspaceState;
+    }
+    if (label.startsWith("workspace-sync-")) {
+      assert.match(prompt, /parallel_workspace_sync\.py" sync/);
+      if (fault === "workspace-agent-timeout") throw new Error("workspace sync agent timed out after merge");
+      if (fault === "workspace-command-error") return { success: false, repositoryRef: "default", status: "pending", error: "Git LFS \ufffd\ufffd" };
+      workspaceState = { ...workspaceState, status: "conflicted" };
+      return workspaceState;
     }
     if (label === "prepare-delivery-finalization") {
       if (fault === "admission") throw new Error("finalization unavailable");
       return fault === "blocked"
         ? { success: true, status: "repair_required", repairRequired: true, batchIds: ["B001"] }
-        : { success: true, status: "ready", repairRequired: false, batchIds: [] };
+        : { success: true, status: "ready", repairRequired: false, batchIds: [],
+          ...(workspaceState ? { workspaceSync: [workspaceState] } : {}) };
     }
     if (label.startsWith("final-repair-") || label === "final-report-snapshot") {
       if (fault === "snapshot") return {};
@@ -142,6 +173,33 @@ test("settlement uses Runtime SHA even when the implementation agent transcribed
   assert.equal(result.finalStatus, "awaiting_user_confirmation");
 });
 
+test("provision contention preserves the Runtime reason when deferring a Batch", async () => {
+  const busy = { success: false, batchId: "B001", error: "parallel_worktree_provision_lock_busy",
+    retryable: true, retryAfterSeconds: 3, readiness: { failureKind: "run_lock_contention" } };
+  let reason;
+  const c = vm.createContext({
+    batchWorkspaces: { B001: { workspaceRef: "default" } }, batchTaskIds: { B001: ["T001"] },
+    codeWorkspaces: { default: "/source" }, artifactWorkspace: "/artifact", feature: "f", runId: "r",
+    worktreeManagerPath: "/plugin/hooks/worktree_manager.py",
+    workflowAgent: async (_, options) => {
+      assert.equal(options.label, "provision-worktree-B001");
+      for (const key of Object.keys(busy)) assert.ok(options.schema.properties[key]);
+      return busy;
+    },
+    safelyDeferBatchForRetry: async (batchId, _path, _branch, error) => {
+      reason = error;
+      return { batchId, status: "retry_pending" };
+    }
+  });
+  vm.runInContext(source.slice(0, source.indexOf("function requireSchedulerResult(")).replace("export const meta =", "const meta ="), c);
+  vm.runInContext(source.slice(source.indexOf("async function runInitialBatchLifecycle("),
+    source.indexOf("async function runImplementationRecoveryLifecycle(")), c);
+  const result = await c.runInitialBatchLifecycle("B001");
+  assert.equal(result.status, "retry_pending");
+  assert.match(reason, /parallel_worktree_provision_lock_busy/);
+  assert.match(reason, /"retryable":true/);
+});
+
 test("queued delivery returns to dispatch without failure or consuming its grant", async () => {
   const { labels, result } = await execute(false, "queued");
   assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
@@ -156,6 +214,29 @@ test("sealed delivery recovery goes straight to settlement without reimplementat
   assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
   assert.equal(labels.some(label => /fixed-batch|provision-worktree|stage-review|validate-review/.test(label)), false);
   assert.ok(labels.includes("settle-delivery-B001-1"));
+});
+
+for (const fault of ["workspace-synced", "workspace-conflict", "workspace-refresh", "workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"]) {
+  test(`${fault} delivers uncommitted workspace results without failing an already merged Batch`, async () => {
+    const { labels, result } = await execute(false, fault);
+    assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+    assert.equal(result.nextAction, "review_workspace_changes");
+    assert.equal(result.workspaceSync.length, 1);
+    assert.equal(result.workspaceSyncPending.length, ["workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"].includes(fault) ? 1 : 0);
+    assert.equal(labels.some(label => /defer-batch|dispatch-finish|fixed-batch.*2/.test(label)), false);
+    assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 1);
+    if (fault === "workspace-refresh") assert.equal(labels.filter(label => label.startsWith("workspace-sync-complete-")).length, 2);
+  });
+}
+
+test("post-merge cleanup bypasses defer when Runtime already reported the merge", async () => {
+  const c = vm.createContext({ activeDispatchGrants: new Map([["B001", { generation: 1, ownerToken: "token" }]]),
+    deliveryControl: { finalized: new Map([["B001", 1]]) },
+    dispatchCommand: async () => { throw new Error("must not register a retry after merge"); } });
+  vm.runInContext(source.slice(source.indexOf("async function deferBatchForRetry("), source.indexOf("function mergedBatchIds(")), c);
+  const result = await c.deferBatchForRetry("B001", "/worktree", "branch", "sync failed");
+  assert.equal(result.status, "merged");
+  assert.equal(result.durable, true);
 });
 
 for (const frontend of [false, true]) {

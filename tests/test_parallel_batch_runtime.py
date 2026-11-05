@@ -25,6 +25,7 @@ from hooks.parallel_runtime import (
     load_manifest,
     plan_digest,
     reclaim_lease,
+    run_dir,
     ready_batches,
     release_lease,
     resource_groups,
@@ -1128,6 +1129,26 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(removed["removed"])
             self.assertFalse(worktree.exists())
             self.assertIsNotNone(load_manifest(workspace, "alpha", run_id)["batches"]["B001"].get("worktreeRemovedAt"))
+
+    def test_provision_lock_timeout_is_retryable_without_git_or_manifest_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            run_id = create_run(workspace, "alpha", code_workspaces=[str(repo)], max_parallel=4, timeout_seconds=60)["runId"]
+            before = load_manifest(workspace, "alpha", run_id)
+            lock_path = run_dir(workspace, "alpha", run_id) / ".lock"
+            with patch("hooks.worktree_manager.run_lock", side_effect=TimeoutError("file_lock_timeout:" + str(lock_path))) as lock, \
+                    patch("hooks.worktree_manager._git") as git:
+                result = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertFalse(result["success"])
+            self.assertEqual("parallel_worktree_provision_lock_busy", result["error"])
+            self.assertTrue(result["retryable"])
+            self.assertEqual(240, lock.call_args.kwargs["timeout"])
+            git.assert_not_called()
+            self.assertEqual(before, load_manifest(workspace, "alpha", run_id))
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(provisioned["success"], provisioned)
+            self.assertTrue(remove_parallel_worktree(workspace, "alpha", run_id, "B001")["success"])
 
     def test_plugin_worktree_manager_reconciles_worktree_created_before_manifest_save(self) -> None:
         """A retry adopts only the exact native worktree left by an interrupted provision."""

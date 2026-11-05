@@ -551,8 +551,8 @@ def append_event(workspace: Path, feature: str, run_id: str, event: str, **detai
 
 
 @contextmanager
-def run_lock(workspace: Path, feature: str, run_id: str) -> Iterator[None]:
-    with FileLock(run_dir(workspace, feature, run_id) / ".lock"):
+def run_lock(workspace: Path, feature: str, run_id: str, *, timeout: float | None = None) -> Iterator[None]:
+    with FileLock(run_dir(workspace, feature, run_id) / ".lock", timeout=timeout):
         yield
 
 

@@ -1,15 +1,25 @@
-# 需求集成 Worktree 与最终人工合并
+# 需求集成 Worktree 与用户工作区交付
+
+固定 Workflow 现在按 Batch 将集成成果同步到用户原工作区，以**未提交改动**展示。用户分支 HEAD、原暂存区保持不变；已有未提交修改不阻止同步。Runtime 在临时 Worktree 中三方合并，冲突由 Workflow 自动编辑临时文件，再由 Runtime 校验并写回。后续 Batch 仍从集成分支开发。`workspaceSync` / `workspaceSyncPending` 返回实际同步结果，最终 `review_workspace_changes` 只做验收，不自动提交或调用 `promote`。下文显式基线合并命令保留为独立手动入口，不能将验收同意解释为提交授权。
+
+同步使用上次 `lastSyncedSha`、用户当前内容及最新集成 SHA。备份保存在 run 的 `workspace-sync` 目录，含暂存区副本、文件原始内容及逐文件写回日志；私有 `refs/autobiz-workspace-backups/` 引用保存 Git 快照，不进入用户分支历史。写回不清空、不 stash 用户工作区；中断后跳过已完成文件并继续，用户在计算或解冲突期间再次编辑时重新计算。暂存、未暂存、未跟踪、二进制及符号链接内容均保留。同步问题单独记录，不撤销已合并 Batch；最终收口和恢复会继续同步。
+
+`settle-delivery` 完成合并后只登记同步待办并立即返回 `merged`，Workflow 随后执行独立同步；最终收口同样先返回待办，再补同步。临时同步 Worktree 的创建和合并按命令指定空 hooks 目录，保留 LFS 内容过滤，不改用户全局 Git 配置。Git 原始输出保存在同步备份目录的 `*.stdout.log` / `*.stderr.log`；错误文本容错转为 UTF-8。`preparing` 中断会校验并复用已创建的临时 Worktree，已合并 Batch 的后续诊断不会重新登记为业务失败。
+
+独立恢复使用 `python hooks/parallel_workspace_sync.py sync --workspace <artifact> --feature <feature> --run-id <runId> --repository-ref <ref> --resolver-id <invocationId>`。冲突返回临时 `worktreePath`、`contextPath`、`conflictedFiles`、`attemptId`；仅编辑这些临时冲突文件，随后执行同入口 `complete` 并追加 `--attempt-id <attemptId>`。`refresh_required` 表示用户期间又有修改，重新 `sync` 即可。不得直接在用户目录处理 Runtime 冲突标记，也不调用 commit/reset。
 
 当前固定 Workflow 已暂时移除前后端 UTest 和 E2E：Review checkpoint/交付 gate 使用 `--skip-tests` 登记 `utest_temporarily_disabled`；最终 aggregate 使用 `--skip-e2e` 在汇总内部登记 `e2e_temporarily_disabled`。不派发测试或 E2E 跳过登记 Agent、不准备测试环境、不生成测试资产、不创建验证 Worktree。报告明确展示未执行及原因，最终基线合并仍需用户确认。下文独立 E2E 工具的执行/恢复协议保留供手动流程或未来重新接入使用。
 
-新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支。启动时的当前分支记录为基线分支，也作为最终合入目标。最终测试未执行记录及证据汇总报告生成后，run 等待用户确认；E2E 失败和聚合校验未通过均作为明确问题交给用户审阅，不阻断准备合入报告；只有确认入口会修改基线分支。
+新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支的提交。每批成果随后写回用户原工作区，分支引用与暂存区不变。最终证据和测试未执行记录随同步状态一同交给用户验收。
 
 ```text
 启动时的当前分支 → integration → Batch Worktrees
                      ↓ Review
        integration ← Merge Train
+             ↓ 每批三方合并并同步文件
+       用户原工作区（未提交，可直接编辑，HEAD 不变）
              ↓ evidence aggregate / 测试未执行记录
-       awaiting_user_confirmation → prepare → 用户确认 → promote → 原基线分支
+       awaiting_user_confirmation → 用户验收（不自动提交）
 ```
 
 ## 配置与兼容

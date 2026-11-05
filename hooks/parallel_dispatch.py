@@ -120,6 +120,8 @@ def finish(workspace: Path, feature: str, run_id: str, batch_id: str, expected: 
             return {"success": True, "status": "already_finished", "batchId": batch_id}
         if current.get("expiresEpoch", 0) <= time.time():
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
+        if batch.get("status") == "merged" and batch.get("mergeCommitSha"):
+            outcome = "completed"
         current.update(status=outcome, completedEpoch=time.time())
         save_manifest(workspace, feature, run_id, manifest)
         path = run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")
@@ -139,6 +141,12 @@ def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
         if (generation(batch) != expected or current.get("generation") != expected
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
+        if batch.get("status") == "merged" and batch.get("mergeCommitSha"):
+            if current.get("status") != "completed":
+                current.update(status="completed", completedEpoch=time.time())
+                save_manifest(workspace, feature, run_id, manifest)
+                (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
+            return {"success": True, "status": "merged", "batchId": batch_id, "reused": True}
         if current.get("status") in {"retry_pending", "failed"} and batch.get("status") in {"retry_pending", "blocked"}:
             return {"success": True, "status": batch["status"], "batchId": batch_id, "reused": True}
         if current.get("status") != "running" or current.get("expiresEpoch", 0) <= time.time():
@@ -186,7 +194,7 @@ def main(argv=None):
         elif args.action == "finish":
             result = finish(workspace, feature, args.run_id, args.batch_id, args.generation, args.owner_token, args.outcome)
         else:
-            error = base64.b64decode(args.error_b64, validate=True).decode("utf-8")
+            error = base64.b64decode(args.error_b64, validate=True).decode("utf-8", errors="replace")
             result = defer(workspace, feature, args.run_id, args.batch_id, args.generation, args.owner_token, error)
     except (ValueError, OSError, KeyError) as exc:
         result = {"success": False, "status": "failed", "batchId": args.batch_id,

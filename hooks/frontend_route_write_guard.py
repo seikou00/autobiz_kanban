@@ -408,6 +408,12 @@ def validate_merge_resolution_write(workspace: Path, feature: str, target_path: 
     matches = []
     for manifest_path in (feature_dir(workspace, feature) / ".parallel-runs").glob("*/manifest.json"):
         manifest = read_json(manifest_path)
+        for record in (manifest.get("workspaceSync") or {}).values():
+            if not isinstance(record, dict) or not isinstance(record.get("worktreePath"), str):
+                continue
+            worktree = Path(record["worktreePath"]).resolve(strict=False)
+            if _path_within(target_path, worktree):
+                matches.append((worktree, manifest, record, "workspace_sync"))
         for record in (manifest.get("mergeTrains") or {}).values():
             if not isinstance(record, dict) or not isinstance(record.get("worktreePath"), str):
                 continue
@@ -431,6 +437,12 @@ def validate_merge_resolution_write(workspace: Path, feature: str, target_path: 
     if len(owners) != 1:
         return block("candidate_resolution_owner_ambiguous")
     _, manifest, record, kind = owners[0]
+    if kind == "workspace_sync":
+        from hooks.parallel_workspace_sync import resolution_write_error as workspace_resolution_write_error
+        error = workspace_resolution_write_error(workspace, manifest, record, target_path)
+        if error:
+            return block(error, system_message="工作区同步只允许编辑 Runtime 登记的临时冲突文件；交还 complete 写回，禁止直接修改用户目录或提交。")
+        return 0
     if kind == "integration":
         from hooks.parallel_integration import integration_sync_write_error
         error = integration_sync_write_error(manifest, record, target_path)

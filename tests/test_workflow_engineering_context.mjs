@@ -78,6 +78,8 @@ test("failure diagnostics survive shell metacharacters and Unicode without execu
   const message = '路径错误 `touch /tmp/unwanted` $(echo bad) "quoted"\nline2';
   assert.equal(Buffer.from(c.encodeFailure(message), "base64").toString("utf8"), message);
   assert.match(c.encodeFailure(message), /^[A-Za-z0-9+/=]+$/);
+  const malformed = "Git LFS \uD800 中文 \uDC00 \ufffd \ud83d\ude00";
+  assert.equal(Buffer.from(c.encodeFailure(malformed), "base64").toString("utf8"), "Git LFS \ufffd 中文 \ufffd \ufffd \ud83d\ude00");
 });
 
 test("a nonbinary agent response cannot replace Runtime advisory normalization", async () => {

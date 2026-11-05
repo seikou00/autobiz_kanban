@@ -167,6 +167,7 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
     from hooks.parallel_dispatch import finish
     from hooks import parallel_merge_train as train
     from hooks.parallel_cleanup import pending
+    from hooks.parallel_workspace_sync import request_sync_locked
 
     started = time.monotonic()
     with run_lock(workspace, feature, run_id):
@@ -313,6 +314,7 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
                              queueWaitMs=queue_wait_ms,
                              buildMs=build_ms, promoteMs=promote_ms,
                              durationMs=round((time.monotonic() - started) * 1000))
+            workspace_sync = request_sync_locked(manifest, ref)
             save_manifest(workspace, feature, run_id, manifest)
     finally:
         guard.__exit__(None, None, None)
@@ -325,6 +327,7 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
             "dispatchGeneration": generation, "operationId": key, "wave": wave, "repositoryRef": ref,
             "deliverySha": expected_commit, "mergeCommitSha": result["candidateSha"],
             "dispatchFinalized": True, "schedulerSnapshot": snapshot, "cleanupPending": pending(current),
+            "workspaceSync": workspace_sync,
             "durationMs": round((time.monotonic() - started) * 1000), "reused": result.get("reused", False)}
 
 
@@ -342,6 +345,7 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
     from hooks.json_writer_common import feature_dir
     from hooks.parallel_integration import assert_integration, git
     from hooks.parallel_cleanup import pending
+    from hooks.parallel_workspace_sync import request_sync_locked
     # Tick recovery here; the Workflow reads the view through scheduler status.
     _snapshot(workspace, feature, run_id)
     with run_lock(workspace, feature, run_id):
@@ -364,9 +368,11 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
         receipt["digest"] = hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()
         manifest["finalizationReceipt"] = receipt
         manifest.pop("finalizationReceiptInvalidated", None)
+        workspace_sync = [request_sync_locked(manifest, ref) for ref, binding in manifest["repositories"].items()
+                          if binding.get("integrationRepositoryRef", ref) == ref]
         save_manifest(workspace, feature, run_id, manifest)
     return {"success": True, "status": "ready", "repairRequired": False,
-            "batchIds": [], "cleanupPending": pending(manifest)}
+            "batchIds": [], "cleanupPending": pending(manifest), "workspaceSync": workspace_sync}
 
 
 def upgrade_protocol(workspace: Path, feature: str, run_id: str) -> dict:

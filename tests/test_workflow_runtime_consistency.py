@@ -10,12 +10,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hooks.engineering_contract import runtime_contract
 from hooks.parallel_batch_scheduler import _workflow_status_view, load_manifest, resume_run, main as scheduler_main
 from hooks.parallel_batch_stage import main as stage_main
 from hooks.parallel_dispatch import claim, defer, main as dispatch_main
-from hooks.worktree_manager import provision_parallel_worktree
+from hooks.parallel_runtime import run_dir
+from hooks.worktree_manager import provision_parallel_worktree, main as worktree_main
 from tests.test_parallel_batch_runtime import create_run
 from tests.test_task_runner import _workspace, _configure_defer_to_test_stages
 
@@ -112,6 +114,17 @@ process.stdout.write(JSON.stringify(context.schemas));
         failed = provision_parallel_worktree(self.workspace, "alpha", self.run, "B404")
         self.assertFalse(failed["success"])
         self.assert_schema("WORKTREE_SCHEMA", failed)
+        output = io.StringIO()
+        lock_path = run_dir(self.workspace, "alpha", self.run) / ".lock"
+        with patch("hooks.worktree_manager.run_lock", side_effect=TimeoutError("file_lock_timeout:" + str(lock_path))), \
+                contextlib.redirect_stdout(output):
+            code = worktree_main(["--json", "provision", "--artifact-workspace", str(self.workspace),
+                                  "--feature", "alpha", "--run-id", self.run, "--batch-id", "B001"])
+        busy = json.loads(output.getvalue())
+        self.assertEqual(1, code)
+        self.assertEqual("parallel_worktree_provision_lock_busy", busy["error"])
+        self.assertTrue(busy["retryable"])
+        self.assert_schema("WORKTREE_SCHEMA", busy)
 
     def test_control_command_errors_fit_their_schemas_without_invented_success_fields(self):
         commands = [

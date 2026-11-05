@@ -37,8 +37,10 @@ python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}"
 
 Review 收口后的交付由 Merge Train 集成；全部 Batch 交付后直接执行 aggregate `--skip-e2e`，在汇总内部登记 E2E `skipped` 和 `e2e_temporarily_disabled` 原因，不再派发独立的 E2E 执行或跳过登记 Agent。报告展示前后端 UTest、E2E 未执行及原因，再准备用户确认；不创建验证 Worktree、不重复编译或测试，不增加独立 Verify。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
 
-`review_integration_and_confirm_promotion` 是最终交付入口：展示 `mainPromotion` 报告中的各仓库代码位置、集成分支、冻结的基线分支、候选 SHA、diff、验证结果和遗留问题。`validationStatus` / `evidencePassed` 为失败时仍如实展示，report-only 不是 PASS。
+`review_workspace_changes` 是未提交交付的验收入口：展示 `workspaceSync` 中用户原目录 `sourcePath`、分支、`lastSyncedSha`、备份及待同步问题。每个 Batch 的成果已作为未提交文件写回，用户分支 HEAD 和原暂存区不变，用户可直接编辑；冲突由 Workflow 在临时 Worktree 自动处理。`workspaceSyncPending` 非空时如实展示尚未完成的同步，恢复同一 run 继续。只请求最终验收，不把验收当成提交授权，不调用 `promote`、commit、reset 或清理用户修改。
 
-先展示结果，再按共享提问协议请求用户确认具体报告；已有同一有效 `approvalDigest` 的明确授权直接复用。用户确认后才调用 `parallel_integration.py promote --approval-digest <报告原值> --approved-by <用户标识> --confirm`；暂不合入调用 `keep`。目标或候选变化必须重新准备报告。准确参数和冲突恢复见 `${pluginPath}/docs/feature-integration-worktree.md`。
+旧流程返回 `review_integration_and_confirm_promotion` 时，展示 `mainPromotion` 报告中的各仓库代码位置、集成分支、冻结的基线分支、候选 SHA、diff、验证结果和遗留问题。`validationStatus` / `evidencePassed` 为失败时仍如实展示，report-only 不是 PASS。
+
+仅旧的正式合并流程，或用户另外明确要求正式合并时：先展示结果，再按共享提问协议请求用户确认具体报告；已有同一有效 `approvalDigest` 的明确授权直接复用。明确授权后才调用 `parallel_integration.py promote --approval-digest <报告原值> --approved-by <用户标识> --confirm`；暂不合入调用 `keep`。目标或候选变化必须重新准备报告。准确参数和冲突恢复见 `${pluginPath}/docs/feature-integration-worktree.md`。
 
 `code_done` 由固定 Workflow 交付与门禁收口，不手改 Plan、manifest、Evidence 或 checkpoint 绕过。Code/Rework 提交均由封存器生成，格式见 `${pluginPath}/docs/code-commit-messages.md`。简报实际结果并按 `${pluginPath}/skills/references/ui-continuation-guide.md` 交接。

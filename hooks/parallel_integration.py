@@ -125,7 +125,8 @@ def promotion_view(manifest: dict) -> dict:
     return {"integrationMode": manifest.get("integrationMode", "direct"),
             "integrationWorkspaces": {ref: {**binding["integration"], "headSha": binding["headSha"], "targetBranch": binding["baseBranch"], "baselineSha": binding["baseSha"]}
                                       for ref, binding in manifest.get("repositories", {}).items() if isinstance(binding.get("integration"), dict)},
-            "mainPromotion": manifest.get("mainPromotion")}
+            "mainPromotion": manifest.get("mainPromotion"),
+            "workspaceSync": list(manifest.get("workspaceSync", {}).values())}
 
 
 def await_confirmation(manifest: dict) -> None:
@@ -198,6 +199,8 @@ def _snapshot(manifest: dict) -> dict:
                              "diffStat": git(repo, "diff", "--stat", target, candidate),
                              "diffDigest": digest(git(repo, "diff", "--binary", target, candidate))}
     return {"runId": manifest["runId"], "repositories": repositories,
+            "deliveryMode": "uncommitted" if manifest.get("workspaceSync") else "committed",
+            "workspaceSync": list(manifest.get("workspaceSync", {}).values()),
             "planDigest": manifest["planDigest"],
             "e2eStatus": manifest["finalEvidenceAggregate"].get("e2eStatus", "passed"),
             "e2eSkipReason": manifest["finalEvidenceAggregate"].get("e2eSkipReason"),
@@ -232,6 +235,7 @@ def prepare_promotion(workspace: Path, feature: str, run_id: str) -> dict:
         approval = digest(snapshot)
         path = run_dir(workspace, feature, run_id) / "main-promotion.json"
         manifest["mainPromotion"] = {"status": "prepared", "approvalDigest": approval, "snapshot": snapshot,
+                                     "deliveryMode": snapshot["deliveryMode"],
                                      "reportPath": str(path), "preparedAt": utc_now()}
         manifest["status"] = "promotion_prepared"
         save_manifest(workspace, feature, run_id, manifest)

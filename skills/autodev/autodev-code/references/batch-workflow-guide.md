@@ -214,6 +214,18 @@ provisioned.
    Sealed Batches with closed stages resume at `nextStage=delivery`, without
    replaying implementation or Review. A retained candidate/reservation is reused;
    an already-merged Batch only needs its operation/dispatch receipts reconciled.
+   After each merge, Runtime publishes the integrated files to the user's
+   original checkout as uncommitted changes. It never moves that checkout's
+   HEAD or changes its index. A detached temporary worktree merges the previous
+   published integration SHA, the user's saved files and the latest integration
+   SHA; local staged/unstaged/untracked files are backed up and retained.
+   `workspaceSync` carries publication progress and conflict context. The Workflow
+   resolves only those temporary conflict files and calls Runtime `complete`;
+   it never edits the user's files directly. Interrupted writes replay from a
+   per-file journal; concurrent user edits trigger a fresh merge. Publication
+   failures stay separate from Batch retries and are retried at finalization.
+   `review_workspace_changes` requests acceptance of uncommitted results, never
+   permission to commit or promote them. Backup refs are not source-branch commits.
    A failure releases that worker to dispatch an unrelated Batch; dependents
    remain blocked until their dependency is merged.
 2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
@@ -239,7 +251,7 @@ provisioned.
    transport a nested scheduler snapshot. Admission/read failures finish with an
    explicit unresolved report rather than replaying the drain.
 
-   Between task-card ID input and the final baseline promotion confirmation,
+   Between task-card ID input and final acceptance,
    the Workflow never asks for human confirmation. Review interruption gets one
    retry. Review decisions are only `passed` or `failed`: proven implementation
    defects fail; external uncertainties and missing contracts are recorded with
@@ -247,7 +259,9 @@ provisioned.
    records are normalized by Runtime into advisories without an extra classifier
    agent. Proven unresolved defects retain their Worktree and block only their
    dependent DAG branch. No active, runnable or recoverable work ends the invocation.
-   The final baseline promotion still requires explicit user confirmation.
+   Acceptance of uncommitted workspace results does not authorize a commit or
+   branch update. A separately requested formal baseline promotion still
+   requires explicit authorization for that exact report.
 
    UTest and E2E are temporarily removed for both frontend and backend.
    There are no test preparation, execution, budget-monitor or E2E-skip Agents.

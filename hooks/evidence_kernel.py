@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -214,17 +215,22 @@ class FileLock(ContextManager["FileLock"]):
                 try:
                     if os.name == "nt":
                         import msvcrt
-                        msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK if deadline is not None else msvcrt.LK_LOCK, 1)
+                        # LK_LOCK gives up after ten attempts even without a
+                        # caller deadline. Own the wait so Windows matches flock.
+                        msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
                     else:
                         import fcntl
                         fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | (fcntl.LOCK_NB if deadline is not None else 0))
                     break
-                except OSError:
-                    if deadline is None:
+                except OSError as exc:
+                    busy = exc.errno in {errno.EACCES, errno.EAGAIN} or (
+                        os.name == "nt" and exc.errno == errno.EDEADLK
+                    )
+                    if not busy or (deadline is None and os.name != "nt"):
                         raise
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("file_lock_timeout:" + str(self.path))
-                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("file_lock_timeout:" + str(self.path)) from exc
+                    time.sleep(0.05 if deadline is None else min(0.05, max(0, deadline - time.monotonic())))
         except BaseException:
             self.handle.close()
             self.handle = None

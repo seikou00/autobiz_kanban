@@ -493,16 +493,21 @@ def analyze_batches(
             else None
         )
         from hooks.parallel_integration import PROMOTION_STATES, isolated, promotion_view
-        if active_manifest and active_manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
+        from hooks.parallel_workspace_sync import workspace_sync_pending
+        pending_workspace_sync = bool(active_manifest and workspace_sync_pending(active_manifest))
+        if (active_manifest and active_manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}
+                and not (pending_workspace_sync and active_manifest.get("status") in {
+                    "awaiting_user_confirmation", "promotion_prepared", "integration_retained"})):
             return {"useWorkflow": False, "strategy": "awaiting_confirmation", "batchCount": 0,
                     "batches": [], "runId": active_run_id, "status": active_manifest["status"],
                     "canStartWorkflow": False, "reason": active_manifest["status"],
-                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else "review_integration_and_confirm_promotion",
+                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else
+                        "review_workspace_changes" if active_manifest.get("workspaceSync") else "review_integration_and_confirm_promotion",
                     **promotion_view(active_manifest)}
         final_validation_pending = bool(active_manifest and isolated(active_manifest)
                                         and active_manifest.get("batches")
                                         and all(b.get("status") == "merged" for b in active_manifest["batches"].values())
-                                        and not active_manifest.get("finalEvidenceAggregate", {}).get("passed"))
+                                        and (not active_manifest.get("finalEvidenceAggregate", {}).get("passed") or pending_workspace_sync))
         # Recovery is not one generic retry: an unsealed but verified dirty
         # implementation Worktree and a sealed Review/UTest checkpoint both
         # resume in place, while a clean failed dispatch needs operator
