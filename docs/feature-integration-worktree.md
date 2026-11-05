@@ -36,6 +36,8 @@ Git 2.20 可使用最终合入入口。读取目标分支的 Worktree 登记时�
 
 ## 开发、验证与恢复
 
+- 固定 Workflow 的 `settle-delivery` 不转写提交 SHA；Runtime 在锁内读取当前封存版本，并在整个交付过程中保留版本校验。排队或仓库锁占用返回 `queued`、操作 ID、阻塞 Batch 和调度快照，释放 dispatch 执行名额，不消耗 Batch 失败重试次数。之后重新 claim，沿用同一交付记录继续。
+- 阶段均已结束的 `sealed` Batch 从交付 gate/settle 恢复，不重跑实现或 Review。候选构建或合并中断时复用已登记候选及仓库占用记录；Git 与 Plan 已完成后，只补齐操作回执和 dispatch 收尾，不重复合并。Runtime 用进程持有的执行锁区分正在执行和已中断的结算，避免仅因长效 dispatch 尚未过期就一直阻塞队列。
 - 仓库绑定的 `gitRoot` 保留源 checkout 身份；`integration.worktreePath`、`integration.branchName` 保存集成工作区。`baseBranch`、`baseSha` 冻结启动时的当前分支和提交，`headSha` 跟随集成分支推进。
 - Batch 创建时保存 `startSha`。后续依赖 Batch 从依赖已集成后的 HEAD 创建；已经开始的 Batch 保留起始 SHA 和改动，冲突交给 Merge Train。
 - prepare 证据绑定 Batch 的 `startSha`，不会因集成 HEAD 推进而失效。UTest 可新增测试资产、修改 POM 的 test scope 依赖及必要 Surefire/Failsafe 配置；最终聚合读取证据提交到最终提交的真实 Git 差异，复用封存的 POM 内容校验。多次测试封存或 Batch Worktree 清理后仍可核验，既有阶段 evidence 不重写；生产代码、生产依赖和失败屏蔽配置的变更不能沿用旧 Review 证据。

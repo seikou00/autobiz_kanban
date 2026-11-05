@@ -384,6 +384,38 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             "fixed_workflow_for_manual_recovery:cw-resume-all:B001,B007,B015",
         )
 
+    def test_launcher_reenters_delivery_even_when_plan_has_no_pending_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin, workspace, code = root / "plugin", root / "artifacts", root / "code"
+            (plugin / "workflows").mkdir(parents=True)
+            (plugin / "workflows/code-batched-execution.workflow.js").write_text("export const meta = {};")
+            code.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=code, check=True)
+            feature = workspace / ".autobizdevops/features/delivery"
+            feature.mkdir(parents=True)
+            (feature / "plan.json").write_text("{}")
+            (workspace / ".autobizdevops/state.json").write_text("{}")
+            bundle = PlanBundle(root={"codeWorkspaces": {"api": str(code)}, "batches": [
+                {"id": "B001", "status": "failed", "workspaceRef": "api", "deps": []}]},
+                batches={"B001": {"tasks": [{"workspaceRef": "api"}]}}, tasks=[], task_batches={})
+            closed = {stage: {"status": "passed"} for stage in ("prepare", "implement", "review", "test")}
+            for status in ("sealed", "ready_to_candidate", "blocked"):
+                with self.subTest(status=status), mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), \
+                        mock.patch("hooks.workflow_launcher.validate_plan_for_parallel", return_value={
+                            "canParallel": False, "reason": "no_pending_batches", "errors": []}), \
+                        mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-delivery"), \
+                        mock.patch("hooks.workflow_launcher.load_manifest", return_value={
+                            "runId": "cw-delivery", "batches": {"B001": {
+                                "status": status, "commitSha": "sealed", "stageStates": closed,
+                                "recovery": {"status": "unchanged_failure", "failureClassification": "retryable"}}}}):
+                    result = analyze_batches("delivery", plugin, workspace, "TEST-001")
+                    self.assertTrue(result["canStartWorkflow"], result)
+                    self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
+                    self.assertEqual(result["workflowArgs"]["resumeMode"], "manual" if status == "blocked" else "automatic")
+                    if status == "ready_to_candidate":
+                        self.assertEqual(result["deliveryRecoveryBatchIds"], ["B001"])
+
     def test_launcher_starts_fixed_workflow_for_sealed_stage_recovery(self) -> None:
         """A Plan-projected done Batch must not hide an interrupted UTest."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -13,6 +13,7 @@ async function execute(frontend = false, fault = null) {
   const workspace = { workspaceRef: "default", componentRoots: ["."], executionStage: "parallel",
     requestedPath: "/source", worktreePath: "/worktree", branchName: "batch" };
   let revision = 1;
+  let queuedOnce = false;
   let reviewAdvisoryRecorded = false;
   const advisory = { issueId: "REVIEW-ADVISORY-B001-1", kind: "review_advisory", batchId: "B001", stage: "review",
     failureType: "external_uncertainty", message: "External API behavior is undocumented", disposition: "recorded_advisory",
@@ -25,7 +26,7 @@ async function execute(frontend = false, fault = null) {
     implementationRecoveryBatches: [], stageRecoveryBatches: [], retryPendingBatches: [], blockedBatches: [],
     parallelGroups: [], allParallelGroups: [], dispatchGrants: { B001: 1 },
     batchTaskIds: { B001: ["T001"] }, batchWorkspaces: { B001: workspace }, cleanupPending: [],
-    manifest: { batches: { B001: { ...delivery, status: merged ? "merged" : "pending",
+    manifest: { batches: { B001: { ...delivery, dispatchGeneration: 1, status: merged ? "merged" : "pending",
       dependencies: [], mergeCommitSha: merged ? "candidate" : null, recovery: {} } },
       mergeTrains: {}, deferredIssues: reviewAdvisoryRecorded ? [advisory] : [], skippedUtests: [] },
   });
@@ -36,10 +37,21 @@ async function execute(frontend = false, fault = null) {
     const label = options.label;
     labels.push(label);
     if (label === "verify-engineering-deployment") return { success: true };
-    if (label === "fixed-workflow-prepare") return snapshot(false);
+    if (label === "fixed-workflow-prepare") {
+      const state = snapshot(false);
+      if (fault === "sealed-recovery") {
+        state.scheduledGroups = [];
+        state.readyBatches = state.allReadyBatches = [];
+        state.stageRecoveryBatches = [{ ...delivery, recoveryKind: "stage_resume", nextStage: "delivery",
+          preserveWorktree: true, reprovision: false }];
+        state.manifest.batches.B001.status = "sealed";
+      }
+      return state;
+    }
     if (label.startsWith("dispatch-claim-")) return { success: true, batchId: "B001", status: "claimed", ownerToken: "owner", generation: 1 };
     if (label === "provision-worktree-B001") return { success: true, ...delivery, repositoryRef: "default" };
-    if (label === "fixed-batch-B001") return { ...delivery, status: "success" };
+    if (label === "fixed-batch-B001") return { ...delivery, status: "success",
+      commitSha: fault === "stale-sha" ? "transcribed-wrong" : delivery.commitSha };
     if (label === "stage-review-B001-attempt-1") {
       reviewAdvisoryRecorded = fault === "advisory";
       return { success: true, batchId: "B001", stage: "review", status: "passed" };
@@ -49,8 +61,20 @@ async function execute(frontend = false, fault = null) {
       return { success: true, batchId: "B001", stage: "review", status: "passed" };
     }
     if (label === "settle-delivery-B001-1") {
-      assert.match(prompt, /--expected-commit "sealed"/);
+      assert.doesNotMatch(prompt, /--expected-commit\s+"/);
       assert.match(prompt, /--skip-tests/);
+      if (fault === "queued" && !queuedOnce) {
+        queuedOnce = true;
+        const state = snapshot(false);
+        state.scheduledGroups = [];
+        state.readyBatches = state.allReadyBatches = [];
+        state.mergeableBatches = ["B001"];
+        state.manifest.batches.B001.status = "ready_to_candidate";
+        state.manifest.batches.B001.dispatch = { status: "waiting", generation: 1 };
+        return { success: true, status: "queued", batchId: "B001", runId: "run", dispatchGeneration: 1,
+          deliverySha: "sealed", dispatchFinalized: false, dispatchReleased: true,
+          blockingBatchIds: [], operationId: "operation", schedulerSnapshot: state };
+      }
       return { success: true, status: "merged", batchId: "B001", runId: "run", dispatchGeneration: 1,
         deliverySha: "sealed", mergeCommitSha: "candidate", dispatchFinalized: true,
         repositoryRef: "default", wave: 1, operationId: "operation", schedulerSnapshot: snapshot(true) };
@@ -111,6 +135,27 @@ test("nonblocking Review uncertainty survives through final baseline confirmatio
   assert.equal(result.deferredIssues[0].blocksWorkflow, false);
   assert.equal(labels.some(label => label.startsWith("triage-review-")), false);
   assert.ok(labels.includes("aggregate-staged-evidence"));
+});
+
+test("settlement uses Runtime SHA even when the implementation agent transcribed it incorrectly", async () => {
+  const { result } = await execute(false, "stale-sha");
+  assert.equal(result.finalStatus, "awaiting_user_confirmation");
+});
+
+test("queued delivery returns to dispatch without failure or consuming its grant", async () => {
+  const { labels, result } = await execute(false, "queued");
+  assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+  assert.equal(labels.filter(label => label === "dispatch-claim-B001-1").length, 2);
+  assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 2);
+  assert.equal(labels.some(label => /defer-batch|dispatch-finish/.test(label)), false);
+  assert.equal(labels.filter(label => label === "stage-review-B001-attempt-1").length, 1);
+});
+
+test("sealed delivery recovery goes straight to settlement without reimplementation or Review", async () => {
+  const { labels, result } = await execute(false, "sealed-recovery");
+  assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+  assert.equal(labels.some(label => /fixed-batch|provision-worktree|stage-review|validate-review/.test(label)), false);
+  assert.ok(labels.includes("settle-delivery-B001-1"));
 });
 
 for (const frontend of [false, true]) {

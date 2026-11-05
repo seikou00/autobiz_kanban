@@ -26,7 +26,7 @@ from hooks.json_writer_common import atomic_write_json, feature_dir, resolve_wor
 from hooks.workflow_sandbox_contract import validate_workflow_source
 from hooks.engineering_contract import runtime_contract
 from hooks.commit_message import normalize_task_card_id  # noqa: E402
-from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
+from hooks.parallel_batch_scheduler import can_manually_resume_batch, validate_plan_for_parallel  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     batch_workspace_ref,
     batch_write_set,
@@ -520,20 +520,18 @@ def analyze_batches(
             str(batch_id)
             for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
             if isinstance(batch, dict)
-            and (
-                batch.get("status") in {"retry_pending", "failed"}
-                or (
-                    batch.get("status") == "blocked"
-                    and isinstance(batch.get("recovery"), dict)
-                    and batch["recovery"].get("status") == "retry_exhausted"
-                )
-            )
+            and can_manually_resume_batch(batch)
         } - implementation_recovery_batch_ids
         stage_recovery_batch_ids = set(stage_recovery_batches(active_manifest or {}))
+        delivery_recovery_batch_ids = {
+            str(batch_id) for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
+            if isinstance(batch, dict) and batch.get("status") == "ready_to_candidate" and batch.get("commitSha")
+        }
         recovery_batch_ids = (
             retry_recovery_batch_ids
             | implementation_recovery_batch_ids
             | stage_recovery_batch_ids
+            | delivery_recovery_batch_ids
         )
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
         manual_resume = bool(active_run_id and retry_recovery_batch_ids)
@@ -655,6 +653,7 @@ def analyze_batches(
             "retryRecoveryBatchIds": sorted(retry_recovery_batch_ids),
             "implementationRecoveryBatchIds": sorted(implementation_recovery_batch_ids),
             "stageRecoveryBatchIds": sorted(stage_recovery_batch_ids),
+            "deliveryRecoveryBatchIds": sorted(delivery_recovery_batch_ids),
         }
         runtime_config = _load_runtime_config(artifact_workspace)
         max_parallel = runtime_config["maxParallel"]

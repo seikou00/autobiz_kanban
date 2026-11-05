@@ -52,6 +52,11 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
                     "generation": generation(batch), "reasonCode": reason}
         if expected != generation(batch):
             return denied("stale_generation")
+        queue = batch.get("deliveryQueue") or {}
+        blockers = queue.get("blockingBatchIds") or []
+        if (queue.get("retryAfterEpoch", 0) > time.time()
+                and (not blockers or any(batches.get(key, {}).get("status") != "merged" for key in blockers))):
+            return denied("delivery_queue_wait")
         previous = batch.get("dispatch", {})
         if active_claim(batch):
             if request_id and previous.get("requestId") == request_id and previous.get("worker") == worker:
@@ -91,6 +96,7 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
                 return denied("dependencies_unmerged")
         token = uuid.uuid4().hex
         metadata = {"generation": expected, "status": "running", "worker": worker,
+                    "claimedEpoch": time.time(),
                     "requestId": request_id, "tokenSha256": hashlib.sha256(token.encode()).hexdigest(),
                     "expiresEpoch": time.time() + max(60, ttl), "ttlSeconds": max(60, ttl), "source": source}
         path = run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")
@@ -108,11 +114,12 @@ def finish(workspace: Path, feature: str, run_id: str, batch_id: str, expected: 
         batch = manifest["batches"][batch_id]
         current = batch.get("dispatch", {})
         if (generation(batch) != expected or current.get("generation") != expected
-                or current.get("expiresEpoch", 0) <= time.time()
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if current.get("status") != "running":
             return {"success": True, "status": "already_finished", "batchId": batch_id}
+        if current.get("expiresEpoch", 0) <= time.time():
+            return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         current.update(status=outcome, completedEpoch=time.time())
         save_manifest(workspace, feature, run_id, manifest)
         path = run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")

@@ -19,7 +19,7 @@ const MAX_SCHEDULER_CYCLES = 100;
 // outside the worker that currently owns the only active lifecycle.
 const DISPATCH_POLL_INTERVAL_MS = 60 * 1000;
 const schedulerControlState = { available: true, failures: 0 };
-const deliveryControl = { deliveries: new Map(), finalized: new Map() };
+const deliveryControl = { deliveries: new Map(), finalized: new Map(), waiting: new Map() };
 // The scheduler is the authority for the per-Batch retry budget (currently
 // two failure admissions). Keep one extra pass to let the scheduler turn a
 // legacy retry marker with a zero counter into its explicit exhausted state.
@@ -108,7 +108,7 @@ const STAGE_RECOVERY_ENTRY_SCHEMA = {
     // canonicalize their meaning at the Workflow boundary below.
     preserveWorktree: { type: "boolean" },
     reprovision: { type: "boolean" },
-    nextStage: { enum: ["prepare", "implement", "review", "test"] },
+    nextStage: { enum: ["prepare", "implement", "review", "test", "delivery"] },
     failureContext: RECOVERY_FAILURE_CONTEXT_SCHEMA
   },
   required: [
@@ -313,6 +313,8 @@ const DELIVERY_SETTLEMENT_SCHEMA = {
     runId: { type: "string" }, batchId: { type: "string" }, dispatchGeneration: { type: "integer" },
     operationId: { type: "string" }, deliverySha: { type: "string" }, mergeCommitSha: { type: "string" },
     dispatchFinalized: { type: "boolean" }, wave: { type: "integer" }, repositoryRef: { type: "string" },
+    dispatchReleased: { type: "boolean" }, reasonCode: { type: "string" },
+    blockingBatchIds: { type: "array", items: { type: "string" } },
     conflictContext: { type: "object" }, worktreePath: { type: "string" },
     repairRequired: { type: "boolean" }, batchIds: { type: "array", items: { type: "string" } },
     receipt: { type: "object", properties: {
@@ -671,7 +673,7 @@ function requireSchedulerResult(value, label) {
     || !usableString(recovery.worktreePath)
     || !usableString(recovery.branchName)
     || !usableString(recovery.commitSha)
-    || !["prepare", "implement", "review", "test"].includes(recovery.nextStage)
+    || !["prepare", "implement", "review", "test", "delivery"].includes(recovery.nextStage)
     || (recovery.failureContext !== undefined && (
       !isObject(recovery.failureContext)
       || !usableString(recovery.failureContext.failedStage)
@@ -1683,7 +1685,7 @@ async function continueRecoveredDelivery(recovery) {
     // Scheduler stage recovery is a durable checkpoint, not a request to
     // replay already-passed Review. Retained test-stage recoveries go directly
     // to delivery admission, which records testing as skipped.
-    const initialOptions = recovery.nextStage === "test"
+    const initialOptions = ["test", "delivery"].includes(recovery.nextStage)
       ? { reviewResolvedByRepair: true }
       : {};
     return runDeliveryWithImplementationRepair(recovery, initialOptions);
@@ -1861,16 +1863,15 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
 
 async function settleReadyBatch(batchId) {
   const grant = activeDispatchGrants.get(batchId);
-  const delivery = deliveryControl.deliveries.get(batchId)
-    || (lastScheduler.manifest && lastScheduler.manifest.batches[batchId]);
-  if (!grant || !delivery || !usableString(delivery.commitSha)) throw new Error(`delivery_context_missing:${batchId}`);
+  if (!grant) throw new Error(`delivery_context_missing:${batchId}`);
   const command = `python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" settle-delivery ` +
     `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ` +
-    `--dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}" --expected-commit "${delivery.commitSha}" --skip-tests`;
+    `--dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}" --skip-tests`;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const result = unwrap(await workflowAgent(
       `只执行 ${command}。插件连续完成 gate、仓库队列、候选构建与推广、Plan 对账、清理登记及 dispatch 收尾。` +
       `遵循托管后台协议，仅启动一次并等同一 task_id 的终态；不得拆成旧 build/promote/gate 命令，不得自行执行 Git 或删除目录。` +
+      `Runtime 从当前封存记录固定交付 SHA，禁止自行添加 --expected-commit 或转写提交号。queued 是正常排队，完整返回 dispatchReleased、blockingBatchIds 和 schedulerSnapshot，不得等待其他 Batch、重启命令或当成失败。` +
       `完整保留 schedulerSnapshot、dispatchFinalized、operationId、generation、SHA 与 conflictContext；冲突原样返回，不能当成成功。`,
       { label: `settle-delivery-${batchId}-${attempt}`, phase: "候选集成", schema: DELIVERY_SETTLEMENT_SCHEMA }
     ));
@@ -1883,8 +1884,25 @@ async function settleReadyBatch(batchId) {
       throw new Error(`delivery_resolution_required:${batchId}`);
     }
     requireSuccess(result, `settle delivery ${batchId}`);
+    if (result.status === "queued") {
+      const snapshot = requireSchedulerResult(result.schedulerSnapshot, `queued delivery ${batchId}`);
+      const current = snapshot.manifest && snapshot.manifest.batches[batchId];
+      if (result.batchId !== batchId || result.runId !== runId || result.dispatchGeneration !== grant.generation
+          || !usableString(result.operationId) || !usableString(result.deliverySha)
+          || typeof result.dispatchReleased !== "boolean" || result.dispatchFinalized !== false
+          || !Array.isArray(result.blockingBatchIds) || !current || current.commitSha !== result.deliverySha
+          || current.dispatchGeneration !== grant.generation
+          || (current.dispatch || {}).status !== (result.dispatchReleased ? "waiting" : "running")) {
+        throw new Error(`delivery_queue_receipt_invalid:${batchId}`);
+      }
+      applySchedulerState(snapshot);
+      schedulerControlState.available = true;
+      schedulerControlState.failures = 0;
+      deliveryControl.waiting.set(batchId, grant.generation);
+      return { batchId, status: "queued", operationId: result.operationId, durable: true };
+    }
     if (result.status !== "merged" || result.batchId !== batchId || result.runId !== runId
-        || result.dispatchGeneration !== grant.generation || result.deliverySha !== delivery.commitSha
+        || result.dispatchGeneration !== grant.generation || !usableString(result.deliverySha)
         || result.dispatchFinalized !== true || !usableString(result.mergeCommitSha) || !usableString(result.operationId)
         || !usableString(result.repositoryRef) || !Number.isInteger(result.wave) || result.wave < 1) {
       throw new Error(`delivery_settlement_incomplete:${batchId}`);
@@ -1892,7 +1910,8 @@ async function settleReadyBatch(batchId) {
     const snapshot = requireSchedulerResult(result.schedulerSnapshot, `delivery snapshot ${batchId}`);
     const merged = snapshot.manifest && snapshot.manifest.batches[batchId];
     if (snapshot.runId !== runId || !Number.isInteger(snapshot.controlRevision) || snapshot.controlProtocolVersion !== 2
-        || !merged || merged.status !== "merged" || merged.mergeCommitSha !== result.mergeCommitSha) {
+        || !merged || merged.status !== "merged" || merged.mergeCommitSha !== result.mergeCommitSha
+        || merged.commitSha !== result.deliverySha) {
       throw new Error(`delivery_snapshot_invalid:${batchId}`);
     }
     applySchedulerState(snapshot);
@@ -2432,14 +2451,16 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
           `dispatch-claim-${job.batchId}-${job.generation}`);
         if (acquired.status === "claimed" && usableString(acquired.ownerToken)) {
           grant = { generation: job.generation, ownerToken: acquired.ownerToken };
+          if (typeof deliveryControl !== "undefined") deliveryControl.waiting.delete(job.batchId);
           activeDispatchGrants.set(job.batchId, grant);
           if (!canStartLifecycle()) return;
           idlePolls = 0;
           idleStarted = dispatchSnapshotEpoch(lastScheduler);
           dispatcherState.ranAny = true;
           const result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback, job.generation);
+          if (result && result.status === "queued") claimedBatchIds.delete(job.grantKey);
           outcome = result && result.status === "retry_pending" ? "retry_pending" : result && ["merged", "ready_to_candidate"].includes(result.status) ? "completed" : "failed";
-        } else if (["capacity_full", "running", "business_lease_held", "resource_or_stage_conflict"].includes(acquired.reasonCode)) {
+        } else if (["capacity_full", "running", "business_lease_held", "resource_or_stage_conflict", "delivery_queue_wait"].includes(acquired.reasonCode)) {
           claimedBatchIds.delete(job.grantKey);
           claimDeferred = true;
         } else {
@@ -2461,7 +2482,8 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
         if (grant) {
           try {
             if (!(typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2
-                && deliveryControl.finalized.get(job.batchId) === job.generation)) {
+                && (deliveryControl.finalized.get(job.batchId) === job.generation
+                    || deliveryControl.waiting.get(job.batchId) === job.generation))) {
               await dispatchCommand("finish", { ...job, ...grant }, `--outcome "${outcome}"`, `dispatch-finish-${job.batchId}-${job.generation}`);
             }
           } catch (error) {
@@ -2478,7 +2500,8 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       // already returned that snapshot while closing the dispatch; other paths
       // still refresh immediately and stop admission on a failed read.
       const state = typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2
-          && deliveryControl.finalized.get(job.batchId) === job.generation && schedulerControlState.available
+          && (deliveryControl.finalized.get(job.batchId) === job.generation
+              || deliveryControl.waiting.get(job.batchId) === job.generation) && schedulerControlState.available
         ? lastScheduler
         : await refreshSchedulerForDispatch(`${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}-worker-${workerIndex}`);
       if (!state) {

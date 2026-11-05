@@ -977,6 +977,8 @@ def schedule(
                     "blockedBatches": [], "parallelGroups": [], "allParallelGroups": [], "dispatchGrants": {},
                     "batchTaskIds": {}, "batchWorkspaces": {}, "activeWorkers": 0,
                     "maxParallel": manifest["maxParallel"], **promotion_view(manifest)}
+        from hooks.parallel_delivery import reconcile_deliveries_locked
+        reconcile_deliveries_locked(workspace, feature, run_id, manifest)
         for batch_id, batch in manifest.get("batches", {}).items():
             dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
@@ -1290,7 +1292,7 @@ def schedule(
                     "recoveryKind": "stage_resume",
                     "preserveWorktree": True,
                     "reprovision": False,
-                    "nextStage": "implement" if failure_context is not None else next_stage,
+                    "nextStage": "implement" if failure_context is not None else next_stage or "delivery",
                     **(
                         {"failureContext": failure_context}
                         if failure_context is not None
@@ -1897,6 +1899,17 @@ def resume_run(
     return result
 
 
+def can_manually_resume_batch(batch: dict[str, Any]) -> bool:
+    recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+    return batch.get("status") in {"retry_pending", "failed"} or (
+        batch.get("status") == "blocked"
+        and (recovery.get("status") == "retry_exhausted"
+             or (recovery.get("status") == "unchanged_failure"
+                 and recovery.get("failureClassification") == "retryable"
+                 and bool(batch.get("commitSha")) and _next_open_delivery_stage(batch) is None))
+    )
+
+
 def manual_resume_run(
     workspace: Path,
     feature: str,
@@ -1927,14 +1940,7 @@ def manual_resume_run(
                 continue
             batch_id = str(raw_batch_id)
             recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
-            retryable = (
-                batch.get("status") in {"retry_pending", "failed"}
-                or (
-                    batch.get("status") == "blocked"
-                    and recovery.get("status") == "retry_exhausted"
-                )
-            )
-            if not retryable:
+            if not can_manually_resume_batch(batch):
                 continue
             batch["recovery"] = {
                 **recovery,

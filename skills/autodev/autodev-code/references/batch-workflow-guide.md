@@ -205,6 +205,15 @@ provisioned.
    reads retry after 5/10/20/30 seconds, capped at 30 seconds. Capacity waits are
    at most 30 seconds and denied claims wait 15 seconds or an earlier completion.
    No worker dispatches from an unavailable or superseded snapshot.
+   `settle-delivery` resolves and pins the sealed SHA inside Runtime; the
+   Workflow does not transcribe `--expected-commit`. Queue/repository-lock waits
+   return `queued` with an operation ID, blockers and a scheduler snapshot,
+   release the dispatch slot and retain the ticket for a later claim. Waiting
+   does not consume a Batch failure retry. A process execution lock lets Runtime
+   recover an abandoned settler without revoking an active merge or conflict edit.
+   Sealed Batches with closed stages resume at `nextStage=delivery`, without
+   replaying implementation or Review. A retained candidate/reservation is reused;
+   an already-merged Batch only needs its operation/dispatch receipts reconciled.
    A failure releases that worker to dispatch an unrelated Batch; dependents
    remain blocked until their dependency is merged.
 2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
