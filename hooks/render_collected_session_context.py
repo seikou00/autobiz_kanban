@@ -742,15 +742,11 @@ UNEXPANDED_PLACEHOLDER_RE = re.compile(r"\$\{[^}]*\}")
 def _expand_knowledge_option(option: str, raw: str) -> List[str]:
     """把一个知识库参数展开为候选目录列表。
 
-    宿主替换 ``${knowledgePath}`` 后可能得到 JSON 数组 ``[{"name":..,"path":..}]``，取每项 ``path``；
-    普通值按单个目录处理。未替换的宿主占位符记日志并视同未传。
+    宿主替换 ``${knowledgePath}`` 后可能得到 JSON 数组 ``[{"name":..,"path":..}]``，取每项 ``path``，
+    只剔除仍含未替换占位符的项；普通值按单个目录处理，含未替换的宿主占位符时记日志并视同未传。
     """
     value = (raw or "").strip()
     if not value:
-        return []
-    if UNEXPANDED_PLACEHOLDER_RE.search(value):
-        _timing_log("knowledge.path", "ignored",
-                    "{} 含未替换的宿主占位符: {}".format(option, value))
         return []
     if value.startswith("["):
         try:
@@ -762,9 +758,16 @@ def _expand_knowledge_option(option: str, raw: str) -> List[str]:
             for entry in entries:
                 if isinstance(entry, dict) and isinstance(entry.get("path"), str):
                     item = entry["path"].strip()
-                    if item and not UNEXPANDED_PLACEHOLDER_RE.search(item):
+                    if UNEXPANDED_PLACEHOLDER_RE.search(item):
+                        _timing_log("knowledge.path", "ignored",
+                                    "{} 数组项含未替换的宿主占位符: {}".format(option, item))
+                    elif item:
                         paths.append(item)
             return paths
+    if UNEXPANDED_PLACEHOLDER_RE.search(value):
+        _timing_log("knowledge.path", "ignored",
+                    "{} 含未替换的宿主占位符: {}".format(option, value))
+        return []
     return [value]
 
 

@@ -361,6 +361,22 @@ class CollectedSessionContextTest(unittest.TestCase):
             self.assertEqual(resolved, str(platform))
             self.assertEqual(_resolve_knowledge_path("", value, []), str(decoy))
 
+    def test_platform_json_array_drops_only_unexpanded_entries(self):
+        from hooks.render_collected_session_context import _resolve_knowledge_path
+
+        value = json.dumps([
+            {"name": "未替换", "path": "${pluginPath}/kb"},
+            {"name": "平台知识库", "path": "platform path"},
+        ], ensure_ascii=False)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(_resolve_knowledge_path("legacy path", value), "platform path")
+        self.assertIn("数组项含未替换的宿主占位符: ${pluginPath}/kb", stderr.getvalue())
+
+        only_unexpanded = json.dumps([{"name": "未替换", "path": "${pluginPath}/kb"}])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(_resolve_knowledge_path("legacy path", only_unexpanded), "legacy path")
+
     def test_cli_unexpanded_platform_placeholder_still_loads_plugin_knowledge(self):
         plugin_root = _legacy_plugin_root()
         args = [
