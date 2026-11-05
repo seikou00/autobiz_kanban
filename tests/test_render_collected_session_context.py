@@ -318,8 +318,8 @@ class CollectedSessionContextTest(unittest.TestCase):
             (["--knowledge-path", "legacy path", "--knowledge-path-platform", "  "], "legacy path"),
             (["--knowledge-path", "legacy path", "--knowledge-path-platform", "platform path"], "platform path"),
             # 宿主未替换占位符时会原样传入，不能当成相对路径使用。
-            (["--knowledge-path", "legacy path", "--knowledge-path-platform", "${knowledge-path}"], "legacy path"),
-            (["--knowledge-path", "${pluginPath}/sys", "--knowledge-path-platform", "${knowledge-path}"], ""),
+            (["--knowledge-path", "legacy path", "--knowledge-path-platform", "${knowledgePath}"], "legacy path"),
+            (["--knowledge-path", "${pluginPath}/sys", "--knowledge-path-platform", "${knowledgePath}"], ""),
             (["--knowledge-path", "${pluginPath}/sys", "--knowledge-path-platform", "platform path"], "platform path"),
         )
         for args, expected in cases:
@@ -331,8 +331,35 @@ class CollectedSessionContextTest(unittest.TestCase):
                 ) as mocked_render, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
                     self.assertEqual(_main(args), 0)
                 self.assertEqual(mocked_render.call_args.kwargs["knowledge_path"], expected)
-                if "${knowledge-path}" in args:
+                if "${knowledgePath}" in args:
                     self.assertIn("未替换的宿主占位符", stderr.getvalue())
+
+    def test_platform_json_array_selects_entry_indexing_selected_unit(self):
+        from hooks.render_collected_session_context import _resolve_knowledge_path
+
+        with tempfile.TemporaryDirectory(prefix="kp-json-中文 ") as tmp:
+            root = Path(tmp)
+            decoy = root / "decoy"
+            platform = root / "platform"
+            decoy.mkdir()
+            platform.mkdir()
+            (decoy / "agents.manifest.json").write_text(json.dumps({"systems": []}), encoding="utf-8")
+            (platform / "agents.manifest.json").write_text(json.dumps({"systems": [{
+                "systemId": "SYS",
+                "agentsPath": "SYS/AGENTS.md",
+                "deployUnits": [{
+                    "deployUnitId": "DEMO.api",
+                    "description": "description.md",
+                    "agentsPath": "DEMO/AGENTS.md",
+                }],
+            }]}, ensure_ascii=False), encoding="utf-8")
+            value = json.dumps([
+                {"name": "无关知识库", "path": str(decoy)},
+                {"name": "平台知识库", "path": str(platform)},
+            ], ensure_ascii=False)
+            resolved = _resolve_knowledge_path("", value, ["DEMO.api"])
+            self.assertEqual(resolved, str(platform))
+            self.assertEqual(_resolve_knowledge_path("", value, []), str(decoy))
 
     def test_cli_unexpanded_platform_placeholder_still_loads_plugin_knowledge(self):
         plugin_root = _legacy_plugin_root()
@@ -341,7 +368,7 @@ class CollectedSessionContextTest(unittest.TestCase):
             json.dumps([{"deployUnitId": "LF39.18_wg_flow", "localRepoPath": ""}]),
             "--knowledge-collector", str(plugin_root / "collect-knowledge.js"),
             "--knowledge-path", str(plugin_root / "sys"),
-            "--knowledge-path-platform", "${knowledge-path}",
+            "--knowledge-path-platform", "${knowledgePath}",
         ]
         stdout = io.StringIO()
         with patch(
@@ -353,7 +380,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertIn("# 旧知识库正文", payload["sessionContext"])
         self.assertIn("remote 1 / local 0 / 缺 0", payload["message"])
-        self.assertNotIn("${knowledge-path}", payload["message"])
+        self.assertNotIn("${knowledgePath}", payload["message"])
 
     def test_board_config_routes_session_hook_to_adapter(self):
         config = json.loads(
@@ -363,7 +390,7 @@ class CollectedSessionContextTest(unittest.TestCase):
             command = config["inspectCommands"][platform]["session_context_inject"]
             separator = "\\" if platform == "win32" else "/"
             self.assertIn("render_collected_session_context.py", command)
-            self.assertIn('--knowledge-path-platform "${knowledge-path}"', command)
+            self.assertIn('--knowledge-path-platform "${knowledgePath}"', command)
             self.assertIn(
                 "--knowledge-collector ${{pluginPath}}{0}hooks{0}collect-knowledge.js".format(
                     separator
