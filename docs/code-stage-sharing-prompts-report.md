@@ -1,5 +1,7 @@
 # Code 阶段跨 Batch 与单 Batch 跨阶段共享：提示词核对报告
 
+> 本文为先前版本的提示词快照。当前固定 Workflow 已移除前后端 UTest 和 E2E，不再使用本文中的测试派发提示词；当前流程以 workflows/code-batched-execution.workflow.js 和 autodev-code/SKILL.md 为准。
+
 核对日期：2026-11-02（Asia/Shanghai）。范围：当前工作区源码，包含现有未提交修改；Git 基线 `548719c597b5c4618629307e05e1fa1e18d6f7f1`。本报告仅新增文档，没有修改实现、角色或提示词，没有启动业务 Workflow，也没有读取某个具体 Run 的生产执行记录。
 
 结论：当前通过 **Feature 级工程事实缓存 + Run/Batch 级实现交接与修复上下文** 完成复用。提示词分为 Workflow 直接组装的字符串、按指令读取的角色/协议文件、Runtime 返回的动态 brief / operations。三类内容的生效条件不同，下文逐一列出原文。

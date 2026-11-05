@@ -12,12 +12,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hooks.parallel_batch_scheduler import create_run, mark_batch, schedule
-from hooks.parallel_batch_stage import start_stage, complete_stage
+from hooks.parallel_batch_stage import start_stage, complete_stage, review_checkpoint
+from hooks.parallel_evidence_aggregate import aggregate_evidence
 from hooks.parallel_dispatch import claim
 from hooks.parallel_delivery import settle_delivery, prepare_finalization
 from hooks.parallel_cleanup import drain, pending
-from hooks.parallel_runtime import load_manifest, run_lock, save_manifest
-from hooks.parallel_integration import git, integration_repo
+from hooks.parallel_runtime import load_manifest, run_lock, save_manifest, run_dir
+from hooks.parallel_integration import git, integration_repo, prepare_promotion
 from hooks import parallel_merge_train as train
 from tests.test_task_runner import _workspace, _refresh_parallel_pipeline
 
@@ -63,7 +64,7 @@ class DeliveryTest(unittest.TestCase):
     def manifest(self):
         return load_manifest(self.workspace, "alpha", self.run)
 
-    def delivery(self, batch_id="B001", content=None, review=True):
+    def delivery(self, batch_id="B001", content=None, review=True, skip_tests=False):
         from hooks.worktree_manager import provision_parallel_worktree
         owner = claim(self.workspace, "alpha", self.run, batch_id, 1, "initial", batch_id)
         self.assertEqual(owner["status"], "claimed", owner)
@@ -76,10 +77,51 @@ class DeliveryTest(unittest.TestCase):
         sha = git(tree, "rev-parse", "HEAD")
         mark_batch(self.workspace, "alpha", self.run, batch_id, "sealed", worktreePath=str(tree),
                    branchName=result["branchName"], commitSha=sha)
-        for stage in ("prepare", "implement", *(("review", "test") if review else ())):
+        stages = ["prepare", "implement"]
+        if review:
+            stages.extend(("review",) if skip_tests else ("review", "test"))
+        for stage in stages:
             start_stage(self.workspace, "alpha", self.run, batch_id, stage)
             complete_stage(self.workspace, "alpha", self.run, batch_id, stage, metadata={"batchCommit": sha})
         return (self.workspace, "alpha", self.run, batch_id, 1, owner["ownerToken"], sha), tree
+
+    def test_frontend_and_backend_deliver_without_any_test_preparation_or_execution(self):
+        self.create(2)
+        baseline = git(self.repo, "rev-parse", "HEAD")
+        manifest = self.manifest()
+        for batch_id, lane in (("B001", "frontend"), ("B002", "backend")):
+            manifest["batches"][batch_id]["executionLane"] = lane
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        with patch("hooks.utest_assignment_router.build_assignments", side_effect=AssertionError("test assignment must not run")), \
+                patch("hooks.engineering_context.execute", side_effect=AssertionError("test environment must not be prepared")):
+            for batch_id in ("B001", "B002"):
+                args, _ = self.delivery(batch_id, skip_tests=True)
+                checkpoint = review_checkpoint(self.workspace, "alpha", self.run, batch_id, skip_tests=True)
+                self.assertEqual(checkpoint["utestPreparation"]["skipReason"], "utest_temporarily_disabled")
+                before = self.manifest()["batches"][batch_id]["stageStates"]["test"]
+                self.assertEqual(settle_delivery(*args, skip_tests=True)["status"], "merged")
+                self.assertEqual(self.manifest()["batches"][batch_id]["stageStates"]["test"], before)
+                self.assertTrue(settle_delivery(*args, skip_tests=True)["reused"])
+            self.assertFalse(prepare_finalization(self.workspace, "alpha", self.run)["repairRequired"])
+            report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["e2eStatus"], "skipped")
+        self.assertEqual({item["executionLane"] for item in report["skippedUtests"]}, {"frontend", "backend"})
+        self.assertTrue(all(item["reason"] == "utest_temporarily_disabled" for item in report["skippedUtests"]))
+        directory = run_dir(self.workspace, "alpha", self.run)
+        self.assertFalse((directory / "utest").exists())
+        self.assertFalse((directory / "validation-worktrees").exists())
+        approval = prepare_promotion(self.workspace, "alpha", self.run)
+        self.assertEqual(approval["mainPromotion"]["status"], "prepared")
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), baseline)
+
+    def test_removing_tests_does_not_bypass_review_or_a_stale_dispatch(self):
+        self.create()
+        args, _ = self.delivery(review=False, skip_tests=True)
+        with self.assertRaisesRegex(ValueError, "requires_review_passed"):
+            settle_delivery(*args, skip_tests=True)
+        with self.assertRaisesRegex(ValueError, "stale_stage_owner"):
+            settle_delivery(*(*args[:5], "invalid-token", args[6]), skip_tests=True)
 
     def test_settle_replays_without_git_mutation_and_cleanup_is_deferred(self):
         self.create()

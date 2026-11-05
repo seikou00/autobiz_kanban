@@ -62,7 +62,7 @@ const fs = require("fs"), vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const context = vm.createContext({});
 vm.runInContext(source.slice(0, source.indexOf("function normalizeStructuredOutput(")).replace("export const meta =", "const meta =") +
-  "\nglobalThis.schemas = { SCHEDULER_RESULT_SCHEMA, DISPATCH_RESULT_SCHEMA, WORKTREE_SCHEMA, SINGLE_REPAIR_RESULT_SCHEMA, UTEST_PREPARATION_SCHEMA, REVIEW_VALIDATION_SCHEMA };", context);
+  "\nglobalThis.schemas = { SCHEDULER_RESULT_SCHEMA, DISPATCH_RESULT_SCHEMA, WORKTREE_SCHEMA, SINGLE_REPAIR_RESULT_SCHEMA, REVIEW_VALIDATION_SCHEMA };", context);
 process.stdout.write(JSON.stringify(context.schemas));
 '''
         result = subprocess.run(["node", "-e", script, str(ROOT / "workflows/code-batched-execution.workflow.js")], capture_output=True, text=True, check=True)
@@ -117,7 +117,6 @@ process.stdout.write(JSON.stringify(context.schemas));
         commands = [
             (scheduler_main, "SCHEDULER_RESULT_SCHEMA", ["status", "--workflow-view"]),
             (stage_main, "SINGLE_REPAIR_RESULT_SCHEMA", ["record-single-repair", "--batch-id", "B404", "--failed-stage", "review", "--metadata-json", "{}"]),
-            (stage_main, "UTEST_PREPARATION_SCHEMA", ["prepare-test", "--batch-id", "B404"]),
             (stage_main, "REVIEW_VALIDATION_SCHEMA", ["validate-review-result", "--batch-id", "B404"]),
         ]
         for main, name, command in commands:

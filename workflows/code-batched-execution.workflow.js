@@ -1,20 +1,18 @@
 export const meta = {
   name: "code-batched-execution",
-  description: "Batch DAG with isolated feature integration, E2E and user-confirmed baseline branch promotion",
+  description: "Batch DAG with implementation, Review, isolated integration and user-confirmed baseline promotion",
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
     { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 集合" },
-    { title: "Batch 阶段", detail: "编码 → review → UTest/封存；Review 可定向修复一次，UTest 失败记录后继续" },
-    { title: "候选验证", detail: "Merge Train 合成并推广已完成 Review 与 UTest 记录的候选 SHA" },
-    { title: "最终验证", detail: "E2E 暂时跳过并记录原因；聚合证据后准备基线合并确认" }
+    { title: "Batch 阶段", detail: "编码 → 封存 → Review；生产缺陷可定向修复一次" },
+    { title: "候选集成", detail: "Merge Train 集成已完成 Review 的候选 SHA" },
+    { title: "最终汇总", detail: "汇总既有证据和测试未执行记录，准备基线合并确认" }
   ]
 };
 
 const DEFAULT_MAX_PARALLEL = 5;
 const DEFAULT_BATCH_TIMEOUT_SECONDS = 4 * 60 * 60;
 const MAX_SCHEDULER_CYCLES = 100;
-// Temporary policy: retain an explicit skip receipt without running E2E.
-const E2E_TEMPORARILY_DISABLED = true;
 // Idle dispatch workers keep checking the durable scheduler snapshot while
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
@@ -27,9 +25,8 @@ const deliveryControl = { deliveries: new Map(), finalized: new Map() };
 // legacy retry marker with a zero counter into its explicit exhausted state.
 // Final repair keeps draining until that budget is consumed or no retry remains.
 const MAX_FINAL_RETRY_DRAINS = 3;
-// Review findings and production defects proven by UTest each receive one
-// targeted repair. A deferred UTest remains explicit evidence and may proceed
-// through an unverified candidate; final reporting preserves that disposition.
+// Review findings receive one targeted repair. Keep support for production
+// findings already recorded by older runs, without restarting their tests.
 const SINGLE_REPAIRABLE_STAGES = new Set(["review", "test"]);
 const BATCH_RESULT_SCHEMA = {
   type: "object",
@@ -384,7 +381,6 @@ const REVIEW_STAGE_RESULT_SCHEMA = {
 const REVIEW_VALIDATION_SCHEMA = {
   type: "object",
   properties: {
-    utestPreparation: { type: "object" },
     ok: { type: "boolean" },
     success: { type: "boolean" },
     batchId: { type: "string" },
@@ -459,83 +455,6 @@ const WORKTREE_SCHEMA = {
     readiness: { type: "object", additionalProperties: true }
   },
   required: ["success"],
-  additionalProperties: false
-};
-// prepare-test is control-plane data, reused from the independent Review
-// checkpoint when available; it is not a UTest execution result. Declare both backend policy/context and frontend skip evidence so
-// structured transports do not replace this handoff with a generic success.
-const UTEST_PREPARATION_SCHEMA = {
-  type: "object",
-  properties: {
-    assignments: { type: "array", items: { type: "object" } },
-    ok: { type: "boolean" },
-    success: { type: "boolean" },
-    batchId: { type: "string" },
-    status: { enum: ["test_required", "skipped", "failed"] },
-    stage: { type: "string" },
-    runtimeContractDigest: { type: "string" },
-    utestPolicy: {
-      type: "object",
-      properties: {
-        version: { type: "string" },
-        stageSeconds: { type: "integer", minimum: 1 },
-        firstExecutionSeconds: { type: "integer", minimum: 1 },
-        commandSeconds: { type: "integer", minimum: 1 },
-        strategyChanges: { type: "integer", minimum: 0 },
-        testRepairs: { type: "integer", minimum: 0 },
-        sourceRepairs: { type: "integer", minimum: 0 },
-        indexSeconds: { type: "integer", minimum: 1 },
-        digest: { type: "string" }
-      },
-      required: ["stageSeconds", "firstExecutionSeconds", "commandSeconds", "digest"],
-      additionalProperties: true
-    },
-    engineeringContext: {
-      type: "object",
-      properties: {
-        ok: { type: "boolean" }, status: { type: "string" },
-        contextPath: { type: "string" }, contextDigest: { type: "string" },
-        commandCatalogPath: { type: "string" },
-        allowedReads: { type: "array", items: { type: "string" } },
-        summary: { type: "object", additionalProperties: true },
-        brief: { type: "object", additionalProperties: true }
-      },
-      additionalProperties: true
-    },
-    testStatus: { type: "string" },
-    skipReason: { type: "string" },
-    worktreePath: { type: "string" },
-    branchName: { type: "string" },
-    commitSha: { type: "string" },
-    stageEvidenceId: { type: "string" },
-    reused: { type: "boolean" },
-    error: { type: "string" }
-  },
-  required: [],
-  additionalProperties: true
-};
-const UTEST_STAGE_SCHEMA = {
-  type: "object",
-  properties: {
-    batchId: { type: "string" },
-    status: { enum: ["success", "failed", "timeout", "deferred"] },
-    testStatus: { enum: ["passed", "skipped", "deferred", "source_repair_required", "timed_out"] },
-    skipReason: { type: "string" },
-    worktreePath: { type: "string" },
-    branchName: { type: "string" },
-    commitSha: { type: "string" },
-    testEvidenceIds: { type: "array", items: { type: "string" } },
-    stageEvidenceId: { type: "string" },
-    failureType: { type: "string" },
-    nextStage: { type: "string" },
-    failure: { type: "object" },
-    testFailure: { type: "object" },
-    errorMessage: { type: "string" },
-    repairContextPath: { type: "string" },
-    repairContextDigest: { type: "string" },
-    affectedTaskIds: { type: "array", items: { type: "string" } }
-  },
-  required: ["batchId", "status", "worktreePath", "branchName", "commitSha"],
   additionalProperties: false
 };
 const MERGED_CLEANUP_SCHEMA = {
@@ -659,24 +578,6 @@ function requireSuccess(value, label) {
   const result = unwrap(value);
   if (!result || result.unparsedStructuredOutput === true || hasFailureSignal(result)) {
     throw new Error(`${label} failed: ${JSON.stringify(result)}`);
-  }
-  return result;
-}
-
-function requireUtestPreparation(value, batchId) {
-  const result = requireSuccess(value, `prepare test ${batchId}`);
-  if (result.success !== true || !usableString(result.batchId)
-      || !["test_required", "skipped"].includes(result.status)) {
-    throw new Error(`utest_preparation_invalid:${batchId}:${JSON.stringify({
-      success: result.success, batchId: result.batchId, status: result.status, fields: Object.keys(result)
-    })}`);
-  }
-  if (result.batchId !== batchId) {
-    throw new Error(`utest_preparation_batch_mismatch:${batchId}:actual=${result.batchId}`);
-  }
-  if (result.status === "skipped" && (result.testStatus !== "skipped"
-      || ![result.skipReason, result.worktreePath, result.branchName, result.commitSha].every(usableString))) {
-    throw new Error(`utest_preparation_invalid:${batchId}:skip_evidence_incomplete`);
   }
   return result;
 }
@@ -907,11 +808,6 @@ const routeResolverPath = joinPath(pluginPath, "hooks/resolve_frontend_html_rout
 const worktreeManagerPath = joinPath(pluginPath, "hooks/worktree_manager.py");
 const lifecyclePath = joinPath(pluginPath, "hooks/parallel_batch_lifecycle.py");
 const stagePath = joinPath(pluginPath, "hooks/parallel_batch_stage.py");
-const utestRouterPath = joinPath(pluginPath, "hooks/utest_assignment_router.py");
-const utestCommandPath = joinPath(pluginPath, "hooks/run_utest_command.py");
-const utestEnvironmentPath = joinPath(pluginPath, "hooks/inspect_test_environment.py");
-const utestRuntimePath = joinPath(pluginPath, "hooks/utest_runtime.py");
-const utestSourceBugPath = joinPath(pluginPath, "hooks/validate_utest_source_bug.py");
 const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 // Every child below runs after the caller has supplied the task-card ID and
 // started this fixed Workflow. Keep the no-interaction contract at the call
@@ -925,12 +821,12 @@ async function workflowAgent(instruction, options = {}) {
   const label = usableString(options.label) ? options.label : "workflow-agent";
   const batchMatch = label.match(/(?:^|-)(B\d{3,})(?:-|$)/);
   const grant = batchMatch && typeof activeDispatchGrants !== "undefined" ? activeDispatchGrants.get(batchMatch[1]) : null;
-  if (grant) instruction += `\n派发身份：本子任务中每条 parallel_batch_stage.py 命令，以及 batch_lease_manager.py acquire 命令，必须追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。仅追加到以上命令，不能替代 TASK/UTest 的业务 lease-token/owner-token；业务凭证只取 acquire 返回的 businessLeaseToken（兼容旧返回 lease.ownerToken），后续优先直接执行 engineering prepare 返回的 operations.argv，保留其中真实 lease-token/owner-token；stale_stage_owner 立即停止，禁止强制 reclaim。`;
+  if (grant) instruction += `\n派发身份：本子任务中每条 parallel_batch_stage.py 命令，以及 batch_lease_manager.py acquire 命令，必须追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。仅追加到以上命令，不能替代 TASK 的业务 lease-token/owner-token；业务凭证只取 acquire 返回的 businessLeaseToken（兼容旧返回 lease.ownerToken），后续优先直接执行 engineering prepare 返回的 operations.argv，保留其中真实 lease-token/owner-token；stale_stage_owner 立即停止，禁止强制 reclaim。`;
   workflowControlMetrics.agentCalls += 1;
   workflowControlMetrics.promptCharacters += (WORKFLOW_AUTONOMY_PREFIX + instruction).length;
   workflowControlMetrics.labels[label] = (workflowControlMetrics.labels[label] || 0) + 1;
   const category = /cleanup/.test(label) ? "cleanup" : /poll|snapshot|scheduler-retry|finalization/.test(label)
-    ? "scheduler" : /^(fixed-batch|rework-implement|stage-review|stage-utest|run-e2e-validation)|-edit$/.test(label)
+    ? "scheduler" : /^(fixed-batch|rework-implement|stage-review)|-edit$/.test(label)
       ? "execution" : "control";
   workflowControlMetrics.categories[category] = (workflowControlMetrics.categories[category] || 0) + 1;
   return await agent(WORKFLOW_AUTONOMY_PREFIX + instruction, options);
@@ -939,13 +835,13 @@ const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
   .join(" ");
-// Tests are intentionally owned by the later UTest stage.  This boundary is
+// Workflow testing is temporarily disabled for every execution lane. This boundary is
 // injected into both initial implementation and implementation rework prompts;
 // task_runner.py independently rejects violating file changes at completion.
 // Code and rework agents may run the required production-only compile for
-// backend tasks. All behavioral tests and other validation remain UTest-owned.
+// backend tasks. No behavior test or E2E stage runs in this Workflow.
 // Keep this exact boundary in both implementation prompts, including cowork.
-const CODE_STAGE_EXECUTION_BOUNDARY = "本 Code 执行规则适用于主 Agent、cowork/协作 Agent 以及实现修复 Agent。Code 阶段和修复阶段只允许生产源码、生产配置、迁移和公开接口的最小实现，以及本 Prompt 明确列出的 lease、scheduler、route resolver、task_runner、worktree seal/release 命令。可以只读既有测试理解契约，但在 task_runner.py finish-implementation 成功前，禁止创建、修改或删除测试源码（包括 src/test、test、tests、__tests__）、fixture/mock、测试环境或测试配置。后端 lane 的每个 TASK 在实现或修复生产代码后、finish-implementation 前，必须使用 Bash 在该 TASK 的业务 Worktree 执行项目文档/构建配置指定的 production-only compile 命令；只编译生产代码，不得连带运行测试、打包、typecheck 或 lint。记录精确命令和完整输出；失败时根据真实输出定位根因、修复生产代码并重编，直到通过；编译命令或环境无法使用时保留真实错误并返回失败，禁止假报通过或完成。前端 lane 不执行此新增编译门槛。除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E 或 TASK validation 命令，也禁止为此启动后台进程。包括但不限于 mvn/mvnw（package、verify、test）、Gradle/gradlew（build、assemble、check、test）、npm/pnpm/yarn（build、typecheck、lint、test）、npx/vite/webpack/tsc/vue-tsc/eslint、jest、vitest、pytest；Maven/Gradle 等只允许使用对应的生产 compile-only 目标，不得使用会触发测试或打包的复合目标。所有测试资产和行为验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行；不得以“验证实现”为由绕过该阶段。\n";
+const CODE_STAGE_EXECUTION_BOUNDARY = "本 Code 执行规则适用于主 Agent、cowork/协作 Agent 以及实现修复 Agent。Code 阶段和修复阶段只允许生产源码、生产配置、迁移和公开接口的最小实现，以及本 Prompt 明确列出的 lease、scheduler、route resolver、task_runner、worktree seal/release 命令。可以只读既有测试理解契约，但在 task_runner.py finish-implementation 成功前，禁止创建、修改或删除测试源码（包括 src/test、test、tests、__tests__）、fixture/mock、测试环境或测试配置。后端 lane 的每个 TASK 在实现或修复生产代码后、finish-implementation 前，必须使用 Bash 在该 TASK 的业务 Worktree 执行项目文档/构建配置指定的 production-only compile 命令；只编译生产代码，不得连带运行测试、打包、typecheck 或 lint。记录精确命令和完整输出；失败时根据真实输出定位根因、修复生产代码并重编，直到通过；编译命令或环境无法使用时保留真实错误并返回失败，禁止假报通过或完成。前端 lane 不执行此新增编译门槛。除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E 或 TASK validation 命令，也禁止为此启动后台进程。包括但不限于 mvn/mvnw（package、verify、test）、Gradle/gradlew（build、assemble、check、test）、npm/pnpm/yarn（build、typecheck、lint、test）、npx/vite/webpack/tsc/vue-tsc/eslint、jest、vitest、pytest；Maven/Gradle 等只允许使用对应的生产 compile-only 目标，不得使用会触发测试或打包的复合目标。本 Workflow 对前后端均暂时移除 UTest 和 E2E；禁止创建测试资产、初始化测试环境或调用其他技能补跑测试。\n";
 
 const CODE_STAGE_COMPILE_COMMAND_GUIDANCE = "编译和环境查询使用前台 Bash。guard 按实际程序、目标和 TASK/Batch 绑定检查，不要求固定某行命令；支持字面量 export/环境赋值、cd、分行/分号/&&、输出重定向和 head/tail/tee，以及 PIPESTATUS 保存、echo/printf 和 exit。mvn 的 -q/-o/-D 参数不是拦截理由。使用当前 TASK 的业务模块 cwd/workdir；相对 cwd 必须由工具提供真实绝对 workspaceRoot，不能猜执行工具根目录；也可在同一次执行中使用 cd \"<模块目录>\" && ... 或 cd \"<模块目录>\" || exit \"$?\"。默认使用 PATH 中的 mvn，允许 mvn -v/--version/--help，不要求查找 mvn.exe；只有命令不存在或启动失败才检查安装。后端 TASK 的生产源码写完后，先用同一个 task_runner.py prepare-compile 登记：携带全部已有 TASK/workspace/parallel-run-id/lease-token/workspace-ref 参数、--run-id <当前 TASK 的真实 runId>、--execution-cwd \"<实际模块绝对目录>\"，在 -- 后传实际 compile-only argv；保存返回的 attemptId。prepare-compile 只冻结源码和命令，不执行编译。随后单独用 Bash 执行同一 argv，2>&1 | tee 到工作树之外已存在的临时日志目录；管道后立即保存 compile_status=(\"${PIPESTATUS[@]}\")，用 printf 输出两个退出码，最后 exit \"$((compile_status[0] != 0 ? compile_status[0] : compile_status[1]))\"。不能只追加 echo EXIT 后把工具成功当成编译通过。再独立调用 task_runner.py record-compile，携带同一 TASK/run 参数、--attempt-id <真实 attemptId>、--exit-code <实际编译退出码>、--log-exit-code <实际 tee 退出码>、--output-file \"<临时完整日志>\"；它只登记，不执行编译。record-compile 的 ok 只表示登记成功，必须读取 passed/exitCode/logExitCode；编译失败时依据实际日志修复生产代码，重新 prepare 和编译。登记失败保留输出，只重试登记，不能自动重跑编译。finish-implementation 检查当前后端 TASK/run 最新成功 Evidence 和源码快照；编译后又修改代码必须重新编译，前端不新增编译门槛。若 guard 拦截，必须展示 GUARD_DIAGNOSTICS.failures 中具体 code/reason/line/statement 和 executionCwd、taskRuns；先修复该具体原因，不得盲目删除 -o 或反复试命令。GUARD_DIAGNOSTICS.guardVersion/guardPath 用于核对 Windows 实际加载的插件；工具自身 cwd 拒绝和插件 guard 拒绝分别报告。task_runner start/start-task-repair/resume 自动登记 implement，旧 Run 的 activeStage=none 本身不禁止绑定正确的活动 TASK 纯编译。禁止 test/package/verify 等非生产编译目标、额外验证命令、动态执行和后台进程；不得切中立目录绕过 guard 或直接修改 Runtime JSON。\n";
 
@@ -1600,97 +1496,8 @@ async function recoverImplementationRework(batchResult, failedStage, result) {
   }
 }
 
-function withLatestBatchDelivery(batchResult, result) {
-  const normalized = unwrap(result);
-  return {
-    ...batchResult,
-    worktreePath: usableString(normalized.worktreePath) ? normalized.worktreePath : batchResult.worktreePath,
-    branchName: usableString(normalized.branchName) ? normalized.branchName : batchResult.branchName,
-    commitSha: usableString(normalized.commitSha) ? normalized.commitSha : batchResult.commitSha,
-  };
-}
-
-async function runBatchUtestAndSeal(batchResult, retryFailure = null, prepared = null) {
-  const batchId = batchResult.batchId;
-  const batchWorktree = batchResult.worktreePath;
-  const batchBranch = batchResult.branchName;
-  const batchWorkspace = batchWorkspaces[batchId] || {};
-  const batchWorkspaceRef = batchWorkspace.workspaceRef;
-  const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
-  if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef) || !taskIds.length) {
-    throw new Error("utest_batch_context_missing:" + batchId);
-  }
-  const preparation = requireUtestPreparation(prepared || await workflowAgent(
-    `读取并登记 Batch ${batchId} 的 UTest 执行策略。只执行 python -X utf8 "${stagePath}" prepare-test ` +
-    `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
-    `当前前端 UTest 暂时禁用：插件按真实 executionLane 将前端登记为 skipped 并返回原因；本步骤不执行测试、环境初始化、测试生成或编译。后端返回 test_required。` +
-    `将命令 stdout 的 JSON 对象直接作为结构化返回：success、batchId、status 必须保留在顶层，不得包装到 result/data/value 或只返回成功摘要；后端完整保留 runtimeContractDigest、utestPolicy 和 engineeringContext，前端完整保留 testStatus、skipReason、worktreePath、branchName、commitSha、stageEvidenceId。禁止自行启动测试或修改源码。`,
-    { label: `prepare-utest-${batchId}`, phase: "Batch 阶段", schema: UTEST_PREPARATION_SCHEMA }
-  ), batchId);
-  if (preparation.status === "skipped") {
-    return { ...preparation, status: "success" };
-  }
-  if (typeof runtimeContractDigest !== "undefined" && preparation.runtimeContractDigest !== runtimeContractDigest) {
-    throw new Error("utest_runtime_deployment_changed:rerun_launcher:" + batchId);
-  }
-  const taskIdArgs = taskIds.map(taskId => "--task-id \"" + taskId + "\"").join(" ");
-  const taskList = JSON.stringify(taskIds);
-  // A command gets only a fraction of the UTest wall-clock budget.  The
-  // runner clamps it again using the durable `test.startedAt` deadline.
-  const utestPolicy = preparation.utestPolicy;
-  if (!utestPolicy || !Number.isInteger(utestPolicy.stageSeconds) || !Number.isInteger(utestPolicy.firstExecutionSeconds)
-      || !Number.isInteger(utestPolicy.commandSeconds) || !usableString(utestPolicy.digest)
-      || utestPolicy.stageSeconds <= 0 || utestPolicy.firstExecutionSeconds <= 0 || utestPolicy.commandSeconds <= 0) {
-    throw new Error("utest_runtime_policy_missing:" + batchId);
-  }
-  const utestStageTimeout = Math.min(utestPolicy.stageSeconds, timeoutPerBatch);
-  const utestCommandTimeout = Math.min(utestPolicy.commandSeconds, utestStageTimeout);
-  const retryInstruction = retryFailure && typeof retryFailure === "object"
-    ? "这是 source repair 后的受控重跑。只允许执行此前失败的精确命令，不得创建新测试、选择其他 target、换 runner 或扩大范围。若仍为 source_compile/source_bug，绝不再执行第二次 production repair；按步骤 7 以 failure-type implementation 记录 deferred UTest issue 后继续。失败基线=" + JSON.stringify(retryFailure) + "。\n"
-    : "";
-  const binding = `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"`;
-  const prompt =
-    `在 Batch ${batchId} 的原生 Worktree "${batchWorktree}"（分支 "${batchBranch}"）完成当前 TASK=${taskList} 的 UTest。只读角色 "${stagePath.replace(/hooks[/\\][^/\\]+$/, "agents/test-engineer.md")}"，按它判断测试与失败；具体命令和预算使用 Runtime。\n` +
-    retryInstruction +
-    `已准备的 assignment/engineeringContext/policy=${JSON.stringify(preparation)}。直接复用 brief 和有效事实，只有未知或失效问题才按准确 allowedReads 查证，不重建工程认知。若 assignment 缺失，调用 "${utestRouterPath}" --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --json；不要读其他 Batch 或完整 Plan。\n` +
-    `范围护栏：只读当前 Worktree、assignment、contextPath/allowedReads/commandCatalogPath 和当前 runner 返回的日志；禁止 git worktree list、find、grep -R、全仓库 rg/glob 或枚举其他 Batch。测试源码留在本 Worktree，只修改测试/fixture/mock/helper/语义 guard 允许的测试 POM，不能写生产代码。\n` +
-    `1. 确认 Git 顶层与分支，执行 python -X utf8 "${leasePath}" acquire ${binding} --ttl-seconds ${timeoutPerBatch} --lease-guard，保存真实 ownerToken。执行 python -X utf8 "${stagePath}" start ${binding} --stage test。后续 Runtime 命令保持完整绑定和当前派发代次；不得自启 heartbeat。\n` +
-    `2. 每个 TASK 调用 python -X utf8 "${utestRuntimePath}" prepare ${binding} --batch-worktree "${batchWorktree}" --task-id <TASK_ID> --owner-token <真实token> --stage-timeout ${utestStageTimeout}，按返回模块/preset/缺口执行。环境歧义只从 Runtime 候选判断；无法定位就收口，不初始化全部候选或修改 Plan。确有环境缺口才读测试环境/静态隔离 reference；测试依赖由 apply-pom 语义校验。\n` +
-    `3. 已有适用测试直接复用并补齐 testPoints、verificationIntent 与 AC；不删除生产代码造红。未知依赖只对当前 classpath 做 lookup-class/inspect-class；Maven setup 经 preflight-setup，status=cached 直接复用，status=prepared 只执行返回 bashCommand。所有 Maven 命令由 Bash 执行，Python 只监督和登记，不递归扫 .m2 或寻找 mvn.exe。\n` +
-    `4. 文件落地后执行 preflight，带同一绑定、--test-file <精确相对文件>、--command-timeout ${utestCommandTimeout} 与 -- <精确argv>，原样执行返回 bashCommand。Runtime 捕获 PIPESTATUS/tee 和实际用例数，run_utest_command.py 只登记真实输出。登记失败保留输出，awaiting_record 只补登记；不得重启已完成命令。零/未知用例不能 PASS。首次/总期限和计数以 utestPolicy 固化值为准，blocked/timeout 立即停止探索。\n` +
-    `5. test_bug 最多修一次，用 retry-kind test_bug 原 target/argv 续跑；source_compile 或 validator 证明的 source_bug 首次交受控生产修复：先用 worktree_manager.py seal --commit-stage utest --commit-summary "<实际测试变更>" --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --repo "${batchWorktree}" --owner-token <真实token> 封存，再用 parallel_batch_stage.py fail ${binding} --stage test --failure-type implementation --message "<targetId/commandId/evidenceId/file:line根因>"，以 sealed 释放 lease，返回 source_repair_required 和 testFailure。只读本次 evidenceLogPath；根因缺失才读本 target 的完整命令段。\n` +
-    `6. 通过或耗尽时只执行 python -X utf8 "${stagePath}" close-test ${binding} --owner-token <真实token> --commit-summary "<实际测试改动中文摘要>" --metadata-json '<testEvidenceIds及必要testFailure对象>'。失败额外传 --failure-type <implementation|environment|test_definition> --message "<真实失败>"；该操作可恢复地封存、登记、释放，不重跑测试。受控 source_repair 再失败时必须 deferred，不再次修生产代码。返回 Runtime 原始 JSON，保持真实 testStatus/testFailure/commitSha/stageEvidenceId；不可把 deferred/skipped 当 PASS。\n`;
-  // Independent quality deadlines do not depend on dispatcher polling.
-  let finished = false;
-  let timer;
-  let wake;
-  const child = workflowAgent(prompt,
-    { label: "stage-utest-" + batchId, phase: "Batch 阶段", timeoutMs: utestStageTimeout * 1000, schema: UTEST_STAGE_SCHEMA }
-  ).finally(() => { finished = true; clearTimeout(timer); if (wake) wake(); });
-  const monitor = async () => {
-    let seconds = Math.min(utestPolicy.firstExecutionSeconds, utestStageTimeout);
-    while (!finished) {
-      await new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, seconds * 1000); });
-      if (finished) return;
-      const check = requireSuccess(await workflowAgent(
-        `只执行 python -X utf8 "${stagePath}" check-test-budget --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。原样返回 JSON；该 Runtime 按固化期限请求停止，但保留封存资产所需 lease。不得清租约、修改代码或执行测试。`,
-        { label: `utest-budget-${batchId}`, phase: "Batch 阶段" }
-      ), `UTest budget ${batchId}`);
-      if (check.status === "stop_requested" || check.status === "terminal") return;
-      seconds = Math.max(1, Number(check.nextCheckSeconds) || 30);
-    }
-  };
-  const results = await Promise.allSettled([child, monitor()]);
-  for (const result of results) if (result.status === "rejected") throw result.reason;
-  return unwrap(results[0].value);
-}
-
-async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
+async function runDeliveryReviewAndGate(batchResult, options = {}) {
   const reviewResolvedByRepair = options.reviewResolvedByRepair === true;
-  const testResolvedByRepair = options.testResolvedByRepair === true;
-  const retryTestFailure = options.retryTestFailure && typeof options.retryTestFailure === "object"
-    ? options.retryTestFailure
-    : null;
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -1698,7 +1505,6 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
   if (!usableString(commitSha)) throw new Error(`sealed_batch_commit_missing:${batchId}`);
   const metadata = JSON.stringify({ batchCommit: commitSha, worktreePath: batchWorktree, branchName: batchBranch });
-  let preparedUtest = null;
   if (!reviewResolvedByRepair) {
     let review;
     let reviewValidation;
@@ -1709,9 +1515,9 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       const reviewRaw = unwrap(await workflowAgent(
         `对已草稿封存的 Batch ${batchId} 做只读评审。Review execution mode=fixed_code_workflow；代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。不得调用 request_user_input、要求用户确认或等待用户裁定；只返回可执行的阶段结果。${retryContext}` +
         `先读取只读角色 "${stagePath.replace(/hooks[/\\][^/\\]+$/, "agents/reviewer.md")}"；执行 python -X utf8 "${stagePath}" prepare-review --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。Runtime 会复用已完成的 implement、Review attempt 和准确工程上下文；requiredAction=reuse_review_result 时直接返回已有 reviewResult，不重新审查；只按返回 contextPath/allowedReads 读取当前任务交接、生产差异及必要契约，不领取新事实。完整审相关函数，只有具体证据不足才扩展读取，不强制全文读所有文本或生成长报告。` +
-        `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。Review 是完全只读阶段：禁止执行任何构建、编译、打包、typecheck、lint、测试、E2E 或验证命令，包括 mvn/mvnw、Gradle/gradlew、npm/pnpm/yarn、npx/tsc/vite/webpack、jest/vitest/pytest。后端 compile-only 已在 implement 的 finish-implementation 前完成；UTest 的行为测试及收尾编译通过 Bash 执行，再由 run_utest_command.py 登记 Evidence 和结果。` +
+        `只评审业务生产代码、生产配置、迁移和公开接口的实现；本 Workflow 当前对前后端均不生成测试资产、不准备测试环境、不执行 UTest 或 E2E。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。Review 是完全只读阶段：禁止执行任何构建、编译、打包、typecheck、lint、测试、E2E 或验证命令，包括 mvn/mvnw、Gradle/gradlew、npm/pnpm/yarn、npx/tsc/vite/webpack、jest/vitest/pytest。后端 compile-only 已在 implement 的 finish-implementation 前完成。` +
         `使用 python -X utf8 "${stagePath}" finish-review --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --decision <passed|failed>。只有可证实的生产实现缺陷判 failed，并带 --message "<具体TASK、file:line、触发条件、期望/实际、影响及建议>"。` +
-        `外部 API 行为未知、契约资料不足、无法证实的疑点和改进建议，使用 --advisory-message "<具体信息缺口、影响范围与待核实事项>" 记录非阻断问题；没有可证实的阻断缺陷时仍判 passed，有真实缺陷时可同时登记 advisory。生产问题由 Workflow 定向修复一次，完成纯编译和封存后直接 UTest，不重复 Review。` +
+        `外部 API 行为未知、契约资料不足、无法证实的疑点和改进建议，使用 --advisory-message "<具体信息缺口、影响范围与待核实事项>" 记录非阻断问题；没有可证实的阻断缺陷时仍判 passed，有真实缺陷时可同时登记 advisory。生产问题由 Workflow 定向修复一次，完成纯编译和封存后直接进入候选集成，不重复 Review。` +
         `Review 业务结论只有 passed/failed；执行中断或缺少输出由 Workflow 有限重试，禁止把未执行评审当通过。只返回 Runtime 规范化 JSON，不写全局完成声明或长报告，不要求人工确认。`,
         { label: `stage-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_STAGE_RESULT_SCHEMA }
       ).catch(error => ({ error: errorText(error) })));
@@ -1719,7 +1525,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       // validator in a read-only child so a prose/raw-JSON response cannot
       // bypass the plugin-owned state machine.
       reviewValidation = unwrap(await workflowAgent(
-        `只验证 Batch ${batchId} 已持久化的 Review 阶段，不评审代码、不修改业务文件、不运行 TASK，也不得运行构建、编译、打包、typecheck、lint、测试或 E2E。唯一允许的命令是 python -X utf8 "${stagePath}" review-checkpoint --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。该操作将旧 needs_triage/documentation 信息缺口归档为非阻断 advisory，独立校验持久化的 passed/failed 结论，通过时准备 UTest assignment/policy，完整保留 advisories 和 utestPreparation。只返回 JSON。`,
+        `只验证 Batch ${batchId} 已持久化的 Review 阶段，不评审代码、不修改业务文件、不运行 TASK，也不得运行构建、编译、打包、typecheck、lint、测试或 E2E。唯一允许的命令是 python -X utf8 "${stagePath}" review-checkpoint --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --skip-tests。该操作将旧 needs_triage/documentation 信息缺口归档为非阻断 advisory，独立校验持久化的 passed/failed 结论，通过时仅登记当前提交的测试未执行记录，不准备测试 assignment、环境或工具；完整保留 advisories。只返回 JSON。`,
         { label: `validate-review-${batchId}-attempt-${attempt}`, phase: "Batch 阶段", schema: REVIEW_VALIDATION_SCHEMA }
       ).catch(error => ({ status: "incomplete", error: errorText(error) })));
       if (isFinalReviewDecision(reviewValidation, batchId)) {
@@ -1737,37 +1543,11 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       return recoverImplementationRework(batchResult, "review", review);
     }
     requireReviewPassed(review, batchId);
-    preparedUtest = review.utestPreparation || null;
-  }
-  if (!testResolvedByRepair) {
-    const test = requireSuccess(await runBatchUtestAndSeal(batchResult, retryTestFailure, preparedUtest), `stage test ${batchId}`);
-    const testedDelivery = withLatestBatchDelivery(batchResult, test);
-    const testStatus = test.testStatus || (test.status === "deferred" ? "deferred" : "passed");
-    if (testStatus === "source_repair_required") {
-      const sourceFailure = unwrap(test.testFailure || test.failure || {});
-      return implementationReworkRequired(testedDelivery, "test", {
-        status: "failed",
-        failureType: "implementation",
-        testFailure: sourceFailure,
-        repairContextPath: test.repairContextPath,
-        repairContextDigest: test.repairContextDigest,
-        affectedTaskIds: test.affectedTaskIds,
-        failure: {
-          type: "implementation",
-          nextStage: "implement",
-          message: sourceFailure.message || test.errorMessage || "",
-        },
-      });
-    }
-    if (!["passed", "skipped", "deferred", "timed_out"].includes(testStatus)) {
-      throw new Error(`stage_test_status_invalid:${batchId}:${String(testStatus)}`);
-    }
-    batchResult = testedDelivery;
   }
   if (typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2) {
     deliveryControl.deliveries.set(batchId, batchResult);
   } else requireSuccess(await workflowAgent(
-    `Batch ${batchId} 的 Review 与 UTest 已收口（前端 UTest 明确跳过）。执行 python -X utf8 "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
+    `Batch ${batchId} 的 Review 已收口，前后端测试均不执行。执行 python -X utf8 "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --skip-tests。` +
     `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
     { label: `stage-gate-${batchId}`, phase: "Batch 阶段" }
   ), `stage gate ${batchId}`);
@@ -1873,7 +1653,7 @@ async function runDeliveryWithImplementationRepair(batchResult, initialOptions =
   const repairedStages = new Set();
   let options = initialOptions;
   for (;;) {
-    const staged = await runDeliveryReviewTestAndGate(delivery, options);
+    const staged = await runDeliveryReviewAndGate(delivery, options);
     if (staged.status === "ready_to_candidate") return staged;
     if (staged.status !== "implementation_rework_required") {
       throw new Error(`unexpected_delivery_stage_result:${JSON.stringify(staged)}`);
@@ -1894,21 +1674,15 @@ async function runDeliveryWithImplementationRepair(batchResult, initialOptions =
     }
     delivery = repaired;
     await recordSingleRepairResolution(staged.recovery, repaired);
-    // A UTest-proven source defect has a new production commit and fresh
-    // Review evidence, but the test itself is still pending.  Re-enter UTest
-    // to run its original exact command; never mark it as repaired by prose.
-    options = {
-      reviewResolvedByRepair: true,
-      ...(staged.failedStage === "test" ? { retryTestFailure: staged.recovery.failureContext } : {}),
-    };
+    options = { reviewResolvedByRepair: true };
   }
 }
 
 async function continueRecoveredDelivery(recovery) {
   if (recovery.nextStage !== "implement" || !(recovery && recovery.failureContext)) {
     // Scheduler stage recovery is a durable checkpoint, not a request to
-    // replay already-passed Review.  A test-stage recovery must resume UTest
-    // directly; this keeps its agent scope and lease limited to the work left.
+    // replay already-passed Review. Retained test-stage recoveries go directly
+    // to delivery admission, which records testing as skipped.
     const initialOptions = recovery.nextStage === "test"
       ? { reviewResolvedByRepair: true }
       : {};
@@ -1916,12 +1690,8 @@ async function continueRecoveredDelivery(recovery) {
   }
   const repaired = await reworkDeliveryImplementation(recovery);
   await recordSingleRepairResolution(recovery, repaired);
-  const failedStage = recovery.failureContext.failedStage;
-  const options = {
-    reviewResolvedByRepair: true,
-    ...(failedStage === "test" ? { retryTestFailure: recovery.failureContext } : {}),
-  };
-  return runDeliveryReviewTestAndGate(repaired, options);
+  const options = { reviewResolvedByRepair: true };
+  return runDeliveryReviewAndGate(repaired, options);
 }
 
 async function resolveMergeCandidate(repositoryRef, wave, label, executionPhase) {
@@ -2004,7 +1774,7 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
         `构建 Batch ${batchId} 的独立 Merge Train 候选（候选序号 ${wave}，第 ${attempt} 次）。执行 python -X utf8 "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
         `本插件脚本遵循统一后台执行协议：只启动一次 execute({command:<上述命令>,run_in_background:true})，保存 task_id 并在同一子 Agent 内反复 task_output（每次 timeout:60000）直至获得最终退出结果；轮询等待超时继续等待同一任务，禁止重启命令或提前结束子 Agent。` +
         `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。build-candidate 在同一 wave 中只能真正启动一次；只能轮询同一 task_id，不得因本地终端超时或中断再次执行。只返回最终命令 stdout 的完整 JSON；若工具返回后台任务包装对象，提取 final_result，不得把 command、task_id、exit_code 包装层当作命令结果。status=candidate_conflicted 是可恢复冲突，完整保留 conflictContext 交由本 Workflow 处理。`,
-        { label: `build-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
+        { label: `build-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选集成" }
       ));
 
       let built = builtRaw;
@@ -2013,7 +1783,7 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
         // Resolve and promote it now, before other same-repository deliveries
         // can advance main and make the retained conflict context stale.
         const resolved = await resolveMergeCandidate(repositoryRef, wave,
-          `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, "候选验证");
+          `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, "候选集成");
         if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
           recordUnresolved({
             kind: "merge_candidate",
@@ -2050,9 +1820,9 @@ async function validateAndPromoteBatch(batchId, candidateSequence) {
       }
 
       const rawPromotion = unwrap(await workflowAgent(
-      `推广已完成业务 Review，UTest 已通过、已记录失败或前端 UTest 已明确跳过的候选 SHA ${built.candidateSha}。执行 python -X utf8 "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
-        `Batch 的 UTest 失败会作为显式 issue 随最终结果保留，但不打断后续流程；合并后唯一的可执行验证是 B-E2E。若返回 stale=true，必须停止本次推广并由插件从当前目标 HEAD 全量重建候选；禁止 rebase 或直接 merge。只返回 JSON。`,
-        { label: `promote-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
+      `推广已完成业务 Review 的候选 SHA ${built.candidateSha}。执行 python -X utf8 "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
+        `前后端 UTest 和 E2E 均已从本 Workflow 移除，测试未执行记录和旧运行遗留问题由最终报告展示。若返回 stale=true，必须停止本次推广并由插件从当前目标 HEAD 全量重建候选；禁止 rebase 或直接 merge。只返回 JSON。`,
+        { label: `promote-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选集成" }
       ));
       if (rawPromotion && rawPromotion.stale === true && attempt < 2) continue;
       if (rawPromotion && (rawPromotion.stale === true || rawPromotion.needsPlanRecovery === true || hasFailureSignal(rawPromotion))) {
@@ -2096,17 +1866,17 @@ async function settleReadyBatch(batchId) {
   if (!grant || !delivery || !usableString(delivery.commitSha)) throw new Error(`delivery_context_missing:${batchId}`);
   const command = `python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" settle-delivery ` +
     `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ` +
-    `--dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}" --expected-commit "${delivery.commitSha}"`;
+    `--dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}" --expected-commit "${delivery.commitSha}" --skip-tests`;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const result = unwrap(await workflowAgent(
       `只执行 ${command}。插件连续完成 gate、仓库队列、候选构建与推广、Plan 对账、清理登记及 dispatch 收尾。` +
       `遵循托管后台协议，仅启动一次并等同一 task_id 的终态；不得拆成旧 build/promote/gate 命令，不得自行执行 Git 或删除目录。` +
       `完整保留 schedulerSnapshot、dispatchFinalized、operationId、generation、SHA 与 conflictContext；冲突原样返回，不能当成成功。`,
-      { label: `settle-delivery-${batchId}-${attempt}`, phase: "候选验证", schema: DELIVERY_SETTLEMENT_SCHEMA }
+      { label: `settle-delivery-${batchId}-${attempt}`, phase: "候选集成", schema: DELIVERY_SETTLEMENT_SCHEMA }
     ));
     if (result.status === "candidate_conflicted" && attempt === 1) {
       const resolved = await resolveMergeCandidate(result.repositoryRef, result.wave,
-        `resolve-settlement-${batchId}-${result.wave}`, "候选验证");
+        `resolve-settlement-${batchId}-${result.wave}`, "候选集成");
       if (resolved && resolved.success === true && resolved.status === "built") continue;
       recordUnresolved({ kind: "merge_candidate", batchId, batchIds: [batchId], repositoryRef: result.repositoryRef,
         wave: result.wave, status: "needs_resolution", durable: true, error: resolved || result });
@@ -2141,7 +1911,7 @@ async function runDeferredCleanup() {
   try {
     return requireSuccess(await workflowAgent(
       `只执行 python -X utf8 "${pluginPath}/hooks/parallel_cleanup.py" drain --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --budget-seconds 120。插件按已登记所有权清理候选和交付 Worktree；pending 原样保留，不自行删除、重试或修改业务状态。只返回最终 JSON。`,
-      { label: "drain-delivery-cleanup", phase: "最终验证" }
+      { label: "drain-delivery-cleanup", phase: "最终汇总" }
     ), "delivery cleanup");
   } catch (error) { return { success: false, error: errorText(error) }; }
 }
@@ -2151,7 +1921,7 @@ async function promoteReadyBatch(batchId) {
     return settleReadyBatch(batchId);
   }
   const promotionWave = ++mergeSequence;
-  phase("候选验证");
+  phase("候选集成");
   try {
     const promotions = [await validateAndPromoteBatch(batchId, promotionWave)];
     const promotedBatchIds = promotions.flatMap(mergedBatchIds);
@@ -2918,6 +2688,7 @@ function deferredIssueDetails(scheduler = lastScheduler, verification = null) {
 
 function skippedUtestDetails(scheduler = lastScheduler, verification = null) {
   const manifest = manifestFromScheduler(scheduler);
+  if (verification && Array.isArray(verification.skippedUtests)) return verification.skippedUtests;
   if (manifest && Array.isArray(manifest.skippedUtests)) return manifest.skippedUtests;
   return verification && Array.isArray(verification.skippedUtests) ? verification.skippedUtests : [];
 }
@@ -2934,7 +2705,6 @@ function allWorkflowDeliveriesMerged(scheduler = lastScheduler) {
 function completionReport({
   finalStatus,
   scheduler = lastScheduler,
-  e2e = null,
   verification = null,
   e2eSkippedReason = null,
   nextAction = null,
@@ -2952,7 +2722,6 @@ function completionReport({
     mergeResults,
     cleanupResults,
     lifecycleResults,
-    e2e,
     verification,
     integrationWorkspaces: (verification && verification.integrationWorkspaces) || (scheduler && scheduler.integrationWorkspaces),
     mainPromotion: (verification && verification.mainPromotion) || (scheduler && scheduler.mainPromotion),
@@ -2963,7 +2732,7 @@ function completionReport({
     retryPendingBatches: batches.filter(batch => batch.status === "retry_pending").map(batch => batch.batchId),
     blockedBatches: batches.filter(batch => ["blocked", "needs_resolution"].includes(batch.status)).map(batch => batch.batchId),
     deferredIssues,
-    e2eSkippedReason: e2eSkippedReason || (e2e && e2e.skipReason) || null,
+    e2eSkippedReason: e2eSkippedReason || (verification && verification.e2eSkipReason) || null,
     skippedUtests: skippedUtestDetails(scheduler, verification),
     finalRepair: {
       attempted: true,
@@ -3219,79 +2988,25 @@ if (!allWorkflowDeliveriesMerged(finalScheduler)) {
 }
 
 async function runFinalValidation() {
-phase("最终验证");
+phase("最终汇总");
 if (prepared.integrationMode === "isolated") {
   try {
     requireSuccess(await workflowAgent(
       `执行 python -X utf8 "${joinPath(pluginPath, "hooks/parallel_integration.py")}" sync-main --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
       `只同步目标主分支提交到集成 Worktree，不得修改主分支；若存在冲突，原样返回插件状态和 conflicts，保留集成 Worktree 供用户检查。只返回 JSON。`,
-      { label: "sync-main-into-integration", phase: "最终验证" }
+      { label: "sync-main-into-integration", phase: "最终汇总" }
     ), "integration main sync");
   } catch (error) {
     return completionReport({ finalStatus: "integration_sync_required", scheduler: finalScheduler || lastScheduler,
       verification: { error: errorText(error) }, nextAction: "inspect_integration_sync_then_resume" });
   }
 }
-let e2e;
-if (E2E_TEMPORARILY_DISABLED) {
-  try {
-    e2e = requireSuccess(await workflowAgent(
-      `E2E 当前暂时禁用。只执行 python -X utf8 "${mergeTrainPath}" skip-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-      `仅登记当前集成 SHA 的 skipped Evidence 和 e2e_temporarily_disabled 原因，不创建验证 Worktree，不运行测试或环境准备，不登记 passed。原样返回 JSON。`,
-      { label: "skip-e2e-validation", phase: "最终验证", schema: {
-        type: "object", properties: { ok: { type: "boolean" }, success: { type: "boolean" },
-          status: { type: "string" }, e2eStatus: { type: "string" }, skipReason: { type: "string" },
-          reused: { type: "boolean" }, error: { type: "string" } }, required: [], additionalProperties: false
-      } }
-    ), "record E2E skip");
-    if (e2e.success !== true || e2e.status !== "skipped" || e2e.e2eStatus !== "skipped"
-        || e2e.skipReason !== "e2e_temporarily_disabled") throw new Error("parallel_e2e_skip_result_invalid");
-  } catch (error) {
-    recordUnresolved({ kind: "validation", status: "e2e_skip_record_failed", durable: false, error });
-    return completionReport({ finalStatus: "completed_with_validation_failure", scheduler: finalScheduler || lastScheduler,
-      e2e: { error: errorText(error) }, nextAction: "record_e2e_skip_then_resume" });
-  }
-} else {
-let e2eStarted;
-try {
-  e2eStarted = requireSuccess(await workflowAgent(
-    `所有 delivery Batch 已推广后，创建 B-E2E。执行 python -X utf8 "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `此命令创建当前集成 SHA 绑定的验证状态（旧 direct run 绑定原基线分支）；它不运行 Batch UTest。只返回 JSON。`,
-    { label: "begin-e2e-validation", phase: "最终验证" }
-  ), "begin e2e");
-  e2e = requireSuccess(await workflowAgent(
-    `在全部 Batch 已合入的最终集成提交上执行唯一的 B-E2E 验证。Feature=${feature}，runId=${runId}。` +
-    `必须只在这些插件创建的临时验证 Worktree 中操作：${JSON.stringify(e2eStarted.worktrees || {})}；不得操作主 checkout。` +
-    `先收集可重现环境元数据：environment.version、environment.seedDataDigest、environment.dependencies（对象，含 DB/Redis/MQ 等实际版本或明确的 none），并将其与场景摘要一并作为 JSON metadata。` +
-    `执行 Plan/Feature 定义且未被 Batch UTest 覆盖的端到端场景，不得重复执行 Batch test。` +
-    `通过后执行 python -X utf8 "${mergeTrainPath}" finish-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --passed true --metadata-json '<含上述 environment 与场景摘要的 JSON>'。` +
-    `场景失败、超时或环境不可用时使用 --passed false 并记录真实失败摘要和已有输出引用；插件将其登记为非阻断 E2E 问题，继续证据汇总和最终用户确认，不自动创建修复 Batch，不得把失败写成通过。禁止在基线分支直接修复。只返回 JSON。`,
-    { label: "run-e2e-validation", phase: "最终验证" }
-  ), "e2e validation");
-} catch (error) {
-  const metadata = encodeFailure(JSON.stringify({ message: errorText(error),
-    executionOutcome: e2eStarted ? "execution_failed" : "not_run" }));
-  try {
-    e2e = requireSuccess(await workflowAgent(
-      `E2E 子任务失败或中断，只登记原始失败，禁止重新执行测试。执行 python -X utf8 "${mergeTrainPath}" finish-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --passed false --metadata-base64 "${metadata}"。` +
-      `命令将失败保存为非阻断问题，未创建验证 Worktree 时也可登记；已有终态结果则幂等复用。只返回 JSON，不修改业务代码、不创建修复 Batch。`,
-      { label: "record-e2e-failure", phase: "最终验证" }
-    ), "record E2E failure");
-  } catch (recordError) {
-    recordUnresolved({ kind: "validation", status: "e2e_failure_record_failed", durable: false, error: recordError });
-    return completionReport({ finalStatus: "completed_with_validation_failure", scheduler: finalScheduler || lastScheduler,
-      e2e: { error: errorText(error), recordingError: errorText(recordError) }, nextAction: "record_e2e_failure_then_resume" });
-  }
-}
-void e2eStarted;
-}
-
 let verification;
 try {
   verification = unwrap(await workflowAgent(
-    `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-    `这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 交用户审阅，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时继续准备确认报告。原样返回 JSON。`,
-    { label: "aggregate-staged-evidence", phase: "最终验证", schema: VERIFICATION_SCHEMA }
+    `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --skip-e2e。` +
+    `只登记当前集成提交的 E2E 未执行记录并汇总既有证据，不创建验证 Worktree 或准备测试环境。这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 交用户审阅，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时继续准备确认报告。原样返回 JSON。`,
+    { label: "aggregate-staged-evidence", phase: "最终汇总", schema: VERIFICATION_SCHEMA }
   ));
   if (!verification || verification.unparsedStructuredOutput === true
       || verification.ok === false || verification.success === false
@@ -3302,7 +3017,6 @@ try {
     return completionReport({
       finalStatus: "completed_with_validation_failure",
       scheduler: finalScheduler || lastScheduler,
-      e2e,
       verification,
       nextAction: "inspect_evidence_aggregate_failure",
     });
@@ -3312,7 +3026,6 @@ try {
   return completionReport({
     finalStatus: "completed_with_validation_failure",
     scheduler: finalScheduler || lastScheduler,
-    e2e,
     verification: { error: errorText(error) },
     nextAction: "inspect_evidence_aggregate_failure",
   });
@@ -3324,15 +3037,15 @@ if (verification.integrationMode === "isolated") {
       `执行 python -X utf8 "${joinPath(pluginPath, "hooks/parallel_integration.py")}" prepare --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
       `只准备可审阅的最终合并报告和 approvalDigest，不得执行 promote、修改主分支或替用户确认。` +
       `完整返回 JSON，保留 mainPromotion.reportPath 和 snapshot.repositories 内各仓库的 gitRoot、targetWorktreePath、targetBranch、targetSha、worktreePath、branchName、candidateSha，供主 Agent 先展示代码查看位置再发起确认提问。`,
-      { label: "prepare-user-confirmed-promotion", phase: "最终验证" }
+      { label: "prepare-user-confirmed-promotion", phase: "最终汇总" }
     ), "prepare main promotion");
     verification.mainPromotion = promotion.mainPromotion;
     return completionReport({ finalStatus: "awaiting_user_confirmation", scheduler: finalScheduler || lastScheduler,
-      e2e, verification, nextAction: "review_integration_and_confirm_promotion" });
+      verification, nextAction: "review_integration_and_confirm_promotion" });
   } catch (error) {
     verification.promotionPreparationError = errorText(error);
     return completionReport({ finalStatus: "awaiting_user_confirmation", scheduler: finalScheduler || lastScheduler,
-      e2e, verification, nextAction: "sync_target_if_changed_then_prepare_promotion" });
+      verification, nextAction: "sync_target_if_changed_then_prepare_promotion" });
   }
 }
 
@@ -3340,7 +3053,6 @@ const hasAuditIssues = verification.hasDeferredIssues || !verification.passed ||
 return completionReport({
   finalStatus: hasAuditIssues ? "succeeded_with_issues" : "succeeded",
   scheduler: finalScheduler || lastScheduler,
-  e2e,
   verification,
   nextAction: hasAuditIssues ? "review_validation_issues" : "completed",
 });

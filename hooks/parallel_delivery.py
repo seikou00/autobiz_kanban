@@ -42,7 +42,7 @@ def _snapshot(workspace: Path, feature: str, run_id: str) -> dict:
 
 
 def settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
-                    generation: int, token: str, expected_commit: str) -> dict:
+                    generation: int, token: str, expected_commit: str, *, skip_tests: bool = False) -> dict:
     from hooks.parallel_batch_stage import gate_batch
     from hooks.parallel_dispatch import finish
     from hooks import parallel_merge_train as train
@@ -74,7 +74,7 @@ def settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
             manifest["deliveryOperations"][key] = operation
             save_manifest(workspace, feature, run_id, manifest)
     if batch.get("status") != "merged":
-        gate = gate_batch(workspace, feature, run_id, batch_id)
+        gate = gate_batch(workspace, feature, run_id, batch_id, skip_tests=skip_tests)
         if gate.get("status") != "ready_to_candidate":
             with run_lock(workspace, feature, run_id):
                 manifest = load_manifest(workspace, feature, run_id)
@@ -252,6 +252,7 @@ def build_parser():
         for name in ("workspace", "feature", "run-id"):
             command.add_argument("--" + name, required=True)
         if action == "settle-delivery":
+            command.add_argument("--skip-tests", action="store_true")
             for name in ("batch-id", "dispatch-token", "expected-commit"):
                 command.add_argument("--" + name, required=True)
             command.add_argument("--dispatch-generation", type=int, required=True)
@@ -264,7 +265,7 @@ def main(argv=None):
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
         if args.action == "settle-delivery":
             result = settle_delivery(workspace, feature, args.run_id, args.batch_id, args.dispatch_generation,
-                                     args.dispatch_token, args.expected_commit)
+                                     args.dispatch_token, args.expected_commit, skip_tests=args.skip_tests)
         elif args.action == "prepare-finalization":
             result = prepare_finalization(workspace, feature, args.run_id)
         else:

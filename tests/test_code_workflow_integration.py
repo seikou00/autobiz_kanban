@@ -76,12 +76,14 @@ def test_fixed_workflow_entrypoint():
     content = workflow_script.read_text(encoding="utf-8")
     checks = [
         "await parallel",
+        "runDeliveryReviewAndGate",
+        "review-checkpoint",
+        "finish-review",
+        "--skip-tests",
+        "--skip-e2e",
+        "本 Workflow 对前后端均暂时移除 UTest 和 E2E",
         "worktree_manager.py",
         "parallel_merge_train.py",
-        "utest_assignment_router.py",
-        "run_utest_command.py",
-        "inspect_test_environment.py",
-        "validate_utest_source_bug.py",
         "parallel_batch_lifecycle.py",
         "cleanup-merged",
         "merged_worktree_cleanup_incomplete",
@@ -91,7 +93,6 @@ def test_fixed_workflow_entrypoint():
         "--json provision",
         "parallel_evidence_aggregate.py",
         "ready_to_candidate",
-        "B-E2E",
         "batchTaskIds",
         "不要用 read_file 读取 artifact 目录",
         "function usableString",
@@ -139,13 +140,8 @@ def test_fixed_workflow_entrypoint():
         "function isFailedVerdict",
         "function isFailedStatus",
         "function hasFailureSignal",
-        "--stage review --failure-type",
         "promotions.flatMap(mergedBatchIds)",
         "promotion_batch_ids_missing",
-        "runBatchUtestAndSeal",
-        "范围护栏",
-        "git worktree list、find、grep -R、全仓库 rg/glob",
-        "utestCommandTimeout",
         "blockImplementationFinding",
         "deferBatchForRetry",
         "retry_pending",
@@ -162,12 +158,6 @@ def test_fixed_workflow_entrypoint():
         "生产代码修复和封存",
         "failureContext",
         "本次打回的精确问题如下",
-        "targetId、commandId、evidenceId、test-output.log",
-        "record-test-failure",
-        'testStatus:\\"source_repair_required\\"',
-        "utestPolicy.stageSeconds",
-        "timeoutMs: utestStageTimeout * 1000",
-        "executionOutcome=command_timeout/stage_deadline_exceeded",
         "--purpose review",
         "parallel_git_index_lock_busy",
         "parallel_git_index_lock_recovery_failed",
@@ -175,21 +165,17 @@ def test_fixed_workflow_entrypoint():
         "recordSingleRepairResolution",
         "single_repair_accepted",
         "record-single-repair",
-        "validate-review-result",
         "REVIEW_VALIDATION_SCHEMA",
         "run_in_background",
         "task_output",
         "MAX_FINAL_RETRY_DRAINS",
         "drain_recovered_batches",
-        "if (!reviewResolvedByRepair && !testResolvedByRepair)",
         "Review execution mode=fixed_code_workflow",
         "Code Workflow 已获自主执行授权",
         "const WORKFLOW_AUTONOMY_PREFIX",
         "const CODE_STAGE_EXECUTION_BOUNDARY",
         "禁止创建、修改或删除测试源码",
         "除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E",
-        "不得以“验证实现”为由绕过该阶段",
-        "所有测试资产和行为验证仅可在 Review 通过后的 UTest 阶段由 UTest 协议运行",
         "CODE_STAGE_COMPILE_COMMAND_GUIDANCE",
         "prepare-compile",
         "record-compile",
@@ -256,9 +242,8 @@ def test_fixed_workflow_entrypoint():
         print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
     review_prompt = content.find("对已草稿封存的 Batch")
-    utest_prompt = content.find("async function runBatchUtestAndSeal(")
-    if review_prompt < 0 or utest_prompt < 0:
-        print("✗ Review 到 UTest 的固定顺序缺失")
+    if review_prompt < 0 or "runBatchUtestAndSeal" in content or "begin-e2e" in content or "finish-e2e" in content:
+        print("✗ Workflow Review 缺失或仍含测试执行入口")
         return False
     candidate_start = content.find("构建 Batch ${batchId} 的独立 Merge Train 候选")
     candidate_end = content.find("let built = builtRaw;", candidate_start)
@@ -270,7 +255,7 @@ def test_fixed_workflow_entrypoint():
         print("✗ 候选构建仍禁止平台异步执行")
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
-    print("✓ 每个 Batch 独立完成 review、UTest、合并并重新调度")
+    print("✓ 每个 Batch 独立完成 Review、合并并重新调度，测试阶段已移除")
     print()
     return True
 
@@ -342,7 +327,7 @@ const schemaEnd = source.indexOf("// Review can return either");
 const helperStart = source.indexOf("function normalizeStructuredOutput(");
 const inputStart = source.indexOf("const input = unwrap(args);");
 const reworkStart = source.indexOf("function requiresImplementationRework(");
-const reworkEnd = source.indexOf("function withLatestBatchDelivery(", reworkStart);
+const reworkEnd = source.indexOf("async function runDeliveryReviewAndGate(", reworkStart);
 if (schemaEnd < 0 || helperStart < 0 || inputStart < 0 || reworkStart < 0 || reworkEnd < 0) process.exit(2);
 vm.runInContext(
   source.slice(0, schemaEnd).replace("export const meta =", "const meta =") +
@@ -744,7 +729,7 @@ const vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const calls = [];
 const context = {
-  runDeliveryReviewTestAndGate: async (_delivery, options) => {
+  runDeliveryReviewAndGate: async (_delivery, options) => {
     calls.push(options);
     return { status: "ready_to_candidate" };
   },
@@ -766,8 +751,8 @@ vm.runInContext(source.slice(start, end), context);
     if result["returncode"] != 0:
         print(f"✗ sealed UTest 恢复边界错误: {result['stderr'] or result['stdout']}")
         return False
-    print("✓ nextStage=test 只恢复 UTest 与 gate，不重跑 Review")
-    print("✓ nextStage=review 保留正常 Review → UTest 顺序")
+    print("✓ 旧 nextStage=test 直接进入跳过测试的 gate，不重跑 Review")
+    print("✓ nextStage=review 保留正常 Review → gate 顺序")
     print()
     return True
 
@@ -836,25 +821,17 @@ def test_skill_integration():
 
     content = skill_file.read_text(encoding="utf-8")
 
-    # 检查是否添加了 Workflow 入口
     checks = [
-        ("## Workflow 并行执行模式", "Workflow 章节"),
         ("workflow_launcher.py", "启动器引用"),
-        ("native_git_worktrees", "插件原生 Worktree 隔离说明"),
-        ("worktree_manager.py provision", "插件 Worktree 创建阶段说明"),
-        ("不得调用 `task_runner.py code-session`", "废弃 Code 会话入口保护"),
-        ("mergeCommitSha", "合并证据保护"),
-        ("前端 Route 闸门（按 Task 在 Agent 内执行）", "按 Task 执行 Route 闸门"),
-        ("taskContract.uiRequired=true", "Task UI 机器事实"),
-        ("固定 Code Workflow 启动后禁止调用 `request_user_input`", "Code 阶段无用户确认边界"),
-        ("拿到有效 ID 后再进行准入检查", "启动前看板 ID 询问边界"),
-        ("## Code 入口：先获取看板 ID", "Code 入口看板 ID 获取"),
-        ("请填写本次 Code 提交使用的看板 ID", "直接填写看板 ID"),
-        ("缺少 ID 时调用 `request_user_input`", "工具获取看板 ID"),
-        ("通过工具的自由文本输入收集 ID", "自由文本填写看板 ID"),
-        ("Workflow 启动后以及恢复同一 Run 时", "启动后不再询问看板 ID"),
+        ("workflowArgs", "固定 Workflow 启动参数"),
+        ("原生 Worktree", "隔离工作区"),
+        ("uiRequired=true", "按 Task 选择前端 Route"),
+        ("仅首次缺失时", "复用已知看板 ID"),
+        ("固定 Workflow 启动后不调用 `request_user_input`", "执行期间无人工确认"),
+        ("前后端 UTest 和 E2E 当前全部移出 Workflow", "前后端测试阶段移除"),
+        ("不另外调用测试技能或命令补跑", "禁止另走测试入口"),
+        ("用户确认后才调用", "保留最终合并确认"),
     ]
-
     all_passed = True
     for pattern, description in checks:
         if pattern in content:
@@ -862,32 +839,9 @@ def test_skill_integration():
         else:
             print(f"✗ 缺少 {description}")
             all_passed = False
-
-    card_start = content.find("## Code 入口：先获取看板 ID")
-    route_start = content.find("## 前端 Route 闸门")
-    if not (0 <= card_start < route_start):
-        print("✗ 看板 ID 获取未处于 Code 第一项")
-        all_passed = False
-    if "工具不支持时直接在对话中等待回复" in content:
-        print("✗ 看板 ID 获取仍会退回普通对话")
-        all_passed = False
-
-    forbidden_confirmation_rules = [
-        "使用任何 `request_user_input` 前",
-        "停下用 `request_user_input` 单次确认",
-        "ask-user-question.md",
-    ]
-    # Before launch, the task-card question uses the shared protocol. Only the
-    # already-running autonomous Workflow must exclude confirmation rules.
-    post_launch = content.split("固定 Code Workflow 启动后禁止", 1)[-1]
-    present_confirmation_rules = [rule for rule in forbidden_confirmation_rules if rule in post_launch]
-    if present_confirmation_rules:
-        print(f"✗ Code 技能仍保留用户确认规则: {', '.join(present_confirmation_rules)}")
-        all_passed = False
-
     reviewer = (ROOT / "agents" / "reviewer.md").read_text(encoding="utf-8")
-    if "- `fixed_code_workflow`：" not in reviewer:
-        print("✗ Reviewer 未声明固定 Code Workflow 无确认模式")
+    if "不自行修改或要求用户确认" not in reviewer:
+        print("✗ Reviewer 未保留自主执行边界")
         all_passed = False
 
     launcher = (ROOT / "hooks" / "workflow_launcher.py").read_text(encoding="utf-8")

@@ -178,6 +178,8 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["workspaceContractPath"], str((feature_dir / "plan.json").resolve()))
         self.assertEqual(result["reason"], "fixed_workflow_for_pending_batches:2")
         execution_plan = result["batchExecutionPlan"]
+        self.assertNotIn("test", execution_plan["deliveryStages"])
+        self.assertIsNone(execution_plan["postMergeValidation"]["validationBatch"])
         self.assertEqual(execution_plan["maxParallel"], 5)
         self.assertEqual([item["id"] for item in execution_plan["batches"]], ["B001", "B002"])
         self.assertEqual(execution_plan["waves"][0]["batchIds"], ["B001", "B002"])

@@ -1,13 +1,13 @@
 ---
 name: autodev-code
-description: 启动或恢复固定 Code Workflow，在隔离工作树完成实现、Review、UTest 和最终证据汇总。
+description: 启动或恢复固定 Code Workflow，在隔离工作树完成实现、Review、集成和最终证据汇总。
 version: v2.0
 allowed-tools: execute task_output read_file grep glob write_file edit_file request_user_input
 ---
 
 # /autodev-code
 
-主会话只负责启动、恢复与展示最终交付；固定 Workflow 管 Batch DAG、原生 Worktree、每个 Batch `review` 子阶段、UTest、Merge Train 和最终验证登记。E2E 当前暂时禁用，不另外调用 E2E 技能或测试命令补跑。不要生成替代 Workflow 或在共享 checkout 手工执行 Batch。
+主会话只负责启动、恢复与展示最终交付；固定 Workflow 管 Batch DAG、原生 Worktree、每个 Batch `review` 子阶段、Merge Train 和最终证据汇总。前后端 UTest 和 E2E 当前全部移出 Workflow，不另外调用测试技能或命令补跑，不生成测试资产或初始化测试环境。不要生成替代 Workflow 或在共享 checkout 手工执行 Batch。
 
 ## 启动与恢复
 
@@ -29,16 +29,16 @@ python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}"
 - 实现前读取 `references/task-execution.md`；当前 Task 的上游事实通过 `code_task_context.py` 获取，不重读整个 Plan。已有有效工程事实直接复用，未知或失效的 API 才定向 lookup/resolve/query。
 - 当前 TASK `uiRequired=true` 时才读取 `references/frontend-route.md`。后端不加载 HTML/parser，不在 Workflow 启动前解析全局前端 Route。
 - 生产代码在 TASK start 成功后修改；Code 不生成测试、不执行行为测试。后端每个 TASK 必须完成当前源码的 production-only compile 并登记真实输出，才能 `finish-implementation`。前端不新增编译要求。
-- Review 独立且只读，只审当前 Batch 生产实现。UTest 生成/复用测试并实际执行。既有一次定向生产修复后完成纯编译、封存和 `single_repair_accepted`，直接续测，不派发第二次 Review。
-- 前端 UTest 当前明确 `skipped`，原因 `frontend_utest_temporarily_disabled`；不生成测试资产、不初始化环境、不编译、不把跳过记为 PASS。后端按真实测试结果收口，失败/deferred 保留 Evidence。
+- Review 独立且只读，只审当前 Batch 生产实现。既有一次定向生产修复后完成纯编译、封存和 `single_repair_accepted`，直接进入候选集成，不派发第二次 Review。
+- Review checkpoint 和交付 gate 使用 `--skip-tests`，按当前提交登记前后端测试 `skipped`，原因 `utest_temporarily_disabled`；不准备 assignment、测试环境或测试工具，不把跳过记为 PASS。
 - 固定 Workflow 启动后不调用 `request_user_input` 或额外等待确认。内部差异按已有契约与现有依赖最小兼容处理，超出权限/契约时报告具体阻断，不伪造成功。
 
 ## 收口与合入
 
-Review/UTest 处理后的交付由 Merge Train 集成；全部 Batch 交付后通过 `skip-e2e` 登记 `skipped`，原因 `e2e_temporarily_disabled`，不创建 E2E 验证 Worktree、不准备环境、不运行 E2E、不记为通过。最终 aggregate 校验含跳过记录的既有证据，报告保留 E2E 未执行及原因，再准备用户确认；不重复编译或测试，不增加独立 Verify。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
+Review 收口后的交付由 Merge Train 集成；全部 Batch 交付后直接执行 aggregate `--skip-e2e`，在汇总内部登记 E2E `skipped` 和 `e2e_temporarily_disabled` 原因，不再派发独立的 E2E 执行或跳过登记 Agent。报告展示前后端 UTest、E2E 未执行及原因，再准备用户确认；不创建验证 Worktree、不重复编译或测试，不增加独立 Verify。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
 
 `review_integration_and_confirm_promotion` 是最终交付入口：展示 `mainPromotion` 报告中的各仓库代码位置、集成分支、冻结的基线分支、候选 SHA、diff、验证结果和遗留问题。`validationStatus` / `evidencePassed` 为失败时仍如实展示，report-only 不是 PASS。
 
 先展示结果，再按共享提问协议请求用户确认具体报告；已有同一有效 `approvalDigest` 的明确授权直接复用。用户确认后才调用 `parallel_integration.py promote --approval-digest <报告原值> --approved-by <用户标识> --confirm`；暂不合入调用 `keep`。目标或候选变化必须重新准备报告。准确参数和冲突恢复见 `${pluginPath}/docs/feature-integration-worktree.md`。
 
-`code_done` 由固定 Workflow 交付与门禁收口，不手改 Plan、manifest、Evidence 或 checkpoint 绕过。Code/Rework/UTest 提交均由封存器生成，格式见 `${pluginPath}/docs/code-commit-messages.md`。简报实际结果并按 `${pluginPath}/skills/references/ui-continuation-guide.md` 交接。
+`code_done` 由固定 Workflow 交付与门禁收口，不手改 Plan、manifest、Evidence 或 checkpoint 绕过。Code/Rework 提交均由封存器生成，格式见 `${pluginPath}/docs/code-commit-messages.md`。简报实际结果并按 `${pluginPath}/skills/references/ui-continuation-guide.md` 交接。

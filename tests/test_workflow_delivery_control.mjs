@@ -29,10 +29,6 @@ async function execute(frontend = false, fault = null) {
       dependencies: [], mergeCommitSha: merged ? "candidate" : null, recovery: {} } },
       mergeTrains: {}, deferredIssues: reviewAdvisoryRecorded ? [advisory] : [], skippedUtests: [] },
   });
-  const preparation = frontend
-    ? { success: true, ...delivery, status: "skipped", testStatus: "skipped", skipReason: "frontend_utest_temporarily_disabled" }
-    : { success: true, batchId: "B001", status: "test_required", runtimeContractDigest: "b".repeat(64),
-      utestPolicy: { firstExecutionSeconds: 1800, stageSeconds: 2700, commandSeconds: 300, digest: "policy" } };
   let releaseCleanup;
   const cleanupMayFinish = new Promise(resolve => { releaseCleanup = resolve; });
   let cleanupStarted = false;
@@ -48,10 +44,13 @@ async function execute(frontend = false, fault = null) {
       reviewAdvisoryRecorded = fault === "advisory";
       return { success: true, batchId: "B001", stage: "review", status: "passed" };
     }
-    if (label === "validate-review-B001-attempt-1") return { success: true, batchId: "B001", stage: "review", status: "passed", utestPreparation: preparation };
-    if (label === "stage-utest-B001") return { success: true, ...delivery, status: "success", testStatus: "passed" };
+    if (label === "validate-review-B001-attempt-1") {
+      assert.match(prompt, /--skip-tests/);
+      return { success: true, batchId: "B001", stage: "review", status: "passed" };
+    }
     if (label === "settle-delivery-B001-1") {
       assert.match(prompt, /--expected-commit "sealed"/);
+      assert.match(prompt, /--skip-tests/);
       return { success: true, status: "merged", batchId: "B001", runId: "run", dispatchGeneration: 1,
         deliverySha: "sealed", mergeCommitSha: "candidate", dispatchFinalized: true,
         repositoryRef: "default", wave: 1, operationId: "operation", schedulerSnapshot: snapshot(true) };
@@ -75,15 +74,18 @@ async function execute(frontend = false, fault = null) {
       return current;
     }
     if (label === "sync-main-into-integration") return { success: true };
-    if (label === "skip-e2e-validation") {
+    if (label === "aggregate-staged-evidence") {
+      assert.match(prompt, /--skip-e2e/);
       // Cleanup can be waiting independently while final validation advances.
       await Promise.resolve();
       assert.equal(cleanupStarted, true);
       releaseCleanup();
-      return { success: true, status: "skipped", e2eStatus: "skipped", skipReason: "e2e_temporarily_disabled" };
+      return { ok: true, policy: "report_only", passed: true,
+        errors: [], blockingErrors: [], integrationMode: "isolated",
+        e2eStatus: "skipped", e2eSkipReason: "e2e_temporarily_disabled",
+        skippedUtests: [{ batchId: "B001", executionLane: frontend ? "frontend" : "backend",
+          status: "skipped", reason: "utest_temporarily_disabled" }] };
     }
-    if (label === "aggregate-staged-evidence") return { ok: true, policy: "report_only", passed: true,
-      errors: [], blockingErrors: [], integrationMode: "isolated" };
     if (label === "prepare-user-confirmed-promotion") return { success: true, mainPromotion: { approvalDigest: "approval" } };
     if (label === "drain-delivery-cleanup") {
       cleanupStarted = true;
@@ -108,19 +110,21 @@ test("nonblocking Review uncertainty survives through final baseline confirmatio
   assert.equal(result.deferredIssues[0].kind, "review_advisory");
   assert.equal(result.deferredIssues[0].blocksWorkflow, false);
   assert.equal(labels.some(label => label.startsWith("triage-review-")), false);
-  assert.ok(labels.includes("skip-e2e-validation"));
+  assert.ok(labels.includes("aggregate-staged-evidence"));
 });
 
 for (const frontend of [false, true]) {
   test(`complete ${frontend ? "frontend" : "backend"} workflow settles without individual control agents`, async () => {
     const { labels, result } = await execute(frontend);
     assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
-    assert.equal(result.e2e.e2eStatus, "skipped");
+    assert.equal(result.verification.e2eStatus, "skipped");
+    assert.equal(result.skippedUtests[0].reason, "utest_temporarily_disabled");
+    assert.equal(labels.some(label => /utest|e2e/i.test(label)), false);
     assert.equal(result.e2eSkippedReason, "e2e_temporarily_disabled");
     assert.equal(labels.includes("begin-e2e-validation"), false);
     assert.equal(labels.includes("run-e2e-validation"), false);
     const chain = labels.filter(label => /^(stage-review|validate-review|stage-utest|settle-delivery)/.test(label));
-    assert.equal(chain.length, frontend ? 3 : 4);
+    assert.equal(chain.length, 3);
     assert.equal(labels.filter(label => label === "prepare-delivery-finalization").length, 1);
     assert.equal(labels.filter(label => label === "final-repair-initial-snapshot").length, 1);
     assert.equal(labels.filter(label => /stage-gate|build-candidate|promote-candidate|dispatch-finish|after-batch|final-report-snapshot|recover-merged/.test(label)).length, 0);

@@ -14,13 +14,11 @@ function harness() {
     artifactWorkspace: "/artifacts", feature: "f", runId: "run", controlProtocolVersion: 2,
     batchTaskIds: { B001: ["T001"] }, batchWorkspaces: { B001: { workspaceRef: "default" } },
     errorText: error => error.message || String(error),
-    runBatchUtestAndSeal: async () => ({ success: true, testStatus: "passed" }),
   });
   vm.runInContext(source.slice(0, source.indexOf("const input = unwrap(args);")).replace("export const meta =", "const meta ="), c);
   const load = (from, until) => vm.runInContext(source.slice(source.indexOf(from), source.indexOf(until, source.indexOf(from))), c);
-  load("function requiresImplementationRework(", "function withLatestBatchDelivery(");
-  load("function withLatestBatchDelivery(", "async function runBatchUtestAndSeal(");
-  load("async function runDeliveryReviewTestAndGate(", "async function reworkDeliveryImplementation(");
+  load("function requiresImplementationRework(", "async function runDeliveryReviewAndGate(");
+  load("async function runDeliveryReviewAndGate(", "async function reworkDeliveryImplementation(");
   return { c, load };
 }
 
@@ -32,17 +30,17 @@ test("Review transport interruption gets one retry driven by its durable checkpo
     if (label === "validate-review-B001-attempt-1") return { ...passed, status: "incomplete", success: false };
     return passed;
   };
-  assert.equal((await c.runDeliveryReviewTestAndGate(delivery)).status, "ready_to_candidate");
+  assert.equal((await c.runDeliveryReviewAndGate(delivery)).status, "ready_to_candidate");
   assert.equal(labels.filter(label => label.startsWith("stage-review-")).length, 2);
 });
 
 test("reviewer prose cannot replace a missing durable decision", async () => {
   const { c } = harness();
   c.workflowAgent = async (_, { label }) => label.startsWith("stage-review-") ? passed : { status: "incomplete" };
-  await assert.rejects(c.runDeliveryReviewTestAndGate(delivery), /review_stage_not_finalized/);
+  await assert.rejects(c.runDeliveryReviewAndGate(delivery), /review_stage_not_finalized/);
 });
 
-test("Review with external uncertainties proceeds to UTest without a classification agent", async () => {
+test("Review with external uncertainties proceeds to delivery without a test or classification agent", async () => {
   const { c } = harness(), labels = [];
   c.workflowAgent = async (prompt, { label }) => {
     labels.push(label);
@@ -52,7 +50,7 @@ test("Review with external uncertainties proceeds to UTest without a classificat
     }
     return { ...passed, advisories: [advisory] };
   };
-  assert.equal((await c.runDeliveryReviewTestAndGate(delivery)).status, "ready_to_candidate");
+  assert.equal((await c.runDeliveryReviewAndGate(delivery)).status, "ready_to_candidate");
   assert.deepEqual(labels, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1"]);
 });
 
@@ -60,7 +58,7 @@ test("proven implementation defects still fail Review even alongside external ad
   const { c } = harness();
   const failure = { type: "implementation", message: "source.py:1 missing null check", nextStage: "implement" };
   c.workflowAgent = async () => ({ ...passed, status: "failed", nextStage: "implement", failure, advisories: [advisory] });
-  const result = await c.runDeliveryReviewTestAndGate(delivery);
+  const result = await c.runDeliveryReviewAndGate(delivery);
   assert.equal(result.status, "implementation_rework_required");
   assert.equal(result.recovery.failureContext.message, failure.message);
 });
@@ -93,7 +91,7 @@ test("Runtime-proven sealed repair skips task restart even when the commit is al
 
   load("async function runDeliveryWithImplementationRepair(", "async function continueRecoveredDelivery(");
   let first = true;
-  c.runDeliveryReviewTestAndGate = async () => {
+  c.runDeliveryReviewAndGate = async () => {
     if (!first) return { ...delivery, status: "ready_to_candidate" };
     first = false;
     return { status: "implementation_rework_required", failedStage: "review", recovery };

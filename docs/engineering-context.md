@@ -112,10 +112,11 @@ Rework 先检查全 Batch 的旧活动 run，但仅重开 repairTaskIds。无法
 resumeCursor 和原 deadlines；awaiting_record 只补记原输出，不启动 Maven。
 
 固定 Batch Workflow 遵循当前一次性生产修复规则：在原 Worktree 修复、完成所需
-后端纯编译和封存，由 Runtime 登记 single_repair_accepted 后直接继续 UTest，
-不再派发第二次 Review；UTest 来源重跑原失败命令。测试自身修复和生产修复各按
-现有有限次数执行。耗尽后按现有 deferred/阻断策略保留真实结果，绝不称为通过。
-独立手动流程仍按其自身阶段契约执行。前端 UTest 暂时跳过的策略不变。
+后端纯编译和封存，由 Runtime 登记 single_repair_accepted 后直接进入候选集成，
+不再派发第二次 Review。前后端 UTest 和 E2E 均暂时移出固定 Workflow，不准备
+测试 assignment/环境、不生成资产、不补跑旧测试。Review checkpoint/交付使用
+--skip-tests，最终 aggregate 使用 --skip-e2e，报告保留未执行状态及原因。
+独立手动流程仍按其自身阶段契约执行。
 
 所有编译/测试继续前台 Bash、实时合并输出、保存真实进程与 tee 退出码，runner
 只做绑定和 record-only 登记。Runtime guard 允许读取准确引用，阻止直接改写上下文、
@@ -181,7 +182,7 @@ launcher 在复制固定模板前检查已知禁用全局，并校验发布副�
 ready 但没有可领取许可时报告
 ready_batches_not_dispatchable 及原因，不再无提示等待数小时。
 
-Review 业务结论只有 passed/failed，只有持久化 passed 才放行 UTest。外部行为未知和
+Review 业务结论只有 passed/failed，只有持久化 passed 才放行候选集成。外部行为未知和
 资料缺口通过 --advisory-message 记录为非阻断问题；review-checkpoint 将旧 needs_triage/
 documentation 记录转换为带 advisory 的 passed，不增加分类 Agent，不以信息缺口阻塞。
 可证实的实现缺陷仍 failed；未完成评审的执行中断有限重试，不冒充通过。

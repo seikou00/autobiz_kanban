@@ -365,9 +365,9 @@ def _batch_execution_plan(
         remaining.difference_update(selected)
 
     notes = [
-        "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后执行 UTest 并重新封存，随后进入候选合并；成功合并后才释放下游。",
-        "每个 Batch 在自己的 Worktree 完成业务 Review 与 UTest；Merge Train 只合成并推广这些已通过的 candidate SHA，成功后才释放下游 Batch。",
-        "所有 delivery Batch 推广后，E2E 当前暂时跳过并登记 e2e_temporarily_disabled；最终仅聚合证据，保留跳过原因后准备基线合并确认。",
+        "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后直接进入候选合并，成功合并后才释放下游。",
+        "前后端 UTest 和 E2E 均暂时移出 Workflow；不准备测试环境、不生成测试资产、不派发测试 Agent。后端实现阶段仍保留生产代码纯编译。",
+        "所有 delivery Batch 推广后直接聚合证据并展示测试未执行记录，再准备最终基线合并确认。",
     ]
 
     if optimistic_mode:
@@ -387,16 +387,17 @@ def _batch_execution_plan(
             "rule": "dependency_ready_and_safe_within_available_parallel_slots",
         },
         "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
-        "deliveryStages": ["prepare", "implement", "review", "test"],
+        "deliveryStages": ["prepare", "implement", "review"],
         "mergeBarrier": {
             "type": "merge_train",
             "validationBatch": None,
-            "rule": "batch_review_and_utest_must_pass_before_fast_forward_promotion",
+            "rule": "batch_review_must_pass_before_fast_forward_promotion",
         },
         "postMergeValidation": {
-            "validationBatch": "V-E2E",
-            "rule": "temporary_main_worktree_then_evidence_aggregate_only",
+            "validationBatch": None,
+            "rule": "evidence_aggregate_only_with_testing_omissions",
         },
+        "skippedTesting": {"utest": "utest_temporarily_disabled", "e2e": "e2e_temporarily_disabled"},
         "batches": [
             {
                 "id": batch["id"],
