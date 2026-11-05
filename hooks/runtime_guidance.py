@@ -36,8 +36,9 @@ def parser_schema(parser: argparse.ArgumentParser) -> dict:
 def command_catalog() -> dict:
     # Imports are deferred: these modules also use guidance for their results.
     from hooks import task_runner, batch_lease_manager, worktree_manager, parallel_batch_stage, utest_runtime
-    from hooks import engineering_context, parallel_dispatch
-    modules = (task_runner, batch_lease_manager, worktree_manager, parallel_batch_stage, utest_runtime, engineering_context, parallel_dispatch)
+    from hooks import engineering_context, parallel_dispatch, parallel_delivery, parallel_cleanup
+    modules = (task_runner, batch_lease_manager, worktree_manager, parallel_batch_stage, utest_runtime,
+               engineering_context, parallel_dispatch, parallel_delivery, parallel_cleanup)
     return {"schemaVersion": "autodev.runtime.commands.v1", "commands": {
         Path(module.__file__).stem: {"argvPrefix": [sys.executable, "-X", "utf8", str(Path(module.__file__).resolve())],
                                      **parser_schema(module.build_parser() if hasattr(module, "build_parser") else module.parser())}

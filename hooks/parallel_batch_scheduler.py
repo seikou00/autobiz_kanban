@@ -173,8 +173,15 @@ def _mark_retry_pending_locked(
     previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
     from hooks.parallel_failure import recovery_failure
     failure = recovery_failure(error, batch, run_dir(workspace, feature, run_id) / "engineering" / batch_id)
+    # Provision has not begun business work. Waiting for another Batch's
+    # checkout is contention, even when the same lock stays busy repeatedly.
+    provision_wait = (previous == "pending" and not batch.get("commitSha") and not batch.get("lease")
+                      and failure["classification"] == "retryable"
+                      and "parallel_worktree_provision_lock_busy" in error)
+    if provision_wait:
+        failure["reasonCode"] = "parallel_worktree_provision_lock_busy"
     unchanged = previous_recovery.get("status") != "manual_retry_queued" and previous_recovery.get("failureFingerprint") == failure["fingerprint"]
-    if failure["classification"] == "precondition" or unchanged:
+    if not provision_wait and (failure["classification"] == "precondition" or unchanged):
         batch.update(status="blocked", error=error, activeStage=None)
         batch["recovery"] = {**previous_recovery, "status": "precondition_blocked" if failure["classification"] == "precondition" else "unchanged_failure",
                              "failureClassification": failure["classification"], "failureFingerprint": failure["fingerprint"],
@@ -182,7 +189,9 @@ def _mark_retry_pending_locked(
                              "nextAction": "inspect_reported_precondition" if failure["classification"] == "precondition" else "inspect_unchanged_failure_before_retry"}
         return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
     retry_attempts = (
-        1
+        int(previous_recovery.get("retryAttempts", 0))
+        if provision_wait
+        else 1
         if previous == "blocked" and previous_recovery.get("status") == "retry_exhausted"
         else int(previous_recovery.get("retryAttempts", 0)) + 1
     )
@@ -970,11 +979,15 @@ def schedule(
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
             return {"runId": run_id, "status": manifest["status"], "scheduledGroups": [],
+                    "controlProtocolVersion": manifest.get("controlProtocolVersion", 1),
+                    "controlRevision": manifest.get("controlRevision", 0),
                     "readyBatches": [], "allReadyBatches": [], "mergeableBatches": [],
                     "implementationRecoveryBatches": [], "stageRecoveryBatches": [], "retryPendingBatches": [],
                     "blockedBatches": [], "parallelGroups": [], "allParallelGroups": [], "dispatchGrants": {},
                     "batchTaskIds": {}, "batchWorkspaces": {}, "activeWorkers": 0,
                     "maxParallel": manifest["maxParallel"], **promotion_view(manifest)}
+        from hooks.parallel_delivery import reconcile_deliveries_locked
+        reconcile_deliveries_locked(workspace, feature, run_id, manifest)
         for batch_id, batch in manifest.get("batches", {}).items():
             dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
@@ -1251,6 +1264,13 @@ def schedule(
             )
         result = {
             "runId": run_id,
+            "controlProtocolVersion": manifest.get("controlProtocolVersion", 1),
+            "controlRevision": manifest.get("controlRevision", 0),
+            "cleanupPending": [
+                {key: job.get(key) for key in ("jobId", "batchId", "kind", "status", "error")}
+                for job in manifest.get("cleanupQueue", {}).values() if job.get("status") != "completed"
+            ],
+            "workspaceSync": list(manifest.get("workspaceSync", {}).values()),
             "observedEpochMs": int(time.time() * 1000),
             "status": manifest.get("status"),
             "readyBatches": scoped_ready,
@@ -1282,7 +1302,7 @@ def schedule(
                     "recoveryKind": "stage_resume",
                     "preserveWorktree": True,
                     "reprovision": False,
-                    "nextStage": "implement" if failure_context is not None else next_stage,
+                    "nextStage": "implement" if failure_context is not None else next_stage or "delivery",
                     **(
                         {"failureContext": failure_context}
                         if failure_context is not None
@@ -1450,6 +1470,16 @@ def resume_run(
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
     initial = load_manifest(workspace, feature, run_id)
+    from hooks.parallel_workspace_sync import workspace_sync_pending
+    if (initial.get("status") in {"awaiting_user_confirmation", "promotion_prepared", "integration_retained"}
+            and workspace_sync_pending(initial)):
+        with run_lock(workspace, feature, run_id):
+            initial = load_manifest(workspace, feature, run_id)
+            if (initial.get("status") in {"awaiting_user_confirmation", "promotion_prepared", "integration_retained"}
+                    and workspace_sync_pending(initial)):
+                initial["status"] = "running"
+                initial.pop("mainPromotion", None)
+                save_manifest(workspace, feature, run_id, initial)
     if isolated(initial):
         initialize_integrations(workspace, feature, run_id)
         if initial.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
@@ -1788,7 +1818,8 @@ def resume_run(
                 continue
             recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
             retry_attempts = int(recovery.get("retryAttempts", 0))
-            if retry_attempts >= MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS:
+            if (retry_attempts >= MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS
+                    and recovery.get("reasonCode") != "parallel_worktree_provision_lock_busy"):
                 batch["status"] = "blocked"
                 batch["activeStage"] = None
                 batch["recovery"] = {
@@ -1889,6 +1920,17 @@ def resume_run(
     return result
 
 
+def can_manually_resume_batch(batch: dict[str, Any]) -> bool:
+    recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+    return batch.get("status") in {"retry_pending", "failed"} or (
+        batch.get("status") == "blocked"
+        and (recovery.get("status") == "retry_exhausted"
+             or (recovery.get("status") == "unchanged_failure"
+                 and recovery.get("failureClassification") == "retryable"
+                 and bool(batch.get("commitSha")) and _next_open_delivery_stage(batch) is None))
+    )
+
+
 def manual_resume_run(
     workspace: Path,
     feature: str,
@@ -1919,14 +1961,7 @@ def manual_resume_run(
                 continue
             batch_id = str(raw_batch_id)
             recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
-            retryable = (
-                batch.get("status") in {"retry_pending", "failed"}
-                or (
-                    batch.get("status") == "blocked"
-                    and recovery.get("status") == "retry_exhausted"
-                )
-            )
-            if not retryable:
+            if not can_manually_resume_batch(batch):
                 continue
             batch["recovery"] = {
                 **recovery,
@@ -2008,6 +2043,7 @@ def _emit(ok: bool, **payload: Any) -> int:
 
 
 _WORKFLOW_STATUS_FIELDS = (
+    "controlProtocolVersion", "controlRevision", "cleanupPending", "workspaceSync",
     "integrationMode", "integrationWorkspaces", "mainPromotion",
     "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
     "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",

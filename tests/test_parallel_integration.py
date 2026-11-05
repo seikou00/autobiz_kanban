@@ -15,12 +15,12 @@ from unittest.mock import patch
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_lifecycle import cleanup_run, cleanup_merged_batches, rollback_run
 from hooks.parallel_batch_scheduler import create_run, ensure_run, mark_batch, assert_batch_worktree_isolated
-from hooks.parallel_batch_stage import begin_implementation, complete_stage, gate_batch, start_stage
+from hooks.parallel_batch_stage import begin_implementation, complete_stage, gate_batch, start_stage, record_e2e_skip, skipped_e2e_errors
 from hooks.parallel_evidence_aggregate import aggregate_evidence
 from hooks.parallel_integration import (git, integration_repo, keep_integration, prepare_promotion,
                                         promote_main, sync_main)
 from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate, recover_promoted_plan
-from hooks.parallel_runtime import acquire_lease, get_active_run, load_manifest, release_lease, save_manifest
+from hooks.parallel_runtime import acquire_lease, get_active_run, load_manifest, release_lease, save_manifest, run_dir
 from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
 from hooks.workflow_launcher import analyze_batches
 from tests.test_parallel_staged_pipeline import _enable_pipeline
@@ -323,6 +323,51 @@ class ParallelIntegrationTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "deliveries_incomplete|not_waiting|delivery_commit"):
                     self.prepare()
                 self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
+
+    def test_skipped_e2e_creates_no_validation_worktree_and_keeps_baseline_confirmation(self):
+        self.create()
+        self.deliver()
+        result = record_e2e_skip(self.workspace, "alpha", self.run_id)
+        self.assertEqual(result["e2eStatus"], "skipped")
+        self.assertEqual(skipped_e2e_errors(self.manifest()), [])
+        self.assertFalse((run_dir(self.workspace, "alpha", self.run_id) / "validation-worktrees").exists())
+        state = self.manifest()["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"]
+        evidence = json.loads(Path(state["evidencePath"]).read_text())
+        self.assertEqual(evidence["outcome"], "SKIP")
+        self.assertEqual(evidence["metadata"]["executionOutcome"], "not_run")
+        self.assertTrue(record_e2e_skip(self.workspace, "alpha", self.run_id)["reused"])
+        self.assertEqual(self.manifest()["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"], state)
+        report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["e2eStatus"], "skipped")
+        self.assertFalse(report["hasBlockingDeferredIssues"])
+        approval = self.prepare()
+        self.assertEqual(self.manifest()["mainPromotion"]["snapshot"]["e2eStatus"], "skipped")
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), self.baseline)
+        with self.assertRaisesRegex(ValueError, "explicit_user_confirmation"):
+            self.promote(approval)
+
+    def test_e2e_skip_cannot_cover_an_unmerged_delivery_or_a_running_validation(self):
+        self.create()
+        with self.assertRaisesRegex(ValueError, "delivery_incomplete"):
+            record_e2e_skip(self.workspace, "alpha", self.run_id)
+        self.deliver()
+        begin_e2e(self.workspace, "alpha", self.run_id)
+        with self.assertRaisesRegex(ValueError, "stopped_validation"):
+            record_e2e_skip(self.workspace, "alpha", self.run_id)
+
+    def test_e2e_skip_receipt_is_bound_to_heads_and_intact_evidence(self):
+        self.create()
+        self.deliver()
+        record_e2e_skip(self.workspace, "alpha", self.run_id)
+        manifest = self.manifest()
+        manifest["repositories"]["default"]["headSha"] = "changed"
+        self.assertIn("V-E2E.skip_inputs_stale", skipped_e2e_errors(manifest))
+        state = self.manifest()["validationBatches"]["V-E2E"]["stageStates"]["e2e_test"]
+        Path(state["evidencePath"]).write_text("{}")
+        report = aggregate_evidence(self.workspace, "alpha", self.run_id)
+        self.assertFalse(report["passed"])
+        self.assertIn("V-E2E.e2e_test_skip_evidence_invalid", report["errors"])
 
     def test_failed_e2e_continues_to_confirmation_and_requires_explicit_approval(self):
         self.create()

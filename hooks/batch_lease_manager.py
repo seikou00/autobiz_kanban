@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return _emit(
                 True,
+                businessLeaseToken=lease["ownerToken"],
                 lease=lease,
                 leaseGuard=(
                     {

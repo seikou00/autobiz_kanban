@@ -448,6 +448,9 @@ def create_manifest(
 
     manifest = {
         "schemaVersion": RUN_SCHEMA_VERSION,
+        "controlProtocolVersion": (runtime_config.get("controlProtocolVersion", 2)
+                                   if integration_mode == "isolated" else 1),
+        "controlRevision": 0,
         "runId": run_id,
         "featureId": feature,
         "status": "created",
@@ -528,9 +531,14 @@ def _strip_legacy_parallel_flags(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_manifest(workspace: Path, feature: str, run_id: str, manifest: dict[str, Any]) -> None:
-    manifest = dict(manifest)
+    path = manifest_path(workspace, feature, run_id)
+    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    revision = int(current.get("controlRevision", 0))
+    if manifest.get("controlProtocolVersion", 1) >= 2 and int(manifest.get("controlRevision", 0)) != revision:
+        raise ValueError("parallel_manifest_stale_revision")
+    manifest["controlRevision"] = revision + 1
     manifest["updatedAt"] = utc_now()
-    atomic_write_json(manifest_path(workspace, feature, run_id), manifest)
+    atomic_write_json(path, manifest)
 
 
 def append_event(workspace: Path, feature: str, run_id: str, event: str, **details: Any) -> None:
@@ -543,8 +551,8 @@ def append_event(workspace: Path, feature: str, run_id: str, event: str, **detai
 
 
 @contextmanager
-def run_lock(workspace: Path, feature: str, run_id: str) -> Iterator[None]:
-    with FileLock(run_dir(workspace, feature, run_id) / ".lock"):
+def run_lock(workspace: Path, feature: str, run_id: str, *, timeout: float | None = None) -> Iterator[None]:
+    with FileLock(run_dir(workspace, feature, run_id) / ".lock", timeout=timeout):
         yield
 
 
@@ -582,6 +590,29 @@ def acquire_lease(
                     or dispatch.get("tokenSha256") != hashlib.sha256((dispatch_auth.get("token") or "").encode()).hexdigest()):
                 raise ValueError(f"parallel_dispatch_stale_lease_owner:{batch_id}")
             dispatch["expiresEpoch"] = time.time() + max(60, int(dispatch.get("ttlSeconds", 14400)))
+            # A lost acquire response may be retried by the same fenced worker.
+            # Reuse its business capability; never replace a live owner's token.
+            states = batch.get("stageStates") or {}
+            mutable_seal = ((states.get("implement") or {}).get("status") == "pending"
+                            or ((states.get("review") or {}).get("status") == "passed"
+                                and (states.get("test") or {}).get("status") in {"pending", "running", "failed"}))
+            if batch.get("status") in {"leased", "running"} or (batch.get("status") == "sealed" and mutable_seal):
+                path = lease_path(workspace, feature, run_id, batch_id)
+                with FileLock(path.with_suffix(".lock")):
+                    try:
+                        existing = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        existing = {}
+                if (isinstance(existing, dict) and existing.get("expiresEpoch", 0) > time.time()
+                        and existing.get("dispatchGeneration") == dispatch_auth["generation"]
+                        and existing.get("dispatchTokenSha256") == dispatch.get("tokenSha256")
+                        and (not owner_token or owner_token == existing.get("ownerToken"))
+                        and (not lease_guard or existing.get("guardMode") == "command_boundary_renewal")):
+                    lease = renew_lease(workspace, feature, run_id, batch_id, existing["ownerToken"],
+                                        ttl_seconds=max(ttl_seconds, int(existing["ttlSeconds"])))
+                    batch["lease"] = {key: value for key, value in lease.items() if key not in {"expiresEpoch", "ownerToken"}}
+                    save_manifest(workspace, feature, run_id, manifest)
+                    return lease
         states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
         rework_stage = (states.get("implement") or {}).get("status")
         review_stage = (states.get("review") or {}).get("status")
@@ -836,15 +867,15 @@ def skipped_utests(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
-    """Return recoverable deliveries whose post-implementation stages remain open.
+    """Return deliveries needing stage continuation or final delivery admission.
 
     This is distinct from ``ready_batches``: no source task is scheduled here.
     The delivery commit and linked worktree already exist, so a resumed
     Workflow only needs to continue its remaining review/test/quality stages
     idempotently.  A review/test implementation finding resets a Batch to
     ``running`` while retaining its sealed commit, so that state is also a
-    recovery candidate; otherwise a resumed Workflow would stall before it
-    can repair or defer the finding.
+    recovery candidate. A sealed result with every stage closed still needs
+    its gate/settlement; excluding it would strand an interrupted delivery.
     """
     result: list[str] = []
     for batch_id, item in manifest.get("batches", {}).items():
@@ -853,7 +884,7 @@ def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
         if not isinstance(item.get("commitSha"), str) or not item.get("commitSha"):
             continue
         states = item.get("stageStates") if isinstance(item.get("stageStates"), dict) else {}
-        if any(
+        if item.get("status") == "sealed" or any(
             not isinstance(states.get(stage), dict) or states[stage].get("status") not in {"passed", "skipped", "deferred"}
             for stage in DELIVERY_STAGES
         ):

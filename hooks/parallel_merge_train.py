@@ -26,7 +26,7 @@ from hooks.conflict_resolution_agent import ModelBasedResolver
 from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure
+from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure, record_e2e_skip
 from hooks.parallel_runtime import append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_integration import integration_repo, assert_integration, isolated, record_integration_head
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
@@ -207,6 +207,9 @@ def _remove_candidate(
 
 def _integration_train_lock(workspace: Path, feature: str, run_id: str, repository_ref: str):
     manifest = load_manifest(workspace, feature, run_id)
+    if manifest.get("controlProtocolVersion", 1) >= 2:
+        from hooks.parallel_repository import repository_lock
+        return repository_lock(manifest["repositories"][repository_ref])
     if not isolated(manifest):
         return nullcontext()
     binding = manifest.get("repositories", {}).get(repository_ref, {})
@@ -219,6 +222,9 @@ def build_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, ba
     first = manifest.get("batches", {}).get(next(iter(batch_ids), ""), {})
     ref = str(first.get("repositoryRef") or first.get("workspaceRef") or "")
     with _integration_train_lock(workspace, feature, run_id, ref):
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_repository import assert_reservation
+            assert_reservation(manifest["repositories"][ref], workspace, feature, run_id, wave)
         return _build_candidate(workspace, feature, run_id, wave=wave, batch_ids=batch_ids)
 
 
@@ -398,6 +404,10 @@ def verify_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, r
 def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str,
                       allow_unverified: bool = False) -> dict[str, Any]:
     with _integration_train_lock(workspace, feature, run_id, repository_ref):
+        manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_repository import assert_reservation
+            assert_reservation(manifest["repositories"][repository_ref], workspace, feature, run_id, wave)
         return _promote_candidate(workspace, feature, run_id, wave=wave, repository_ref=repository_ref,
                                   allow_unverified=allow_unverified)
 
@@ -537,6 +547,9 @@ def recover_promoted_plan(workspace: Path, feature: str, run_id: str, *, reposit
         manifest = load_manifest(workspace, feature, run_id)
         record = _record(manifest, repository_ref, wave)
         if isolated(manifest) and record and record.get("status") == "promoted":
+            if manifest.get("controlProtocolVersion", 1) >= 2:
+                from hooks.parallel_repository import release_if_owned
+                release_if_owned(manifest["repositories"][repository_ref], workspace, feature, run_id, wave)
             return {"success": True, "reused": True, "promoted": True,
                     "batchIds": record.get("batchIds", []), "candidateSha": record.get("candidateSha")}
         return _recover_promoted_plan(workspace, feature, run_id, repository_ref=repository_ref, wave=wave)
@@ -650,7 +663,19 @@ def _recover_promoted_plan(
         current.pop("resolution", None)
         current.pop("planWriterErrors", None)
         manifest["status"] = "running"
+        deferred_cleanup = manifest.get("controlProtocolVersion", 1) >= 2
+        if deferred_cleanup:
+            from hooks.parallel_cleanup import enqueue
+            enqueue(manifest, repository_ref, wave)
         save_manifest(workspace, feature, run_id, manifest)
+
+    if deferred_cleanup:
+        from hooks.parallel_repository import release
+        release(binding, workspace, feature, run_id, wave)
+        append_event(workspace, feature, run_id, "merge_train_promoted", repositoryRef=repository_ref,
+                     wave=wave, candidateSha=promoted_sha, batchIds=batch_ids, cleanupDeferred=True)
+        return {"success": True, "promoted": True, "candidateSha": promoted_sha,
+                "batchIds": batch_ids, "cleanupDeferred": True, "cleanupErrors": []}
 
     worktree_path = record.get("worktreePath")
     cleanup_errors = (
@@ -669,6 +694,12 @@ def _recover_promoted_plan(
 
 
 def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
+    before = load_manifest(workspace, feature, run_id)
+    if before.get("finalizationReceiptInvalidated"):
+        from hooks.parallel_delivery import prepare_finalization
+        refreshed = prepare_finalization(workspace, feature, run_id)
+        if refreshed.get("repairRequired"):
+            raise ValueError("parallel_e2e_finalization_repair_required")
     """Open the single B-E2E validation Batch after all deliveries are merged."""
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
@@ -676,6 +707,13 @@ def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
         if incomplete:
             raise ValueError("parallel_e2e_delivery_incomplete:" + ",".join(sorted(incomplete)))
         heads = {ref: binding.get("headSha") for ref, binding in manifest.get("repositories", {}).items() if isinstance(binding, dict)}
+        if manifest.get("finalizationReceipt"):
+            from hooks.parallel_delivery import finalization_inputs
+            from hooks.parallel_integration import _assert_plan
+            _assert_plan(workspace, feature, manifest)
+            expected = {key: value for key, value in manifest["finalizationReceipt"].items() if key != "digest"}
+            if expected != finalization_inputs(manifest):
+                raise ValueError("parallel_e2e_finalization_changed")
         previous = manifest.get("validationBatches", {}).get("V-E2E", {})
         if (isinstance(previous, dict) and previous.get("status") == "running"
                 and previous.get("candidateSha") == json.dumps(heads, sort_keys=True)
@@ -689,6 +727,8 @@ def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
         for ref, binding in manifest["repositories"].items():
             repo = integration_repo(binding)
             _clean(repo)
+            if manifest.get("controlProtocolVersion", 1) >= 2 and _head(repo) != heads[ref]:
+                raise ValueError("parallel_e2e_integration_head_changed")
             target = run_dir(workspace, feature, run_id) / "validation-worktrees" / "e2e" / _safe(ref)
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
@@ -828,6 +868,15 @@ def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, re
 
 
 def complete_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
+    with _integration_train_lock(workspace, feature, run_id, repository_ref):
+        manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_repository import assert_reservation
+            assert_reservation(manifest["repositories"][repository_ref], workspace, feature, run_id, wave)
+        return _complete_resolution(workspace, feature, run_id, wave, repository_ref)
+
+
+def _complete_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
     """Stage model-resolved files and create the merge commit inside the plugin."""
     lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
     with FileLock(lock), run_lock(workspace, feature, run_id):
@@ -911,6 +960,8 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
 
     Returns updated candidate record with resolution status.
     """
+    if load_manifest(workspace, feature, run_id).get("controlProtocolVersion", 1) >= 2:
+        return {"success": False, "error": "use_prepare_resolution_and_complete_resolution"}
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         record = _record(manifest, repository_ref, wave)
@@ -1030,6 +1081,15 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
 
 
 def resume_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
+    with _integration_train_lock(workspace, feature, run_id, repository_ref):
+        manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_repository import assert_reservation
+            assert_reservation(manifest["repositories"][repository_ref], workspace, feature, run_id, wave)
+        return _resume_candidate(workspace, feature, run_id, wave, repository_ref)
+
+
+def _resume_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
     """Mark a manually committed candidate as ready for normal verification.
 
     This command deliberately accepts only a clean worktree with no unmerged
@@ -1097,6 +1157,28 @@ def resume_candidate(workspace: Path, feature: str, run_id: str, wave: int, repo
 
 
 def discard_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
+    with _integration_train_lock(workspace, feature, run_id, repository_ref):
+        manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_repository import assert_reservation, release_if_owned
+            binding = manifest["repositories"][repository_ref]
+            assert_reservation(binding, workspace, feature, run_id, wave)
+            record = _record(manifest, repository_ref, wave) or {}
+            if record.get("promotedSha"):
+                return {"success": False, "error": "candidate_plan_recovery_required_before_discard"}
+        result = _discard_candidate(workspace, feature, run_id, wave, repository_ref)
+        if result.get("success") and manifest.get("controlProtocolVersion", 1) >= 2:
+            release_if_owned(binding, workspace, feature, run_id, wave)
+            with run_lock(workspace, feature, run_id):
+                current = load_manifest(workspace, feature, run_id)
+                for operation in current.get("deliveryOperations", {}).values():
+                    if operation.get("wave") == wave and operation.get("repositoryRef") == repository_ref:
+                        operation["status"] = "discarded"
+                save_manifest(workspace, feature, run_id, current)
+        return result
+
+
+def _discard_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
     """Discard a conflicted candidate and clean up its worktree.
 
     Allows rebuilding from scratch.
@@ -1173,7 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--attempt-id", default="", help="stable identity for one Workflow resolution step")
     e2e_begin = sub.add_parser("begin-e2e")
     e2e_finish = sub.add_parser("finish-e2e")
-    for item in (e2e_begin, e2e_finish):
+    e2e_skip = sub.add_parser("skip-e2e")
+    for item in (e2e_begin, e2e_finish, e2e_skip):
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
         item.add_argument("--run-id", required=True)
@@ -1222,6 +1305,8 @@ def main(argv: list[str] | None = None) -> int:
             result = discard_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "begin-e2e":
             result = begin_e2e(workspace, feature, args.run_id)
+        elif args.command == "skip-e2e":
+            result = record_e2e_skip(workspace, feature, args.run_id)
         else:
             metadata = json.loads(base64.b64decode(args.metadata_base64, validate=True).decode("utf-8")
                                   if args.metadata_base64 else args.metadata_json)

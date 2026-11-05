@@ -10,7 +10,7 @@ function harness() {
     implementationFailureMessage: (value, failure) => failure.message || value.message,
   });
   vm.runInContext(source.slice(0, source.indexOf("function normalizeStructuredOutput(")).replace("export const meta =", "const meta =") +
-    "\nglobalThis.schemas = { review: REVIEW_VALIDATION_SCHEMA, utest: UTEST_STAGE_SCHEMA, recovery: RECOVERY_FAILURE_CONTEXT_SCHEMA };", context);
+    "\nglobalThis.schemas = { review: REVIEW_VALIDATION_SCHEMA, recovery: RECOVERY_FAILURE_CONTEXT_SCHEMA };", context);
   vm.runInContext(source.slice(source.indexOf("function implementationReworkRequired("), source.indexOf("function implementationFailureMessage(")), context);
   return context;
 }
@@ -18,7 +18,7 @@ function harness() {
 test("durable repair references survive structured transport and reach production recovery", () => {
   const context = harness();
   const references = { repairContextPath: "/artifacts/repair.json", repairContextDigest: "a".repeat(64), affectedTaskIds: ["T002"] };
-  for (const [stage, schema] of [["review", context.schemas.review], ["test", context.schemas.utest]]) {
+  for (const [stage, schema] of [["review", context.schemas.review]]) {
     const raw = { ...references, status: "failed", failure: { type: "implementation", message: "src/Auth.java:7 authorization mismatch" } };
     const projected = Object.fromEntries(Object.entries(raw).filter(([key]) => key in schema.properties));
     const result = context.implementationReworkRequired({ batchId: "B001", worktreePath: "/batch", branchName: "batch", commitSha: "draft" }, stage, projected);
@@ -78,21 +78,22 @@ test("failure diagnostics survive shell metacharacters and Unicode without execu
   const message = '路径错误 `touch /tmp/unwanted` $(echo bad) "quoted"\nline2';
   assert.equal(Buffer.from(c.encodeFailure(message), "base64").toString("utf8"), message);
   assert.match(c.encodeFailure(message), /^[A-Za-z0-9+/=]+$/);
+  const malformed = "Git LFS \uD800 中文 \uDC00 \ufffd \ud83d\ude00";
+  assert.equal(Buffer.from(c.encodeFailure(malformed), "base64").toString("utf8"), "Git LFS \ufffd 中文 \ufffd \ufffd \ud83d\ude00");
 });
 
-test("Review needs_triage cannot launch UTest even with success true", async () => {
+test("a nonbinary agent response cannot replace Runtime advisory normalization", async () => {
   const calls = [], c = vm.createContext({ batchTaskIds: { B001: ["T001"] },
-    stagePath: "/plugin/hooks/parallel_batch_stage.py", artifactWorkspace: "/artifacts", feature: "f", runId: "r",
+    pluginPath: "/plugin", stagePath: "/plugin/hooks/parallel_batch_stage.py", artifactWorkspace: "/artifacts", feature: "f", runId: "r",
     requiresImplementationRework: () => false,
     workflowAgent: async (_, options) => { calls.push(options.label); return options.label.startsWith("stage-implement")
       ? { success: true, status: "passed" } : { success: true, batchId: "B001", stage: "review", status: "needs_triage" }; },
-    runBatchUtestAndSeal: async () => { throw new Error("UTest must not run"); },
   });
   vm.runInContext(source.slice(0, source.indexOf("function normalizeStructuredOutput(")).replace("export const meta =", "const meta ="), c);
   vm.runInContext(source.slice(source.indexOf("function normalizeStructuredOutput("), source.indexOf("const input = unwrap(args);")), c);
-  vm.runInContext(source.slice(source.indexOf("async function runDeliveryReviewTestAndGate("), source.indexOf("async function reworkDeliveryImplementation(")), c);
-  await assert.rejects(c.runDeliveryReviewTestAndGate({ batchId: "B001", worktreePath: "/batch", branchName: "branch", commitSha: "sha" }), /review_not_passed:needs_triage/);
-  assert.deepEqual(calls, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1"]);
+  vm.runInContext(source.slice(source.indexOf("async function runDeliveryReviewAndGate("), source.indexOf("async function reworkDeliveryImplementation(")), c);
+  await assert.rejects(c.runDeliveryReviewAndGate({ batchId: "B001", worktreePath: "/batch", branchName: "branch", commitSha: "sha" }), /review_stage_not_finalized/);
+  assert.deepEqual(calls, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1", "stage-review-B001-attempt-2", "validate-review-B001-attempt-2"]);
 });
 
 test("Workflow dispatch works when ambient clock and random globals are unavailable", () => {

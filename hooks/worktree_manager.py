@@ -49,6 +49,7 @@ from hooks.repository_snapshot import (
 
 GIT_INDEX_LOCK_RETRY_ATTEMPTS = 4
 GIT_INDEX_LOCK_RETRY_DELAY_SECONDS = 3
+PROVISION_LOCK_TIMEOUT_SECONDS = 240
 _GIT_INDEX_LOCK_ERROR_RE = re.compile(
     r"(?:unable to create .*index\.lock.*(?:file exists|exists)|index\.lock.*(?:file exists|exists))",
     re.IGNORECASE,
@@ -495,6 +496,30 @@ def provision_parallel_worktree(
     run_id: str,
     batch_id: str,
 ) -> dict[str, Any]:
+    """Queue for provisioning within the Workflow's five-minute budget."""
+    try:
+        return _provision_parallel_worktree(artifact_workspace, feature, run_id, batch_id)
+    except TimeoutError as exc:
+        lock_path = run_dir(artifact_workspace, feature, run_id) / ".lock"
+        if str(exc) != "file_lock_timeout:" + str(lock_path):
+            raise
+        return {
+            "success": False,
+            "batchId": batch_id,
+            "error": "parallel_worktree_provision_lock_busy",
+            "retryable": True,
+            "retryAfterSeconds": GIT_INDEX_LOCK_RETRY_DELAY_SECONDS,
+            "readiness": {"failureKind": "run_lock_contention", "lockPath": str(lock_path),
+                          "waitTimeoutSeconds": PROVISION_LOCK_TIMEOUT_SECONDS},
+        }
+
+
+def _provision_parallel_worktree(
+    artifact_workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+) -> dict[str, Any]:
     """Create or reuse the native Git worktree assigned to one Batch.
 
     Provisioning is idempotent for a live Batch.  If an interruption occurs
@@ -503,7 +528,7 @@ def provision_parallel_worktree(
     it belongs to this Batch.  Other stale paths and branches are rejected
     rather than overwritten.
     """
-    with run_lock(artifact_workspace, feature, run_id):
+    with run_lock(artifact_workspace, feature, run_id, timeout=PROVISION_LOCK_TIMEOUT_SECONDS):
         try:
             manifest, batch, repository_ref, git_root = _parallel_binding(
                 artifact_workspace, feature, run_id, batch_id

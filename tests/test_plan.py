@@ -39,6 +39,7 @@ class PlanTest(unittest.TestCase):
             "schemaVersion": "autodev.plan", "featureId": "alpha",
             "tasks": [{
                 "id": "T001", "outcome": "Users retrieve capability state", "workspace": "default",
+                "ui": None,
                 "dependsOn": [],
                 "implementationPoints": ["Expose the confirmed capability response"],
                 "testPoints": ["Return the current value", "Handle an unavailable value"],
@@ -237,6 +238,7 @@ class PlanTest(unittest.TestCase):
                     "id": "T001",
                     "outcome": "Users can retrieve the capability state",
                     "workspace": "default",
+                    "ui": None,
                     "dependsOn": [],
                     "implementationPoints": ["Expose the capability state through the confirmed API"],
                     "testPoints": ["Verify the response shape for an available capability"],
@@ -266,6 +268,76 @@ class PlanTest(unittest.TestCase):
             test_plan = load_utest_plan(feature)
             self.assertEqual(test_plan["batches"][0]["tasks"][0]["verificationIntent"], payload["tasks"][0]["verification"]["intent"])
             self.assertEqual(test_plan["batches"][0]["tasks"][0]["testPoints"], payload["tasks"][0]["testPoints"])
+
+    def test_frontend_task_without_html_keeps_ui_contract_through_code_context(self) -> None:
+        from hooks.resolve_frontend_html_route import resolve_frontend_route
+        from tests.test_frontend_route_gate import base_ui_context
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            code = Path(directory) / "frontend"
+            code.mkdir()
+            _git(code, "init", "-b", "main")
+            _configure_runtime_ignore(code)
+            write_scope(feature, "frontend_only")
+            ui_context = base_ui_context()
+            ui_context["interactions"] = []
+            ui_context["capabilities"][0]["interactionRefs"] = []
+            (feature / "UI_CONTEXT.json").write_text(json.dumps(ui_context), encoding="utf-8")
+            payload = self._payload()
+            payload["tasks"][0]["ui"] = {
+                "pages": ["PAGE-001"], "interactions": [], "route": "spec-driven-ui",
+            }
+
+            result = self._publish(workspace, payload, code)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            bundle = load_plan_bundle(feature)
+            task = bundle.batches["B001"]["tasks"][0]
+            self.assertTrue(task["uiRequired"])
+            self.assertEqual(task["uiRefs"]["visualSourceRefs"], [])
+            self.assertEqual(bundle.root["batches"][0]["executionLane"], "frontend")
+            self.assertEqual(bundle.batches["B001"]["executionLane"], "frontend")
+
+            context = build_context(workspace=workspace, feature="alpha", task_id="T001", code_workspaces=[code])
+            self.assertTrue(context.ok, context.errors)
+            self.assertTrue(context.data["taskContract"]["uiRequired"])
+            route = resolve_frontend_route(workspace, "alpha", task_id="T001", write_evidence=False)
+            self.assertTrue(route["uiRequired"])
+            self.assertEqual(route["route"], "spec-driven-ui")
+
+    def test_explicit_null_ui_publishes_backend_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, feature = self._feature(Path(directory))
+            write_scope(feature, "backend_only")
+            result = self._publish(workspace, self._payload())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            bundle = load_plan_bundle(feature)
+            self.assertFalse(bundle.batches["B001"]["tasks"][0]["uiRequired"])
+            self.assertEqual(bundle.root["batches"][0]["executionLane"], "backend")
+            self.assertEqual(bundle.batches["B001"]["executionLane"], "backend")
+
+    def test_missing_ui_decision_rejects_input_without_writing_a_plan(self) -> None:
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                workspace, feature = self._feature(Path(directory))
+                payload = self._payload()
+                if existing:
+                    prepared = self._prepare(workspace, payload)
+                    self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                paths = [feature / "plan.json", *sorted((feature / "plans").glob("*/plan.json"))]
+                before = {path: path.read_bytes() for path in paths if path.is_file()}
+                payload["tasks"][0].pop("ui")
+
+                rejected = self._prepare(workspace, payload)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("plan_task_ui_decision_missing", rejected.stdout)
+                self.assertIn("T001", rejected.stdout)
+                self.assertIn("spec-driven-ui", rejected.stdout)
+                self.assertIn("ui=null", rejected.stdout)
+                self.assertEqual(before, {path: path.read_bytes() for path in paths if path.is_file()})
+                self.assertFalse((feature / "PLAN.md").exists())
+                if not existing:
+                    self.assertFalse((feature / "plans").exists())
 
     def test_prepare_plan_is_revisable_before_critic_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -461,6 +533,7 @@ class PlanTest(unittest.TestCase):
                 "tasks": [{
                     "id": "T001", "outcome": "Users retrieve the capability state",
                     "workspace": "default", "dependsOn": [],
+                    "ui": None,
                     "implementationPoints": ["Expose the confirmed capability state"],
                     "testPoints": ["Verify the bounded capability response"],
                     "refs": {
@@ -598,6 +671,8 @@ class PlanTest(unittest.TestCase):
             (lambda p: p["tasks"][0]["verification"].update({"command": "pytest"}), "plan_task_verification_field_unknown"),
             (lambda p: p["tasks"][0]["verification"].clear(), "plan_task_verification_intent_invalid"),
             (lambda p: p["tasks"][0].pop("workspace"), "plan_task_workspace_missing"),
+            (lambda p: p["tasks"][0].update({"ui": False}), "plan_task_ui_invalid"),
+            (lambda p: p["tasks"][0].update({"ui": "spec-driven-ui"}), "plan_task_ui_invalid"),
         ]
         for mutate, reason in mutations:
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:

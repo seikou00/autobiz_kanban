@@ -1,5 +1,6 @@
 """Exercise durable grants with real manifests, concurrency and retry transitions."""
 import concurrent.futures
+import base64
 import io
 import json
 import subprocess
@@ -10,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from hooks.parallel_dispatch import claim, defer, finish
+from hooks.parallel_dispatch import claim, defer, finish, main as dispatch_main
 from hooks.parallel_runtime import acquire_lease, lease_path, load_manifest, save_manifest
 from hooks.parallel_batch_scheduler import mark_batch, resume_run, schedule
 from hooks.parallel_batch_stage import start_stage, complete_stage
@@ -53,6 +54,70 @@ class DispatchGrantTest(unittest.TestCase):
         self.assertEqual("stale_owner_ignored", defer(self.workspace, "alpha", self.run, "B001", 1, first["ownerToken"], "old_failure")["status"])
         self.assertEqual("stale_owner_ignored", finish(self.workspace, "alpha", self.run, "B001", 1, first["ownerToken"])["status"])
         self.assertEqual(before, lease_path(self.workspace, "alpha", self.run, "B001").read_bytes())
+
+    def test_non_utf8_diagnostics_do_not_break_defer_or_reopen_merged_batches(self):
+        owner = self.claim()
+        payload = base64.b64encode(b"Git LFS failed: \x95\xa1").decode("ascii")
+        argv = ["defer", "--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run,
+                "--batch-id", "B001", "--generation", "1", "--owner-token", owner["ownerToken"], "--error-b64", payload]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(0, dispatch_main(argv))
+        self.assertEqual("retry_pending", json.loads(output.getvalue())["status"])
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        self.assertIn("\ufffd", manifest["batches"]["B001"]["recovery"]["lastError"])
+        # A matching late callback must return the durable merge even after
+        # its dispatch expired or completed. Old generations remain fenced.
+        batch = manifest["batches"]["B001"]
+        batch.update(status="merged", mergeCommitSha="f" * 40)
+        batch["dispatch"].update(status="completed", expiresEpoch=time.time() - 1)
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        before = load_manifest(self.workspace, "alpha", self.run)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(0, dispatch_main(argv))
+        self.assertEqual("merged", json.loads(output.getvalue())["status"])
+        self.assertEqual(before, load_manifest(self.workspace, "alpha", self.run))
+        self.assertEqual("stale_owner_ignored", defer(self.workspace, "alpha", self.run, "B001", 0, owner["ownerToken"], "late")["status"])
+
+    def test_failure_cleanup_cannot_mark_a_merged_dispatch_failed(self):
+        owner = self.claim()
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["batches"]["B001"].update(status="merged", mergeCommitSha="f" * 40)
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], outcome="failed")
+        batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        self.assertEqual("completed", batch["dispatch"]["status"])
+        self.assertEqual("merged", defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "late")["status"])
+
+    def test_repeated_provision_lock_waits_do_not_consume_business_retries(self):
+        error = 'provision worktree B001 failed: {"error":"parallel_worktree_provision_lock_busy","retryable":true}'
+        for gen in range(1, 4):
+            owner = self.claim(gen)
+            result = defer(self.workspace, "alpha", self.run, "B001", gen, owner["ownerToken"], error)
+            self.assertEqual("retry_pending", result["status"])
+            batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+            self.assertEqual(0, batch["recovery"]["retryAttempts"])
+            self.assertEqual("parallel_worktree_provision_lock_busy", batch["recovery"]["reasonCode"])
+            resumed = resume_run(self.workspace, "alpha", self.run)
+            self.assertIn("B001", resumed["rescheduledRetryBatches"])
+            self.assertEqual([], resumed["retryExhaustedBatches"])
+            self.assertEqual(gen + 1, resumed["dispatchGrants"]["B001"])
+        owner = self.claim(4)
+        defer(self.workspace, "alpha", self.run, "B001", 4, owner["ownerToken"], "transport_failure")
+        self.assertEqual(1, load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["recovery"]["retryAttempts"])
+
+    def test_provision_wait_preserves_prior_business_failure_budget(self):
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["batches"]["B001"]["recovery"] = {"retryAttempts": 1}
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        owner = self.claim()
+        defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "parallel_worktree_provision_lock_busy")
+        self.assertEqual(1, load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["recovery"]["retryAttempts"])
+        self.assertIn("B001", resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"])
+        owner = self.claim(2)
+        defer(self.workspace, "alpha", self.run, "B001", 2, owner["ownerToken"], "transport_failure")
+        self.assertIn("B001", resume_run(self.workspace, "alpha", self.run)["retryExhaustedBatches"])
 
     def _single_slot_worktree(self):
         manifest = load_manifest(self.workspace, "alpha", self.run)
@@ -226,6 +291,29 @@ class DispatchGrantTest(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("parallel_dispatch_stale_lease_owner", output.getvalue())
         self.assertFalse(lease_path(self.workspace, "alpha", self.run, "B001").exists())
+
+    def test_same_dispatch_can_recover_its_business_lease_after_a_lost_acquire_response(self):
+        from hooks.batch_lease_manager import main
+        from hooks.parallel_runtime import check_lease
+        owner, worktree, branch = self._single_slot_worktree()
+        auth = {"generation": 1, "token": owner["ownerToken"]}
+        lease = acquire_lease(self.workspace, "alpha", self.run, "B001", lease_guard=True, dispatch_auth=auth)
+        mark_batch(self.workspace, "alpha", self.run, "B001", "running", worktreePath=str(worktree), branchName=branch)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["acquire", "--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run,
+                         "--batch-id", "B001", "--lease-guard", "--dispatch-generation", "1", "--dispatch-token", owner["ownerToken"]])
+        self.assertEqual(code, 0, output.getvalue())
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["businessLeaseToken"], lease["ownerToken"])
+        self.assertNotEqual(result["businessLeaseToken"], owner["ownerToken"])
+        self.assertTrue(check_lease(self.workspace, "alpha", self.run, "B001", result["businessLeaseToken"]))
+        self.assertFalse(check_lease(self.workspace, "alpha", self.run, "B001", owner["ownerToken"]))
+        self.assertEqual(load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["status"], "running")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, check=True).stdout.strip()
+        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed", commitSha=head)
+        repeated = acquire_lease(self.workspace, "alpha", self.run, "B001", lease_guard=True, dispatch_auth=auth)
+        self.assertEqual(repeated["ownerToken"], lease["ownerToken"])
 
     def test_poll_recovers_expired_dispatch_without_waiting_for_final_drain(self):
         owner = self.claim()

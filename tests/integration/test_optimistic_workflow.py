@@ -32,6 +32,7 @@ class OptimisticWorkflowIntegrationTest(unittest.TestCase):
                 _load_runtime_config(workspace),
                 {
                     "integrationMode": "isolated",
+                    "controlProtocolVersion": 2,
                     "parallelSchedulingMode": "optimistic",
                     "maxParallel": 6,
                     "conflictResolution": {"maxAttempts": 3, "enableAutoResolve": True},

@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, BinaryIO, ContextManager
 
@@ -194,8 +196,9 @@ def check_record_artifacts(target_feature_dir: Path, record: dict[str, Any]) -> 
 class FileLock(ContextManager["FileLock"]):
     """Cross-platform exclusive lock backed by one local file."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, timeout: float | None = None) -> None:
         self.path = path
+        self.timeout = timeout
         self.handle: BinaryIO | None = None
 
     def __enter__(self) -> "FileLock":
@@ -206,14 +209,32 @@ class FileLock(ContextManager["FileLock"]):
             self.handle.write(b"0")
             self.handle.flush()
         self.handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(self.handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        deadline = time.monotonic() + self.timeout if self.timeout is not None else None
+        try:
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        # LK_LOCK gives up after ten attempts even without a
+                        # caller deadline. Own the wait so Windows matches flock.
+                        msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | (fcntl.LOCK_NB if deadline is not None else 0))
+                    break
+                except OSError as exc:
+                    busy = exc.errno in {errno.EACCES, errno.EAGAIN} or (
+                        os.name == "nt" and exc.errno == errno.EDEADLK
+                    )
+                    if not busy or (deadline is None and os.name != "nt"):
+                        raise
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("file_lock_timeout:" + str(self.path)) from exc
+                    time.sleep(0.05 if deadline is None else min(0.05, max(0, deadline - time.monotonic())))
+        except BaseException:
+            self.handle.close()
+            self.handle = None
+            raise
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:

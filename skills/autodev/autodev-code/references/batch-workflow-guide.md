@@ -52,7 +52,8 @@ when all of these are true. Pass the complete launcher `workflowArgs` mapping
 to that one Workflow. It creates a shared scheduler run and uses `parallel()`
 to start one agent chain for each independently runnable Batch; each chain
 provisions its own repository-native Worktree. The fixed Workflow performs
-B-E2E and final verification after all delivery Batches are promoted. The
+evidence aggregation after all delivery Batches are promoted, with frontend/
+backend UTest and E2E explicitly recorded as not run. The
 launcher keeps a Feature-scoped archival copy in
 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/`, then copies that fixed
 script into `workflowWorkspace/.cmbdevclaw/workflows/<feature>/` for the
@@ -174,8 +175,8 @@ The reuse validation also blocks a Batch marked `merged` without a non-empty
 `mergeCommitSha`, a dirty source checkout, or a source HEAD that differs from
 the run's recorded HEAD. In each case it returns the original `runId` with a
 blocked result. A Batch is `merged` only when `parallel_merge_train.py` has
-fast-forwarded the candidate Merge Train SHA whose Batch Review and UTest
-evidence already passed, and written its
+fast-forwarded the candidate Merge Train SHA whose Batch Review passed and
+whose test omission is recorded, and written its
 merge commit; no worker-facing command may
 set this status.
 
@@ -195,24 +196,89 @@ provisioned.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`,
    whose write sets are safe with every active Batch lifecycle, and for which a
-   `maxParallel` slot is free. Active includes running Review/UTest stages after
+   `maxParallel` slot is free. Active includes running Review stages after
    a delivery has been sealed. The Workflow runs a fixed `maxParallel` worker
-   pool: each worker executes one lifecycle, refreshes immediately on completion,
-   and idle workers poll every thirty minutes while another lifecycle is active.
-   Periodic idle/capacity polls make one model call without empty-response
-   retries. A failed poll preserves the last state and waits for the next poll
-   or local wake; it does not trigger dispatch from a fallback snapshot.
+   pool. New isolated runs use control protocol v2: one `settle-delivery`
+   operation gates, queues, builds and promotes a delivery, records cleanup,
+   finishes its dispatch and returns a revisioned scheduler snapshot. Completion
+   immediately wakes idle workers. Workers share a 60-second fallback and failed
+   reads retry after 5/10/20/30 seconds, capped at 30 seconds. Capacity waits are
+   at most 30 seconds and denied claims wait 15 seconds or an earlier completion.
+   No worker dispatches from an unavailable or superseded snapshot.
+   `settle-delivery` resolves and pins the sealed SHA inside Runtime; the
+   Workflow does not transcribe `--expected-commit`. Queue/repository-lock waits
+   return `queued` with an operation ID, blockers and a scheduler snapshot,
+   release the dispatch slot and retain the ticket for a later claim. Waiting
+   does not consume a Batch failure retry. A process execution lock lets Runtime
+   recover an abandoned settler without revoking an active merge or conflict edit.
+   Sealed Batches with closed stages resume at `nextStage=delivery`, without
+   replaying implementation or Review. A retained candidate/reservation is reused;
+   an already-merged Batch only needs its operation/dispatch receipts reconciled.
+   After each merge, Runtime publishes the integrated files to the user's
+   original checkout as uncommitted changes. It never moves that checkout's
+   HEAD or changes its index. A detached temporary worktree merges the previous
+   published integration SHA, the user's saved files and the latest integration
+   SHA; local staged/unstaged/untracked files are backed up and retained.
+   `workspaceSync` carries publication progress and conflict context. The Workflow
+   resolves only those temporary conflict files and calls Runtime `complete`;
+   it never edits the user's files directly. Interrupted writes replay from a
+   per-file journal; concurrent user edits trigger a fresh merge. Publication
+   failures stay separate from Batch retries and are retried at finalization.
+   `review_workspace_changes` requests acceptance of uncommitted results, never
+   permission to commit or promote them. Backup refs are not source-branch commits.
    A failure releases that worker to dispatch an unrelated Batch; dependents
    remain blocked until their dependency is merged.
 2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
-   Every Batch independently runs code → Review → UTest/seal
+   Every Batch independently runs code → seal → Review
    → Merge Train promotion. A fast Batch may therefore
-   review, test, and merge while another Batch in the same frontier is still
+   review and merge while another Batch in the same frontier is still
    coding. Every Batch records its actual Worktree path and branch in the
    scheduler manifest. In conservative mode, same-repository write-set overlap
    is excluded before launch; optimistic mode records that risk for Merge Train
    handling. Each Merge Train candidate contains exactly one `--batch-id`; its
-   `--wave` value is only a unique candidate-record sequence.
+   `--wave` is allocated by Runtime. Physical repository locks cover construction
+   through promotion/Plan reconciliation. A retained conflict reserves its
+   integration target while releasing the OS lock for model editing; another
+   repository can keep merging. Independent Review checkpoint validation remains
+   mandatory before delivery admission.
+
+   Protocol v2 durably queues both candidate and delivery cleanup. A single
+   managed cleanup worker runs after delivery drain, alongside final validation;
+   cleanup errors never undo `merged` or delay dependent Batch dispatch. Remaining
+   jobs appear as `cleanupPending` and resume on a later invocation. No detached
+   cleanup process is started. Finalization uses a compact `prepare-finalization`
+   admission followed by one authoritative `status --workflow-view`; it does not
+   transport a nested scheduler snapshot. Admission/read failures finish with an
+   explicit unresolved report rather than replaying the drain.
+
+   Between task-card ID input and final acceptance,
+   the Workflow never asks for human confirmation. Review interruption gets one
+   retry. Review decisions are only `passed` or `failed`: proven implementation
+   defects fail; external uncertainties and missing contracts are recorded with
+   `--advisory-message` as non-blocking issues. Legacy `needs_triage`/documentation
+   records are normalized by Runtime into advisories without an extra classifier
+   agent. Proven unresolved defects retain their Worktree and block only their
+   dependent DAG branch. No active, runnable or recoverable work ends the invocation.
+   Acceptance of uncommitted workspace results does not authorize a commit or
+   branch update. A separately requested formal baseline promotion still
+   requires explicit authorization for that exact report.
+
+   UTest and E2E are temporarily removed for both frontend and backend.
+   There are no test preparation, execution, budget-monitor or E2E-skip Agents.
+   Review checkpoint and delivery admission use `--skip-tests` to record
+   SHA-bound SKIP evidence with `utest_temporarily_disabled`, without acquiring
+   a test lease or preparing assignments/environments. Final aggregation uses
+   `--skip-e2e` to register `e2e_temporarily_disabled` in the same operation.
+   Reports show skipped tests explicitly; no skip is a test pass. Backend TASK
+   implementation retains its production-only compile gate.
+
+   Existing runs without `controlProtocolVersion=2` retain legacy delivery and
+   cleanup behavior. To upgrade a stopped isolated run, first stop its old
+   Workflow and finish pending Git/Plan recovery, then run
+   `hooks/parallel_delivery.py upgrade-control-protocol` with its exact
+   `--workspace`, `--feature`, and `--run-id`. Active leases, dispatches and TASK
+   runs block this upgrade. Use the launcher for a fresh platform invocation;
+   do not edit published Workflow copies or replay a terminal platform journal.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
    invokes `worktree_manager.py seal --purpose review --commit-stage code
    --commit-summary "<actual feature summary>"` to create a
@@ -222,36 +288,30 @@ provisioned.
    body contains only the assigned TASK IDs, titles and Plan goals. Review
    creates no commit. Production rework seals with `--purpose review
    --commit-stage rework`; ordinary interrupted implementation stays Code.
-   UTest seals with `--commit-stage utest`, including failure-path test-asset
-   seals. Rework and UTest summaries describe actual changes without TASK
-   bodies; no-change seals reuse the existing SHA. See `docs/code-commit-messages.md`.
-4. `parallelBatchPipeline.validationOwnership` assigns every test intent to
-   its delivery Batch except `e2e_test`, which belongs to final B-E2E.  The
-   delivery UTest agent generates and runs its own tests in the native
-   Worktree.
-5. Each Review draft first performs production-code-only `review`. A Review
-   source bug returns to that Batch's implement repair and a new seal. The
-   Review is then recorded as resolved. The resulting
-   delivery performs UTest in the same Worktree and re-seals the test assets.
-   Any final UTest failure is
-   retained with its runner Evidence as a non-blocking issue and proceeds to
-   later stages without restarting implementation, Review, or UTest. Only
-   then is it `ready_to_candidate`.
+   Rework summaries describe actual changes without TASK bodies; no-change seals reuse the existing SHA. See `docs/code-commit-messages.md`.
+4. Plan test intents remain design context; the current Workflow does not
+   generate tests, prepare test environments or invoke UTest/E2E tools.
+5. Each Review draft performs production-code-only `review`. A proven source
+   bug returns to that Batch's implementation repair and a new seal, then
+   Runtime records the Review as resolved. Passed Review proceeds directly to
+   delivery admission with `--skip-tests`, which records the omission before
+   marking the delivery `ready_to_candidate`. Existing proven production
+   findings from older runs can still be repaired, without rerunning tests.
    The shared Workflow builds a Merge Train candidate and fast-forwards it
-   directly; no candidate test phase is run. A changed main SHA makes the candidate
-   stale and requires rebuild rather than rebase.
+   directly; no candidate test phase is run. A changed main SHA makes the
+   candidate stale and requires rebuild rather than rebase.
 6. After Batch lifecycles settle, the script calls scheduler `resume` to
    calculate newly unlocked work. A dependent Batch never starts from an
    unmerged upstream result, but unrelated Batches do not wait for a failed peer.
 7. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
-   `done`. A Review-and-UTest-processed delivery remains `implemented` /
+   `done`. A Review-processed delivery remains `implemented` /
    `sealed` until this source-branch integration succeeds; each backend TASK has already recorded its current production-only compile
    before finish-implementation. Review does not rerun it.
    If promotion succeeds but the Plan writer fails, the run is retained in
    `needs_resolution` until its Plan state is recovered.
-8. Once all Batches are `merged`, B-E2E runs in a temporary validation
-   Worktree. `parallel_evidence_aggregate.py` then validates existing
-   content-bound evidence only; it never runs a duplicate compile/test command.
+8. Once all Batches are `merged`, `parallel_evidence_aggregate.py --skip-e2e`
+   records the E2E omission and audits existing content-bound evidence in one
+   operation; it creates no validation Worktree and runs no compile/test command.
 
 Independent Batches run in parallel, including independent Batches in the same
 repository. A dependency chain advances only after its upstream merge commit,
@@ -261,8 +321,8 @@ An execution-stage failure is recorded as `retry_pending`, not terminal
 `failed`. Scheduler `resume` reclaims its lease and reschedules the Batch in
 its existing Worktree while unrelated Batches continue. After the bounded
 automatic retry budget is exhausted, that Batch becomes `blocked`; only its
-dependent branch stops, and the Workflow returns `partial_blocked` without
-starting B-E2E. After diagnostics are addressed, an operator may explicitly
+dependent branch stops, and the Workflow reports unresolved work. After
+diagnostics are addressed, an operator may explicitly
 mark that Batch `retry_pending` and resume the same run; it is never stranded
 as an irrecoverable `failed` record.
 
@@ -289,8 +349,8 @@ Within its plugin-provisioned native Git Worktree, a Batch agent must:
 - pass the plugin-provisioned Worktree as `--code-workspace`;
 - complete all assigned TASKs, draft-seal with `--purpose review`, and wait for
   the Workflow's Review stage;
-- after Review, let the fixed Workflow proceed directly to UTest; it creates
-  and seals test assets before the Batch becomes ready to merge.
+- after Review, let the fixed Workflow proceed directly to delivery admission;
+  Runtime records testing as skipped without a test lease, assets or tools.
 
 The Batch agent must not merge, rebase, resolve conflicts, delete Worktrees, or
 modify a shared main checkout. It receives no platform isolation option.
@@ -326,14 +386,13 @@ state.
   The Batch manifest and event report
   `recoveryArchivePath`; active leases and recorded delivery commits prevent
   this replacement.
-- The fixed Workflow defaults to four hours per Batch; UTest keeps its separate
-  Runtime-owned policy/deadlines (utest_policy.py). The scheduler measures a repair attempt from its
+- The fixed Workflow defaults to four hours per Batch. The scheduler measures a repair attempt from its
   current lease acquisition, not from the Batch's first implementation.
   Do not rely on the lease CLI's 15-minute default for an unguarded Batch.
   A lease naturally expires if the agent cannot reach another lease-bearing plugin
   command before its TTL; every failure path must still release the lease with
   its prescribed final status.
-- A candidate conflict, failed Batch stage, plan digest change, or failed B-E2E
+- A candidate conflict, failed production stage, or plan digest change
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.
 - After every successful merge, the fixed Workflow calls
@@ -349,17 +408,15 @@ state.
   or `git clean` to remove them: those commands can destroy user work or the
   Workflow journal needed for recovery.
 - `parallel_merge_train.py` is the integration owner for this workflow. Once it
-  has promoted the Batch-UTest-gated candidate and written `mergeCommitSha`, the fixed Workflow cleans that delivered native
+  has promoted the Review-gated candidate and written `mergeCommitSha`, the fixed Workflow cleans that delivered native
   worktree and temporary branch before the scheduler may start a dependent
   Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.
-- Frontend UTest is temporarily disabled. After Review, `prepare-test` records
-  the delivery's test stage as `skipped` with reason
-  `frontend_utest_temporarily_disabled`. Do not launch a frontend test Agent,
-  initialize test environments, generate test assets, run tests or compile in
-  UTest, or reseal just for this omission. Backend UTest continues normally.
-  `skippedUtests` carries the omitted Batches to the final report; it is not a
-  test PASS. The final B-E2E remains enabled.
+- Frontend and backend UTest, and final E2E, are temporarily removed from the
+  Workflow. Review checkpoint/gate and settlement use `--skip-tests`; aggregate
+  uses `--skip-e2e`. Do not launch test Agents, initialize test environments,
+  generate test assets, run tests or reseal for this omission. `skippedUtests`
+  and `e2eStatus=skipped` carry the omitted tests to final baseline confirmation.
 - Candidate conflicts use a model-to-plugin handoff: `prepare-resolution`
   registers the exact candidate and conflict files; the conflict Agent edits
   those files and returns `success=true,status=resolved`, without running Git
@@ -382,7 +439,7 @@ state.
 
 ## Demand-driven engineering context
 
-Use engineering_context.py prepare inside the existing Workflow, without a pre-Workflow exploration pass or Design/Plan changes. Read only its exact contextPath/allowedReads/commandCatalogPath. Resolve common API facts once per content version, publish immediately and reuse across Batches. finish-implementation produces actual-source handoffs. Runtime records immutable repair snapshots before resetting stages; Rework targets repairTaskIds after bounded attribution, preserving unrelated completed TASKs. Metadata does not authorize source writes or replace Evidence. Fixed Batch repairs record single_repair_accepted and resume UTest without a second reviewer. Full protocol: docs/engineering-context.md.
+Use engineering_context.py prepare inside the existing Workflow, without a pre-Workflow exploration pass or Design/Plan changes. Read only its exact contextPath/allowedReads/commandCatalogPath. Resolve common API facts once per content version, publish immediately and reuse across Batches. finish-implementation produces actual-source handoffs. Runtime records immutable repair snapshots before resetting stages; Rework targets repairTaskIds after bounded attribution, preserving unrelated completed TASKs. Metadata does not authorize source writes or replace Evidence. Fixed Batch repairs record single_repair_accepted and proceed to integration without a second reviewer or test execution. Full protocol: docs/engineering-context.md.
 
 
-共享事实：Code 的 TASK start 前准备与后续实现直接使用有效交接；未知或失效 API 才通过 engineering_context.py lookup 查询，仅解析准确来源。finish 自动保存可提取的声明片段与实现交接，语义 claim 必须 publish/fail 收口。不同 Batch 同一 Feature/仓库按内容版本复用；UTest 继承有效上下文，在当前实现上实际运行测试，不重新探索整个工程。
+共享事实：Code 的 TASK start 前准备与后续实现直接使用有效交接；未知或失效 API 才通过 engineering_context.py lookup 查询，仅解析准确来源。finish 自动保存可提取的声明片段与实现交接，语义 claim 必须 publish/fail 收口。不同 Batch 同一 Feature/仓库按内容版本复用；固定 Workflow 当前不执行 UTest/E2E，独立测试工具保留但不由 Workflow 调用。

@@ -5,27 +5,24 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../workflows/code-batched-execution.workflow.js", import.meta.url), "utf8");
 
-function harness(testPreparation = { success: true, batchId: "B001", status: "test_required",
-  utestPolicy: { stageSeconds: 600, firstExecutionSeconds: 600, commandSeconds: 300, digest: "runtime-policy" },
-  engineeringContext: { brief: { facts: [{ symbol: "example.SharedApi", contentPreview: "current signature" }] } } }) {
+function harness() {
   const prompts = [];
   const context = vm.createContext({
     feature: "orders", runId: "cw-test", artifactWorkspace: "/artifacts",
     batchWorkspaces: { B001: { workspaceRef: "default" } },
     batchTaskIds: { B001: ["T001"] },
     timeoutPerBatch: 600, setTimeout, clearTimeout,
-    BATCH_RESULT_SCHEMA: {}, UTEST_STAGE_SCHEMA: {},
+    BATCH_RESULT_SCHEMA: {},
     CODE_STAGE_EXECUTION_BOUNDARY: "", CODE_STAGE_COMPILE_COMMAND_GUIDANCE: "",
     leasePath: "/plugin/lease.py", stagePath: "/plugin/stage.py",
     schedulerPath: "/plugin/scheduler.py", worktreeManagerPath: "/plugin/worktree_manager.py",
-    routeResolverPath: "/plugin/route.py", utestCommandPath: "/plugin/utest.py",
-    utestRuntimePath: "/plugin/utest_runtime.py", utestRouterPath: "/plugin/router.py",
+    routeResolverPath: "/plugin/route.py",
     usableString: value => typeof value === "string" && value.trim().length > 0,
     batchTaskWorkspace: (_batchId, worktree) => worktree,
     unwrap: value => value, requireSuccess: value => value,
     workflowAgent: async (prompt, options) => {
       prompts.push({ prompt, options });
-      if (options.label === "prepare-utest-B001") return testPreparation;
+      if (options.label === "prepare-repair-B001") return { success: true, status: "ready", ...delivery };
       return { status: "success" };
     },
   });
@@ -39,7 +36,6 @@ function harness(testPreparation = { success: true, batchId: "B001", status: "te
   load("function normalizeStructuredOutput(", "const input = unwrap(args);");
   load("function implementationPrompt(", "async function runInitialBatchLifecycle(");
   load("async function reworkDeliveryImplementation(", "async function recordSingleRepairResolution(");
-  load("async function runBatchUtestAndSeal(", "async function runDeliveryReviewTestAndGate(");
   return { context, prompts };
 }
 
@@ -79,9 +75,11 @@ test("review and UTest production repairs seal as Rework with full binding", asy
   for (const failedStage of ["review", "test"]) {
     const { context, prompts } = harness();
     await context.reworkDeliveryImplementation({ ...delivery, failureContext: { failedStage, message: "筛选失效" } });
-    assert.match(prompts[0].prompt, /seal --purpose review --commit-stage rework --commit-summary/);
+    assert.equal(prompts[0].options.label, "prepare-repair-B001");
+    const prompt = prompts.find(item => item.options.label === "rework-implement-B001").prompt;
+    assert.match(prompt, /seal --purpose review --commit-stage rework --commit-summary/);
     for (const binding of ["--artifact-workspace", "--feature", "--run-id", "--batch-id", "--repo", "--owner-token"]) {
-      assert.ok(prompts[0].prompt.includes(binding), binding);
+      assert.ok(prompt.includes(binding), binding);
     }
   }
 });
@@ -90,199 +88,4 @@ test("ordinary implementation resume keeps the Code stage", async () => {
   const { context, prompts } = harness();
   await context.reworkDeliveryImplementation(delivery);
   assert.match(prompts[0].prompt, /seal --purpose review --commit-stage code --commit-summary/);
-});
-
-test("UTest success and failure paths share the UTest seal command", async () => {
-  const { context, prompts } = harness();
-  await context.runBatchUtestAndSeal(delivery);
-  const prompt = prompts.find(item => item.options.label === "stage-utest-B001").prompt;
-  assert.match(prompt, /seal --commit-stage utest --commit-summary/);
-  assert.match(prompt, /close-test/);
-  assert.match(prompt, /--failure-type/);
-  assert.match(prompt, /不可把 deferred\/skipped 当 PASS/);
-});
-
-test("frontend UTest skips before launching any test generation or execution agent", async () => {
-  const skipped = { success: true, ...delivery, status: "skipped", testStatus: "skipped", skipReason: "frontend_utest_temporarily_disabled" };
-  for (const failure of [null, { failureClassification: "source_compile", commandId: "old" }]) {
-    const { context, prompts } = harness(skipped);
-    const result = await context.runBatchUtestAndSeal(delivery, failure);
-    assert.equal(result.testStatus, "skipped");
-    assert.equal(result.commitSha, "draft");
-    assert.equal(result.status, "success");
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0].prompt, /prepare-test/);
-    assert.doesNotMatch(prompts[0].prompt, /preflight|record-test-failure|seal --commit-stage/);
-  }
-});
-
-test("backend UTest continues through its existing test agent", async () => {
-  const { context, prompts } = harness();
-  await context.runBatchUtestAndSeal(delivery);
-  assert.deepEqual(prompts.map(item => item.options.label), ["prepare-utest-B001", "stage-utest-B001"]);
-  assert.match(prompts[1].prompt, /example.SharedApi/);
-  assert.match(prompts[1].prompt, /只有未知或失效问题/);
-  assert.equal(prompts[1].options.timeoutMs, 600000);
-});
-
-test("UTest preparation declares the fields needed by backend and frontend handoffs", async () => {
-  const { context, prompts } = harness();
-  await context.runBatchUtestAndSeal(delivery);
-  const schema = prompts[0].options.schema;
-  assert.ok(schema, "prepare-utest must declare its structured result");
-  for (const key of ["success", "batchId", "status"]) {
-    assert.ok(key in schema.properties, key);
-    const incomplete = { success: true, batchId: "B001", status: "test_required" };
-    delete incomplete[key];
-    assert.throws(() => context.requireUtestPreparation(incomplete, "B001"), /utest_preparation_invalid/);
-  }
-  for (const key of ["runtimeContractDigest", "utestPolicy", "engineeringContext", "testStatus",
-    "skipReason", "worktreePath", "branchName", "commitSha", "stageEvidenceId"]) {
-    assert.ok(key in schema.properties, key);
-  }
-  for (const key of ["stageSeconds", "firstExecutionSeconds", "commandSeconds", "digest"]) {
-    assert.ok(key in schema.properties.utestPolicy.properties, key);
-  }
-  assert.match(prompts[0].prompt, /顶层/);
-});
-
-test("incomplete or misbound UTest preparation never starts the test agent", async () => {
-  for (const value of [{}, { success: true }, { success: true, batchId: "B002", status: "test_required" },
-    { success: true, result: { batchId: "B001", status: "test_required" } },
-    { batchId: "B001", status: "test_required" },
-    { success: true, batchId: "B001", status: "skipped", testStatus: "passed" }]) {
-    const { context, prompts } = harness(value);
-    await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_preparation_(invalid|batch_mismatch)/);
-    assert.equal(prompts.length, 1);
-  }
-});
-
-test("wrapped preparation preserves backend policy and context without losing Batch identity", async () => {
-  const raw = { success: true, batchId: "B001", status: "test_required", runtimeContractDigest: "deployment",
-    utestPolicy: { stageSeconds: 600, firstExecutionSeconds: 1800, commandSeconds: 300, digest: "policy" },
-    engineeringContext: { contextPath: "/artifacts/context.json", contextDigest: "context-digest",
-      commandCatalogPath: "/artifacts/commands.json", allowedReads: ["/artifacts/context.json"],
-      brief: { facts: [{ symbol: "example.SharedApi" }] } } };
-  for (const wrapped of [JSON.stringify(raw), { value: JSON.stringify(raw) },
-    { command: "prepare-test", run_in_background: true, task_id: "task", exit_code: 0, final_result: raw }]) {
-    const { context, prompts } = harness(wrapped);
-    context.runtimeContractDigest = "deployment";
-    await context.runBatchUtestAndSeal(delivery);
-    assert.deepEqual(prompts.map(item => item.options.label), ["prepare-utest-B001", "stage-utest-B001"]);
-    assert.match(prompts[1].prompt, /example.SharedApi/);
-    assert.match(prompts[1].prompt, /\/artifacts\/context.json/);
-    assert.equal(prompts[1].options.timeoutMs, 600000);
-  }
-});
-
-test("structured projection preserves frontend skip evidence and backend execution inputs", async () => {
-  const preparations = [
-    { success: true, ...delivery, status: "skipped", testStatus: "skipped",
-      skipReason: "frontend_utest_temporarily_disabled", stageEvidenceId: "STAGE-B001-TEST-001", reused: true },
-    { success: true, batchId: "B001", status: "test_required", runtimeContractDigest: "deployment",
-      utestPolicy: { version: "policy-v2", stageSeconds: 600, firstExecutionSeconds: 1800,
-        commandSeconds: 300, digest: "policy" },
-      engineeringContext: { contextPath: "/artifacts/context.json", contextDigest: "context-digest",
-        commandCatalogPath: "/artifacts/commands.json", allowedReads: ["/artifacts/context.json"],
-        brief: { facts: [{ symbol: "example.SharedApi" }] } } },
-  ];
-  for (const preparation of preparations) {
-    const { context, prompts } = harness(preparation), original = context.workflowAgent;
-    context.workflowAgent = async (prompt, options) => {
-      const result = await original(prompt, options);
-      if (options.label !== "prepare-utest-B001") return result;
-      assert.ok(options.schema, "the transport needs a declared preparation schema");
-      const projected = Object.fromEntries(Object.entries(result).filter(([key]) => key in options.schema.properties));
-      for (const key of ["utestPolicy", "engineeringContext"]) {
-        if (projected[key]) projected[key] = Object.fromEntries(Object.entries(projected[key])
-          .filter(([field]) => field in options.schema.properties[key].properties));
-      }
-      return projected;
-    };
-    const result = await context.runBatchUtestAndSeal(delivery);
-    if (preparation.status === "skipped") {
-      assert.equal(prompts.length, 1);
-      assert.equal(result.stageEvidenceId, preparation.stageEvidenceId);
-      assert.equal(result.commitSha, delivery.commitSha);
-      assert.equal(result.reused, true);
-    } else {
-      assert.equal(prompts.length, 2);
-      assert.match(prompts[1].prompt, /example.SharedApi/);
-      assert.match(prompts[1].prompt, /\/artifacts\/commands.json/);
-      assert.equal(prompts[1].options.timeoutMs, 600000);
-    }
-  }
-});
-
-test("an unsuccessful preparation command is rejected even when its payload looks successful", async () => {
-  const raw = { success: true, batchId: "B001", status: "skipped", testStatus: "skipped", ...delivery };
-  const { context, prompts } = harness({ command: "prepare-test", run_in_background: true,
-    task_id: "task", exit_code: 1, final_result: raw });
-  await assert.rejects(context.runBatchUtestAndSeal(delivery), /prepare test B001 failed/);
-  assert.equal(prompts.length, 1);
-});
-
-test("missing Runtime policy fails closed instead of using a different deadline", async () => {
-  const { context, prompts } = harness({ success: true, batchId: "B001", status: "test_required" });
-  await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_runtime_policy_missing/);
-  assert.equal(prompts.length, 1);
-});
-
-test("nonpositive preparation budgets cannot start a UTest agent", async () => {
-  for (const field of ["stageSeconds", "firstExecutionSeconds", "commandSeconds"]) {
-    const { context, prompts } = harness({ success: true, batchId: "B001", status: "test_required",
-      utestPolicy: { stageSeconds: 600, firstExecutionSeconds: 1800, commandSeconds: 300,
-        digest: "policy", [field]: 0 } });
-    await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_runtime_policy_missing/);
-    assert.equal(prompts.length, 1);
-  }
-});
-
-test("changing an installed Runtime after launch stops before UTest discovery", async () => {
-  const { context, prompts } = harness();
-  context.runtimeContractDigest = "expected-deployment";
-  await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_runtime_deployment_changed/);
-  assert.equal(prompts.length, 1);
-});
-
-test("UTest deadline monitor runs independently of dispatch polling and retains asset ownership", async () => {
-  const { context, prompts } = harness();
-  let timerCallback, completeChild;
-  context.setTimeout = callback => { timerCallback = callback; return 1; };
-  context.clearTimeout = () => {};
-  context.workflowAgent = async (prompt, options) => {
-    prompts.push({ prompt, options });
-    if (options.label === "prepare-utest-B001") return { success: true, batchId: "B001", status: "test_required",
-      utestPolicy: { stageSeconds: 1800, firstExecutionSeconds: 600, commandSeconds: 300, digest: "runtime-policy" } };
-    if (options.label === "stage-utest-B001") return new Promise(resolve => { completeChild = resolve; });
-    assert.equal(options.label, "utest-budget-B001");
-    assert.match(prompt, /check-test-budget/);
-    assert.match(prompt, /保留封存资产所需 lease/);
-    completeChild({ success: true, testStatus: "deferred" });
-    return { success: true, batchId: "B001", status: "stop_requested" };
-  };
-  const run = context.runBatchUtestAndSeal(delivery);
-  await new Promise(resolve => setImmediate(resolve));
-  timerCallback();
-  const result = await run;
-  assert.equal(result.testStatus, "deferred");
-  assert.equal(prompts.length, 3);
-});
-
-test("invalid UTest policy output stops before a test agent can run", async () => {
-  const { context, prompts } = harness({ batchId: "B001", status: "unknown" });
-  await assert.rejects(context.runBatchUtestAndSeal(delivery), /utest_preparation_invalid/);
-  assert.equal(prompts.length, 1);
-});
-
-test("durable Review preparation eliminates the separate UTest preparation agent", async () => {
-  const prepared = { success: true, batchId: "B001", status: "test_required",
-    utestPolicy: { stageSeconds: 600, firstExecutionSeconds: 600, commandSeconds: 300, digest: "policy" },
-    assignments: [{ batchId: "B001", promptContent: "<UTEST_ASSIGNMENT>exact scoped context</UTEST_ASSIGNMENT>" }],
-    engineeringContext: { brief: { facts: [] } } };
-  const { context, prompts } = harness();
-  await context.runBatchUtestAndSeal(delivery, null, prepared);
-  assert.deepEqual(prompts.map(item => item.options.label), ["stage-utest-B001"]);
-  assert.match(prompts[0].prompt, /exact scoped context/);
-  assert.match(prompts[0].prompt, /close-test/);
 });

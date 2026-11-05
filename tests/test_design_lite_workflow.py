@@ -119,6 +119,7 @@ class DesignLiteWorkflowTest(unittest.TestCase):
                     "tasks": [{
                         "id": "T001", "outcome": "Users request an export and receive its task identifier",
                         "workspace": "default", "dependsOn": [],
+                        "ui": None,
                         "implementationPoints": ["Reuse export submission with the confirmed task response"],
                         "testPoints": ["An accepted export returns its task identifier"],
                         "refs": {

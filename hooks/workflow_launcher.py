@@ -26,7 +26,7 @@ from hooks.json_writer_common import atomic_write_json, feature_dir, resolve_wor
 from hooks.workflow_sandbox_contract import validate_workflow_source
 from hooks.engineering_contract import runtime_contract
 from hooks.commit_message import normalize_task_card_id  # noqa: E402
-from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
+from hooks.parallel_batch_scheduler import can_manually_resume_batch, validate_plan_for_parallel  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     batch_workspace_ref,
     batch_write_set,
@@ -192,6 +192,7 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     """Load and validate runtime configuration from .autobiz/runtime_config.json."""
     defaults: dict[str, Any] = {
         "integrationMode": "isolated",
+        "controlProtocolVersion": 2,
         "parallelSchedulingMode": "optimistic",
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
         "conflictResolution": {
@@ -214,6 +215,10 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     max_parallel = raw.get("maxParallel")
     resolution = raw.get("conflictResolution")
     config = dict(defaults)
+    if "controlProtocolVersion" in raw:
+        if type(raw["controlProtocolVersion"]) is not int or raw["controlProtocolVersion"] not in {1, 2}:
+            raise ValueError("control_protocol_version_invalid")
+        config["controlProtocolVersion"] = raw["controlProtocolVersion"]
     if "integrationMode" in raw:
         if raw["integrationMode"] not in {"isolated", "direct"}:
             raise ValueError("integration_mode_invalid")
@@ -360,14 +365,14 @@ def _batch_execution_plan(
         remaining.difference_update(selected)
 
     notes = [
-        "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后执行 UTest 并重新封存，随后进入候选合并；成功合并后才释放下游。",
-        "每个 Batch 在自己的 Worktree 完成业务 Review 与 UTest；Merge Train 只合成并推广这些已通过的 candidate SHA，成功后才释放下游 Batch。",
-        "所有 delivery Batch 推广后，B-E2E 在交付 HEAD 对应的临时验证 Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
+        "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后直接进入候选合并，成功合并后才释放下游。",
+        "前后端 UTest 和 E2E 均暂时移出 Workflow；不准备测试环境、不生成测试资产、不派发测试 Agent。后端实现阶段仍保留生产代码纯编译。",
+        "所有 delivery Batch 推广后直接聚合证据并展示测试未执行记录，再准备最终基线合并确认。",
     ]
 
     if optimistic_mode:
         notes.append(
-            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中检测并自动解决或人工介入。"
+            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中自动检测并有限恢复，无法恢复时记录阻塞并结束，不等待中途人工确认；最终合入基线仍需用户确认。"
         )
     else:
         notes.append(
@@ -382,16 +387,17 @@ def _batch_execution_plan(
             "rule": "dependency_ready_and_safe_within_available_parallel_slots",
         },
         "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "optimistic"),
-        "deliveryStages": ["prepare", "implement", "review", "test"],
+        "deliveryStages": ["prepare", "implement", "review"],
         "mergeBarrier": {
             "type": "merge_train",
             "validationBatch": None,
-            "rule": "batch_review_and_utest_must_pass_before_fast_forward_promotion",
+            "rule": "batch_review_must_pass_before_fast_forward_promotion",
         },
         "postMergeValidation": {
-            "validationBatch": "V-E2E",
-            "rule": "temporary_main_worktree_then_evidence_aggregate_only",
+            "validationBatch": None,
+            "rule": "evidence_aggregate_only_with_testing_omissions",
         },
+        "skippedTesting": {"utest": "utest_temporarily_disabled", "e2e": "e2e_temporarily_disabled"},
         "batches": [
             {
                 "id": batch["id"],
@@ -487,16 +493,21 @@ def analyze_batches(
             else None
         )
         from hooks.parallel_integration import PROMOTION_STATES, isolated, promotion_view
-        if active_manifest and active_manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
+        from hooks.parallel_workspace_sync import workspace_sync_pending
+        pending_workspace_sync = bool(active_manifest and workspace_sync_pending(active_manifest))
+        if (active_manifest and active_manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}
+                and not (pending_workspace_sync and active_manifest.get("status") in {
+                    "awaiting_user_confirmation", "promotion_prepared", "integration_retained"})):
             return {"useWorkflow": False, "strategy": "awaiting_confirmation", "batchCount": 0,
                     "batches": [], "runId": active_run_id, "status": active_manifest["status"],
                     "canStartWorkflow": False, "reason": active_manifest["status"],
-                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else "review_integration_and_confirm_promotion",
+                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else
+                        "review_workspace_changes" if active_manifest.get("workspaceSync") else "review_integration_and_confirm_promotion",
                     **promotion_view(active_manifest)}
         final_validation_pending = bool(active_manifest and isolated(active_manifest)
                                         and active_manifest.get("batches")
                                         and all(b.get("status") == "merged" for b in active_manifest["batches"].values())
-                                        and not active_manifest.get("finalEvidenceAggregate", {}).get("passed"))
+                                        and (not active_manifest.get("finalEvidenceAggregate", {}).get("passed") or pending_workspace_sync))
         # Recovery is not one generic retry: an unsealed but verified dirty
         # implementation Worktree and a sealed Review/UTest checkpoint both
         # resume in place, while a clean failed dispatch needs operator
@@ -514,20 +525,18 @@ def analyze_batches(
             str(batch_id)
             for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
             if isinstance(batch, dict)
-            and (
-                batch.get("status") in {"retry_pending", "failed"}
-                or (
-                    batch.get("status") == "blocked"
-                    and isinstance(batch.get("recovery"), dict)
-                    and batch["recovery"].get("status") == "retry_exhausted"
-                )
-            )
+            and can_manually_resume_batch(batch)
         } - implementation_recovery_batch_ids
         stage_recovery_batch_ids = set(stage_recovery_batches(active_manifest or {}))
+        delivery_recovery_batch_ids = {
+            str(batch_id) for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
+            if isinstance(batch, dict) and batch.get("status") == "ready_to_candidate" and batch.get("commitSha")
+        }
         recovery_batch_ids = (
             retry_recovery_batch_ids
             | implementation_recovery_batch_ids
             | stage_recovery_batch_ids
+            | delivery_recovery_batch_ids
         )
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
         manual_resume = bool(active_run_id and retry_recovery_batch_ids)
@@ -649,6 +658,7 @@ def analyze_batches(
             "retryRecoveryBatchIds": sorted(retry_recovery_batch_ids),
             "implementationRecoveryBatchIds": sorted(implementation_recovery_batch_ids),
             "stageRecoveryBatchIds": sorted(stage_recovery_batch_ids),
+            "deliveryRecoveryBatchIds": sorted(delivery_recovery_batch_ids),
         }
         runtime_config = _load_runtime_config(artifact_workspace)
         max_parallel = runtime_config["maxParallel"]

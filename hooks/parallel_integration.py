@@ -11,7 +11,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,8 @@ def integration_repo(binding: dict) -> Path:
 
 def record_integration_head(manifest: dict, ref: str, sha: str) -> None:
     binding = manifest["repositories"][ref]
+    if binding.get("headSha") != sha and manifest.pop("finalizationReceipt", None):
+        manifest["finalizationReceiptInvalidated"] = "integration_head_changed"
     binding["headSha"] = sha
     if isolated(manifest):
         canonical = binding.get("integrationRepositoryRef", ref)
@@ -123,7 +125,8 @@ def promotion_view(manifest: dict) -> dict:
     return {"integrationMode": manifest.get("integrationMode", "direct"),
             "integrationWorkspaces": {ref: {**binding["integration"], "headSha": binding["headSha"], "targetBranch": binding["baseBranch"], "baselineSha": binding["baseSha"]}
                                       for ref, binding in manifest.get("repositories", {}).items() if isinstance(binding.get("integration"), dict)},
-            "mainPromotion": manifest.get("mainPromotion")}
+            "mainPromotion": manifest.get("mainPromotion"),
+            "workspaceSync": list(manifest.get("workspaceSync", {}).values())}
 
 
 def await_confirmation(manifest: dict) -> None:
@@ -196,8 +199,11 @@ def _snapshot(manifest: dict) -> dict:
                              "diffStat": git(repo, "diff", "--stat", target, candidate),
                              "diffDigest": digest(git(repo, "diff", "--binary", target, candidate))}
     return {"runId": manifest["runId"], "repositories": repositories,
+            "deliveryMode": "uncommitted" if manifest.get("workspaceSync") else "committed",
+            "workspaceSync": list(manifest.get("workspaceSync", {}).values()),
             "planDigest": manifest["planDigest"],
             "e2eStatus": manifest["finalEvidenceAggregate"].get("e2eStatus", "passed"),
+            "e2eSkipReason": manifest["finalEvidenceAggregate"].get("e2eSkipReason"),
             "validationStatus": manifest["finalEvidenceAggregate"]["validationStatus"],
             "evidencePassed": manifest["finalEvidenceAggregate"]["passed"],
             "evidenceErrors": manifest["finalEvidenceAggregate"]["errors"],
@@ -229,6 +235,7 @@ def prepare_promotion(workspace: Path, feature: str, run_id: str) -> dict:
         approval = digest(snapshot)
         path = run_dir(workspace, feature, run_id) / "main-promotion.json"
         manifest["mainPromotion"] = {"status": "prepared", "approvalDigest": approval, "snapshot": snapshot,
+                                     "deliveryMode": snapshot["deliveryMode"],
                                      "reportPath": str(path), "preparedAt": utc_now()}
         manifest["status"] = "promotion_prepared"
         save_manifest(workspace, feature, run_id, manifest)
@@ -243,7 +250,27 @@ def _target_worktree(repo: Path, branch: str) -> Path | None:
     return None
 
 
+@contextmanager
+def _repository_locks(workspace: Path, feature: str, run_id: str):
+    manifest = load_manifest(workspace, feature, run_id)
+    with ExitStack() as locks:
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_repository import coordinates, repository_lock, assert_reservation
+            bindings = manifest["repositories"].values()
+            unique = {str(coordinates(binding)[0]): binding for binding in bindings}
+            for key in sorted(unique):
+                locks.enter_context(repository_lock(unique[key]))
+            for binding in manifest["repositories"].values():
+                assert_reservation(binding, workspace, feature, run_id)
+        yield
+
+
 def promote_main(workspace: Path, feature: str, run_id: str, *, approval_digest: str, approved_by: str, confirm: bool = False) -> dict:
+    with _repository_locks(workspace, feature, run_id):
+        return _promote_main(workspace, feature, run_id, approval_digest=approval_digest, approved_by=approved_by, confirm=confirm)
+
+
+def _promote_main(workspace: Path, feature: str, run_id: str, *, approval_digest: str, approved_by: str, confirm: bool = False) -> dict:
     if not confirm or not approved_by.strip():
         raise ValueError("integration_explicit_user_confirmation_required")
     with run_lock(workspace, feature, run_id), ExitStack() as locks:
@@ -351,6 +378,11 @@ def integration_sync_write_error(manifest: dict, binding: dict, target: Path) ->
 
 
 def sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = False) -> dict:
+    with _repository_locks(workspace, feature, run_id):
+        return _sync_main(workspace, feature, run_id, complete=complete)
+
+
+def _sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = False) -> dict:
     """Merge target changes into integration only, then require a fresh E2E.
 
     On conflicts the owned integration checkout is retained. ``complete-sync``
