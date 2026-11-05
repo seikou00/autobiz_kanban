@@ -313,18 +313,47 @@ class CollectedSessionContextTest(unittest.TestCase):
 
     def test_cli_knowledge_path_platform_takes_precedence_or_falls_back(self):
         cases = (
-            ([], "legacy path"),
-            (["--knowledge-path-platform", ""], "legacy path"),
-            (["--knowledge-path-platform", "platform path"], "platform path"),
+            (["--knowledge-path", "legacy path"], "legacy path"),
+            (["--knowledge-path", "legacy path", "--knowledge-path-platform", ""], "legacy path"),
+            (["--knowledge-path", "legacy path", "--knowledge-path-platform", "  "], "legacy path"),
+            (["--knowledge-path", "legacy path", "--knowledge-path-platform", "platform path"], "platform path"),
+            # 宿主未替换占位符时会原样传入，不能当成相对路径使用。
+            (["--knowledge-path", "legacy path", "--knowledge-path-platform", "${knowledge-path}"], "legacy path"),
+            (["--knowledge-path", "${pluginPath}/sys", "--knowledge-path-platform", "${knowledge-path}"], ""),
+            (["--knowledge-path", "${pluginPath}/sys", "--knowledge-path-platform", "platform path"], "platform path"),
         )
-        for extra_args, expected in cases:
-            with self.subTest(extra_args=extra_args):
+        for args, expected in cases:
+            with self.subTest(args=args):
+                stderr = io.StringIO()
                 with patch(
                     "hooks.render_collected_session_context.render",
                     return_value={"ok": True, "message": "", "sessionContext": ""},
-                ) as mocked_render, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(_main(["--knowledge-path", "legacy path", *extra_args]), 0)
+                ) as mocked_render, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                    self.assertEqual(_main(args), 0)
                 self.assertEqual(mocked_render.call_args.kwargs["knowledge_path"], expected)
+                if "${knowledge-path}" in args:
+                    self.assertIn("未替换的宿主占位符", stderr.getvalue())
+
+    def test_cli_unexpanded_platform_placeholder_still_loads_plugin_knowledge(self):
+        plugin_root = _legacy_plugin_root()
+        args = [
+            "--selected-deployUnit",
+            json.dumps([{"deployUnitId": "LF39.18_wg_flow", "localRepoPath": ""}]),
+            "--knowledge-collector", str(plugin_root / "collect-knowledge.js"),
+            "--knowledge-path", str(plugin_root / "sys"),
+            "--knowledge-path-platform", "${knowledge-path}",
+        ]
+        stdout = io.StringIO()
+        with patch(
+            "hooks.render_collected_session_context.subprocess.run",
+            return_value=_proc("", returncode=1, stderr="collector unavailable"),
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(_main(args), 0)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertIn("# 旧知识库正文", payload["sessionContext"])
+        self.assertIn("remote 1 / local 0 / 缺 0", payload["message"])
+        self.assertNotIn("${knowledge-path}", payload["message"])
 
     def test_board_config_routes_session_hook_to_adapter(self):
         config = json.loads(

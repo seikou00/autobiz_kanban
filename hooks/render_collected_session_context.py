@@ -27,6 +27,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -735,6 +736,29 @@ def render(
     }
 
 
+UNEXPANDED_PLACEHOLDER_RE = re.compile(r"\$\{[^}]*\}")
+
+
+def _resolve_knowledge_path(knowledge_path: str, knowledge_path_platform: str) -> str:
+    """平台知识库路径优先，为空时回退 ``--knowledge-path``；都没有时返回空串，由 render 取 sys 默认目录。
+
+    宿主未替换的 ``${...}`` 占位符视同未传，否则会被当成相对路径，collector 与清单兜底都读不到知识。
+    """
+    for option, raw in (
+        ("--knowledge-path-platform", knowledge_path_platform),
+        ("--knowledge-path", knowledge_path),
+    ):
+        value = (raw or "").strip()
+        if not value:
+            continue
+        if UNEXPANDED_PLACEHOLDER_RE.search(value):
+            _timing_log("knowledge.path", "ignored",
+                        "{} 含未替换的宿主占位符: {}".format(option, value))
+            continue
+        return value
+    return ""
+
+
 def _main(argv: Optional[List[str]] = None) -> int:
     started = time.perf_counter()
     parser = argparse.ArgumentParser(
@@ -793,7 +817,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
             project=args.project,
             feature=args.feature,
             collector_script=args.collector_script,
-            knowledge_path=args.knowledge_path_platform.strip() or args.knowledge_path,
+            knowledge_path=_resolve_knowledge_path(
+                args.knowledge_path, args.knowledge_path_platform
+            ),
             node_command=args.node_command,
             npm_command=args.npm_command,
         )
