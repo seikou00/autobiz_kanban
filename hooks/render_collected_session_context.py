@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -739,24 +739,71 @@ def render(
 UNEXPANDED_PLACEHOLDER_RE = re.compile(r"\$\{[^}]*\}")
 
 
-def _resolve_knowledge_path(knowledge_path: str, knowledge_path_platform: str) -> str:
+def _expand_knowledge_option(option: str, raw: str) -> List[str]:
+    """把一个知识库参数展开为候选目录列表。
+
+    宿主替换 ``${knowledgePath}`` 后可能得到 JSON 数组 ``[{"name":..,"path":..}]``，取每项 ``path``，
+    只剔除仍含未替换占位符的项；普通值按单个目录处理，含未替换的宿主占位符时记日志并视同未传。
+    """
+    value = (raw or "").strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            entries = json.loads(value)
+        except ValueError:
+            entries = None
+        if isinstance(entries, list):
+            paths: List[str] = []
+            for entry in entries:
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                    item = entry["path"].strip()
+                    if UNEXPANDED_PLACEHOLDER_RE.search(item):
+                        _timing_log("knowledge.path", "ignored",
+                                    "{} 数组项含未替换的宿主占位符: {}".format(option, item))
+                    elif item:
+                        paths.append(item)
+            return paths
+    if UNEXPANDED_PLACEHOLDER_RE.search(value):
+        _timing_log("knowledge.path", "ignored",
+                    "{} 含未替换的宿主占位符: {}".format(option, value))
+        return []
+    return [value]
+
+
+def _manifest_indexes_any(root: str, deploy_unit_ids: Sequence[str]) -> bool:
+    """候选目录的清单里是否登记了任一选中的部署单元。清单缺失/非法 → False。"""
+    if not deploy_unit_ids:
+        return False
+    try:
+        manifest = load_manifest(manifest_path=Path(root) / MANIFEST_NAME)
+    except (AgentsManifestError, OSError):
+        return False
+    return any(unit_id in index_unit_pairs(manifest) for unit_id in deploy_unit_ids)
+
+
+def _resolve_knowledge_path(
+    knowledge_path: str,
+    knowledge_path_platform: str,
+    deploy_unit_ids: Sequence[str] = (),
+) -> str:
     """平台知识库路径优先，为空时回退 ``--knowledge-path``；都没有时返回空串，由 render 取 sys 默认目录。
 
-    宿主未替换的 ``${...}`` 占位符视同未传，否则会被当成相对路径，collector 与清单兜底都读不到知识。
+    平台参数可为目录或 JSON 数组（取各项 ``path``）。多个候选时优先选清单中登记了选中部署单元的目录，
+    否则取第一个候选。宿主未替换的 ``${...}`` 占位符视同未传，否则会被当成相对路径，collector 与清单兜底都读不到知识。
     """
+    candidates: List[str] = []
     for option, raw in (
         ("--knowledge-path-platform", knowledge_path_platform),
         ("--knowledge-path", knowledge_path),
     ):
-        value = (raw or "").strip()
-        if not value:
-            continue
-        if UNEXPANDED_PLACEHOLDER_RE.search(value):
-            _timing_log("knowledge.path", "ignored",
-                        "{} 含未替换的宿主占位符: {}".format(option, value))
-            continue
-        return value
-    return ""
+        candidates.extend(_expand_knowledge_option(option, raw))
+    if not candidates:
+        return ""
+    for root in candidates:
+        if _manifest_indexes_any(root, deploy_unit_ids):
+            return root
+    return candidates[0]
 
 
 def _main(argv: Optional[List[str]] = None) -> int:
@@ -818,7 +865,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
             feature=args.feature,
             collector_script=args.collector_script,
             knowledge_path=_resolve_knowledge_path(
-                args.knowledge_path, args.knowledge_path_platform
+                args.knowledge_path,
+                args.knowledge_path_platform,
+                [str(unit.get("deployUnitId", "")) for unit in selected],
             ),
             node_command=args.node_command,
             npm_command=args.npm_command,

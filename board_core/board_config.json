@@ -35,7 +35,7 @@
       "dynamic_workflow": "python3 -X utf8 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 -X utf8 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 -X utf8 ${pluginPath}/hooks/sync_agents.py --prefer-manifest --write-board-config",
-      "session_context_inject": "python3 -X utf8 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path \"${pluginPath}/sys\" --knowledge-path-platform \"${knowledge-path}\""
+      "session_context_inject": "python3 -X utf8 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path \"${pluginPath}/sys\" --knowledge-path-platform \"${knowledgePath}\""
     },
     "linux": {
       "knowledge_path": "${pluginPath}/sys",
@@ -49,7 +49,7 @@
       "dynamic_workflow": "python -X utf8 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python -X utf8 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 -X utf8 ${pluginPath}/hooks/sync_agents.py --prefer-manifest --write-board-config",
-      "session_context_inject": "python3 -X utf8 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path \"${pluginPath}/sys\" --knowledge-path-platform \"${knowledge-path}\""
+      "session_context_inject": "python3 -X utf8 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}/hooks/collect-knowledge.js --knowledge-path \"${pluginPath}/sys\" --knowledge-path-platform \"${knowledgePath}\""
     },
     "win32": {
       "knowledge_path": "${pluginPath}\\sys",
@@ -63,7 +63,7 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --prefer-manifest --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path \"${pluginPath}\\sys\" --knowledge-path-platform \"${knowledge-path}\""
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path \"${pluginPath}\\sys\" --knowledge-path-platform \"${knowledgePath}\""
     }
   },
   "workflow": {
