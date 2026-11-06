@@ -1077,6 +1077,9 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
         workspace_contract = workspace_contracts[batch_id]
         status = _batch_status(batch_tasks)
+        if (batch_tasks and all(normalize_status(task.get("status")) == "done" for task in batch_tasks)
+                and previous.get("mergeCommitSha") and previous.get("deliveryRunId")):
+            status = "done"
         execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
         atomic_group = batch_tasks[0].get("atomicGroup") if batch_tasks else None

@@ -1069,6 +1069,15 @@ def list_runs(workspace: Path, feature: str) -> list[dict[str, Any]]:
     return result
 
 
+def workflow_report_pending(manifest: dict[str, Any]) -> bool:
+    """Keep unfinished publication recoverable; cleanup never reopens Code."""
+    if (manifest.get("integrationMode") != "isolated"
+            or (manifest.get("mainPromotion") or {}).get("status") in {"promoting", "merged"}):
+        return False
+    from hooks.parallel_workspace_sync import workspace_sync_pending
+    return not manifest.get("workflowCompletedAt") or workspace_sync_pending(manifest)
+
+
 def get_active_run(workspace: Path, feature: str) -> str | None:
     active = [
         item
@@ -1076,6 +1085,7 @@ def get_active_run(workspace: Path, feature: str) -> str | None:
         if item.get("status") in {"created", "running", "merging", "verifying", "blocked", "needs_resolution",
                                  "awaiting_user_confirmation", "promotion_prepared", "promoting_main", "integration_retained",
                                  "integration_sync_required", "integration_sync_conflicted"}
+        or (item.get("status") in {"succeeded", "succeeded_with_issues"} and workflow_report_pending(item))
     ]
     if len(active) > 1:
         raise ValueError("multiple_parallel_runs_active")

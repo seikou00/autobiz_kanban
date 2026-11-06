@@ -1470,15 +1470,18 @@ def resume_run(
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
     initial = load_manifest(workspace, feature, run_id)
-    from hooks.parallel_workspace_sync import workspace_sync_pending
-    if (initial.get("status") in {"awaiting_user_confirmation", "promotion_prepared", "integration_retained"}
-            and workspace_sync_pending(initial)):
+    from hooks.parallel_runtime import workflow_report_pending
+    report_states = {"awaiting_user_confirmation", "promotion_prepared", "integration_retained",
+                     "succeeded", "succeeded_with_issues", "verifying"}
+    def needs_report(manifest):
+        return manifest.get("status") in report_states and workflow_report_pending(manifest)
+    if needs_report(initial):
         with run_lock(workspace, feature, run_id):
             initial = load_manifest(workspace, feature, run_id)
-            if (initial.get("status") in {"awaiting_user_confirmation", "promotion_prepared", "integration_retained"}
-                    and workspace_sync_pending(initial)):
+            if needs_report(initial):
                 initial["status"] = "running"
                 initial.pop("mainPromotion", None)
+                initial.pop("workflowCompletedAt", None)
                 save_manifest(workspace, feature, run_id, initial)
     if isolated(initial):
         initialize_integrations(workspace, feature, run_id)

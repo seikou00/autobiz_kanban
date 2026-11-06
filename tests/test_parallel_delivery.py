@@ -414,13 +414,33 @@ class DeliveryTest(unittest.TestCase):
         (tree / "local-change.txt").unlink()
         self.assertEqual(drain(self.workspace, "alpha", self.run)["cleanupPending"], [])
 
-    def test_cleanup_waits_for_unmerged_deliveries_and_finalization_requests_repair(self):
+    def test_each_merged_batch_is_cleaned_while_other_worktrees_remain_usable(self):
         self.create(2)
+        binding = self.manifest()["repositories"]["default"]
+        baseline_branch, integration_branch = binding["baseBranch"], binding["integration"]["branchName"]
+        baseline_sha = git(self.repo, "rev-parse", baseline_branch)
         args, tree = self.delivery()
+        second, active_tree = self.delivery("B002")
+        active_branch = git(active_tree, "symbolic-ref", "--short", "HEAD")
         settle_delivery(*args)
-        self.assertEqual(drain(self.workspace, "alpha", self.run)["status"], "waiting_for_deliveries")
-        self.assertTrue(tree.exists())
+        candidate = Path(self.manifest()["mergeTrains"]["default:wave-001"]["worktreePath"])
+        cleanup = drain(self.workspace, "alpha", self.run)
+        self.assertEqual(cleanup["status"], "completed", cleanup)
+        self.assertFalse(tree.exists())
+        self.assertFalse(candidate.exists())
+        self.assertTrue(self.repo.exists())
+        self.assertTrue(self.integration.exists())
+        self.assertTrue(active_tree.exists())
+        self.assertEqual(git(active_tree, "symbolic-ref", "--short", "HEAD"), active_branch)
         self.assertTrue(prepare_finalization(self.workspace, "alpha", self.run)["repairRequired"])
+        self.assertEqual(settle_delivery(*second)["status"], "merged")
+        self.assertEqual(drain(self.workspace, "alpha", self.run)["cleanupPending"], [])
+        self.assertFalse(active_tree.exists())
+        self.assertEqual((self.integration / "B002.txt").read_text(), "B002")
+        self.assertEqual(git(self.repo, "rev-parse", baseline_branch), baseline_sha)
+        self.assertEqual(git(self.repo, "symbolic-ref", "--short", "HEAD"), baseline_branch)
+        self.assertEqual(git(self.integration, "symbolic-ref", "--short", "HEAD"), integration_branch)
+        self.assertEqual(git(self.repo, "rev-parse", integration_branch), self.manifest()["repositories"]["default"]["headSha"])
 
     def test_stale_manifest_cannot_overwrite_current_revision(self):
         self.create()

@@ -830,7 +830,7 @@ def test_skill_integration():
         ("固定 Workflow 启动后不调用 `request_user_input`", "执行期间无人工确认"),
         ("前后端 UTest 和 E2E 当前全部移出 Workflow", "前后端测试阶段移除"),
         ("不另外调用测试技能或命令补跑", "禁止另走测试入口"),
-        ("用户确认后才调用", "保留最终合并确认"),
+        ("不再请求合并或验收确认", "最终汇总无人工确认"),
     ]
     all_passed = True
     for pattern, description in checks:

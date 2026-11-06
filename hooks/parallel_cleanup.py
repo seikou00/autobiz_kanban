@@ -138,12 +138,10 @@ def drain(workspace: Path, feature: str, run_id: str, budget_seconds: int = 120)
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in {"cancelled", "rolled_back", "cleaned"}:
             return {"success": True, "status": "inactive", "cleanupPending": pending(manifest)}
-        if any(batch.get("status") != "merged" for batch in manifest["batches"].values()):
-            return {"success": True, "status": "waiting_for_deliveries", "cleanupPending": pending(manifest)}
         for job_id in list(manifest.get("cleanupQueue", {})):
             if time.monotonic() >= deadline:
                 break
-            with run_lock(workspace, feature, run_id):
+            with run_lock(workspace, feature, run_id, timeout=max(0, deadline - time.monotonic())):
                 manifest = load_manifest(workspace, feature, run_id)
                 job = manifest["cleanupQueue"][job_id]
                 if job["status"] == "completed":
@@ -161,7 +159,7 @@ def drain(workspace: Path, feature: str, run_id: str, budget_seconds: int = 120)
             except (OSError, ValueError, subprocess.SubprocessError, TimeoutError) as exc:
                 error = str(exc)
                 errors.append({"jobId": job_id, "error": error})
-            with run_lock(workspace, feature, run_id):
+            with run_lock(workspace, feature, run_id, timeout=max(0, deadline - time.monotonic())):
                 manifest = load_manifest(workspace, feature, run_id)
                 current = manifest["cleanupQueue"][job_id]
                 current.update(status="retryable" if error else "completed", error=error, completedAt=utc_now())

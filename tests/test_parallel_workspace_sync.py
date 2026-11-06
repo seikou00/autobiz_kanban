@@ -375,6 +375,83 @@ class WorkspaceSyncTest(unittest.TestCase):
         self.assertEqual((self.repo / "B002.txt").read_text(), "B002")
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
 
+    def test_finished_workflow_reports_issues_without_confirmation_or_restarting(self):
+        from hooks.parallel_cleanup import drain
+        from hooks.parallel_evidence_aggregate import aggregate_evidence
+        from hooks.workflow_launcher import analyze_batches
+        initial_index = self.source_index()
+        for batch_id in ("B001", "B002"):
+            self.assertEqual(self.publish(batch_id)["status"], "synced")
+        self.assertFalse(drain(self.workspace, "alpha", self.run)["cleanupPending"])
+        # An audit finding must remain visible without reopening delivery or
+        # turning the final report into a merge-confirmation request.
+        evidence = Path(self.fixture.manifest()["batches"]["B001"]["stageStates"]["review"]["evidencePath"])
+        evidence.unlink()
+        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
+        self.assertFalse(report["passed"])
+        self.assertIn("B001.review_evidence_missing", report["errors"])
+        self.assertEqual(report["status"], "succeeded_with_issues")
+        manifest = self.fixture.manifest()
+        self.assertTrue(manifest["workflowCompletedAt"])
+        self.assertNotIn("mainPromotion", manifest)
+        launch = analyze_batches("alpha", plugin_path=Path(__file__).resolve().parents[1],
+                                 workspace=self.workspace, task_card_id="TEST-001")
+        self.assertFalse(launch["canStartWorkflow"], launch)
+        self.assertEqual(launch["requiredAction"], "code_done_ready")
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(self.source_index(), initial_index)
+        self.assertTrue((self.repo / "B001.txt").exists())
+        self.assertTrue((self.repo / "B002.txt").exists())
+
+    def test_cleanup_failure_after_retry_does_not_reopen_a_finished_workflow(self):
+        from hooks.parallel_cleanup import drain
+        from hooks.parallel_evidence_aggregate import aggregate_evidence
+        from hooks.parallel_batch_scheduler import resume_run
+        from hooks.workflow_launcher import analyze_batches
+        for batch_id in ("B001", "B002"):
+            self.publish(batch_id)
+        tree = Path(self.fixture.manifest()["batches"]["B001"]["worktreePath"])
+        local_file = tree / "retain-local-edit.txt"
+        local_file.write_text("preserve")
+        self.assertTrue(drain(self.workspace, "alpha", self.run)["cleanupPending"])
+        self.assertTrue(drain(self.workspace, "alpha", self.run)["cleanupPending"])
+        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
+        self.assertEqual(report["status"], "succeeded_with_issues")
+        before = self.fixture.manifest()["batches"]
+        launch = analyze_batches("alpha", plugin_path=Path(__file__).resolve().parents[1],
+                                 workspace=self.workspace, task_card_id="TEST-001")
+        self.assertFalse(launch["canStartWorkflow"], launch)
+        self.assertEqual(launch["requiredAction"], "code_done_ready")
+        self.assertEqual(resume_run(self.workspace, "alpha", self.run)["skipped"], "terminal_run")
+        self.assertEqual(self.fixture.manifest()["batches"], before)
+        local_file.unlink()
+        self.assertFalse(drain(self.workspace, "alpha", self.run)["cleanupPending"])
+        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
+        self.assertEqual(report["status"], "succeeded_with_issues", report)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
+
+    def test_legacy_prepared_run_without_pending_jobs_resumes_to_automatic_reporting(self):
+        from hooks.parallel_cleanup import drain
+        from hooks.parallel_evidence_aggregate import aggregate_evidence
+        from hooks.parallel_batch_scheduler import resume_run
+        from hooks.workflow_launcher import analyze_batches
+        for batch_id in ("B001", "B002"):
+            self.publish(batch_id)
+        self.assertFalse(drain(self.workspace, "alpha", self.run)["cleanupPending"])
+        aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True)
+        prepare_promotion(self.workspace, "alpha", self.run)
+        self.assertEqual(self.fixture.manifest()["status"], "promotion_prepared")
+        launch = analyze_batches("alpha", plugin_path=Path(__file__).resolve().parents[1],
+                                 workspace=self.workspace, task_card_id="TEST-001")
+        self.assertTrue(launch["canStartWorkflow"], launch)
+        self.assertEqual(launch["requiredAction"], "resume_fixed_workflow")
+        self.assertEqual(resume_run(self.workspace, "alpha", self.run)["status"], "running")
+        self.assertNotIn("mainPromotion", self.fixture.manifest())
+        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
+        self.assertEqual(report["status"], "succeeded_with_issues", report)
+        self.assertEqual(report["errors"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

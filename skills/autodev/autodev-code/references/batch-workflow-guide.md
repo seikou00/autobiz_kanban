@@ -13,22 +13,17 @@ reuses the manifest even if the user later switches branches. Do not guess
 `targetBranches` no longer controls new runs. A detached HEAD or unborn branch
 stops creation with an explicit error. Every physical Git repository gets an
 integration branch/worktree, all Batch promotions target that integration
-checkout, and final verification ends at user confirmation.
-The launcher returns `review_integration_and_confirm_promotion` for a retained
-or reviewable result; do not restart the Workflow or report a Plan error.
-Before asking for final approval, the main agent must send a visible message
-listing each repository's baseline branch/SHA, `gitRoot`, and actual
-`targetWorktreePath`, followed by the integration `worktreePath`, branch/SHA,
-diff, validation findings, and `mainPromotion.reportPath`. Tell the user which
-directory to open to inspect baseline code and which to open for the proposed
-code. A null `targetWorktreePath` means the baseline branch is not checked out;
-direct the user to that branch in the repository's Git view, without switching
-their checkout. Run `prepare` first if an older report lacks these locations.
-Show these paths in the conversation before opening the confirmation question.
-Never call the final `promote` command without the user's explicit approval of
-the concrete report and its `approvalDigest`. See
+checkout. Results are published as uncommitted files in the original user
+checkout. Final aggregation uses `--skip-e2e --finish-workflow`, records a
+terminal report, advances `code_done` through `update_checkpoint.py` and never asks for merge or acceptance confirmation. Display
+the source directories, publication progress, audit findings and pending
+cleanup. Retained confirmation states resume the same run to finish reporting.
+Final cleanup retries are bounded. Remaining cleanup is advisory and never
+reopens the completed run or blocks `code_done`; publication retries remain separate.
+Formal Git promotion is a separate tool used only when explicitly requested
+by the user. See
 [`docs/feature-integration-worktree.md`](../../../../docs/feature-integration-worktree.md)
-for configuration, final confirmation commands, main synchronization, and
+for configuration, standalone promotion commands, main synchronization, and
 recovery. Existing manifests without isolated integration keep direct mode;
 the older bootstrap/main descriptions below apply to those runs only.
 
@@ -224,8 +219,10 @@ provisioned.
    it never edits the user's files directly. Interrupted writes replay from a
    per-file journal; concurrent user edits trigger a fresh merge. Publication
    failures stay separate from Batch retries and are retried at finalization.
-   `review_workspace_changes` requests acceptance of uncommitted results, never
-   permission to commit or promote them. Backup refs are not source-branch commits.
+   Final output reports uncommitted results without requesting acceptance or
+   promotion. Backup refs are not source-branch commits. Each merged Batch
+   triggers bounded cleanup of owned delivery/candidate worktrees while other
+   Batches continue; the source checkout and integration worktree are retained.
    A failure releases that worker to dispatch an unrelated Batch; dependents
    remain blocked until their dependency is merged.
 2. The worker pool runs tasks concurrently with `parallel()` up to `maxParallel`.
@@ -242,10 +239,11 @@ provisioned.
    repository can keep merging. Independent Review checkpoint validation remains
    mandatory before delivery admission.
 
-   Protocol v2 durably queues both candidate and delivery cleanup. A single
-   managed cleanup worker runs after delivery drain, alongside final validation;
+   Protocol v2 durably queues both candidate and delivery cleanup. Bounded
+   managed cleanup runs after each delivery and retries alongside final validation;
    cleanup errors never undo `merged` or delay dependent Batch dispatch. Remaining
-   jobs appear as `cleanupPending` and resume on a later invocation. No detached
+   jobs appear as `cleanupPending` without reopening the finished Workflow or
+   blocking `code_done`; they remain available to the standalone cleanup tool. No detached
    cleanup process is started. Finalization uses a compact `prepare-finalization`
    admission followed by one authoritative `status --workflow-view`; it does not
    transport a nested scheduler snapshot. Admission/read failures finish with an
@@ -309,7 +307,7 @@ provisioned.
    before finish-implementation. Review does not rerun it.
    If promotion succeeds but the Plan writer fails, the run is retained in
    `needs_resolution` until its Plan state is recovered.
-8. Once all Batches are `merged`, `parallel_evidence_aggregate.py --skip-e2e`
+8. Once all Batches are `merged`, `parallel_evidence_aggregate.py --skip-e2e --finish-workflow`
    records the E2E omission and audits existing content-bound evidence in one
    operation; it creates no validation Worktree and runs no compile/test command.
 
@@ -408,15 +406,15 @@ state.
   or `git clean` to remove them: those commands can destroy user work or the
   Workflow journal needed for recovery.
 - `parallel_merge_train.py` is the integration owner for this workflow. Once it
-  has promoted the Review-gated candidate and written `mergeCommitSha`, the fixed Workflow cleans that delivered native
-  worktree and temporary branch before the scheduler may start a dependent
-  Batch. Do not merge a delivery a second time or delete any unresolved
+  has promoted the Review-gated candidate and written `mergeCommitSha`, the fixed Workflow triggers bounded cleanup of that delivered native
+  worktree and temporary branch. Cleanup pending does not prevent the scheduler
+  from starting a dependent Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.
 - Frontend and backend UTest, and final E2E, are temporarily removed from the
   Workflow. Review checkpoint/gate and settlement use `--skip-tests`; aggregate
-  uses `--skip-e2e`. Do not launch test Agents, initialize test environments,
+  uses `--skip-e2e --finish-workflow`. Do not launch test Agents, initialize test environments,
   generate test assets, run tests or reseal for this omission. `skippedUtests`
-  and `e2eStatus=skipped` carry the omitted tests to final baseline confirmation.
+  and `e2eStatus=skipped` carry the omitted tests into the final completion report.
 - Candidate conflicts use a model-to-plugin handoff: `prepare-resolution`
   registers the exact candidate and conflict files; the conflict Agent edits
   those files and returns `success=true,status=resolved`, without running Git

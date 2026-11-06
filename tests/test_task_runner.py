@@ -415,6 +415,8 @@ class TaskRunnerTest(unittest.TestCase):
             completed = _read_batch(feature_dir)
             self.assertEqual(completed["tasks"][0]["status"], "done")
             self.assertEqual(completed["mergeCommitSha"], "a" * 40)
+            from hooks.evidence_integrity_gate import check_code_done
+            self.assertEqual(check_code_done(feature_dir), [])
 
     def test_start_rejects_unattributed_changes_before_creating_a_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

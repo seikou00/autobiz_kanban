@@ -11,6 +11,7 @@ from unittest.mock import patch
 from board_core.state_store import load_state_json_records, write_state_records
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.update_checkpoint import apply_implicit_skip_decisions, main
+from hooks.route_checkpoint import resolve_route
 
 
 class UpdateCheckpointDynamicStageTest(unittest.TestCase):
@@ -88,6 +89,21 @@ class UpdateCheckpointDynamicStageTest(unittest.TestCase):
         )
 
         self.assertEqual(decisions, {"detail_design_before_code": "enabled"})
+
+    def test_code_done_is_persisted_and_routes_to_the_next_stage(self) -> None:
+        self._enter_code()
+        stdout = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), patch(
+            "hooks.update_checkpoint.validate_lifecycle", return_value=[]
+        ), patch("hooks.update_checkpoint.write_hook_logs"), contextlib.redirect_stdout(stdout):
+            exit_code = main(["--checkpoint", "code_done", "--json"])
+        self.assertEqual(exit_code, 0, stdout.getvalue())
+        records, errors, _ = load_state_json_records(self.project)
+        self.assertEqual(errors, [])
+        self.assertEqual(records[self.feature]["checkpoint"], "code_done")
+        route, exit_code = resolve_route(self.project, self.feature)
+        self.assertEqual(exit_code, 0, route)
+        self.assertEqual(route["recommendedNextSkill"], "autoops-cicd")
 
 
 if __name__ == "__main__":

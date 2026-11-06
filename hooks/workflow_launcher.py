@@ -31,11 +31,13 @@ from hooks.parallel_runtime import (  # noqa: E402
     batch_workspace_ref,
     batch_write_set,
     get_active_run,
+    list_runs,
     load_manifest,
     plan_digest,
     resource_groups,
     select_runnable_batches,
     stage_recovery_batches,
+    workflow_report_pending,
 )
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
@@ -367,12 +369,12 @@ def _batch_execution_plan(
     notes = [
         "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后直接进入候选合并，成功合并后才释放下游。",
         "前后端 UTest 和 E2E 均暂时移出 Workflow；不准备测试环境、不生成测试资产、不派发测试 Agent。后端实现阶段仍保留生产代码纯编译。",
-        "所有 delivery Batch 推广后直接聚合证据并展示测试未执行记录，再准备最终基线合并确认。",
+        "所有 delivery Batch 推广后直接聚合证据、展示工作区同步及测试未执行记录，报告完成，不再询问合并或验收。",
     ]
 
     if optimistic_mode:
         notes.append(
-            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中自动检测并有限恢复，无法恢复时记录阻塞并结束，不等待中途人工确认；最终合入基线仍需用户确认。"
+            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中自动检测并有限恢复，无法恢复时记录阻塞并结束，不等待人工确认。"
         )
     else:
         notes.append(
@@ -492,22 +494,30 @@ def analyze_batches(
             if active_run_id is not None
             else None
         )
-        from hooks.parallel_integration import PROMOTION_STATES, isolated, promotion_view
-        from hooks.parallel_workspace_sync import workspace_sync_pending
-        pending_workspace_sync = bool(active_manifest and workspace_sync_pending(active_manifest))
-        if (active_manifest and active_manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}
-                and not (pending_workspace_sync and active_manifest.get("status") in {
-                    "awaiting_user_confirmation", "promotion_prepared", "integration_retained"})):
-            return {"useWorkflow": False, "strategy": "awaiting_confirmation", "batchCount": 0,
+        from hooks.parallel_integration import isolated, promotion_view
+        if active_manifest is None:
+            completed = [item for item in list_runs(artifact_workspace, feature)
+                         if item.get("status") in {"succeeded", "succeeded_with_issues"}
+                         and item.get("workflowCompletedAt") and item.get("planDigest") == plan_digest(bundle)
+                         and not workflow_report_pending(item)]
+            if completed:
+                latest = max(completed, key=lambda item: (item.get("createdAt", ""), item["runId"]))
+                return {"useWorkflow": False, "strategy": "complete", "batchCount": 0, "batches": [],
+                        "canStartWorkflow": False, "runId": latest["runId"], "status": latest["status"],
+                        "reason": "workflow_report_completed", "requiredAction": "code_done_ready",
+                        **promotion_view(latest)}
+        if (active_manifest and (active_manifest.get("status") in {
+                "promoting_main", "integration_sync_conflicted", "integration_sync_required"}
+                or (active_manifest.get("mainPromotion") or {}).get("status") == "promoting")):
+            return {"useWorkflow": False, "strategy": "blocked", "batchCount": 0,
                     "batches": [], "runId": active_run_id, "status": active_manifest["status"],
                     "canStartWorkflow": False, "reason": active_manifest["status"],
-                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else
-                        "review_workspace_changes" if active_manifest.get("workspaceSync") else "review_integration_and_confirm_promotion",
+                    "requiredAction": "inspect_integration_sync" if active_manifest["status"].startswith("integration_sync") else "inspect_promotion_in_progress",
                     **promotion_view(active_manifest)}
         final_validation_pending = bool(active_manifest and isolated(active_manifest)
                                         and active_manifest.get("batches")
                                         and all(b.get("status") == "merged" for b in active_manifest["batches"].values())
-                                        and (not active_manifest.get("finalEvidenceAggregate", {}).get("passed") or pending_workspace_sync))
+                                        and workflow_report_pending(active_manifest))
         # Recovery is not one generic retry: an unsealed but verified dirty
         # implementation Worktree and a sealed Review/UTest checkpoint both
         # resume in place, while a clean failed dispatch needs operator

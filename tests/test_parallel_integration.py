@@ -196,7 +196,13 @@ class ParallelIntegrationTest(unittest.TestCase):
         self.assertEqual((self.source / "delivery.txt").read_text(), "delivery\n")
         self.assertTrue(self.promote(approval, confirm=True)["reused"])
 
-    def test_waiting_and_keep_resume_without_redispatch(self):
+    def test_legacy_keep_resumes_reporting_without_redispatch_or_confirmation(self):
+        plan_path = self.feature_dir / "plan.json"
+        plan = json.loads(plan_path.read_text())
+        plan["codeWorkspaces"] = {"default": str(self.source)}
+        plan["batches"][0]["workspaceRef"] = "default"
+        plan_path.write_text(json.dumps(plan))
+        _enable_pipeline(self.feature_dir)
         self.create()
         self.deliver()
         self.validate()
@@ -207,10 +213,11 @@ class ParallelIntegrationTest(unittest.TestCase):
                              code_workspaces=[str(self.source)], task_card_id="Z990692-294")
         self.assertEqual(resumed["runId"], self.run_id)
         self.assertEqual(resumed["scheduledGroups"], [])
-        self.assertEqual(resumed["status"], "integration_retained")
+        self.assertEqual(resumed["status"], "running")
+        self.assertNotIn("mainPromotion", self.manifest())
         view = analyze_batches("alpha", ROOT, self.workspace, "Z990692-294")
-        self.assertEqual(view["requiredAction"], "review_integration_and_confirm_promotion")
-        self.assertFalse(view["canStartWorkflow"])
+        self.assertEqual(view["requiredAction"], "resume_fixed_workflow")
+        self.assertTrue(view["canStartWorkflow"])
         self.assertTrue(self.integration.exists())
         self.assertEqual(git(self.source, "rev-parse", "main"), self.baseline)
 

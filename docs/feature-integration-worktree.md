@@ -1,16 +1,18 @@
 # 需求集成 Worktree 与用户工作区交付
 
-固定 Workflow 现在按 Batch 将集成成果同步到用户原工作区，以**未提交改动**展示。用户分支 HEAD、原暂存区保持不变；已有未提交修改不阻止同步。Runtime 在临时 Worktree 中三方合并，冲突由 Workflow 自动编辑临时文件，再由 Runtime 校验并写回。后续 Batch 仍从集成分支开发。`workspaceSync` / `workspaceSyncPending` 返回实际同步结果，最终 `review_workspace_changes` 只做验收，不自动提交或调用 `promote`。下文显式基线合并命令保留为独立手动入口，不能将验收同意解释为提交授权。
+固定 Workflow 按 Batch 将集成成果同步到用户原工作区，以**未提交改动**展示。用户分支 HEAD、原暂存区保持不变；已有未提交修改不阻止同步。Runtime 在临时 Worktree 中三方合并，冲突由 Workflow 自动编辑临时文件，再由 Runtime 校验并写回。后续 Batch 仍从集成分支开发。`workspaceSync` / `workspaceSyncPending` 返回实际同步结果，最后直接报告完成和遗留问题，不再询问是否合并或验收。下文显式基线合并命令仅用于用户另行明确要求正式 Git 合并的场景。
 
 同步使用上次 `lastSyncedSha`、用户当前内容及最新集成 SHA。备份保存在 run 的 `workspace-sync` 目录，含暂存区副本、文件原始内容及逐文件写回日志；私有 `refs/autobiz-workspace-backups/` 引用保存 Git 快照，不进入用户分支历史。写回不清空、不 stash 用户工作区；中断后跳过已完成文件并继续，用户在计算或解冲突期间再次编辑时重新计算。暂存、未暂存、未跟踪、二进制及符号链接内容均保留。同步问题单独记录，不撤销已合并 Batch；最终收口和恢复会继续同步。
+
+自动收口不执行 `sync-main`。最终报告使用 aggregate 本次读取的 `workspaceSync` 与 `repositoryHeads`，不沿用先前的同步缓存；同步 SHA 尚未追上当前集成 SHA 时仍显示待同步。用户基线分支、需求集成分支及其 Worktree 均保留，交付清理队列只处理已交付的 Batch 和候选临时 Worktree。
 
 `settle-delivery` 完成合并后只登记同步待办并立即返回 `merged`，Workflow 随后执行独立同步；最终收口同样先返回待办，再补同步。临时同步 Worktree 的创建和合并按命令指定空 hooks 目录，保留 LFS 内容过滤，不改用户全局 Git 配置。Git 原始输出保存在同步备份目录的 `*.stdout.log` / `*.stderr.log`；错误文本容错转为 UTF-8。`preparing` 中断会校验并复用已创建的临时 Worktree，已合并 Batch 的后续诊断不会重新登记为业务失败。
 
 独立恢复使用 `python hooks/parallel_workspace_sync.py sync --workspace <artifact> --feature <feature> --run-id <runId> --repository-ref <ref> --resolver-id <invocationId>`。冲突返回临时 `worktreePath`、`contextPath`、`conflictedFiles`、`attemptId`；仅编辑这些临时冲突文件，随后执行同入口 `complete` 并追加 `--attempt-id <attemptId>`。`refresh_required` 表示用户期间又有修改，重新 `sync` 即可。不得直接在用户目录处理 Runtime 冲突标记，也不调用 commit/reset。
 
-当前固定 Workflow 已暂时移除前后端 UTest 和 E2E：Review checkpoint/交付 gate 使用 `--skip-tests` 登记 `utest_temporarily_disabled`；最终 aggregate 使用 `--skip-e2e` 在汇总内部登记 `e2e_temporarily_disabled`。不派发测试或 E2E 跳过登记 Agent、不准备测试环境、不生成测试资产、不创建验证 Worktree。报告明确展示未执行及原因，最终基线合并仍需用户确认。下文独立 E2E 工具的执行/恢复协议保留供手动流程或未来重新接入使用。
+当前固定 Workflow 已暂时移除前后端 UTest 和 E2E：Review checkpoint/交付 gate 使用 `--skip-tests` 登记 `utest_temporarily_disabled`；最终 aggregate 使用 `--skip-e2e --finish-workflow` 在汇总内部登记 `e2e_temporarily_disabled` 并结束流程。不派发测试或 E2E 跳过登记 Agent、不准备测试环境、不生成测试资产、不创建验证 Worktree。报告明确展示未执行及原因。
 
-新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支的提交。每批成果随后写回用户原工作区，分支引用与暂存区不变。最终证据和测试未执行记录随同步状态一同交给用户验收。
+新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支的提交。每批成果随后写回用户原工作区，分支引用与暂存区不变。最终证据、测试未执行记录、同步状态和清理待办一同进入报告。
 
 ```text
 启动时的当前分支 → integration → Batch Worktrees
@@ -19,7 +21,7 @@
              ↓ 每批三方合并并同步文件
        用户原工作区（未提交，可直接编辑，HEAD 不变）
              ↓ evidence aggregate / 测试未执行记录
-       awaiting_user_confirmation → 用户验收（不自动提交）
+       succeeded / succeeded_with_issues（直接报告，不自动提交）
 ```
 
 ## 配置与兼容
@@ -40,7 +42,7 @@ artifact workspace 的 `.autobiz/runtime_config.json` 可配置：
 
 没有 `integrationMode=isolated` 标记的旧 manifest 保持原来的 direct 模式。显式配置 `integrationMode=direct` 可用于兼容旧流程；切换配置不会改变已存在 run 的模式或基线。
 
-Git 2.20 可使用最终合入入口。读取目标分支的 Worktree 登记时，插件优先使用 `worktree list --porcelain -z`，仅在 Git 返回不支持选项的退出码 129 时回退到 `worktree list --porcelain`；中文、空格和引号按完整路径保留。读取失败或旧格式无法明确解析时会报错，不能当作目标分支未检出而跳过工作区检查。已停在 `promotion_prepared` 的 run，候选、目标及确认内容未变化时，更新插件后可沿用已有确认重试，无需重跑 Batch/E2E。
+Git 2.20 可使用独立的正式合入入口。读取目标分支的 Worktree 登记时，插件优先使用 `worktree list --porcelain -z`，仅在 Git 返回不支持选项的退出码 129 时回退到 `worktree list --porcelain`；中文、空格和引号按完整路径保留。读取失败或旧格式无法明确解析时会报错，不能当作目标分支未检出而跳过工作区检查。旧 run 的等待确认状态通过 launcher 恢复后直接进入结果汇总，不重跑 Batch。
 
 每个物理仓库创建一个集成 Worktree。同一物理 Git 仓库的多个逻辑 workspaceRef 共用它，并同步记录集成 HEAD；对应 checkout 的当前分支和提交必须一致。多个物理仓库保留同一个 scheduler run，分别从各自当前分支创建集成 Worktree。
 
@@ -52,15 +54,15 @@ Git 2.20 可使用最终合入入口。读取目标分支的 Worktree 登记时�
 - Batch 创建时保存 `startSha`。后续依赖 Batch 从依赖已集成后的 HEAD 创建；已经开始的 Batch 保留起始 SHA 和改动，冲突交给 Merge Train。
 - prepare 证据绑定 Batch 的 `startSha`，不会因集成 HEAD 推进而失效。UTest 可新增测试资产、修改 POM 的 test scope 依赖及必要 Surefire/Failsafe 配置；最终聚合读取证据提交到最终提交的真实 Git 差异，复用封存的 POM 内容校验。多次测试封存或 Batch Worktree 清理后仍可核验，既有阶段 evidence 不重写；生产代码、生产依赖和失败屏蔽配置的变更不能沿用旧 Review 证据。
 - Batch 的 `merged` 和 `mergeCommitSha` 表示已合入集成分支。`mainPromotion` 单独记录最终基线分支合并；两者不能混用。`mainPromotion`、`main-promotion.json` 和 `sync-main` 沿用现有接口名称，其中的 main 指本次 run 冻结的基线分支，不限定分支名为 `main`。
-- `cleanup-merged` 可以清理已集成的 Batch，始终保留集成 Worktree。等待确认、保留成果和基线分支同步状态都属于活动 run；launcher 返回验收入口，不重新派发 Batch。
-- 固定 Workflow 不运行最终 E2E；`aggregate --skip-e2e` 在当前集成 SHA 上登记未执行，报告 `e2eStatus=skipped`。独立 E2E 工具仍保留临时验证 Worktree 执行能力。证据汇总采用 `report_only` 策略，保留真实 `passed`、全部 `errors`、`validationStatus`、deferred 问题及原严重性，不重写既有 Evidence、不自动重跑测试。报告成功持久化且所有 Batch 已集成后，校验未通过也进入 `awaiting_user_confirmation`。固定 Workflow 准备 `main-promotion.json`，返回目标/集成 SHA、diff stat、diff digest、`evidencePassed`、`evidenceErrors`、证据 digest 和 `approvalDigest`。E2E 失败仍保留 `e2eStatus=failed`，不声称测试通过。用户明确确认绑定这些问题和本次实际提交。
-- 合入仍要求 Batch 交付及 merge 提交实际包含于当前候选、集成 Worktree 干净且无未解决冲突、目标分支已同步、Plan 和确认内容未变化。报告或证据在确认后变化，必须重新准备并确认；合入带审计问题的候选后状态为 `succeeded_with_issues`。
-- 历史 run 若因聚合校验失败停在 `blocked` 且已有聚合报告，可直接调用下文 `prepare`；插件重新生成审计报告后准备确认，不重跑 Batch 或 E2E。原 stage Evidence 保留。读取状态或持久化报告失败时仍须先解决该执行错误。
-- 固定 Workflow 从不调用 `promote`，也不把阶段成功视为用户同意。Agent 必须展示实际分支、SHA、变更及验证结果，等待用户明确同意后才执行最终合并。
+- 每个 Batch 合并后触发一次 20 秒预算的 `parallel_cleanup.py drain`，只清理已推广且所有权、SHA、工作区状态均符合的交付和候选 Worktree，不再等待其他 Batch。最终再执行一次 120 秒预算的清理。用户原目录和需求集成 Worktree 保留。
+- 固定 Workflow 使用 `aggregate --skip-e2e --finish-workflow`，采用 `report_only` 策略，保留真实 `passed`、全部 `errors`、`validationStatus`、deferred 问题及原严重性，不重写既有 Evidence、不自动重跑测试。交付完整且报告持久化后，直接进入 `succeeded` 或 `succeeded_with_issues`，不准备确认报告。测试未执行不声称测试通过。
+- 完成报告写入 `workflowCompletedAt`，审计发现不会反复启动流程。工作区同步仍有待办时，launcher 恢复同一 run 处理同步，不重新实现或 Review 已合并 Batch。旧等待确认状态也按此路径恢复。清理在最终收口时再做一次有预算的尝试，仍失败仅保留 `cleanupPending`，不重新拉起已完成 run；以后可独立执行 drain。
+- Workflow 汇总后调用现有 `update_checkpoint.py --checkpoint code_done --json`，通过真实 Plan/证据门禁推进 Code 完成。清理失败不影响推进；检查点推进失败则单独报告 `retry_code_checkpoint`。下一阶段由当前 Feature 的配置路由，不在 Code Workflow 中直接启动。
+- 固定 Workflow 不调用 `promote`、不提交用户工作区、不移动用户分支 HEAD、不发起合并或验收提问。清理失败记录 pending，保留已合并状态；无法自动处理的问题如实报告。
 
-最终确认前，主 Agent 必须先在对话中展示代码位置，再发起确认提问。`mainPromotion.snapshot.repositories` 的每个物理仓库包含源仓库绝对路径 `gitRoot`、基线分支 `targetBranch` 与 `targetSha`、基线分支实际检出的绝对路径 `targetWorktreePath`，以及待合入成果的集成路径 `worktreePath`、分支 `branchName` 与 `candidateSha`。告诉用户在 IDE/文件管理器中打开哪个目录查看基线、哪个目录查看新代码，并展示变更、验证问题和 `mainPromotion.reportPath` 指向的报告。基线分支未检出时 `targetWorktreePath=null`，应明确说明可在 `gitRoot` 的 Git 分支视图查看基线，不能将当前检出的其他分支当作基线，也不自动切换分支。旧报告缺少这些字段时先重新 `prepare`，再展示并确认。提问位于固定 Workflow 返回后的主 Agent，已取得同一份有效报告明确授权时不重复提问。
+## 独立的正式 Git 合入入口
 
-## 最终确认命令
+以下入口保留给用户另行明确要求正式合入分支的场景，不属于固定 Workflow 的自动收口。报告中的 `mainPromotion.snapshot.repositories` 包含源目录、目标分支、目标及候选 SHA、集成目录和 diff 信息；执行正式合入前须绑定有效报告与用户授权。用户只要求按未提交文件交付时，不调用这些命令，也不主动追问是否使用。
 
 以下命令中的 workspace 为 artifact workspace；run-id 必须复用返回的 runId。
 
@@ -86,13 +88,13 @@ python hooks/parallel_integration.py keep --workspace <artifact> --feature <feat
 
 ## 基线分支变化与冲突
 
-所有 Batch 集成后，固定 Workflow 会先调用 `sync-main`，再执行最终 E2E。目标在验收期间变化时，可重新执行：
+所有 Batch 集成后，固定 Workflow 会先调用 `sync-main`，再汇总已有证据。目标分支提交变化时，可重新执行：
 
 ```bash
 python hooks/parallel_integration.py sync-main --workspace <artifact> --feature <feature> --run-id <runId>
 ```
 
-此操作仅将目标分支合入集成 Worktree，废弃旧确认与最终证据。无冲突时返回 `running`，通过 launcher 恢复同一 Workflow，重新执行最终 E2E 与证据汇总。
+此操作仅将目标分支合入集成 Worktree，废弃旧确认与最终证据。无冲突时返回 `running`，通过 launcher 恢复同一 Workflow，重新同步并汇总证据。
 
 有冲突时返回 `integration_sync_conflicted`、集成 Worktree 和准确的 `conflictedFiles`。只解决这些冲突文件，然后由插件完成暂存和提交：
 
@@ -100,7 +102,7 @@ python hooks/parallel_integration.py sync-main --workspace <artifact> --feature 
 python hooks/parallel_integration.py complete-sync --workspace <artifact> --feature <feature> --run-id <runId>
 ```
 
-插件校验 merge parents、冲突标记和冲突文件之外的变化；成功后仍需重新验证、prepare 和用户确认。禁止直接在基线分支修复，禁止用 reset、force push 或旧 approvalDigest 绕过验证。
+插件校验 merge parents、冲突标记和冲突文件之外的变化；成功后恢复同一 Workflow 汇总。独立的正式合入需重新准备有效报告。禁止直接在基线分支修复，禁止用 reset、force push 或旧 approvalDigest 绕过验证。
 
 ## 清理与回滚
 

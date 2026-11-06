@@ -172,13 +172,15 @@ def check_code_done(target_feature_dir: Path) -> list[str]:
     except EvidenceStoreError as exc:
         errors.append(str(exc))
         records = ()
-    errors.extend(_check_completion(plan, records))
+    errors.extend(_check_completion(plan, records, feature_dir=target_feature_dir))
     return errors
 
 
 def _check_completion(
     plan: dict[str, Any],
     records: tuple[dict[str, Any], ...],
+    *,
+    feature_dir: Path | None = None,
 ) -> list[str]:
     """Validate Code completion evidence for deferred validation."""
     errors: list[str] = []
@@ -291,8 +293,27 @@ def _check_batch_completion(
                 except (OSError, json.JSONDecodeError):
                     errors.append(f"parallel_delivery_manifest_missing:{run_id}")
                     continue
-                verification = manifest.get("finalVerification") if isinstance(manifest, dict) else None
-                if manifest.get("status") != "succeeded" or not isinstance(verification, dict) or verification.get("passed") is not True:
+                if not isinstance(manifest, dict):
+                    errors.append(f"parallel_delivery_not_verified:{run_id}")
+                    continue
+                verification = manifest.get("finalVerification")
+                legacy_verified = (manifest.get("status") == "succeeded" and isinstance(verification, dict)
+                                   and verification.get("passed") is True)
+                report = manifest.get("finalEvidenceAggregate")
+                reported = (manifest.get("status") in {"succeeded", "succeeded_with_issues"}
+                            and bool(manifest.get("workflowCompletedAt")) and isinstance(report, dict)
+                            and report.get("runId") == run_id and report.get("policy") == "report_only"
+                            and isinstance(report.get("passed"), bool) and isinstance(report.get("errors"), list)
+                            and report.get("blockingErrors") == [])
+                if reported:
+                    deliveries = manifest.get("batches", {})
+                    reported = isinstance(deliveries, dict) and all(
+                        isinstance(deliveries.get(batch_id), dict)
+                        and deliveries[batch_id].get("status") == "merged"
+                        and deliveries[batch_id].get("mergeCommitSha") == batch.get("mergeCommitSha")
+                        for batch_id, batch in batch_plans.items()
+                        if isinstance(batch, dict) and batch.get("deliveryRunId") == run_id)
+                if not legacy_verified and not reported:
                     errors.append(f"parallel_delivery_not_verified:{run_id}")
     return errors
 

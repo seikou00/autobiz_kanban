@@ -52,6 +52,8 @@ def integration_repo(binding: dict) -> Path:
 
 def record_integration_head(manifest: dict, ref: str, sha: str) -> None:
     binding = manifest["repositories"][ref]
+    if binding.get("headSha") != sha:
+        manifest.pop("workflowCompletedAt", None)
     if binding.get("headSha") != sha and manifest.pop("finalizationReceipt", None):
         manifest["finalizationReceiptInvalidated"] = "integration_head_changed"
     binding["headSha"] = sha

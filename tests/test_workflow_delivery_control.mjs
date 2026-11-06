@@ -17,7 +17,7 @@ async function execute(frontend = false, fault = null) {
   let syncCompletions = 0;
   let workspaceState = fault && fault.startsWith("workspace-") ? {
     success: true, status: fault === "workspace-synced" ? "synced" : "conflicted", repositoryRef: "default",
-    sourcePath: "/source", sourceBranch: "main", sourceHead: "original", lastSyncedSha: null,
+    sourcePath: "/source", sourceBranch: "main", sourceHead: "original", lastSyncedSha: fault === "workspace-synced" ? "candidate" : null,
     targetSha: "candidate", worktreePath: "/sync-worktree", backupPath: "/sync-backup",
     contextPath: "/sync-backup/conflicts.json", attemptId: "c".repeat(32), conflictedFiles: ["file.txt"]
   } : null;
@@ -100,6 +100,7 @@ async function execute(frontend = false, fault = null) {
       assert.match(prompt, /不移动用户分支 HEAD、不改用户暂存区、不提交代码/);
       workspaceState = { ...workspaceState, status: fault === "workspace-refresh" && syncCompletions++ === 0
         ? "refresh_required" : "synced" };
+      if (workspaceState.status === "synced") workspaceState.lastSyncedSha = "candidate";
       return workspaceState;
     }
     if (label.startsWith("workspace-sync-")) {
@@ -128,23 +129,37 @@ async function execute(frontend = false, fault = null) {
       }
       return current;
     }
-    if (label === "sync-main-into-integration") return { success: true };
     if (label === "aggregate-staged-evidence") {
-      assert.match(prompt, /--skip-e2e/);
+      assert.match(prompt, /--skip-e2e --finish-workflow/);
+      assert.ok(options.schema.properties.workspaceSync);
+      assert.ok(options.schema.properties.repositoryHeads);
       // Cleanup can be waiting independently while final validation advances.
       await Promise.resolve();
       assert.equal(cleanupStarted, true);
       releaseCleanup();
-      return { ok: true, policy: "report_only", passed: true,
+      return { ok: true, policy: "report_only", passed: true, hasIssues: fault === "advisory",
         errors: [], blockingErrors: [], integrationMode: "isolated",
+        workspaceSync: workspaceState ? [workspaceState] : [], repositoryHeads: { default: "candidate" },
         e2eStatus: "skipped", e2eSkipReason: "e2e_temporarily_disabled",
         skippedUtests: [{ batchId: "B001", executionLane: frontend ? "frontend" : "backend",
           status: "skipped", reason: "utest_temporarily_disabled" }] };
     }
-    if (label === "prepare-user-confirmed-promotion") return { success: true, mainPromotion: { approvalDigest: "approval" } };
+    if (label === "cleanup-delivered-B001") {
+      assert.match(prompt, /--budget-seconds 20/);
+      if (fault === "cleanup-error") throw new Error("initial cleanup failed");
+      if (fault === "cleanup-pending") return { success: true, cleanupPending: [{ jobId: "delivery", status: "retryable" }] };
+      return { success: true, cleanupPending: [], cleanedJobIds: ["candidate", "delivery"] };
+    }
+    if (label === "complete-code-checkpoint") {
+      assert.match(prompt, /update_checkpoint\.py" --feature "f" --checkpoint code_done --json/);
+      assert.ok(labels.includes("aggregate-staged-evidence"));
+      return { ok: true, new_checkpoint: "code_done" };
+    }
     if (label === "drain-delivery-cleanup") {
       cleanupStarted = true;
       await cleanupMayFinish;
+      if (fault === "cleanup-error") throw new Error("cleanup lock busy");
+      if (fault === "cleanup-pending") return { success: true, cleanupPending: [{ jobId: "delivery", status: "retryable" }] };
       return { success: true, cleanupPending: [], cleanedJobIds: ["candidate", "delivery"] };
     }
     throw new Error(`unexpected control call: ${label}`);
@@ -158,9 +173,9 @@ async function execute(frontend = false, fault = null) {
   return { labels, result };
 }
 
-test("nonblocking Review uncertainty survives through final baseline confirmation", async () => {
+test("nonblocking Review uncertainty survives in the completed report", async () => {
   const { labels, result } = await execute(false, "advisory");
-  assert.equal(result.finalStatus, "awaiting_user_confirmation");
+  assert.equal(result.finalStatus, "succeeded_with_issues");
   assert.equal(result.deferredIssues.length, 1);
   assert.equal(result.deferredIssues[0].kind, "review_advisory");
   assert.equal(result.deferredIssues[0].blocksWorkflow, false);
@@ -170,7 +185,7 @@ test("nonblocking Review uncertainty survives through final baseline confirmatio
 
 test("settlement uses Runtime SHA even when the implementation agent transcribed it incorrectly", async () => {
   const { result } = await execute(false, "stale-sha");
-  assert.equal(result.finalStatus, "awaiting_user_confirmation");
+  assert.equal(result.finalStatus, "succeeded");
 });
 
 test("provision contention preserves the Runtime reason when deferring a Batch", async () => {
@@ -202,7 +217,7 @@ test("provision contention preserves the Runtime reason when deferring a Batch",
 
 test("queued delivery returns to dispatch without failure or consuming its grant", async () => {
   const { labels, result } = await execute(false, "queued");
-  assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+  assert.equal(result.finalStatus, "succeeded", JSON.stringify({ labels, result }));
   assert.equal(labels.filter(label => label === "dispatch-claim-B001-1").length, 2);
   assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 2);
   assert.equal(labels.some(label => /defer-batch|dispatch-finish/.test(label)), false);
@@ -211,7 +226,7 @@ test("queued delivery returns to dispatch without failure or consuming its grant
 
 test("sealed delivery recovery goes straight to settlement without reimplementation or Review", async () => {
   const { labels, result } = await execute(false, "sealed-recovery");
-  assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+  assert.equal(result.finalStatus, "succeeded", JSON.stringify({ labels, result }));
   assert.equal(labels.some(label => /fixed-batch|provision-worktree|stage-review|validate-review/.test(label)), false);
   assert.ok(labels.includes("settle-delivery-B001-1"));
 });
@@ -219,8 +234,9 @@ test("sealed delivery recovery goes straight to settlement without reimplementat
 for (const fault of ["workspace-synced", "workspace-conflict", "workspace-refresh", "workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"]) {
   test(`${fault} delivers uncommitted workspace results without failing an already merged Batch`, async () => {
     const { labels, result } = await execute(false, fault);
-    assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
-    assert.equal(result.nextAction, "review_workspace_changes");
+    const pending = ["workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"].includes(fault);
+    assert.equal(result.finalStatus, pending ? "succeeded_with_issues" : "succeeded", JSON.stringify({ labels, result }));
+    assert.equal(result.nextAction, pending ? "resume_workspace_sync" : "continue_next_stage");
     assert.equal(result.workspaceSync.length, 1);
     assert.equal(result.workspaceSyncPending.length, ["workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"].includes(fault) ? 1 : 0);
     assert.equal(labels.some(label => /defer-batch|dispatch-finish|fixed-batch.*2/.test(label)), false);
@@ -242,7 +258,7 @@ test("post-merge cleanup bypasses defer when Runtime already reported the merge"
 for (const frontend of [false, true]) {
   test(`complete ${frontend ? "frontend" : "backend"} workflow settles without individual control agents`, async () => {
     const { labels, result } = await execute(frontend);
-    assert.equal(result.finalStatus, "awaiting_user_confirmation", JSON.stringify({ labels, result }));
+    assert.equal(result.finalStatus, "succeeded", JSON.stringify({ labels, result }));
     assert.equal(result.verification.e2eStatus, "skipped");
     assert.equal(result.skippedUtests[0].reason, "utest_temporarily_disabled");
     assert.equal(labels.some(label => /utest|e2e/i.test(label)), false);
@@ -255,7 +271,23 @@ for (const frontend of [false, true]) {
     assert.equal(labels.filter(label => label === "final-repair-initial-snapshot").length, 1);
     assert.equal(labels.filter(label => /stage-gate|build-candidate|promote-candidate|dispatch-finish|after-batch|final-report-snapshot|recover-merged/.test(label)).length, 0);
     assert.deepEqual(result.cleanupPending, []);
+    assert.ok(labels.indexOf("cleanup-delivered-B001") > labels.indexOf("settle-delivery-B001-1"));
+    assert.ok(labels.indexOf("cleanup-delivered-B001") < labels.indexOf("prepare-delivery-finalization"));
+    assert.equal(labels.includes("prepare-user-confirmed-promotion"), false);
     assert.equal(result.workflowMetrics.agentCalls, labels.length);
+  });
+}
+
+for (const fault of ["cleanup-error", "cleanup-pending"]) {
+  test(`${fault} is reported without reopening a merged Batch`, async () => {
+    const { labels, result } = await execute(false, fault);
+    assert.equal(result.finalStatus, "succeeded_with_issues");
+    assert.equal(result.ok, true);
+    assert.equal(result.nextAction, "continue_next_stage");
+    assert.equal(result.verification.codeCheckpoint.new_checkpoint, "code_done");
+    assert.equal(labels.filter(label => label === "complete-code-checkpoint").length, 1);
+    assert.equal(labels.some(label => /defer-batch|dispatch-finish/.test(label)), false);
+    assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 1);
   });
 }
 

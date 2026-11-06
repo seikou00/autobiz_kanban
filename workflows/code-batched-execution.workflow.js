@@ -7,7 +7,7 @@ export const meta = {
     { title: "Batch 阶段", detail: "编码 → 封存 → Review；生产缺陷可定向修复一次" },
     { title: "候选集成", detail: "Merge Train 集成已完成 Review 的候选 SHA" },
     { title: "工作区同步", detail: "保留用户修改，自动整合冲突，以未提交文件展示 Batch 成果" },
-    { title: "最终汇总", detail: "汇总既有证据和测试未执行记录，准备基线合并确认" }
+    { title: "最终汇总", detail: "报告交付、工作区同步、清理及测试未执行记录" }
   ]
 };
 
@@ -440,6 +440,8 @@ const VERIFICATION_SCHEMA = {
     integrationMode: { type: "string" },
     integrationWorkspaces: { type: "object", additionalProperties: true },
     mainPromotion: { type: ["object", "null"], additionalProperties: true },
+    workspaceSync: { type: "array", items: WORKSPACE_SYNC_SCHEMA },
+    repositoryHeads: { type: "object", additionalProperties: { type: "string" } },
     passed: { type: "boolean" },
     policy: { const: "report_only" },
     validationStatus: { type: "string" },
@@ -952,14 +954,13 @@ try {
 const runId = prepared.runId;
 maxParallel = prepared.maxParallel;
 const controlProtocolVersion = prepared.controlProtocolVersion || 1;
-if (["awaiting_user_confirmation", "promotion_prepared", "promoting_main", "integration_retained",
-     "integration_sync_required", "integration_sync_conflicted"].includes(prepared.status)) {
+if (["promoting_main", "integration_sync_required", "integration_sync_conflicted"].includes(prepared.status)) {
   const cleanup = controlProtocolVersion >= 2 ? await runDeferredCleanup() : null;
   return { ok: !prepared.status.startsWith("integration_sync"), feature, runId,
     finalStatus: prepared.status, integrationWorkspaces: prepared.integrationWorkspaces,
     mainPromotion: prepared.mainPromotion, cleanupResult: cleanup,
     cleanupPending: cleanup && cleanup.cleanupPending || prepared.cleanupPending || [],
-    nextAction: "review_integration_and_confirm_promotion" };
+    nextAction: prepared.status === "promoting_main" ? "inspect_promotion_in_progress" : "inspect_integration_sync_then_resume" };
 }
 
 let retryRecoveryInFlight = null;
@@ -1993,7 +1994,9 @@ async function settleReadyBatch(batchId) {
     deliveryControl.finalized.set(batchId, grant.generation);
     // Integration and dispatch have already finished. Publication errors must
     // never turn that durable merge into another implementation failure.
+    const cleanup = runDeferredCleanup(`cleanup-delivered-${batchId}`, 20);
     if (result.workspaceSync) await synchronizeUserWorkspace(result.workspaceSync);
+    cleanupResults.push(await cleanup);
     markBatchResolved(batchId);
     markCandidateResolved(result.repositoryRef, result.wave);
     mergeResults.push({ success: true, batchId, wave: result.wave, settlement: result });
@@ -2002,11 +2005,11 @@ async function settleReadyBatch(batchId) {
   throw new Error(`delivery_settlement_exhausted:${batchId}`);
 }
 
-async function runDeferredCleanup() {
+async function runDeferredCleanup(label = "drain-delivery-cleanup", budgetSeconds = 120) {
   try {
     return requireSuccess(await workflowAgent(
-      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_cleanup.py" drain --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --budget-seconds 120。插件按已登记所有权清理候选和交付 Worktree；pending 原样保留，不自行删除、重试或修改业务状态。只返回最终 JSON。`,
-      { label: "drain-delivery-cleanup", phase: "最终汇总" }
+      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_cleanup.py" drain --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --budget-seconds ${budgetSeconds}。插件按各任务已登记所有权清理已合并的候选和交付 Worktree，不等待其他 Batch；pending 原样保留，不自行删除、重试或修改业务状态。只返回最终 JSON。`,
+      { label, phase: "最终汇总", timeoutMs: (budgetSeconds + 60) * 1000 }
     ), "delivery cleanup");
   } catch (error) { return { success: false, error: errorText(error) }; }
 }
@@ -2816,10 +2819,24 @@ function completionReport({
   const deferredIssues = deferredIssueDetails(scheduler, verification);
   const cleanup = activeUnresolvedRecords().filter(record => record.kind === "cleanup");
   const activeSchedulerFailures = activeUnresolvedRecords().filter(record => record.kind === "scheduler");
-  const workspaceSync = new Map(((scheduler && scheduler.workspaceSync) || []).map(item => [item.repositoryRef, item]));
-  for (const [ref, result] of workspaceSyncControl.results) workspaceSync.set(ref, result);
+  // Aggregation reads the manifest after publication has drained. Its snapshot
+  // supersedes both the scheduler snapshot and earlier in-memory sync receipts.
+  const latestSync = verification && Array.isArray(verification.workspaceSync) ? verification.workspaceSync : null;
+  const workspaceSync = new Map((latestSync || (scheduler && scheduler.workspaceSync) || []).map(item => [item.repositoryRef, item]));
+  if (!latestSync) for (const [ref, result] of workspaceSyncControl.results) workspaceSync.set(ref, result);
+  for (const [ref, result] of workspaceSync) {
+    const head = verification && verification.repositoryHeads && verification.repositoryHeads[ref];
+    if (result.status === "synced" && usableString(head) && result.lastSyncedSha !== head) {
+      workspaceSync.set(ref, { ...result, status: "pending", targetSha: head });
+    }
+  }
+  const workspaceSyncPending = [...workspaceSync.values()].filter(item => !["synced", "skipped"].includes(item.status));
+  if (["succeeded", "succeeded_with_issues"].includes(finalStatus) && workspaceSyncPending.length) {
+    finalStatus = "succeeded_with_issues";
+    nextAction = "resume_workspace_sync";
+  }
   return {
-    ok: ["succeeded", "succeeded_with_issues", "awaiting_user_confirmation"].includes(finalStatus),
+    ok: ["succeeded", "succeeded_with_issues"].includes(finalStatus),
     feature,
     runId,
     batchResults,
@@ -2828,7 +2845,7 @@ function completionReport({
     lifecycleResults,
     verification,
     workspaceSync: [...workspaceSync.values()],
-    workspaceSyncPending: [...workspaceSync.values()].filter(item => !["synced", "skipped"].includes(item.status)),
+    workspaceSyncPending,
     integrationWorkspaces: (verification && verification.integrationWorkspaces) || (scheduler && scheduler.integrationWorkspaces),
     mainPromotion: (verification && verification.mainPromotion) || (scheduler && scheduler.mainPromotion),
     finalStatus,
@@ -3096,29 +3113,19 @@ if (!allWorkflowDeliveriesMerged(finalScheduler)) {
 
 async function runFinalValidation() {
 phase("最终汇总");
-if (prepared.integrationMode === "isolated") {
-  try {
-    requireSuccess(await workflowAgent(
-      `执行 python -X utf8 "${joinPath(pluginPath, "hooks/parallel_integration.py")}" sync-main --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-      `只同步目标主分支提交到集成 Worktree，不得修改主分支；若存在冲突，原样返回插件状态和 conflicts，保留集成 Worktree 供用户检查。只返回 JSON。`,
-      { label: "sync-main-into-integration", phase: "最终汇总" }
-    ), "integration main sync");
-  } catch (error) {
-    return completionReport({ finalStatus: "integration_sync_required", scheduler: finalScheduler || lastScheduler,
-      verification: { error: errorText(error) }, nextAction: "inspect_integration_sync_then_resume" });
-  }
-}
 let verification;
 try {
   verification = unwrap(await workflowAgent(
-    `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --skip-e2e。` +
-    `只登记当前集成提交的 E2E 未执行记录并汇总既有证据，不创建验证 Worktree 或准备测试环境。这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 交用户审阅，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时继续准备确认报告。原样返回 JSON。`,
+    `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --skip-e2e --finish-workflow。` +
+    `只登记当前集成提交的 E2E 未执行记录并汇总既有证据，不创建验证 Worktree 或准备测试环境。这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 如实报告，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时直接完成，不询问用户是否合并或验收，不执行 promote、commit 或 reset。原样返回 JSON，完整保留 Runtime 本次读取的 workspaceSync 和 repositoryHeads，禁止用之前的同步回执替换。`,
     { label: "aggregate-staged-evidence", phase: "最终汇总", schema: VERIFICATION_SCHEMA }
   ));
   if (!verification || verification.unparsedStructuredOutput === true
       || verification.ok === false || verification.success === false
       || verification.policy !== "report_only" || typeof verification.passed !== "boolean"
       || !Array.isArray(verification.errors) || !Array.isArray(verification.blockingErrors)
+      || !Array.isArray(verification.workspaceSync) || !verification.repositoryHeads
+      || typeof verification.repositoryHeads !== "object" || Array.isArray(verification.repositoryHeads)
       || verification.blockingErrors.length) {
     recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error: verification });
     return completionReport({
@@ -3138,32 +3145,25 @@ try {
   });
 }
 
-if (verification.integrationMode === "isolated") {
-  const uncommittedDelivery = typeof workspaceSyncControl !== "undefined" && workspaceSyncControl.results.size > 0;
-  try {
-    const promotion = requireSuccess(await workflowAgent(
-      `执行 python -X utf8 "${joinPath(pluginPath, "hooks/parallel_integration.py")}" prepare --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-      `只准备可审阅的最终合并报告和 approvalDigest，不得执行 promote、修改主分支或替用户确认。` +
-      (uncommittedDelivery ? `本次按未提交方式交付，用户直接在 sourcePath 查看和编辑成果；最终仅验收，不自动 commit、移动用户分支 HEAD 或调用 promote。` : "") +
-      `完整返回 JSON，保留 mainPromotion.reportPath 和 snapshot.repositories 内各仓库的 gitRoot、targetWorktreePath、targetBranch、targetSha、worktreePath、branchName、candidateSha，供主 Agent 先展示代码查看位置再发起确认提问。`,
-      { label: "prepare-user-confirmed-promotion", phase: "最终汇总" }
-    ), "prepare main promotion");
-    verification.mainPromotion = promotion.mainPromotion;
-    return completionReport({ finalStatus: "awaiting_user_confirmation", scheduler: finalScheduler || lastScheduler,
-      verification, nextAction: uncommittedDelivery ? "review_workspace_changes" : "review_integration_and_confirm_promotion" });
-  } catch (error) {
-    verification.promotionPreparationError = errorText(error);
-    return completionReport({ finalStatus: "awaiting_user_confirmation", scheduler: finalScheduler || lastScheduler,
-      verification, nextAction: "sync_target_if_changed_then_prepare_promotion" });
+const hasAuditIssues = verification.hasIssues || verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
+try {
+  verification.codeCheckpoint = requireSuccess(await workflowAgent(
+    `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/update_checkpoint.py")}" --feature "${feature}" --checkpoint code_done --json。` +
+    `使用插件环境中的 artifact workspace "${artifactWorkspace}"，不传 --workspace、不手改状态文件、不跳过现有产物和证据校验。清理 pending 不阻止 Code 完成；成功后不启动下一阶段、不询问用户是否合并。原样返回 JSON。`,
+    { label: "complete-code-checkpoint", phase: "最终汇总" }
+  ), "code done checkpoint");
+  if (verification.codeCheckpoint.ok !== true || verification.codeCheckpoint.new_checkpoint !== "code_done") {
+    throw new Error(`code_done_checkpoint_receipt_invalid:${JSON.stringify(verification.codeCheckpoint)}`);
   }
+} catch (error) {
+  return completionReport({ finalStatus: "completed_with_checkpoint_failure", scheduler: finalScheduler || lastScheduler,
+    verification: { ...verification, checkpointError: errorText(error) }, nextAction: "retry_code_checkpoint" });
 }
-
-const hasAuditIssues = verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
 return completionReport({
   finalStatus: hasAuditIssues ? "succeeded_with_issues" : "succeeded",
   scheduler: finalScheduler || lastScheduler,
   verification,
-  nextAction: hasAuditIssues ? "review_validation_issues" : "completed",
+  nextAction: "continue_next_stage",
 });
 
 }
@@ -3178,7 +3178,11 @@ if (controlProtocolVersion >= 2) {
     }
   ]);
   cleanupResults.push(cleanupResult);
-  return { ...finalResult, cleanupPending: cleanupResult.cleanupPending || lastScheduler.cleanupPending || [],
+  const cleanupPending = cleanupResult.cleanupPending || lastScheduler.cleanupPending || [];
+  if (finalResult.finalStatus === "succeeded" && (cleanupPending.length || cleanupResult.success === false)) {
+    finalResult = { ...finalResult, finalStatus: "succeeded_with_issues" };
+  }
+  return { ...finalResult, cleanupPending,
     cleanupResult, workflowMetrics: { ...workflowControlMetrics, labels: { ...workflowControlMetrics.labels }, scope: "current_invocation" } };
 }
 return await runFinalValidation();

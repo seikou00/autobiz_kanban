@@ -1212,6 +1212,38 @@ class EvidenceStoreTest(unittest.TestCase):
 
 
 class EvidenceGateTest(unittest.TestCase):
+    def test_reported_delivery_allows_code_done_with_cleanup_failures_but_rejects_incomplete_merges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            run_id = "cw-reported-001"
+            plan = {
+                "taskValidationPolicy": {"mode": "defer_to_test_stages", "orchestration": "inline", "codeGate": "review_only"},
+                "_bundleBatches": {batch_id: {"tasks": [], "deliveryRunId": run_id, "mergeCommitSha": "a" * 40}
+                                   for batch_id in ("B001", "B002")},
+            }
+            manifest = {
+                "status": "succeeded_with_issues", "workflowCompletedAt": "2026-11-06T00:00:00Z",
+                "finalEvidenceAggregate": {"runId": run_id, "policy": "report_only", "passed": False,
+                                           "errors": ["recorded_audit_finding"], "blockingErrors": []},
+                "batches": {batch_id: {"status": "merged", "mergeCommitSha": "a" * 40}
+                            for batch_id in ("B001", "B002")},
+                "cleanupQueue": {"job": {"status": "retryable", "attempts": 2, "error": "file in use"}},
+            }
+            path = feature_dir / ".parallel-runs" / run_id / "manifest.json"
+            path.parent.mkdir(parents=True)
+            def check():
+                path.write_text(json.dumps(manifest))
+                return _check_batch_completion(plan, {}, feature_dir=feature_dir)
+            self.assertEqual(check(), [])
+            manifest["batches"]["B002"]["status"] = "sealed"
+            self.assertIn(f"parallel_delivery_not_verified:{run_id}", check())
+            manifest["batches"]["B002"]["status"] = "merged"
+            manifest["batches"]["B002"]["mergeCommitSha"] = "b" * 40
+            self.assertIn(f"parallel_delivery_not_verified:{run_id}", check())
+            manifest["batches"]["B002"]["mergeCommitSha"] = "a" * 40
+            manifest["finalEvidenceAggregate"]["blockingErrors"] = ["B002.not_merged"]
+            self.assertIn(f"parallel_delivery_not_verified:{run_id}", check())
+
     def test_multi_batch_code_done_requires_merged_verified_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"

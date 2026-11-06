@@ -167,7 +167,8 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
     return errors
 
 
-def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, skip_e2e: bool = False) -> dict[str, Any]:
+def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, skip_e2e: bool = False,
+                       finish_workflow: bool = False) -> dict[str, Any]:
     if skip_e2e:
         record_e2e_skip(workspace, feature, run_id)
     with run_lock(workspace, feature, run_id):
@@ -252,19 +253,33 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, skip_e2e: 
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
         report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)
         if report["hasBlockingDeferredIssues"]:
-            # Preserve the original severity for review. Final audit findings
-            # are accepted only through explicit approval of this exact report.
+            # Preserve the original severity in the report; audit findings do
+            # not reopen deliveries that have already merged.
             report["errors"] = sorted({*report["errors"], "deferred_implementation_findings_unresolved"})
             report["passed"] = False
         report["hasIssues"] = bool(report["errors"] or report["hasDeferredIssues"])
+        if finish_workflow:
+            from hooks.parallel_workspace_sync import workspace_sync_pending
+            from hooks.parallel_cleanup import pending
+            report["cleanupPending"] = pending(manifest)
+            report["hasIssues"] = bool(report["hasIssues"] or workspace_sync_pending(manifest) or report["cleanupPending"])
         report["validationStatus"] = "passed" if report["passed"] else "failed"
         manifest["finalEvidenceAggregate"] = report
         manifest["status"] = (
             "blocked" if blocking_errors else "succeeded_with_issues" if report["hasIssues"] else "succeeded"
         )
         if not blocking_errors:
-            from hooks.parallel_integration import await_confirmation, promotion_view
-            await_confirmation(manifest)
+            from hooks.parallel_integration import assert_integration, await_confirmation, isolated, promotion_view
+            if finish_workflow:
+                if (manifest.get("mainPromotion") or {}).get("status") in {"promoting", "merged"}:
+                    raise ValueError("integration_promotion_already_started")
+                if isolated(manifest):
+                    for binding in manifest["repositories"].values():
+                        assert_integration(binding)
+                manifest.pop("mainPromotion", None)
+                manifest["workflowCompletedAt"] = report["createdAt"]
+            else:
+                await_confirmation(manifest)
             report.update(promotion_view(manifest))
             report["status"] = manifest["status"]
         save_manifest(workspace, feature, run_id, manifest)
@@ -279,9 +294,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feature", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--skip-e2e", action="store_true")
+    parser.add_argument("--finish-workflow", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = aggregate_evidence(resolve_workspace(args.workspace), resolve_feature(args.feature), args.run_id, skip_e2e=args.skip_e2e)
+        result = aggregate_evidence(resolve_workspace(args.workspace), resolve_feature(args.feature), args.run_id,
+                                    skip_e2e=args.skip_e2e, finish_workflow=args.finish_workflow)
         completed = not result["blockingErrors"]
         print(json.dumps({"ok": completed, "success": completed, **result}, ensure_ascii=False, indent=2))
         return 0 if completed else 1
