@@ -30,12 +30,9 @@ test("durable repair references survive structured transport and reach productio
   }
 });
 
-test("test failure preserves original command coordinates alongside repair references", () => {
+test("recovery schema contains no retired test command fields", () => {
   const context = harness();
-  const failure = { message: "failed test", argv: ["mvn", "-Dtest=AuthTest", "test"], cwd: "/batch/module", evidenceId: "ev_1", evidenceLogPath: "/artifacts/ev_1.log" };
-  const result = context.implementationReworkRequired({ batchId: "B001" }, "test", { testFailure: failure, failure: { message: failure.message } });
-  const baseline = JSON.parse(JSON.stringify(result.recovery.failureContext));
-  for (const field of ["argv", "cwd", "evidenceId", "evidenceLogPath"]) assert.deepEqual(baseline[field], failure[field]);
+  for (const field of ["testFile", "testLogPath"]) assert.equal(context.schemas.recovery.properties[field], undefined);
 });
 
 function dispatchHarness() {

@@ -151,7 +151,7 @@ def drain(workspace: Path, feature: str, run_id: str, budget_seconds: int = 120)
             error = None
             try:
                 # Exact owned paths only: directory deletion must not hold the
-                # publication lock and delay final sync/E2E or another run.
+                # publication lock and delay final workspace sync or another run.
                 with FileLock(run_dir(workspace, feature, run_id) / "cleanup-locks" / (job_id + ".lock"),
                               timeout=max(0, deadline - time.monotonic())):
                     fresh = load_manifest(workspace, feature, run_id)

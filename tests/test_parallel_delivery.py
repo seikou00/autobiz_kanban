@@ -66,7 +66,7 @@ class DeliveryTest(unittest.TestCase):
     def manifest(self):
         return load_manifest(self.workspace, "alpha", self.run)
 
-    def delivery(self, batch_id="B001", content=None, review=True, skip_tests=False):
+    def delivery(self, batch_id="B001", content=None, review=True):
         from hooks.worktree_manager import provision_parallel_worktree
         owner = claim(self.workspace, "alpha", self.run, batch_id, 1, "initial", batch_id)
         self.assertEqual(owner["status"], "claimed", owner)
@@ -81,7 +81,7 @@ class DeliveryTest(unittest.TestCase):
                    branchName=result["branchName"], commitSha=sha)
         stages = ["prepare", "implement"]
         if review:
-            stages.extend(("review",) if skip_tests else ("review", "test"))
+            stages.append("review")
         for stage in stages:
             start_stage(self.workspace, "alpha", self.run, batch_id, stage)
             complete_stage(self.workspace, "alpha", self.run, batch_id, stage, metadata={"batchCommit": sha})
@@ -97,19 +97,22 @@ class DeliveryTest(unittest.TestCase):
         with patch("hooks.utest_assignment_router.build_assignments", side_effect=AssertionError("test assignment must not run")), \
                 patch("hooks.engineering_context.execute", side_effect=AssertionError("test environment must not be prepared")):
             for batch_id in ("B001", "B002"):
-                args, _ = self.delivery(batch_id, skip_tests=True)
-                checkpoint = review_checkpoint(self.workspace, "alpha", self.run, batch_id, skip_tests=True)
-                self.assertEqual(checkpoint["utestPreparation"]["skipReason"], "utest_temporarily_disabled")
-                before = self.manifest()["batches"][batch_id]["stageStates"]["test"]
-                self.assertEqual(settle_delivery(*args, skip_tests=True)["status"], "merged")
-                self.assertEqual(self.manifest()["batches"][batch_id]["stageStates"]["test"], before)
-                self.assertTrue(settle_delivery(*args, skip_tests=True)["reused"])
+                args, _ = self.delivery(batch_id)
+                checkpoint = review_checkpoint(self.workspace, "alpha", self.run, batch_id)
+                self.assertNotIn("utestPreparation", checkpoint)
+                before = self.manifest()["batches"][batch_id]["stageStates"]
+                self.assertNotIn("test", before)
+                self.assertEqual(settle_delivery(*args)["status"], "merged")
+                self.assertEqual(self.manifest()["batches"][batch_id]["stageStates"], before)
+                self.assertTrue(settle_delivery(*args)["reused"])
             self.assertFalse(prepare_finalization(self.workspace, "alpha", self.run)["repairRequired"])
-            report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True)
+            report = aggregate_evidence(self.workspace, "alpha", self.run)
         self.assertTrue(report["passed"], report)
-        self.assertEqual(report["e2eStatus"], "skipped")
-        self.assertEqual({item["executionLane"] for item in report["skippedUtests"]}, {"frontend", "backend"})
-        self.assertTrue(all(item["reason"] == "utest_temporarily_disabled" for item in report["skippedUtests"]))
+        self.assertNotIn("e2eStatus", report)
+        self.assertNotIn("skippedUtests", report)
+        self.assertEqual(self.manifest()["validationBatches"], {})
+        self.assertTrue(all(owner["stage"] == "review" for owner in
+                            self.manifest()["pipeline"]["validationOwnership"].values()))
         directory = run_dir(self.workspace, "alpha", self.run)
         self.assertFalse((directory / "utest").exists())
         self.assertFalse((directory / "validation-worktrees").exists())
@@ -117,13 +120,27 @@ class DeliveryTest(unittest.TestCase):
         self.assertEqual(approval["mainPromotion"]["status"], "prepared")
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), baseline)
 
+    def test_retired_test_entries_cannot_create_work_in_a_code_run(self):
+        from hooks.parallel_batch_stage import prepare_test
+        from hooks.parallel_merge_train import begin_e2e
+        self.create()
+        before = self.manifest()
+        with self.assertRaisesRegex(ValueError, "parallel_code_test_stage_removed"):
+            prepare_test(self.workspace, "alpha", self.run, "B001")
+        with self.assertRaisesRegex(ValueError, "parallel_code_e2e_stage_removed"):
+            begin_e2e(self.workspace, "alpha", self.run)
+        self.assertEqual(self.manifest(), before)
+        directory = run_dir(self.workspace, "alpha", self.run)
+        self.assertFalse((directory / "utest").exists())
+        self.assertFalse((directory / "validation-worktrees").exists())
+
     def test_removing_tests_does_not_bypass_review_or_a_stale_dispatch(self):
         self.create()
-        args, _ = self.delivery(review=False, skip_tests=True)
-        with self.assertRaisesRegex(ValueError, "requires_review_passed"):
-            settle_delivery(*args, skip_tests=True)
+        args, _ = self.delivery(review=False)
+        with self.assertRaisesRegex(ValueError, "delivery_gate_failed.*review"):
+            settle_delivery(*args)
         with self.assertRaisesRegex(ValueError, "stale_stage_owner"):
-            settle_delivery(*(*args[:5], "invalid-token", args[6]), skip_tests=True)
+            settle_delivery(*(*args[:5], "invalid-token", args[6]))
 
     def test_settle_replays_without_git_mutation_and_cleanup_is_deferred(self):
         self.create()
@@ -283,7 +300,7 @@ class DeliveryTest(unittest.TestCase):
         with redirect_stdout(output):
             status = delivery_main(["settle-delivery", "--workspace", str(self.workspace), "--feature", "alpha",
                                     "--run-id", self.run, "--batch-id", "B001", "--dispatch-generation", "1",
-                                    "--dispatch-token", args[5], "--skip-tests"])
+                                    "--dispatch-token", args[5]])
         self.assertEqual(status, 0, output.getvalue())
         result = json.loads(output.getvalue())
         self.assertEqual(result["status"], "merged")
@@ -297,7 +314,7 @@ class DeliveryTest(unittest.TestCase):
                 # One delivery is restored repeatedly; each retry gets its own
                 # generation and starts from the already durable stage results.
                 manifest = self.manifest()
-                manifest["batches"]["B001"]["stageStates"]["test"]["status"] = test_status
+                manifest["batches"]["B001"]["stageStates"].setdefault("test", {})["status"] = test_status
                 save_manifest(self.workspace, "alpha", self.run, manifest)
                 mark_batch(self.workspace, "alpha", self.run, "B001", "retry_pending", error="delivery interrupted " + test_status)
                 resumed = manual_resume_run(self.workspace, "alpha", self.run)

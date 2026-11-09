@@ -14,7 +14,7 @@ reuses the manifest even if the user later switches branches. Do not guess
 stops creation with an explicit error. Every physical Git repository gets an
 integration branch/worktree, all Batch promotions target that integration
 checkout. Results are published as uncommitted files in the original user
-checkout. Final aggregation uses `--skip-e2e --finish-workflow`, records a
+checkout. Final aggregation uses `--finish-workflow`, records a
 terminal report, advances `code_done` through `update_checkpoint.py` and never asks for merge or acceptance confirmation. Display
 the source directories, publication progress, audit findings and pending
 cleanup. Retained confirmation states resume the same run to finish reporting.
@@ -47,8 +47,7 @@ when all of these are true. Pass the complete launcher `workflowArgs` mapping
 to that one Workflow. It creates a shared scheduler run and uses `parallel()`
 to start one agent chain for each independently runnable Batch; each chain
 provisions its own repository-native Worktree. The fixed Workflow performs
-evidence aggregation after all delivery Batches are promoted, with frontend/
-backend UTest and E2E explicitly recorded as not run. The
+evidence aggregation after all delivery Batches are promoted, without UTest/E2E stages or skipped-test records. The
 launcher keeps a Feature-scoped archival copy in
 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/`, then copies that fixed
 script into `workflowWorkspace/.cmbdevclaw/workflows/<feature>/` for the
@@ -171,7 +170,7 @@ The reuse validation also blocks a Batch marked `merged` without a non-empty
 the run's recorded HEAD. In each case it returns the original `runId` with a
 blocked result. A Batch is `merged` only when `parallel_merge_train.py` has
 fast-forwarded the candidate Merge Train SHA whose Batch Review passed and
-whose test omission is recorded, and written its
+and written its
 merge commit; no worker-facing command may
 set this status.
 
@@ -261,14 +260,10 @@ provisioned.
    branch update. A separately requested formal baseline promotion still
    requires explicit authorization for that exact report.
 
-   UTest and E2E are temporarily removed for both frontend and backend.
-   There are no test preparation, execution, budget-monitor or E2E-skip Agents.
-   Review checkpoint and delivery admission use `--skip-tests` to record
-   SHA-bound SKIP evidence with `utest_temporarily_disabled`, without acquiring
-   a test lease or preparing assignments/environments. Final aggregation uses
-   `--skip-e2e` to register `e2e_temporarily_disabled` in the same operation.
-   Reports show skipped tests explicitly; no skip is a test pass. Backend TASK
-   implementation retains its production-only compile gate.
+   UTest and E2E are outside Code. Review checkpoint and delivery admission
+   proceed without test preparation or SKIP evidence. Final aggregation uses
+   `--finish-workflow` and audits delivery and Review evidence only. Backend
+   TASK implementation retains its production-only compile gate.
 
    Existing runs without `controlProtocolVersion=2` retain legacy delivery and
    cleanup behavior. To upgrade a stopped isolated run, first stop its old
@@ -292,8 +287,7 @@ provisioned.
 5. Each Review draft performs production-code-only `review`. A proven source
    bug returns to that Batch's implementation repair and a new seal, then
    Runtime records the Review as resolved. Passed Review proceeds directly to
-   delivery admission with `--skip-tests`, which records the omission before
-   marking the delivery `ready_to_candidate`. Existing proven production
+   delivery admission, marking the delivery `ready_to_candidate`. Existing proven production
    findings from older runs can still be repaired, without rerunning tests.
    The shared Workflow builds a Merge Train candidate and fast-forwards it
    directly; no candidate test phase is run. A changed main SHA makes the
@@ -307,8 +301,8 @@ provisioned.
    before finish-implementation. Review does not rerun it.
    If promotion succeeds but the Plan writer fails, the run is retained in
    `needs_resolution` until its Plan state is recovered.
-8. Once all Batches are `merged`, `parallel_evidence_aggregate.py --skip-e2e --finish-workflow`
-   records the E2E omission and audits existing content-bound evidence in one
+8. Once all Batches are `merged`, `parallel_evidence_aggregate.py --finish-workflow`
+   audits existing delivery and Review evidence in one
    operation; it creates no validation Worktree and runs no compile/test command.
 
 Independent Batches run in parallel, including independent Batches in the same
@@ -348,7 +342,7 @@ Within its plugin-provisioned native Git Worktree, a Batch agent must:
 - complete all assigned TASKs, draft-seal with `--purpose review`, and wait for
   the Workflow's Review stage;
 - after Review, let the fixed Workflow proceed directly to delivery admission;
-  Runtime records testing as skipped without a test lease, assets or tools.
+  Runtime creates no test stage, skip evidence, lease, assets or tools.
 
 The Batch agent must not merge, rebase, resolve conflicts, delete Worktrees, or
 modify a shared main checkout. It receives no platform isolation option.
@@ -410,11 +404,9 @@ state.
   worktree and temporary branch. Cleanup pending does not prevent the scheduler
   from starting a dependent Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.
-- Frontend and backend UTest, and final E2E, are temporarily removed from the
-  Workflow. Review checkpoint/gate and settlement use `--skip-tests`; aggregate
-  uses `--skip-e2e --finish-workflow`. Do not launch test Agents, initialize test environments,
-  generate test assets, run tests or reseal for this omission. `skippedUtests`
-  and `e2eStatus=skipped` carry the omitted tests into the final completion report.
+- Code contains no UTest or E2E stages. Review proceeds directly to delivery;
+  aggregate uses `--finish-workflow`. Do not create test assets, environments,
+  skipped-test evidence or test status fields in the completion report.
 - Candidate conflicts use a model-to-plugin handoff: `prepare-resolution`
   registers the exact candidate and conflict files; the conflict Agent edits
   those files and returns `success=true,status=resolved`, without running Git

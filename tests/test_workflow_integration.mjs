@@ -68,11 +68,11 @@ test("legacy direct finalization preserves its successful result", async () => {
   assert.equal(commands.length, 2);
 });
 
-test("finalization registers skipped E2E inside aggregation without a separate test agent", async () => {
+test("finalization aggregates delivery evidence without a test agent or skip command", async () => {
   const { result, commands } = await finalize();
-  assert.equal(result.verification.e2eStatus, "skipped");
+  assert.equal(result.e2eSkippedReason, undefined);
   assert.deepEqual(commands.map(command => command.label), ["aggregate-staged-evidence", "complete-code-checkpoint"]);
-  assert.match(commands.find(command => command.label === "aggregate-staged-evidence").prompt, /--skip-e2e --finish-workflow/);
+  assert.match(commands.find(command => command.label === "aggregate-staged-evidence").prompt, /--finish-workflow/);
   assert.equal(commands.some(command => /utest|e2e/i.test(command.label)), false);
 });
 
@@ -131,7 +131,7 @@ test("legacy confirmation states continue into reporting while active promotion 
 test("final reports retain E2E issues added after the last scheduler snapshot", () => {
   const context = vm.createContext({ manifestFromScheduler: () => ({ deferredIssues: [] }) });
   vm.runInContext(source.slice(source.indexOf("function deferredIssueDetails("),
-    source.indexOf("function skippedUtestDetails(")), context);
+    source.indexOf("function allWorkflowDeliveriesMerged(")), context);
   const issue = { kind: "e2e_failure", blocksWorkflow: false };
   assert.deepEqual(context.deferredIssueDetails({}, { deferredIssues: [issue] }), [issue]);
 });
@@ -142,7 +142,7 @@ test("final publication state comes from the latest Runtime report, including cl
     feature: "f", runId: "run", batchResults: [], mergeResults: [], cleanupResults: [], lifecycleResults: [],
     finalRepairResults: [], schedulerFailures: [], workspaceSyncControl: { results: new Map([["default", old]]) },
     unresolvedBatchDetails: () => [], unresolvedMergeCandidateDetails: () => [], deferredIssueDetails: () => [],
-    skippedUtestDetails: () => [], activeUnresolvedRecords: () => [], usableString: value => typeof value === "string" && value.length > 0,
+    activeUnresolvedRecords: () => [], usableString: value => typeof value === "string" && value.length > 0,
   });
   vm.runInContext(source.slice(source.indexOf("function completionReport("),
     source.indexOf("async function persistUndurableBatchFailures(")), context);

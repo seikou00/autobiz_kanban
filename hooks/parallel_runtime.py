@@ -63,7 +63,7 @@ def batch_occupies_scheduler_slot(batch: object) -> bool:
     )
 
 
-DELIVERY_STAGES = ("prepare", "implement", "review", "test")
+DELIVERY_STAGES = ("prepare", "implement", "review")
 
 _PLAN_MUTABLE_KEYS = {
     "status", "activeBatchId", "nextBatchId", "startedAt", "completedAt",
@@ -430,7 +430,8 @@ def create_manifest(
             for stage in DELIVERY_STAGES
         }
         entries[batch_id] = entry_state
-    pipeline = bundle.root["parallelBatchPipeline"]
+    from hooks.parallel_validation_ownership import build_pipeline_contract
+    pipeline = build_pipeline_contract(bundle.root, bundle.batches)
     # Prepare runtime configuration with defaults
     if runtime_config is None:
         runtime_config = {}
@@ -850,29 +851,13 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
     return sorted(result)
 
 
-def skipped_utests(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """Report intentional test omissions separately from test passes/failures."""
-    result = []
-    for batch_id, batch in manifest.get("batches", {}).items():
-        if not isinstance(batch, dict):
-            continue
-        state = (batch.get("stageStates") or {}).get("test") or {}
-        if state.get("status") == "skipped":
-            result.append({
-                "batchId": batch_id, "executionLane": batch.get("executionLane"),
-                "status": "skipped", "reason": state.get("skipReason") or "test_stage_skipped",
-                "stageEvidenceId": state.get("latestEvidenceId"),
-            })
-    return result
-
-
 def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
     """Return deliveries needing stage continuation or final delivery admission.
 
     This is distinct from ``ready_batches``: no source task is scheduled here.
     The delivery commit and linked worktree already exist, so a resumed
-    Workflow only needs to continue its remaining review/test/quality stages
-    idempotently.  A review/test implementation finding resets a Batch to
+    Workflow only needs to continue its remaining implementation/Review stages
+    idempotently.  A Review implementation finding resets a Batch to
     ``running`` while retaining its sealed commit, so that state is also a
     recovery candidate. A sealed result with every stage closed still needs
     its gate/settlement; excluding it would strand an interrupted delivery.

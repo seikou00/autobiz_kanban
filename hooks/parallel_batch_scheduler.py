@@ -43,7 +43,6 @@ from hooks.parallel_runtime import (
     run_lock,
     run_dir,
     save_manifest,
-    skipped_utests,
 )
 from hooks.plan_json import load_plan_bundle
 from hooks.parallel_integration import (
@@ -289,28 +288,6 @@ def _recover_stale_active_batches_locked(
         )
         recovered.append({"batchId": batch_id, "reason": reason})
     return recovered
-
-
-def _close_overdue_utest_stages_locked(
-    workspace: Path,
-    feature: str,
-    run_id: str,
-    manifest: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Request cooperative stops without revoking the lease needed to seal."""
-    from hooks.utest_control import request_stop_locked
-    closed = []
-    for batch_id, batch in manifest.get("batches", {}).items():
-        if not isinstance(batch, dict):
-            continue
-        state = batch.get("stageStates", {}).get("test", {})
-        already_stopped = bool(state.get("stopRequested"))
-        result = request_stop_locked(workspace, feature, run_id, batch_id, manifest, batch)
-        if result["status"] == "stop_requested" and not already_stopped:
-            limit = "firstExecutionSeconds" if result["stopRequested"]["reasonCode"] == "first_execution_deadline_exceeded" else "stageSeconds"
-            closed.append({"batchId": batch_id, "timeoutSeconds": result["utestPolicy"][limit],
-                           "reasonCode": result["stopRequested"]["reasonCode"]})
-    return closed
 
 
 def _unresolved_state(manifest: dict[str, Any]) -> tuple[list[str], list[str], set[str]]:
@@ -943,7 +920,7 @@ def _stage_recovery_failure_context(
     *,
     test_log_path: Path,
 ) -> dict[str, Any] | None:
-    """Return the saved review/UTest finding that caused an implement recovery."""
+    """Return the saved Review finding that caused an implement recovery."""
     states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
     for stage in DELIVERY_STAGES:
         state = states.get(stage)
@@ -998,21 +975,6 @@ def schedule(
                 save_manifest(workspace, feature, run_id, manifest)
                 append_event(workspace, feature, run_id, "dispatch_claim_expired", batchId=batch_id,
                              generation=batch.get("dispatchGeneration", 1))
-        overdue_utests = _close_overdue_utest_stages_locked(
-            workspace, feature, run_id, manifest
-        )
-        if overdue_utests:
-            save_manifest(workspace, feature, run_id, manifest)
-            for item in overdue_utests:
-                append_event(
-                    workspace,
-                    feature,
-                    run_id,
-                    "utest_stage_timeout",
-                    batchId=item["batchId"],
-                    timeoutSeconds=item["timeoutSeconds"],
-                    reasonCode=item["reasonCode"],
-                )
         bundle = load_plan_bundle(feature_dir(workspace, feature))
         # A retained per-Batch conflict (or one conflicted Merge Train) owns
         # only the deliveries recorded in that retained state.  Keep those
@@ -1887,7 +1849,7 @@ def resume_run(
         # Persist the recovery contract for every sealed delivery that still
         # has a stage to finish.  This is intentionally distinct from a
         # `retry_dispatch`: its existing Worktree and commit are the only
-        # valid execution context for Review/UTest continuation.
+        # valid execution context for Review/delivery continuation.
         for batch_id in stage_recovery_batches(manifest):
             batch = manifest["batches"].get(batch_id)
             if not isinstance(batch, dict):
@@ -2120,7 +2082,6 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
             for issue in issues
             if isinstance(issue, dict)
         ],
-        "skippedUtests": skipped_utests(manifest),
     }
     return result
 

@@ -368,8 +368,8 @@ def _batch_execution_plan(
 
     notes = [
         "每个 Batch 先编码并草稿封存，再 Review；Review 通过或一次定向修复后直接进入候选合并，成功合并后才释放下游。",
-        "前后端 UTest 和 E2E 均暂时移出 Workflow；不准备测试环境、不生成测试资产、不派发测试 Agent。后端实现阶段仍保留生产代码纯编译。",
-        "所有 delivery Batch 推广后直接聚合证据、展示工作区同步及测试未执行记录，报告完成，不再询问合并或验收。",
+        "前后端 UTest 和 E2E 不属于 Code Workflow；不准备测试环境、不生成测试资产、不派发测试 Agent。后端实现阶段仍保留生产代码纯编译。",
+        "所有 delivery Batch 推广后直接聚合证据、展示工作区同步及交付结果，报告完成，不再询问合并或验收。",
     ]
 
     if optimistic_mode:
@@ -397,9 +397,8 @@ def _batch_execution_plan(
         },
         "postMergeValidation": {
             "validationBatch": None,
-            "rule": "evidence_aggregate_only_with_testing_omissions",
+            "rule": "delivery_and_review_evidence_aggregate_only",
         },
-        "skippedTesting": {"utest": "utest_temporarily_disabled", "e2e": "e2e_temporarily_disabled"},
         "batches": [
             {
                 "id": batch["id"],
@@ -519,7 +518,7 @@ def analyze_batches(
                                         and all(b.get("status") == "merged" for b in active_manifest["batches"].values())
                                         and workflow_report_pending(active_manifest))
         # Recovery is not one generic retry: an unsealed but verified dirty
-        # implementation Worktree and a sealed Review/UTest checkpoint both
+        # implementation Worktree and a sealed Review checkpoint both
         # resume in place, while a clean failed dispatch needs operator
         # re-admission. Do not let the Plan projection hide any of them: the
         # manifest is the durable authority.

@@ -204,8 +204,6 @@ def _snapshot(manifest: dict) -> dict:
             "deliveryMode": "uncommitted" if manifest.get("workspaceSync") else "committed",
             "workspaceSync": list(manifest.get("workspaceSync", {}).values()),
             "planDigest": manifest["planDigest"],
-            "e2eStatus": manifest["finalEvidenceAggregate"].get("e2eStatus", "passed"),
-            "e2eSkipReason": manifest["finalEvidenceAggregate"].get("e2eSkipReason"),
             "validationStatus": manifest["finalEvidenceAggregate"]["validationStatus"],
             "evidencePassed": manifest["finalEvidenceAggregate"]["passed"],
             "evidenceErrors": manifest["finalEvidenceAggregate"]["errors"],
@@ -221,7 +219,7 @@ def prepare_promotion(workspace: Path, feature: str, run_id: str) -> dict:
     report = initial.get("finalEvidenceAggregate") or {}
     allowed = PROMOTION_STATES - {"promoting_main"}
     # Existing blocked runs can refresh their audit without replaying Batch
-    # work or E2E. Never reset an in-progress/finished promotion this way.
+    # work or evidence aggregation. Never reset an in-progress/finished promotion this way.
     if (isolated(initial) and initial.get("status") in allowed | {"blocked"} and report
             and (initial.get("mainPromotion") or {}).get("status") not in {"promoting", "merged"}):
         from hooks.parallel_evidence_aggregate import aggregate_evidence, evidence_state_digest, repository_heads
@@ -385,7 +383,7 @@ def sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = Fa
 
 
 def _sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = False) -> dict:
-    """Merge target changes into integration only, then require a fresh E2E.
+    """Merge target changes into integration only, then require fresh evidence aggregation.
 
     On conflicts the owned integration checkout is retained. ``complete-sync``
     seals only the registered conflict files after the operator resolves them.

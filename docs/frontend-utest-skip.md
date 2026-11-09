@@ -1,23 +1,18 @@
-# 前端 UTest 临时跳过
+# Code 测试阶段移除说明
 
-当前固定 Code Workflow 在 Review 通过后调用
-`parallel_batch_stage.py review-checkpoint`，由其中的 `prepare-test`
-按 manifest 的真实 `executionLane` 决定是否执行 UTest。
+前端与后端使用同一 Code 流程：prepare → implement → review → 交付 → 证据汇总。
+Review checkpoint 不再调用 prepare-test；交付 gate 不接受 `--skip-tests`，
+aggregate 使用 `--finish-workflow`，不接受 `--skip-e2e`。
 
-- `frontend`：记录 `stageStates.test.status=skipped` 和
-  `frontend_utest_temporarily_disabled`，保存 `outcome=SKIP` 的阶段审计记录。
-  不启动测试 Agent，不初始化测试环境、不生成测试源码、不执行测试或编译。
-  复用 Review 后已有交付 SHA，继续 gate 和候选合并。
-- `backend` 及其他非前端 lane：返回 `test_required`，继续原有 UTest 流程。
+新 Run 不创建 test 或 V-E2E 阶段，不登记 SKIP 证据，最终报告不包含
+skippedUtests、e2eStatus 或 e2eSkippedReason。旧 Plan 的测试意图保留为设计上下文，
+启动时投影为当前 Code 执行契约。历史证据读取兼容不代表恢复测试执行。
 
-前端不能通过 `start --stage test` 重新开启已禁用的测试阶段。
-跳过记录出现在 scheduler 的 `manifest.skippedUtests`、最终 evidence aggregate
-和 Workflow 的 `skippedUtests` 字段中，不得当成测试通过。跳过不删除历史测试
-文件、测试意图或此前的失败记录。Review 和最终 B-E2E 继续执行。
+后端 TASK 的生产纯编译和 Review 门槛仍保留；dev 阶段尚未添加独立 E2E。
 
 回归：
 
 ```bash
-python3 -m unittest tests.test_parallel_staged_pipeline
-node --test tests/test_workflow_commit_messages.mjs tests/test_workflow_command_results.mjs
+python -m unittest tests.test_code_pipeline_contract tests.test_parallel_delivery
+node --test tests/test_workflow_delivery_control.mjs tests/test_workflow_review_recovery.mjs
 ```

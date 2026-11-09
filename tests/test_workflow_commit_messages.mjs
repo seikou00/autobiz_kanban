@@ -71,8 +71,8 @@ test("frontend repair establishes an active TASK before HTML analysis and resour
   assert.match(prompt, /TASK 启动失败不得走脚本降级继续写入/);
 });
 
-test("review and UTest production repairs seal as Rework with full binding", async () => {
-  for (const failedStage of ["review", "test"]) {
+test("Review production repairs seal as Rework with full binding", async () => {
+  for (const failedStage of ["review"]) {
     const { context, prompts } = harness();
     await context.reworkDeliveryImplementation({ ...delivery, failureContext: { failedStage, message: "筛选失效" } });
     assert.equal(prompts[0].options.label, "prepare-repair-B001");

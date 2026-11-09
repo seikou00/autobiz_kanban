@@ -520,7 +520,7 @@ def begin_implementation(workspace: Path, feature: str, run_id: str, batch_id: s
         if "implement" not in states or not batch.get("worktreePath"):
             raise ValueError(f"parallel_batch_implementation_workspace_missing:{batch_id}")
         if batch.get("activeStage") not in {None, "", "prepare", "implement"} or any(
-            states[name].get("status") == "running" for name in ("review", "test")
+            states.get(name, {}).get("status") == "running" for name in ("review", "test")
         ):
             raise ValueError(f"parallel_batch_implementation_stage_conflict:{batch_id}:{batch.get('activeStage')}")
         if states["implement"].get("status") in {"passed", "skipped", "deferred", "needs_triage"}:
@@ -553,7 +553,7 @@ def prepare_implementation_repair(workspace: Path, feature: str, run_id: str,
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
         if batch.get("status") not in {"sealed", "running", "leased"} or any(
-            states[name].get("status") == "running" for name in ("review", "test")
+            states.get(name, {}).get("status") == "running" for name in ("review", "test")
         ):
             raise ValueError(f"parallel_repair_not_open:{batch_id}")
         root = Path(batch.get("worktreePath") or "").resolve()
@@ -989,12 +989,14 @@ def fail_stage(
 
 
 def prepare_test(workspace: Path, feature: str, run_id: str, batch_id: str, *, skip_tests: bool = False) -> dict[str, Any]:
-    """Record Workflow test omissions, or prepare standalone backend testing."""
+    """Legacy test preparation; not an entry point for current Code runs."""
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
         if batch.get("type") == "validation":
             raise ValueError("parallel_delivery_batch_required")
+        if "test" not in batch.get("stageStates", {}):
+            raise ValueError("parallel_code_test_stage_removed")
         if not skip_tests and batch.get("executionLane") != "frontend":
             from hooks.engineering_contract import runtime_contract
             from types import SimpleNamespace
@@ -1257,9 +1259,7 @@ def defer_stage(
     return {"success": True, "batchId": batch_id, "stage": stage, "status": "deferred", "issue": issue}
 
 
-def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str, *, skip_tests: bool = False) -> dict[str, Any]:
-    if skip_tests:
-        prepare_test(workspace, feature, run_id, batch_id, skip_tests=True)
+def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
@@ -1267,11 +1267,8 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str, *, ski
             return {"success": False, "batchId": batch_id, "error": "utest_asset_closure_pending"}
         states = _ensure_stage_states(batch)
         deferred = [stage for stage in stage_names(batch) if states[stage].get("status") == "deferred"]
-        # UTest is the only delivery stage that may defer without stopping its
-        # Batch. It is explicitly carried to an `allow-unverified` candidate
-        # and final B-E2E. Deferred prepare/implement/review findings still
-        # represent unresolved production-quality issues and block the gate.
-        blocking_deferred = [stage for stage in deferred if stage != "test"]
+        # Unresolved findings in any active Code stage block delivery.
+        blocking_deferred = deferred
         if blocking_deferred:
             batch["status"] = "blocked"
             batch["activeStage"] = None
@@ -1303,7 +1300,6 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str, *, ski
         "success": True,
         "batchId": batch_id,
         "status": batch["status"],
-        "continuedTestFailureStages": [stage for stage in deferred if stage == "test"],
     }
 
 
@@ -1384,7 +1380,7 @@ def finish_review(workspace: Path, feature: str, run_id: str, batch_id: str, *,
         legacy_advisory = failure.get("type") in {"needs_triage", "documentation"}
         if legacy_advisory:
             if (any(states[name].get("status") not in {"passed", "skipped"} for name in ("prepare", "implement"))
-                    or states["test"].get("status") == "running" or not batch.get("commitSha")):
+                    or states.get("test", {}).get("status") == "running" or not batch.get("commitSha")):
                 raise ValueError(f"parallel_review_advisory_upstream_incomplete:{batch_id}")
             notes.append({"type": failure["type"], "message": str(failure.get("message") or "external review uncertainty")})
             state.update(status="pending", failure=None)
@@ -1415,14 +1411,12 @@ def _normalize_legacy_review(workspace: Path, feature: str, run_id: str, batch_i
         finish_review(workspace, feature, run_id, batch_id, decision="passed")
 
 
-def review_checkpoint(workspace: Path, feature: str, run_id: str, batch_id: str, *, skip_tests: bool = False) -> dict[str, Any]:
+def review_checkpoint(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
     """Independent durable verification and next-stage preparation in one crossing."""
     _normalize_legacy_review(workspace, feature, run_id, batch_id)
     result = validate_review_result(workspace, feature, run_id, batch_id)
     if (result.get("failure") or {}).get("type") == "environment":
         result.update(success=False, status="incomplete")
-    if result.get("status") == "passed":
-        result["utestPreparation"] = prepare_test(workspace, feature, run_id, batch_id, skip_tests=skip_tests)
     append_event(workspace, feature, run_id, "control_operation", operation="review-checkpoint", batchId=batch_id)
     return result
 
@@ -1600,7 +1594,7 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--batch-id", required=True)
         item.add_argument("--dispatch-generation", type=int)
         item.add_argument("--dispatch-token")
-        if name in {"prepare-test", "review-checkpoint", "gate"}:
+        if name == "prepare-test":
             item.add_argument("--skip-tests", action="store_true")
         if name in {"start", "complete", "fail", "defer", "triage-failure"}:
             item.add_argument("--stage", required=True)
@@ -1701,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
             result = finish_review(workspace, feature, args.run_id, args.batch_id, decision=args.decision, message=args.message,
                                    advisory_message=args.advisory_message)
         elif args.command == "review-checkpoint":
-            result = review_checkpoint(workspace, feature, args.run_id, args.batch_id, skip_tests=args.skip_tests)
+            result = review_checkpoint(workspace, feature, args.run_id, args.batch_id)
         elif args.command == "close-test":
             metadata = json.loads(args.metadata_json)
             if not isinstance(metadata, dict):
@@ -1721,7 +1715,7 @@ def main(argv: list[str] | None = None) -> int:
                 metadata=metadata,
             )
         else:
-            result = gate_batch(workspace, feature, args.run_id, args.batch_id, skip_tests=args.skip_tests)
+            result = gate_batch(workspace, feature, args.run_id, args.batch_id)
         if args.command in {"prepare-review", "finish-review", "review-checkpoint", "close-test"}:
             result["controlMetrics"] = {"operation": args.command, "elapsedMs": round((time.monotonic() - operation_started) * 1000),
                                         "reused": bool(result.get("reused"))}

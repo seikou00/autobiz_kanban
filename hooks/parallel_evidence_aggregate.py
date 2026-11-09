@@ -20,11 +20,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import (
-    FRONTEND_UTEST_SKIP_REASON, WORKFLOW_UTEST_SKIP_REASON,
-    deferred_e2e_errors, skipped_e2e_errors, record_e2e_skip,
-)
-from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, skipped_utests, utc_now
+from hooks.parallel_batch_stage import stage_names
+from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, utc_now
 from hooks.utest_test_environment import validate_test_commit_change
 
 
@@ -98,13 +95,12 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
     states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
     errors: list[str] = []
     reseal_checks: dict[tuple[str, str], bool] = {}
-    for stage, state in states.items():
+    for stage in stage_names(batch):
+        state = states.get(stage, {})
         if not isinstance(state, dict) or state.get("status") not in {"passed", "skipped", "deferred"}:
             errors.append(f"{batch_id}.{stage}_not_passed")
             continue
-        skipped_test = (stage == "test" and state.get("status") == "skipped"
-                        and state.get("skipReason") in {FRONTEND_UTEST_SKIP_REASON, WORKFLOW_UTEST_SKIP_REASON})
-        if state.get("status") == "skipped" and not skipped_test:
+        if state.get("status") == "skipped":
             continue
         evidence = _read_evidence(state.get("evidencePath"))
         if evidence is None:
@@ -113,11 +109,6 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         if evidence.get("digest") != _digest({key: value for key, value in evidence.items() if key != "digest"}):
             errors.append(f"{batch_id}.{stage}_evidence_digest_invalid")
             continue
-        if skipped_test and (evidence.get("outcome") != "SKIP"
-                or (state.get("skipReason") == FRONTEND_UTEST_SKIP_REASON and batch.get("executionLane") != "frontend")
-                or evidence.get("metadata") != {"executionLane": batch.get("executionLane"),
-                    "executionOutcome": "not_run", "skipReason": state.get("skipReason")}):
-            errors.append(f"{batch_id}.{stage}_skip_evidence_invalid")
         inputs = evidence.get("inputs") if isinstance(evidence.get("inputs"), dict) else {}
         if inputs.get("planRevision") != pipeline.get("planRevision"):
             errors.append(f"{batch_id}.{stage}_plan_revision_stale")
@@ -155,22 +146,10 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
                 errors.append(f"{batch_id}.{stage}_batch_commit_stale")
         if inputs.get("dependencies") != _dependency_snapshot(manifest, batch):
             errors.append(f"{batch_id}.{stage}_dependency_stale")
-        if batch_id == "V-E2E" and stage == "e2e_test":
-            metadata = evidence.get("metadata") if isinstance(evidence.get("metadata"), dict) else {}
-            environment = metadata.get("environment") if isinstance(metadata.get("environment"), dict) else {}
-            if not isinstance(environment.get("version"), str) or not environment.get("version"):
-                errors.append("V-E2E.e2e_environment_version_missing")
-            if not isinstance(environment.get("seedDataDigest"), str) or not environment.get("seedDataDigest"):
-                errors.append("V-E2E.e2e_seed_data_digest_missing")
-            if not isinstance(environment.get("dependencies"), dict):
-                errors.append("V-E2E.e2e_dependencies_missing")
     return errors
 
 
-def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, skip_e2e: bool = False,
-                       finish_workflow: bool = False) -> dict[str, Any]:
-    if skip_e2e:
-        record_e2e_skip(workspace, feature, run_id)
+def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, finish_workflow: bool = False) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         errors: list[str] = []
@@ -186,22 +165,7 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, skip_e2e: 
                 blocking_errors.append(f"{batch_id}.not_merged")
             errors.extend(_evidence_errors(manifest, batch_id, batch))
         errors.extend(blocking_errors)
-        validations = manifest.get("validationBatches", {})
-        for validation_id in ("V-E2E",):
-            batch = validations.get(validation_id) if isinstance(validations, dict) else None
-            if isinstance(batch, dict) and batch.get("status") == "skipped":
-                errors.extend(skipped_e2e_errors(manifest))
-                continue
-            if isinstance(batch, dict) and batch.get("status") == "deferred":
-                errors.extend(deferred_e2e_errors(manifest))
-                continue
-            if not isinstance(batch, dict) or batch.get("status") != "verified":
-                errors.append(f"{validation_id}.not_verified")
-                continue
-            errors.extend(_evidence_errors(manifest, validation_id, batch))
-        # Each delivery has Review evidence and an explicit test disposition,
-        # including Workflow omissions for either lane. E2E also records a real
-        # result or omission; merge trains prove promotion of exact candidate SHAs.
+        # Code audits delivery and Review evidence only.
         trains = manifest.get("mergeTrains", {})
         if not isinstance(trains, dict) or not trains:
             errors.append("merge_train_records_missing")
@@ -244,11 +208,6 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, skip_e2e: 
             "evidenceStateDigest": evidence_state_digest(manifest),
             "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
             "deferredIssues": deferred_issues,
-            "skippedUtests": skipped_utests(manifest),
-            "e2eStatus": "skipped" if (validations.get("V-E2E") or {}).get("status") == "skipped" else "failed"
-                if (validations.get("V-E2E") or {}).get("status") == "deferred" else "passed"
-                if (validations.get("V-E2E") or {}).get("status") == "verified" else "incomplete",
-            "e2eSkipReason": (validations.get("V-E2E") or {}).get("skipReason"),
         }
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
         report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)
@@ -293,12 +252,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace")
     parser.add_argument("--feature", required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--skip-e2e", action="store_true")
     parser.add_argument("--finish-workflow", action="store_true")
     args = parser.parse_args(argv)
     try:
         result = aggregate_evidence(resolve_workspace(args.workspace), resolve_feature(args.feature), args.run_id,
-                                    skip_e2e=args.skip_e2e, finish_workflow=args.finish_workflow)
+                                    finish_workflow=args.finish_workflow)
         completed = not result["blockingErrors"]
         print(json.dumps({"ok": completed, "success": completed, **result}, ensure_ascii=False, indent=2))
         return 0 if completed else 1

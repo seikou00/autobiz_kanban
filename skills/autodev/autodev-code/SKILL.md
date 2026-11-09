@@ -30,12 +30,12 @@ python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}"
 - 当前 TASK `uiRequired=true` 时才读取 `references/frontend-route.md`。后端不加载 HTML/parser，不在 Workflow 启动前解析全局前端 Route。
 - 生产代码在 TASK start 成功后修改；Code 不生成测试、不执行行为测试。后端每个 TASK 必须完成当前源码的 production-only compile 并登记真实输出，才能 `finish-implementation`。前端不新增编译要求。
 - Review 独立且只读，只审当前 Batch 生产实现。既有一次定向生产修复后完成纯编译、封存和 `single_repair_accepted`，直接进入候选集成，不派发第二次 Review。
-- Review checkpoint 和交付 gate 使用 `--skip-tests`，按当前提交登记前后端测试 `skipped`，原因 `utest_temporarily_disabled`；不准备 assignment、测试环境或测试工具，不把跳过记为 PASS。
+- Review checkpoint 通过后直接进入交付 gate，不创建 UTest/E2E 阶段或 skipped 证据。
 - 固定 Workflow 启动后不调用 `request_user_input` 或额外等待确认。内部差异按已有契约与现有依赖最小兼容处理，超出权限/契约时报告具体阻断，不伪造成功。
 
 ## 收口与合入
 
-Review 收口后的交付由 Merge Train 集成；全部 Batch 交付后直接执行 aggregate `--skip-e2e --finish-workflow`，登记 E2E `skipped` 和原因，直接报告完成及遗留问题，不再请求合并或验收确认。不派发独立的测试 Agent，不创建验证 Worktree、不重复编译或测试。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
+Review 收口后的交付由 Merge Train 集成；全部 Batch 交付后直接执行 aggregate `--finish-workflow`，直接报告完成及遗留问题，不再请求合并或验收确认。不派发独立的测试 Agent，不创建验证 Worktree、不重复编译或测试。`implemented` / `sealed` 不等于 `done`；实际集成和 Evidence 由 Runtime 推进。
 
 展示 `workspaceSync` 中用户原目录 `sourcePath`、分支、`lastSyncedSha`、备份及待同步问题。每个 Batch 的成果以未提交文件写回，用户分支 HEAD 和原暂存区不变，用户可直接编辑。`workspaceSyncPending` 非空时如实报告并保留恢复入口；不请求验收，不调用 `promote`、commit、reset 或清理用户修改。
 

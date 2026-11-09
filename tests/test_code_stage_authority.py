@@ -121,7 +121,7 @@ class CodeStageAuthorityTest(unittest.TestCase):
         self.assertEqual(self._batch()["activeStage"], "implement")
         self.assertIn("TASK_RUN_INACTIVE", self._guard("mvn compile"))
 
-    def test_sealed_stage_evidence_remains_fresh_through_utest_reseal(self) -> None:
+    def test_review_closes_code_without_a_test_stage(self) -> None:
         _, draft = self._initial_delivery()
         batch = self._batch()
         preparation = json.loads(Path(batch["stageStates"]["prepare"]["evidencePath"]).read_text(encoding="utf-8"))
@@ -131,15 +131,9 @@ class CodeStageAuthorityTest(unittest.TestCase):
         start_stage(self.workspace, "alpha", self.parallel_id, "B001", "review")
         self.assertIn("BATCH_STAGE_NOT_CODE_OR_REPAIR", self._guard("mvn compile"))
         complete_stage(self.workspace, "alpha", self.parallel_id, "B001", "review")
-        start_stage(self.workspace, "alpha", self.parallel_id, "B001", "test")
-        self.assertIsNone(self._guard("mvn test"))
-        tests = self.worktree / "tests"
-        tests.mkdir()
-        (tests / "test_production.py").write_text("def test_production():\n    assert True\n", encoding="utf-8")
-        resealed = seal_parallel_batch(self.workspace, "alpha", self.parallel_id, "B001", self.worktree, self.token)
-        self.assertTrue(resealed["success"], resealed)
-        self.assertEqual(resealed["purpose"], "utest")
-        complete_stage(self.workspace, "alpha", self.parallel_id, "B001", "test")
+        with self.assertRaisesRegex(ValueError, "parallel_batch_stage_unknown:B001:test"):
+            start_stage(self.workspace, "alpha", self.parallel_id, "B001", "test")
+        self.assertNotIn("test", self._batch()["stageStates"])
         manifest = load_manifest(self.workspace, "alpha", self.parallel_id)
         self.assertEqual(_evidence_errors(manifest, "B001", manifest["batches"]["B001"]), [])
 
@@ -207,7 +201,7 @@ class CodeStageAuthorityTest(unittest.TestCase):
         self.assertEqual(result["commitSha"], sealed["commitSha"])
         before = self._batch()["stageStates"]
         self.assertEqual(before["review"]["status"], "passed")
-        self.assertEqual(before["test"]["status"], "pending")
+        self.assertNotIn("test", before)
         self.assertEqual(before["implement"]["latestEvidenceId"], implementation_evidence)
         self.assertEqual(prepare_implementation_repair(*args), result)
         self.assertEqual(self._batch()["stageStates"], before)

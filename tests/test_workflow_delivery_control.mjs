@@ -65,12 +65,12 @@ async function execute(frontend = false, fault = null) {
       return { success: true, batchId: "B001", stage: "review", status: "passed" };
     }
     if (label === "validate-review-B001-attempt-1") {
-      assert.match(prompt, /--skip-tests/);
+      assert.doesNotMatch(prompt, /--skip-tests/);
       return { success: true, batchId: "B001", stage: "review", status: "passed" };
     }
     if (label === "settle-delivery-B001-1") {
       assert.doesNotMatch(prompt, /--expected-commit\s+"/);
-      assert.match(prompt, /--skip-tests/);
+      assert.doesNotMatch(prompt, /--skip-tests/);
       if (fault === "queued" && !queuedOnce) {
         queuedOnce = true;
         const state = snapshot(false);
@@ -130,7 +130,8 @@ async function execute(frontend = false, fault = null) {
       return current;
     }
     if (label === "aggregate-staged-evidence") {
-      assert.match(prompt, /--skip-e2e --finish-workflow/);
+      assert.match(prompt, /--finish-workflow/);
+      assert.doesNotMatch(prompt, /--skip-e2e/);
       assert.ok(options.schema.properties.workspaceSync);
       assert.ok(options.schema.properties.repositoryHeads);
       // Cleanup can be waiting independently while final validation advances.
@@ -260,9 +261,9 @@ for (const frontend of [false, true]) {
     const { labels, result } = await execute(frontend);
     assert.equal(result.finalStatus, "succeeded", JSON.stringify({ labels, result }));
     assert.equal(result.verification.e2eStatus, "skipped");
-    assert.equal(result.skippedUtests[0].reason, "utest_temporarily_disabled");
+    assert.equal(result.skippedUtests, undefined);
     assert.equal(labels.some(label => /utest|e2e/i.test(label)), false);
-    assert.equal(result.e2eSkippedReason, "e2e_temporarily_disabled");
+    assert.equal(result.e2eSkippedReason, undefined);
     assert.equal(labels.includes("begin-e2e-validation"), false);
     assert.equal(labels.includes("run-e2e-validation"), false);
     const chain = labels.filter(label => /^(stage-review|validate-review|stage-utest|settle-delivery)/.test(label));

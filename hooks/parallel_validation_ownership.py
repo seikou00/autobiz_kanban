@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plan-owned validation ownership for the staged parallel workflow.
 
-Every test intent and review criterion has exactly one owner.  The owner is a delivery Batch or the single post-merge runtime
-validation Batch (``V-E2E``).  This is deliberately Plan data rather than
+Every review criterion has a delivery Batch owner. Test intents remain
+design context and create no Code execution stages.  This is deliberately Plan data rather than
 an agent convention: the scheduler can reject duplicate execution before a
 worktree is provisioned.
 """
@@ -25,16 +25,8 @@ from hooks.plan_json import PlanBundle, load_plan_bundle
 
 
 PIPELINE_SCHEMA_VERSION = "autobiz.parallel.pipeline.v1"
-DELIVERY_STAGES = ("prepare", "implement", "review", "test")
-VALIDATION_BATCHES = (
-    {
-        "id": "V-E2E",
-        "type": "validation",
-        "stage": "e2e_test",
-        "dependsOn": "all_delivery",
-        "executionTarget": "merged_main",
-    },
-)
+DELIVERY_STAGES = ("prepare", "implement", "review")
+VALIDATION_BATCHES = ()
 
 
 def _canonical(value: Any) -> str:
@@ -86,19 +78,6 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
             "stage": "review",
             "kind": "review",
         }
-        for task in batch.get("tasks", []) if isinstance(batch, dict) else []:
-            if not isinstance(task, dict) or not isinstance(task.get("id"), str):
-                continue
-            if task.get("executionMode") == "external_dependency":
-                continue
-            target_id = f"UTEST-{task['id']}"
-            ownership[target_id] = {
-                "ownerBatchId": batch_id,
-                "stage": "test",
-                "kind": "utest_target",
-                "taskId": task["id"],
-                "sourceBatchId": batch_id,
-            }
 
     return {
         "schemaVersion": PIPELINE_SCHEMA_VERSION,
@@ -120,7 +99,8 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
     errors: list[str] = []
     if pipeline.get("schemaVersion") != PIPELINE_SCHEMA_VERSION:
         errors.append("parallel_batch_pipeline_schema_invalid")
-    if pipeline.get("deliveryStages") != list(DELIVERY_STAGES):
+    # Accept existing Plans while projecting only the active Code stages.
+    if pipeline.get("deliveryStages") not in (list(DELIVERY_STAGES), [*DELIVERY_STAGES, "test"]):
         errors.append("parallel_batch_pipeline_delivery_stages_invalid")
     if not isinstance(pipeline.get("planRevision"), str) or not pipeline["planRevision"].startswith("sha256:"):
         errors.append("parallel_batch_pipeline_revision_invalid")
@@ -128,7 +108,9 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
         errors.append("parallel_batch_pipeline_revision_stale")
 
     expected_validation = [dict(item) for item in VALIDATION_BATCHES]
-    if pipeline.get("validationBatches") != expected_validation:
+    legacy_validation = [{"id": "V-E2E", "type": "validation", "stage": "e2e_test",
+                          "dependsOn": "all_delivery", "executionTarget": "merged_main"}]
+    if pipeline.get("validationBatches") not in (expected_validation, legacy_validation):
         errors.append("parallel_batch_pipeline_validation_batches_invalid")
 
     ownership = pipeline.get("validationOwnership")
@@ -153,6 +135,8 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
         if actual != owner:
             errors.append(f"validation_ownership_missing_or_invalid:{command_id}")
     for command_id, owner in ownership.items():
+        if command_id in source_ids and isinstance(owner, dict) and owner.get("stage") == "test":
+            continue  # Retired test ownership in an existing Plan.
         if command_id not in expected:
             errors.append(f"validation_ownership_unknown:{command_id}")
             continue

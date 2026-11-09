@@ -10,7 +10,7 @@
 
 独立恢复使用 `python hooks/parallel_workspace_sync.py sync --workspace <artifact> --feature <feature> --run-id <runId> --repository-ref <ref> --resolver-id <invocationId>`。冲突返回临时 `worktreePath`、`contextPath`、`conflictedFiles`、`attemptId`；仅编辑这些临时冲突文件，随后执行同入口 `complete` 并追加 `--attempt-id <attemptId>`。`refresh_required` 表示用户期间又有修改，重新 `sync` 即可。不得直接在用户目录处理 Runtime 冲突标记，也不调用 commit/reset。
 
-当前固定 Workflow 已暂时移除前后端 UTest 和 E2E：Review checkpoint/交付 gate 使用 `--skip-tests` 登记 `utest_temporarily_disabled`；最终 aggregate 使用 `--skip-e2e --finish-workflow` 在汇总内部登记 `e2e_temporarily_disabled` 并结束流程。不派发测试或 E2E 跳过登记 Agent、不准备测试环境、不生成测试资产、不创建验证 Worktree。报告明确展示未执行及原因。
+固定 Code Workflow 的阶段为 prepare → implement → review → 交付 → 证据汇总。前后端均不包含 UTest/E2E，不创建测试阶段、测试环境、验证 Worktree 或 SKIP 证据。Review 通过后直接交付，最终使用 aggregate `--finish-workflow` 完成报告。
 
 新 scheduler run 默认使用 `isolated` 模式：从 Plan 中每个业务仓库启动时的**当前分支及其已提交 HEAD** 创建需求集成分支，Batch 从集成 HEAD 创建各自 Worktree，Merge Train 只推进集成分支的提交。每批成果随后写回用户原工作区，分支引用与暂存区不变。最终证据、测试未执行记录、同步状态和清理待办一同进入报告。
 
@@ -52,10 +52,10 @@ Git 2.20 可使用独立的正式合入入口。读取目标分支的 Worktree �
 - 阶段均已结束的 `sealed` Batch 从交付 gate/settle 恢复，不重跑实现或 Review。候选构建或合并中断时复用已登记候选及仓库占用记录；Git 与 Plan 已完成后，只补齐操作回执和 dispatch 收尾，不重复合并。Runtime 用进程持有的执行锁区分正在执行和已中断的结算，避免仅因长效 dispatch 尚未过期就一直阻塞队列。
 - 仓库绑定的 `gitRoot` 保留源 checkout 身份；`integration.worktreePath`、`integration.branchName` 保存集成工作区。`baseBranch`、`baseSha` 冻结启动时的当前分支和提交，`headSha` 跟随集成分支推进。
 - Batch 创建时保存 `startSha`。后续依赖 Batch 从依赖已集成后的 HEAD 创建；已经开始的 Batch 保留起始 SHA 和改动，冲突交给 Merge Train。
-- prepare 证据绑定 Batch 的 `startSha`，不会因集成 HEAD 推进而失效。UTest 可新增测试资产、修改 POM 的 test scope 依赖及必要 Surefire/Failsafe 配置；最终聚合读取证据提交到最终提交的真实 Git 差异，复用封存的 POM 内容校验。多次测试封存或 Batch Worktree 清理后仍可核验，既有阶段 evidence 不重写；生产代码、生产依赖和失败屏蔽配置的变更不能沿用旧 Review 证据。
+- prepare 证据绑定 Batch 的 `startSha`，不会因集成 HEAD 推进而失效。最终聚合校验实现、Review 与交付证据；生产实现变化必须重新封存并按修复协议处理。历史 Run 的测试封存只作为旧证据兼容校验，不再触发测试阶段。
 - Batch 的 `merged` 和 `mergeCommitSha` 表示已合入集成分支。`mainPromotion` 单独记录最终基线分支合并；两者不能混用。`mainPromotion`、`main-promotion.json` 和 `sync-main` 沿用现有接口名称，其中的 main 指本次 run 冻结的基线分支，不限定分支名为 `main`。
 - 每个 Batch 合并后触发一次 20 秒预算的 `parallel_cleanup.py drain`，只清理已推广且所有权、SHA、工作区状态均符合的交付和候选 Worktree，不再等待其他 Batch。最终再执行一次 120 秒预算的清理。用户原目录和需求集成 Worktree 保留。
-- 固定 Workflow 使用 `aggregate --skip-e2e --finish-workflow`，采用 `report_only` 策略，保留真实 `passed`、全部 `errors`、`validationStatus`、deferred 问题及原严重性，不重写既有 Evidence、不自动重跑测试。交付完整且报告持久化后，直接进入 `succeeded` 或 `succeeded_with_issues`，不准备确认报告。测试未执行不声称测试通过。
+- 固定 Workflow 使用 `aggregate --finish-workflow`，采用 `report_only` 策略，保留真实 `passed`、全部 `errors`、`validationStatus`、deferred 问题及原严重性，不重写既有 Evidence、不自动重跑测试。交付完整且报告持久化后，直接进入 `succeeded` 或 `succeeded_with_issues`，不准备确认报告。Code 报告不生成测试状态字段。
 - 完成报告写入 `workflowCompletedAt`，审计发现不会反复启动流程。工作区同步仍有待办时，launcher 恢复同一 run 处理同步，不重新实现或 Review 已合并 Batch。旧等待确认状态也按此路径恢复。清理在最终收口时再做一次有预算的尝试，仍失败仅保留 `cleanupPending`，不重新拉起已完成 run；以后可独立执行 drain。
 - Workflow 汇总后调用现有 `update_checkpoint.py --checkpoint code_done --json`，通过真实 Plan/证据门禁推进 Code 完成。清理失败不影响推进；检查点推进失败则单独报告 `retry_code_checkpoint`。下一阶段由当前 Feature 的配置路由，不在 Code Workflow 中直接启动。
 - 固定 Workflow 不调用 `promote`、不提交用户工作区、不移动用户分支 HEAD、不发起合并或验收提问。清理失败记录 pending，保留已合并状态；无法自动处理的问题如实报告。

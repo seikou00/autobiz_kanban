@@ -99,7 +99,7 @@ test("an in-flight old status read returns the accepted new snapshot to its call
   assert.equal(c.quarantinedBatchIds.has("B002"), false);
 });
 
-test("the status schema preserves Runtime skipped UTest records", async () => {
+test("the status schema drops retired skipped UTest records", async () => {
   const c = harness(), current = snapshot(2, "pending", 2000);
   current.manifest.skippedUtests = [{
     batchId: "B001", executionLane: "frontend", status: "skipped",
@@ -111,7 +111,7 @@ test("the status schema preserves Runtime skipped UTest records", async () => {
     return { ...current, manifest: projected };
   };
   const result = await c.readSchedulerState("status-with-skipped-utests");
-  assert.deepEqual(result.manifest.skippedUtests, current.manifest.skippedUtests);
+  assert.equal(result.manifest.skippedUtests, undefined);
 });
 
 test("single-repair errors remain errors and successful records require their full binding", async () => {

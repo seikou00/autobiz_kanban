@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build and promote immutable parallel Batch merge candidates.
 
-Delivery review and UTest are completed in each Batch worktree before a
+Delivery implementation and Review are completed in each Batch worktree before a
 candidate is built.  The candidate is therefore an integration boundary, not
-an additional test stage; the only post-merge executable validation is V-E2E.
+an additional test stage; Code ends with delivery evidence aggregation.
 """
 
 from __future__ import annotations
@@ -398,7 +398,7 @@ def _build_candidate(
 def verify_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str) -> dict[str, Any]:
     """Reject the retired candidate-test phase instead of silently running it."""
     del workspace, feature, run_id, wave, repository_ref
-    raise ValueError("parallel_merge_train_candidate_verification_removed_use_batch_utest_and_e2e")
+    raise ValueError("parallel_merge_train_candidate_verification_removed_use_batch_review")
 
 
 def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str,
@@ -437,14 +437,14 @@ def _promote_candidate(
             allowed_statuses.add("built")
         if not record or record.get("status") not in allowed_statuses:
             raise ValueError(f"parallel_merge_train_candidate_not_verified:{repository_ref}:{wave}")
-        utest_gated_promotion = record.get("status") == "built"
+        review_gated_promotion = record.get("status") == "built"
         binding = manifest.get("repositories", {}).get(repository_ref)
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
         repo = assert_integration(binding) if isolated(manifest) else integration_repo(binding)
         record.update({
             "status": "promoting",
-            "promotionReadyStatus": "built" if utest_gated_promotion else "verified",
+            "promotionReadyStatus": "built" if review_gated_promotion else "verified",
             "promotionIntentAt": utc_now(),
         })
         save_manifest(workspace, feature, run_id, manifest)
@@ -482,14 +482,14 @@ def _promote_candidate(
         promoted_sha=promoted_sha,
     )
     recovered = _recover_promoted_plan(workspace, feature, run_id, repository_ref=repository_ref, wave=wave)
-    if utest_gated_promotion and recovered.get("success"):
+    if review_gated_promotion and recovered.get("success"):
         with run_lock(workspace, feature, run_id):
             manifest = load_manifest(workspace, feature, run_id)
             current = _record(manifest, repository_ref, wave)
             if current:
                 current["validation"] = {
                     "skipped": True,
-                    "reason": "batch_utest_gated_e2e_only",
+                    "reason": "batch_review_gated",
                     "commands": [],
                 }
                 save_manifest(workspace, feature, run_id, manifest)
@@ -694,13 +694,15 @@ def _recover_promoted_plan(
 
 
 def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
+    """Legacy validation entry point; current Code runs have no V-E2E batch."""
     before = load_manifest(workspace, feature, run_id)
+    if "V-E2E" not in before.get("validationBatches", {}):
+        raise ValueError("parallel_code_e2e_stage_removed")
     if before.get("finalizationReceiptInvalidated"):
         from hooks.parallel_delivery import prepare_finalization
         refreshed = prepare_finalization(workspace, feature, run_id)
         if refreshed.get("repairRequired"):
             raise ValueError("parallel_e2e_finalization_repair_required")
-    """Open the single B-E2E validation Batch after all deliveries are merged."""
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         incomplete = [batch_id for batch_id, batch in manifest.get("batches", {}).items() if not isinstance(batch, dict) or batch.get("status") != "merged"]

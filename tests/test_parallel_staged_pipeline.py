@@ -808,7 +808,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             self.assertEqual(manifest["status"], "succeeded")
             self.assertFalse(aggregate["hasDeferredIssues"])
             record = manifest["mergeTrains"]["default:wave-001"]
-            self.assertEqual(record["validation"]["reason"], "batch_utest_gated_e2e_only")
+            self.assertEqual(record["validation"]["reason"], "batch_review_gated")
 
     def test_utest_reseal_rejects_unreviewed_production_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -131,7 +131,7 @@ proposal 规则：
 
 ## .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md
 
-reviewer 必须直接写这个文件。它是下游 `/autodev-utest` 与 `/autodev-e2e` 的正式输入。
+reviewer 必须直接写这个文件。独立测试工具可将其作为输入；固定 Code Workflow 在 Review 后直接交付，不派发 UTest 或 E2E。
 
 ```
 # Requirements Evaluation

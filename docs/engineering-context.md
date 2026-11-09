@@ -113,9 +113,9 @@ resumeCursor 和原 deadlines；awaiting_record 只补记原输出，不启动 M
 
 固定 Batch Workflow 遵循当前一次性生产修复规则：在原 Worktree 修复、完成所需
 后端纯编译和封存，由 Runtime 登记 single_repair_accepted 后直接进入候选集成，
-不再派发第二次 Review。前后端 UTest 和 E2E 均暂时移出固定 Workflow，不准备
-测试 assignment/环境、不生成资产、不补跑旧测试。Review checkpoint/交付使用
---skip-tests，最终 aggregate 使用 --skip-e2e，报告保留未执行状态及原因。
+不再派发第二次 Review。固定 Code Workflow 不包含 UTest/E2E，不准备测试 assignment/环境、
+不生成测试资产或 SKIP 证据。Review checkpoint 通过后直接交付，最终 aggregate
+使用 --finish-workflow，只汇总交付与 Review 证据。
 独立手动流程仍按其自身阶段契约执行。
 
 所有编译/测试继续前台 Bash、实时合并输出、保存真实进程与 tee 退出码，runner

@@ -79,9 +79,7 @@ def test_fixed_workflow_entrypoint():
         "runDeliveryReviewAndGate",
         "review-checkpoint",
         "finish-review",
-        "--skip-tests",
-        "--skip-e2e",
-        "本 Workflow 对前后端均暂时移除 UTest 和 E2E",
+        "本 Workflow 对前后端均移除 UTest 和 E2E",
         "worktree_manager.py",
         "parallel_merge_train.py",
         "parallel_batch_lifecycle.py",
@@ -119,7 +117,6 @@ def test_fixed_workflow_entrypoint():
         "immediate_candidate_resolution_failed",
         "runFinalRepairAndReport",
         "queueRetryExhaustedBatchRepairs",
-        "scheduler_snapshot_unavailable",
         "errorMessage",
         "--ttl-seconds ${timeoutPerBatch}",
         "heartbeat",
@@ -148,7 +145,6 @@ def test_fixed_workflow_entrypoint():
         "retryPendingBatches",
         "recoverPendingRetries",
         "completed_with_unresolved",
-        "e2eSkippedReason",
         "unresolvedMergeCandidateDetails",
         "runInitialBatchLifecycle",
         "runRecoveredBatchLifecycle",
@@ -356,10 +352,10 @@ for (const field of requiredSchedulerFields) {
   if (!rejected) process.exit(23);
 }
 const manifestSchema = context.schedulerSchema.properties.manifest;
-if (!manifestSchema?.properties?.batches || !manifestSchema.properties.mergeTrains || !manifestSchema.properties.deferredIssues || !manifestSchema.properties.skippedUtests) process.exit(29);
+if (!manifestSchema?.properties?.batches || !manifestSchema.properties.mergeTrains || !manifestSchema.properties.deferredIssues || manifestSchema.properties.skippedUtests) process.exit(29);
 if (!source.includes("status --workflow-view")) process.exit(30);
 if (!context.schedulerSchema.properties.dispatchDiagnostics.properties.activeBatchIds) process.exit(31);
-if (!context.schedulerSchema.properties.stageRecoveryBatches.items.properties.failureContext.properties.argv) process.exit(32);
+if (context.schedulerSchema.properties.stageRecoveryBatches.items.properties.failureContext.properties.argv) process.exit(32);
 const stageSchema = context.schedulerSchema.properties.stageRecoveryBatches.items;
 for (const field of ["batchId", "worktreePath", "branchName", "commitSha", "nextStage", "failureContext"]) {
   if (!stageSchema.properties[field]) process.exit(24);
@@ -456,7 +452,7 @@ const schedulerAccepted = context.requireSchedulerResult(schedulerSnapshot({
     // booleans instead of copying scheduler stdout literally.
     preserveWorktree: false,
     reprovision: true,
-    nextStage: "test",
+    nextStage: "delivery",
   }],
   batchWorkspaces: {
     B007: {
@@ -483,7 +479,7 @@ try { context.requireSchedulerResult(schedulerSnapshot({ ok: false, status: "blo
 catch (_) { failedSnapshotRejected = true; }
 if (!failedSnapshotRejected) process.exit(30);
 if (schedulerAccepted.batchWorkspaces.B007.workspaceRef !== "frontend") process.exit(21);
-if (schedulerAccepted.stageRecoveryBatches[0].nextStage !== "test") process.exit(25);
+if (schedulerAccepted.stageRecoveryBatches[0].nextStage !== "delivery") process.exit(25);
 if (schedulerAccepted.stageRecoveryBatches[0].preserveWorktree !== true) process.exit(27);
 if (schedulerAccepted.stageRecoveryBatches[0].reprovision !== false) process.exit(28);
 let invalidStageRecoveryRejected = false;
@@ -685,8 +681,8 @@ const context = {
     { batchId: "B008", worktreePath: "/tmp/B008", branchName: "batch-b008", recoveryKind: "implementation_resume", preserveWorktree: true, reprovision: false },
   ],
   runnableStageRecoveries: () => [
-    { batchId: "B006", nextStage: "test", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
-    { batchId: "B007", nextStage: "test", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
+    { batchId: "B006", nextStage: "delivery", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
+    { batchId: "B007", nextStage: "delivery", recoveryKind: "stage_resume", preserveWorktree: true, reprovision: false },
   ],
   runnableMergeableBatchIds: () => [],
   runInitialBatchLifecycle: async () => ({}),
@@ -740,7 +736,7 @@ const end = source.indexOf("async function validateAndPromoteBatch(", start);
 if (start < 0 || end < 0) process.exit(2);
 vm.runInContext(source.slice(start, end), context);
 (async () => {
-  await context.continueRecoveredDelivery({ batchId: "B006", nextStage: "test" });
+  await context.continueRecoveredDelivery({ batchId: "B006", nextStage: "delivery" });
   await context.continueRecoveredDelivery({ batchId: "B007", nextStage: "review" });
   if (calls.length !== 2) process.exit(3);
   if (calls[0].reviewResolvedByRepair !== true || calls[0].testResolvedByRepair === true) process.exit(4);
@@ -751,7 +747,7 @@ vm.runInContext(source.slice(start, end), context);
     if result["returncode"] != 0:
         print(f"✗ sealed UTest 恢复边界错误: {result['stderr'] or result['stdout']}")
         return False
-    print("✓ 旧 nextStage=test 直接进入跳过测试的 gate，不重跑 Review")
+    print("✓ nextStage=delivery 直接进入交付 gate，不重跑 Review")
     print("✓ nextStage=review 保留正常 Review → gate 顺序")
     print()
     return True

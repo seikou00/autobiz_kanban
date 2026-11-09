@@ -141,7 +141,7 @@ def _park_delivery(workspace: Path, feature: str, run_id: str, batch_id: str, ge
 
 
 def settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
-                    generation: int, token: str, expected_commit: str | None = None, *, skip_tests: bool = False) -> dict:
+                    generation: int, token: str, expected_commit: str | None = None) -> dict:
     lock = _execution_lock(workspace, feature, run_id, batch_id)
     try:
         lock.__enter__()
@@ -155,14 +155,13 @@ def settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
         return _queued_result(workspace, feature, run_id, batch_id, generation, commit, key, ref,
                               [batch_id], "delivery_already_running", released=False)
     try:
-        return _settle_delivery(workspace, feature, run_id, batch_id, generation, token, expected_commit,
-                                skip_tests=skip_tests)
+        return _settle_delivery(workspace, feature, run_id, batch_id, generation, token, expected_commit)
     finally:
         lock.__exit__(None, None, None)
 
 
 def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
-                     generation: int, token: str, expected_commit: str | None, *, skip_tests: bool) -> dict:
+                     generation: int, token: str, expected_commit: str | None) -> dict:
     from hooks.parallel_batch_stage import gate_batch
     from hooks.parallel_dispatch import finish
     from hooks import parallel_merge_train as train
@@ -209,7 +208,7 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
         batch.pop("deliveryQueue", None)
         save_manifest(workspace, feature, run_id, manifest)
     if batch.get("status") != "merged":
-        gate = gate_batch(workspace, feature, run_id, batch_id, skip_tests=skip_tests)
+        gate = gate_batch(workspace, feature, run_id, batch_id)
         if gate.get("status") != "ready_to_candidate":
             with run_lock(workspace, feature, run_id):
                 manifest = load_manifest(workspace, feature, run_id)
@@ -335,7 +334,7 @@ def finalization_inputs(manifest: dict) -> dict:
     return {"deliveryCommits": {key: batch["mergeCommitSha"] for key, batch in manifest["batches"].items()},
             "productionCommits": {key: batch.get("commitSha") for key, batch in manifest["batches"].items()},
             "stageEvidence": {key: {stage: (batch.get("stageStates", {}).get(stage) or {}).get("latestEvidenceId")
-                                    for stage in ("review", "test")} for key, batch in manifest["batches"].items()},
+                                    for stage in ("review",)} for key, batch in manifest["batches"].items()},
             "heads": {ref: binding.get("headSha") for ref, binding in manifest["repositories"].items()},
             "planDigest": manifest["planDigest"]}
 
@@ -412,7 +411,6 @@ def build_parser():
         for name in ("workspace", "feature", "run-id"):
             command.add_argument("--" + name, required=True)
         if action == "settle-delivery":
-            command.add_argument("--skip-tests", action="store_true")
             for name in ("batch-id", "dispatch-token"):
                 command.add_argument("--" + name, required=True)
             command.add_argument("--expected-commit", help="Optional explicit version fence for legacy callers")
@@ -426,7 +424,7 @@ def main(argv=None):
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
         if args.action == "settle-delivery":
             result = settle_delivery(workspace, feature, args.run_id, args.batch_id, args.dispatch_generation,
-                                     args.dispatch_token, args.expected_commit, skip_tests=args.skip_tests)
+                                     args.dispatch_token, args.expected_commit)
         elif args.action == "prepare-finalization":
             result = prepare_finalization(workspace, feature, args.run_id)
         else:

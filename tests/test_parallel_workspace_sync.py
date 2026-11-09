@@ -359,7 +359,7 @@ class WorkspaceSyncTest(unittest.TestCase):
         args, _ = self.fixture.delivery("B002")
         settle_delivery(*args)
         from hooks.parallel_evidence_aggregate import aggregate_evidence
-        aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True)
+        aggregate_evidence(self.workspace, "alpha", self.run)
         report = prepare_promotion(self.workspace, "alpha", self.run)
         self.assertEqual(report["mainPromotion"]["deliveryMode"], "uncommitted")
         from hooks.workflow_launcher import analyze_batches
@@ -387,7 +387,7 @@ class WorkspaceSyncTest(unittest.TestCase):
         # turning the final report into a merge-confirmation request.
         evidence = Path(self.fixture.manifest()["batches"]["B001"]["stageStates"]["review"]["evidencePath"])
         evidence.unlink()
-        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
+        report = aggregate_evidence(self.workspace, "alpha", self.run, finish_workflow=True)
         self.assertFalse(report["passed"])
         self.assertIn("B001.review_evidence_missing", report["errors"])
         self.assertEqual(report["status"], "succeeded_with_issues")
@@ -415,7 +415,7 @@ class WorkspaceSyncTest(unittest.TestCase):
         local_file.write_text("preserve")
         self.assertTrue(drain(self.workspace, "alpha", self.run)["cleanupPending"])
         self.assertTrue(drain(self.workspace, "alpha", self.run)["cleanupPending"])
-        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
+        report = aggregate_evidence(self.workspace, "alpha", self.run, finish_workflow=True)
         self.assertEqual(report["status"], "succeeded_with_issues")
         before = self.fixture.manifest()["batches"]
         launch = analyze_batches("alpha", plugin_path=Path(__file__).resolve().parents[1],
@@ -426,8 +426,8 @@ class WorkspaceSyncTest(unittest.TestCase):
         self.assertEqual(self.fixture.manifest()["batches"], before)
         local_file.unlink()
         self.assertFalse(drain(self.workspace, "alpha", self.run)["cleanupPending"])
-        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
-        self.assertEqual(report["status"], "succeeded_with_issues", report)
+        report = aggregate_evidence(self.workspace, "alpha", self.run, finish_workflow=True)
+        self.assertEqual(report["status"], "succeeded", report)
         self.assertEqual(report["errors"], [])
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
 
@@ -439,7 +439,7 @@ class WorkspaceSyncTest(unittest.TestCase):
         for batch_id in ("B001", "B002"):
             self.publish(batch_id)
         self.assertFalse(drain(self.workspace, "alpha", self.run)["cleanupPending"])
-        aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True)
+        aggregate_evidence(self.workspace, "alpha", self.run)
         prepare_promotion(self.workspace, "alpha", self.run)
         self.assertEqual(self.fixture.manifest()["status"], "promotion_prepared")
         launch = analyze_batches("alpha", plugin_path=Path(__file__).resolve().parents[1],
@@ -448,8 +448,8 @@ class WorkspaceSyncTest(unittest.TestCase):
         self.assertEqual(launch["requiredAction"], "resume_fixed_workflow")
         self.assertEqual(resume_run(self.workspace, "alpha", self.run)["status"], "running")
         self.assertNotIn("mainPromotion", self.fixture.manifest())
-        report = aggregate_evidence(self.workspace, "alpha", self.run, skip_e2e=True, finish_workflow=True)
-        self.assertEqual(report["status"], "succeeded_with_issues", report)
+        report = aggregate_evidence(self.workspace, "alpha", self.run, finish_workflow=True)
+        self.assertEqual(report["status"], "succeeded", report)
         self.assertEqual(report["errors"], [])
 
 

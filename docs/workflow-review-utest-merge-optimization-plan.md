@@ -1,5 +1,7 @@
 # Review → UTest → Merge 流转提速方案
 
+> 历史方案：其中 UTest/E2E 阶段和测试跳过参数已退出当前 Code Workflow。现行流程见 [Code Batch Workflow Guide](../skills/autodev/autodev-code/references/batch-workflow-guide.md)。
+
 日期：2026-11-01。状态：已实现控制协议 v2，并完成相关回归验证。以下为设计与验收契约；墙钟时间收益仍需真实业务运行对照。
 
 本方案覆盖控制模型调用、候选构建与推广、合并后的清理、调度异常恢复四项。UTest 的首次执行、阶段总时长、单命令时长和修复次数全部沿用现行策略。
