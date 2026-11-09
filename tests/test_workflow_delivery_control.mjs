@@ -19,7 +19,7 @@ async function execute(frontend = false, fault = null) {
     success: true, status: fault === "workspace-synced" ? "synced" : "conflicted", repositoryRef: "default",
     sourcePath: "/source", sourceBranch: "main", sourceHead: "original", lastSyncedSha: fault === "workspace-synced" ? "candidate" : null,
     targetSha: "candidate", worktreePath: "/sync-worktree", backupPath: "/sync-backup",
-    contextPath: "/sync-backup/conflicts.json", attemptId: "c".repeat(32), conflictedFiles: ["file.txt"]
+    contextPath: "/sync-backup/conflicts.json", jobId: "job-1", attemptId: "c".repeat(32), conflictedFiles: ["file.txt"]
   } : null;
   let reviewAdvisoryRecorded = false;
   const advisory = { issueId: "REVIEW-ADVISORY-B001-1", kind: "review_advisory", batchId: "B001", stage: "review",
@@ -33,7 +33,7 @@ async function execute(frontend = false, fault = null) {
     implementationRecoveryBatches: [], stageRecoveryBatches: [], retryPendingBatches: [], blockedBatches: [],
     parallelGroups: [], allParallelGroups: [], dispatchGrants: { B001: 1 },
     batchTaskIds: { B001: ["T001"] }, batchWorkspaces: { B001: workspace }, cleanupPending: [],
-    ...(workspaceState ? { workspaceSync: [workspaceState] } : {}),
+    ...(workspaceState && merged ? { workspaceSync: [workspaceState] } : {}),
     manifest: { batches: { B001: { ...delivery, dispatchGeneration: 1, status: merged ? "merged" : "pending",
       dependencies: [], mergeCommitSha: merged ? "candidate" : null, recovery: {} } },
       mergeTrains: {}, deferredIssues: reviewAdvisoryRecorded ? [advisory] : [], skippedUtests: [] },
@@ -96,15 +96,21 @@ async function execute(frontend = false, fault = null) {
         : { success: true, status: "resolved" };
     }
     if (label.startsWith("workspace-sync-complete-")) {
-      assert.match(prompt, /parallel_workspace_sync\.py" complete/);
+      assert.match(prompt, /parallel_workspace_sync\.py" complete-job/);
       assert.match(prompt, /不移动用户分支 HEAD、不改用户暂存区、不提交代码/);
       workspaceState = { ...workspaceState, status: fault === "workspace-refresh" && syncCompletions++ === 0
         ? "refresh_required" : "synced" };
       if (workspaceState.status === "synced") workspaceState.lastSyncedSha = "candidate";
       return workspaceState;
     }
+    if (label.startsWith("workspace-sync-warning-")) {
+      workspaceState = { ...workspaceState, success: false, status: "failed", error: "publication failed" };
+      return workspaceState;
+    }
     if (label.startsWith("workspace-sync-")) {
-      assert.match(prompt, /parallel_workspace_sync\.py" sync/);
+      if (!workspaceState) return { success: true, status: "skipped", repositoryRef: "default" };
+      if (workspaceState.status === "synced") return workspaceState;
+      assert.match(prompt, /parallel_workspace_sync\.py" process/);
       if (fault === "workspace-agent-timeout") throw new Error("workspace sync agent timed out after merge");
       if (fault === "workspace-command-error") return { success: false, repositoryRef: "default", status: "pending", error: "Git LFS \ufffd\ufffd" };
       workspaceState = { ...workspaceState, status: "conflicted" };

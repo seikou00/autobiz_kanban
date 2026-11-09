@@ -161,4 +161,13 @@ test("final publication state comes from the latest Runtime report, including cl
     assert.equal(result.finalStatus, pending ? "succeeded_with_issues" : "succeeded");
     if (latest.length) assert.equal(result.workspaceSync[0].status, pending ? "pending" : "synced");
   }
+  context.workspaceSyncControl.notifications = [{ repositoryRef: "default", jobId: "A", status: "failed", error: "old error" }];
+  const covered = context.completionReport({ finalStatus: "succeeded", nextAction: "continue_next_stage", scheduler: {},
+    verification: { repositoryHeads: { default: "new" }, workspaceSync: [{ ...old, lastSyncedSha: "new",
+      queue: [{ jobId: "A", status: "covered", coveredBy: "B" }] }] } });
+  assert.equal(covered.workspaceSyncNotifications[0].resolved, true);
+  assert.equal(covered.workspaceSyncNotifications[0].resolution, "covered");
+  assert.equal(covered.workspaceSyncNotifications[0].coveredBy, "B");
+  assert.equal(covered.workspaceSyncPending.length, 0);
+  assert.equal(covered.finalStatus, "succeeded");
 });

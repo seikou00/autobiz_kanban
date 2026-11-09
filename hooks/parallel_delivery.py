@@ -57,6 +57,16 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
     if (manifest.get("controlProtocolVersion", 1) < 2
             or manifest.get("status") in {"cancelled", "rolled_back", "cleaned"}):
         return
+    # A crash can occur after promotion but before publication registration.
+    # Repair that gap on the scheduler's ordinary resume/status path as well as
+    # finalization, without running any Git or workspace writes under this lock.
+    if manifest.get("integrationMode") == "isolated":
+        from hooks.parallel_workspace_sync import request_sync_locked
+        refs = {batch.get("repositoryRef") or batch.get("workspaceRef")
+                for batch in manifest.get("batches", {}).values()
+                if batch.get("status") == "merged" and batch.get("mergeCommitSha")}
+        for ref in sorted(refs):
+            request_sync_locked(manifest, ref)
     for batch_id, batch in manifest.get("batches", {}).items():
         dispatch = batch.get("dispatch") or {}
         operations = [item for item in manifest.get("deliveryOperations", {}).values()

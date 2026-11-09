@@ -2,13 +2,19 @@
 
 固定 Workflow 按 Batch 将集成成果同步到用户原工作区，以**未提交改动**展示。用户分支 HEAD、原暂存区保持不变；已有未提交修改不阻止同步。Runtime 在临时 Worktree 中三方合并，冲突由 Workflow 自动编辑临时文件，再由 Runtime 校验并写回。后续 Batch 仍从集成分支开发。`workspaceSync` / `workspaceSyncPending` 返回实际同步结果，最后直接报告完成和遗留问题，不再询问是否合并或验收。下文显式基线合并命令仅用于用户另行明确要求正式 Git 合并的场景。
 
-同步使用上次 `lastSyncedSha`、用户当前内容及最新集成 SHA。备份保存在 run 的 `workspace-sync` 目录，含暂存区副本、文件原始内容及逐文件写回日志；私有 `refs/autobiz-workspace-backups/` 引用保存 Git 快照，不进入用户分支历史。写回不清空、不 stash 用户工作区；中断后跳过已完成文件并继续，用户在计算或解冲突期间再次编辑时重新计算。暂存、未暂存、未跟踪、二进制及符号链接内容均保留。同步问题单独记录，不撤销已合并 Batch；最终收口和恢复会继续同步。
+同步使用上次 `lastSyncedSha`、用户当前内容及队列任务固定的目标 SHA。备份保存在 run 的 `workspace-sync` 目录，含暂存区副本、文件原始内容及逐文件写回日志；私有 `refs/autobiz-workspace-backups/` 引用保存 Git 快照，不进入用户分支历史。写回不清空、不 stash 用户工作区；中断后跳过已完成文件并继续，用户在计算或解冲突期间再次编辑时重新计算。暂存、未暂存、未跟踪、二进制及符号链接内容均保留。同步问题单独记录，不撤销已合并 Batch；最终收口和恢复会继续同步。
 
 自动收口不执行 `sync-main`。最终报告使用 aggregate 本次读取的 `workspaceSync` 与 `repositoryHeads`，不沿用先前的同步缓存；同步 SHA 尚未追上当前集成 SHA 时仍显示待同步。用户基线分支、需求集成分支及其 Worktree 均保留，交付清理队列只处理已交付的 Batch 和候选临时 Worktree。
 
 `settle-delivery` 完成合并后只登记同步待办并立即返回 `merged`，Workflow 随后执行独立同步；最终收口同样先返回待办，再补同步。临时同步 Worktree 的创建和合并按命令指定空 hooks 目录，保留 LFS 内容过滤，不改用户全局 Git 配置。Git 原始输出保存在同步备份目录的 `*.stdout.log` / `*.stderr.log`；错误文本容错转为 UTF-8。`preparing` 中断会校验并复用已创建的临时 Worktree，已合并 Batch 的后续诊断不会重新登记为业务失败。
 
-独立恢复使用 `python hooks/parallel_workspace_sync.py sync --workspace <artifact> --feature <feature> --run-id <runId> --repository-ref <ref> --resolver-id <invocationId>`。冲突返回临时 `worktreePath`、`contextPath`、`conflictedFiles`、`attemptId`；仅编辑这些临时冲突文件，随后执行同入口 `complete` 并追加 `--attempt-id <attemptId>`。`refresh_required` 表示用户期间又有修改，重新 `sync` 即可。不得直接在用户目录处理 Runtime 冲突标记，也不调用 commit/reset。
+同步任务持久化在 manifest 的 `workspaceSyncQueue`，按仓库串行、不同仓库并行。每个合并提交只登记一次，记录 Batch、目标 SHA、顺序、尝试次数和错误历史。Batch worker 登记后即可领取新工作，Workflow 持有并等待独立同步任务收尾。`desiredSha` 始终表示最新集成目标；旧任务完成不会覆盖它，只有实际 `lastSyncedSha` 追上目标且队列处理完毕才显示仓库已同步。
+
+失败按 5、30、120 秒间隔最多自动重试 3 次，分别显示 `retry_wait` 和最终 `failed`，错误保留在任务 `errors` 及报告 `workspaceSyncNotifications`。重试耗尽后允许同仓库后续任务继续。后续成功 SHA 经 Git 祖先校验确认包含旧失败提交时，旧任务转为 `covered`、记录 `coveredBy`，保留错误历史但不再重试或列入待同步 Batch。没有后续成功覆盖时仍报告失败。恢复和最终收口会对账已合并 Batch，补齐遗漏登记；不重跑编码。
+
+独立恢复使用 `python -X utf8 hooks/parallel_workspace_sync.py process --workspace <artifact> --feature <feature> --run-id <runId> --repository-ref <ref> --resolver-id <invocationId>`，每次处理一条任务。`queued` 表示还有后续任务，继续 `process`；`retry_wait` 按 `retryAfterSeconds` 等待；`failed` 表示自动重试耗尽。排除原因后可显式调用同入口 `retry` 重新开启失败任务的重试预算，再执行 `process`。
+
+冲突返回临时 `worktreePath`、`contextPath`、`conflictedFiles`、`jobId`、`attemptId`；仅编辑这些临时冲突文件，随后执行同入口 `complete-job` 并追加 `--job-id <jobId> --attempt-id <attemptId>`。`refresh_required` 表示用户期间又有修改，重新 `process`。`busy` 表示其他进程或冲突编辑者仍持有任务；冲突编辑所有权最长保留 15 分钟，过期后可由新的调用恢复。失败通知的 `fail` 命令接受 Base64 编码错误，避免把诊断内容解释为 shell 命令。旧 `sync` / `complete` 入口保留兼容，固定 Workflow 使用队列入口。不得直接在用户目录处理 Runtime 冲突标记，也不调用 commit/reset。
 
 固定 Code Workflow 的阶段为 prepare → implement → review → 交付 → 证据汇总。前后端均不包含 UTest/E2E，不创建测试阶段、测试环境、验证 Worktree 或 SKIP 证据。Review 通过后直接交付，最终使用 aggregate `--finish-workflow` 完成报告。
 

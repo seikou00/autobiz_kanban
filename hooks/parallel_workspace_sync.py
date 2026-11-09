@@ -8,6 +8,7 @@ branch, stashing its files, or requiring a clean user checkout.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -121,13 +122,9 @@ def request_sync_locked(manifest: dict, repository_ref: str) -> dict:
     if manifest.get("integrationMode") != "isolated":
         return {"success": True, "status": "skipped", "repositoryRef": repository_ref}
     ref = manifest["repositories"][repository_ref].get("integrationRepositoryRef", repository_ref)
-    saved = manifest.setdefault("workspaceSync", {}).get(ref, {})
-    result = {"success": True, "status": "pending", "repositoryRef": ref, **saved}
-    if not saved or saved.get("status") == "synced":
-        target = manifest["repositories"][ref]["headSha"]
-        result.update(status="synced" if saved.get("lastSyncedSha") == target else "pending", targetSha=target)
-    manifest["workspaceSync"][ref] = result
-    return result.copy()
+    from hooks.parallel_workspace_queue import reconcile_locked, summary_locked
+    reconcile_locked(manifest, ref)
+    return summary_locked(manifest, ref).copy()
 
 
 def resolution_write_error(workspace: Path, manifest: dict, record: dict, target: Path) -> str | None:
@@ -162,6 +159,18 @@ def resolution_write_error(workspace: Path, manifest: dict, record: dict, target
 
 def _persist(workspace: Path, feature: str, run_id: str, ref: str, path: Path, state: dict) -> dict:
     result = _summary(state, ref)
+    covered_ids = set()
+    covering_job = None
+    if state.get("status") == "synced":
+        # Legacy sync/complete callers also acknowledge durable publication.
+        # Do Git ancestry checks before taking the run lock. A concurrent newer
+        # merge cannot be covered by this older snapshot.
+        jobs = load_manifest(workspace, feature, run_id).get("workspaceSyncQueue", {}).get(ref, [])
+        covering_job = next((job["jobId"] for job in jobs if job["targetSha"] == state["lastSyncedSha"]), None)
+        for job in jobs:
+            if job["status"] not in {"synced", "covered"} and _git(Path(state["sourcePath"]), "merge-base", "--is-ancestor",
+                    job["targetSha"], state["lastSyncedSha"], check=False).returncode == 0:
+                covered_ids.add(job["jobId"])
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in {"cancelled", "rolled_back", "cleaned"}:
@@ -169,7 +178,21 @@ def _persist(workspace: Path, feature: str, run_id: str, ref: str, path: Path, s
         atomic_write_json(path, state)
         if state.get("backupPath"):
             atomic_write_json(Path(state["backupPath"]) / "journal.json", state)
-        manifest.setdefault("workspaceSync", {})[ref] = result
+        previous = manifest.setdefault("workspaceSync", {}).get(ref, {})
+        manifest["workspaceSync"][ref] = {**previous, **result}
+        # Per-attempt success is distinct from repository-wide freshness.
+        head = manifest["repositories"][ref]["headSha"]
+        manifest["workspaceSync"][ref]["desiredSha"] = head
+        if state.get("status") == "synced":
+            for job in manifest.get("workspaceSyncQueue", {}).get(ref, []):
+                if job["jobId"] in covered_ids:
+                    job.update(status="synced" if job["targetSha"] == state["lastSyncedSha"] else "covered",
+                               completedAt=utc_now())
+                    if job["status"] == "covered":
+                        job["coveredBy"] = covering_job
+                    job.pop("owner", None)
+            from hooks.parallel_workspace_queue import summary_locked
+            summary_locked(manifest, ref)
         save_manifest(workspace, feature, run_id, manifest)
     return result
 
@@ -403,7 +426,8 @@ def _apply(workspace: Path, feature: str, run_id: str, ref: str, binding: dict, 
 
 
 def sync_workspace(workspace: Path, feature: str, run_id: str, repository_ref: str,
-                   resolver_id: str | None = None, *, complete_attempt: str | None = None) -> dict:
+                   resolver_id: str | None = None, *, complete_attempt: str | None = None,
+                   target_sha: str | None = None) -> dict:
     manifest = load_manifest(workspace, feature, run_id)
     if manifest.get("status") in {"cancelled", "rolled_back", "cleaned"}:
         raise ValueError("workspace_sync_run_inactive")
@@ -422,8 +446,18 @@ def sync_workspace(workspace: Path, feature: str, run_id: str, repository_ref: s
     try:
         # Re-read after taking the publication lock; another Batch may have
         # advanced integration or completed the previous publication meanwhile.
-        binding = load_manifest(workspace, feature, run_id)["repositories"][ref]
+        binding = dict(load_manifest(workspace, feature, run_id)["repositories"][ref])
+        if target_sha:
+            if _git(Path(binding["gitRoot"]), "merge-base", "--is-ancestor", target_sha,
+                    binding["headSha"], check=False).returncode:
+                raise ValueError("workspace_sync_target_not_integrated")
+            binding["headSha"] = target_sha
         state = _read(path)
+        if target_sha and state.get("status") in {"conflicted", "merged", "applying"} and state.get("targetSha") != target_sha:
+            # The exhausted predecessor may have a conflict or partial apply.
+            # Snapshot the actual user files again against lastSyncedSha; its
+            # backup journal remains available and no source content is reset.
+            state = {**state, "status": "refresh_required"}
         if complete_attempt:
             if state.get("attemptId") != complete_attempt or not resolver_id or state.get("resolverId") != resolver_id:
                 raise ValueError("workspace_sync_stale_resolution")
@@ -504,17 +538,28 @@ def sync_all(workspace: Path, feature: str, run_id: str) -> list[dict]:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sync", "complete"))
+    parser.add_argument("action", choices=("sync", "complete", "process", "complete-job", "fail", "retry"))
     for name in ("workspace", "feature", "run-id", "repository-ref"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--resolver-id")
     parser.add_argument("--attempt-id")
+    parser.add_argument("--job-id")
+    parser.add_argument("--failure-id")
+    parser.add_argument("--error-base64")
     args = parser.parse_args(argv)
     try:
         if args.action == "complete" and not args.attempt_id:
             raise ValueError("workspace_sync_attempt_required")
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
-        if args.action == "complete":
+        if args.action in {"process", "complete-job", "fail", "retry"}:
+            from hooks.parallel_workspace_queue import operate
+            if not args.resolver_id:
+                raise ValueError("workspace_sync_resolver_required")
+            result = operate(workspace, feature, args.run_id, args.repository_ref, args.resolver_id,
+                             action="complete" if args.action == "complete-job" else args.action,
+                             job_id=args.job_id, attempt_id=args.attempt_id, failure_id=args.failure_id,
+                             error=base64.b64decode(args.error_base64, validate=True).decode("utf-8") if args.error_base64 else None)
+        elif args.action == "complete":
             result = sync_workspace(workspace, feature, args.run_id, args.repository_ref,
                                     args.resolver_id, complete_attempt=args.attempt_id)
         else:
