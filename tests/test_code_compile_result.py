@@ -15,7 +15,7 @@ from unittest import mock
 from hooks import task_runner as runner
 from hooks.code_shell_analysis import analyze_script
 from hooks.evidence_store import read_records, stream_path, EvidenceStoreError
-from tests.test_task_runner import _workspace, _start, _run, _configure_frontend_without_batch_compile
+from tests.test_task_runner import _workspace, _start, _run, _configure_frontend_without_batch_compile, _verify_frontend
 
 
 class CodeCompileResultTest(unittest.TestCase):
@@ -58,6 +58,18 @@ class CodeCompileResultTest(unittest.TestCase):
         fresh = self.prepare()
         self.record(fresh)
         self.assertTrue(self.finish()[0])
+
+    def test_prepare_and_finish_read_one_source_snapshot_each(self):
+        with mock.patch.object(runner, "_git_snapshot", wraps=runner._git_snapshot) as snapshot:
+            attempt = self.prepare()
+            self.assertEqual(snapshot.call_count, 1)
+            self.record(attempt)
+            snapshot.reset_mock()
+            self.assertTrue(self.finish()[0])
+            self.assertEqual(snapshot.call_count, 1)
+            snapshot.reset_mock()
+            self.assertTrue(self.finish()[0])
+            snapshot.assert_not_called()
 
     def test_log_failure_missing_or_changed_log_prevent_completion(self):
         result = self.record(self.prepare(), log_exit_code=1)
@@ -198,5 +210,7 @@ class FrontendCompileExemptionTest(unittest.TestCase):
             state = _start(workspace, code)
             (code / "production.ts").write_text("export const ready = true;\n", encoding="utf-8")
             self.assertFalse(state["productionCompileRequired"])
+            checked = _verify_frontend(workspace, code, state["runId"], "production.ts")
+            self.assertEqual(checked.returncode, 0, checked.stdout)
             self.assertTrue(runner.finish_implementation(workspace, "alpha", "T001", code, state["runId"],
                                                         no_code_change_why=None, supporting_files=[])[0])

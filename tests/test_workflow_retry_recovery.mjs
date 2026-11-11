@@ -55,6 +55,41 @@ function harness() {
   return c;
 }
 
+test("a consumed claim refreshes to the next generation before starting delivery", async () => {
+  const c = harness(), events = [];
+  let current = snapshot(3, "pending", 1000);
+  c.applySchedulerState(current);
+  c.dispatchCommand = async (action, job) => {
+    events.push(`${action}:${job.generation}`);
+    if (action === "claim" && job.generation === 3) {
+      current = snapshot(4, "pending", 2000);
+      return { success: true, status: "not_claimed", batchId: job.batchId, generation: 3, reasonCode: "grant_consumed" };
+    }
+    return { success: true, status: action === "claim" ? "claimed" : "finished", batchId: job.batchId, ownerToken: "new-owner" };
+  };
+  c.agent = async () => current;
+  c.runInitialBatchLifecycle = async () => {
+    events.push(`delivery:${c.activeDispatchGrants.get("B002").generation}`);
+    current = snapshot(4, "merged", 3000);
+    current.activeWorkers = 0;
+    current.dispatchDiagnostics.activeBatchIds = [];
+    return { batchId: "B002", status: "merged" };
+  };
+  c.waitForDispatchChange = async () => assert.fail("a recovered grant should proceed immediately");
+  await c.runDispatchWorker(2, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set(["B001"]) });
+  assert.deepEqual(events, ["claim:3", "claim:4", "delivery:4", "finish:4"]);
+  assert.equal(c.unresolvedRecords.length, 0);
+});
+
+test("a rejected claim remains a rejection when the model changes success to false", async () => {
+  const c = harness();
+  c.agent = async () => ({ success: false, status: "not_claimed", batchId: "B001", generation: 3, reasonCode: "grant_consumed" });
+  const result = await c.dispatchCommand("claim", { batchId: "B001", generation: 3 }, "", "claim-test");
+  assert.equal(result.status, "not_claimed");
+  assert.equal(result.reasonCode, "grant_consumed");
+  assert.equal(c.activeDispatchGrants.size, 0);
+});
+
 test("a normal status snapshot of the new grant releases the previous failure quarantine", () => {
   const c = harness();
   c.applySchedulerState(snapshot(1, "retry_pending", 1000));

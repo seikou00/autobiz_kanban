@@ -1,13 +1,31 @@
-# 当前前端 TASK 的 Route
+# 当前前端 TASK 的 Route 与统一回检
 
-只有 `taskContract.uiRequired=true` 才执行。本协议位于 Batch 内，不是全局启动前置条件。UI 范围来自 UI_CONTEXT.json，行为来自 Specs，技术边界来自 Design/Plan；HTML 只提供布局和视觉，不覆盖行为契约。
+仅 taskContract.uiRequired=true 执行。业务来自 Specs，视觉来自可读 HTML；没有高保真、仅部分页面有稿或稿件不可读时正常 spec-driven-ui，记录缺口，不阻止写入，也不声称已对照稿件还原。
 
-1. 用 `resolve_frontend_html_route.py --workspace <artifact> --feature <feature> --task-id <TASK> --start-route-run --json` 解析当前作用域。required VIS 只能来自当前 capability 的归档，不用临时 HTML 替换。
-2. 按 route 读取一个分支：absolute-html → `frontend-html/with-absolute-html/SKILL.md`；standard-html → `frontend-html/with-standard-html/SKILL.md`。读完后登记 `--mark route-skill-read-complete`；工具截断时续读。spec-driven-ui 不读 HTML/parser；none 禁止写前端。
-3. 将命中 Route 的实际步骤放入可见清单，登记 `--mark route-todos-created`。只读准备后先完成 TASK start，再生成 `.frontend/html-analysis` / `.frontend/html-input`、处理资源及写源码。
-4. 仅在 Route 步骤需要时读取它指定的 parser，登记 `--mark parser-read`；不是 Code 根技能直接加载全部 parser。
-5. 完成清单登记 `--mark route-todos-completed`，执行 Route 的统一前端回检后登记 `--review-status passed|has-suggestions|skipped-by-user|failed`。缺少回检记录或 failed 不能假报完成。机器证据在 FRONTEND_ROUTE.json。
+1. 执行 resolve_frontend_html_route.py --workspace <artifact> --feature <feature> --task-id <TASK> --start-route-run --json。读取返回 frontendPolicyPath 一次及对应 Route SKILL；standard/absolute 读完登记 route-skill-read-complete，创建 route todos。spec-driven-ui 不读 HTML parser。
+2. 按 Route 完成只读准备，TASK start 成功后才运行分析、复制 assets 或写源码；按顺序转交 parser 并登记 parser-read。原稿优先，分析脚本仅辅助。
+3. Route 实现清单完成登记 route-todos-completed（HTML 路线），随后执行下述统一回检。不能仅登记 reviewStatus 代替回检。
 
-VIS 文件不可读可由 resolver 以 `requiredVisualSourceMissing` 明确降级 spec-driven-ui，缺口保留在回检结果。已归档输入的路径、内容摘要或 bundle 摘要不匹配必须修复，不静默降级。其他 capability 的缺失 VIS 不阻断本 TASK。
+## 统一回检（初次实现与返修共用）
 
-使用现有组件、图标、图表与依赖；不为实现页面新增安装或等待确认，必要时最小兼容实现并保留非阻断差异。HTML Route 完成后回到当前 TASK 的 finish、封存和 Batch 流水线。
+```bash
+python -X utf8 <pluginPath>/hooks/frontend_verification.py --workspace <artifact> --feature <feature> --task-id <TASK> --run-id <真实TASK runId> --code-workspace <业务工作区> --parallel-run-id <真实parallelRunId> --lease-token <真实token> --workspace-ref <真实ref> --target <当前页面/相关源码相对目录>
+```
+
+非并行任务省略 parallel-run-id/lease-token；target 可重复，务必包含本任务页面及相关组件，路径为工作区内相对路径。工具绑定当前源码/输入/检查器，未变化时复用静态回检和已有截图，不重复分析。报告在返回 reportPath；只在有 findings/未验证时读取完整报告。读取 html-post-review.md 做必要专业复核，不把静态脚本当最终视觉判断。
+
+每个 TASK/run 使用一份实现回检报告。首次 finish-implementation 核对当前源码并登记 Evidence，重复 finish 复用已登记的结果。
+
+- failed：读取 static.reports 的 must-fix 定向修复并重跑，最多两轮。执行失败如实报告，不能假写 passed。
+- passed/has-suggestions：可 finish-implementation；建议项透明保留。
+- unverified：有可读 HTML 但还没有当前页面的视觉证据。先用已有浏览器工具截图（真实项目页面+每份原始 HTML）；也可使用下述受控预览，不安装依赖。
+
+可选 `--check-script typecheck`（或 build/check:types）：仅必要时执行一个项目已配置的简单编译脚本，同一源码和脚本结果复用，不默认 build+lint+test 全跑。
+
+可选 `--capture --preview-script dev --page-path /真实路由 --width <原稿视口宽> --height <高>`：项目已有简单 Vite/Next dev 脚本及 Playwright 时，受控启动、截图并自动停止。已有本地服务可用 `--capture --url http://127.0.0.1:<port>/<route>`。不直接启动脱管后台进程，不安装依赖。环境不可用时保留准确错误；可改用已有浏览器工具。
+
+外部浏览器截图通过 `--actual-screenshot <png> --reference-screenshot <png>` 登记，多份原稿重复 reference-screenshot。截图必须属于当前源码。检查截图后写临时 JSON：`{"bindingDigest":"<报告 binding 对象的 digest；优先使用 capture.bindingDigest>","decision":"passed|failed","findings":[...]}`，以 `--visual-report <json>` 再执行同一命令。findings 中 must-fix 必须判失败，不能以“文件存在”替代视觉判断。使用工具 capture 时读取 report.capture.bindingDigest 和截图路径。
+
+无高保真稿的页面只要求当前静态回检，fidelityStatus=not-applicable；按需做运行检查。缺稿不会强制等待截图。可读稿件的页面需当前视觉证据，未执行显示 unverified。环境无法验证时报告缺口，不绕过 finish 门禁。
+
+TASK 实现或生产返修期间修改了相关源码，需在 finish 前完成当前版本的回检。封存后，前后端统一使用封存提交及其 Review 证据交付。候选推广按 Git 提交比较本 Batch 改过的文件，存在内容差异时 Workflow 只读复核这些文件。原 TASK 报告继续保存在原路径。

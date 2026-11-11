@@ -244,6 +244,12 @@ def _start(workspace: Path, code: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _verify_frontend(workspace: Path, code: Path, run_id: str, target: str, *identity: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, "-B", str(ROOT / "hooks/frontend_verification.py"),
+        "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001", "--run-id", run_id,
+        "--code-workspace", str(code), "--target", target, *identity], cwd=ROOT, capture_output=True, text=True)
+
+
 def _configure_review_only(feature_dir: Path) -> None:
     """Configure the current Plan contract: Review/UTest owns validation."""
 
@@ -553,6 +559,8 @@ class TaskRunnerTest(unittest.TestCase):
 
             started = _start(workspace, code)
             (code / "implemented.ts").write_text("export const implemented = true;\n", encoding="utf-8")
+            checked = _verify_frontend(workspace, code, started["runId"], "implemented.ts")
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             finished = _run(
                 "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
@@ -593,6 +601,8 @@ class TaskRunnerTest(unittest.TestCase):
             _configure_frontend_without_batch_compile(feature_dir)
             started = _start(workspace, code)
             (code / "implemented.ts").write_text("export const implemented = true;\n", encoding="utf-8")
+            checked = _verify_frontend(workspace, code, started["runId"], "implemented.ts")
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             finished = _run(
                 "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),

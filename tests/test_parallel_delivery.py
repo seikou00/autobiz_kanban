@@ -14,9 +14,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hooks.parallel_batch_scheduler import create_run, mark_batch, schedule, resume_run, manual_resume_run
-from hooks.parallel_batch_stage import start_stage, complete_stage, review_checkpoint
+from hooks.parallel_batch_stage import start_stage, complete_stage, review_checkpoint, gate_batch
 from hooks.parallel_evidence_aggregate import aggregate_evidence
-from hooks.parallel_dispatch import claim, defer
+from hooks.parallel_dispatch import claim, defer, finish
 from hooks.parallel_delivery import settle_delivery, prepare_finalization, main as delivery_main
 from hooks.parallel_cleanup import drain, pending
 from hooks.parallel_runtime import load_manifest, run_lock, save_manifest, run_dir
@@ -173,7 +173,7 @@ class DeliveryTest(unittest.TestCase):
         # after advancing past the short queue backoff, without code retries.
         clock = time.time()
         for _ in range(5):
-            clock += 10
+            clock += 31
             queued = [item for item in results if item["status"] == "queued"]
             if not queued:
                 break
@@ -247,10 +247,12 @@ class DeliveryTest(unittest.TestCase):
         self.create()
         args, _ = self.delivery()
         from hooks.parallel_repository import repository_lock
+        started = time.time()
         with repository_lock(self.manifest()["repositories"]["default"]):
             queued = settle_delivery(*args[:6])
         self.assertEqual(queued["status"], "queued")
         self.assertEqual(queued["reasonCode"], "repository_busy")
+        self.assertGreaterEqual(self.manifest()["batches"]["B001"]["deliveryQueue"]["retryAfterEpoch"], started + 30)
         self.assertEqual(claim(self.workspace, "alpha", self.run, "B001", 1, "merge_candidate", "resume")["reasonCode"], "delivery_queue_wait")
 
     def test_a_reserved_integration_target_is_a_normal_wait_without_a_code_retry(self):
@@ -264,7 +266,7 @@ class DeliveryTest(unittest.TestCase):
         self.assertEqual(queued["reasonCode"], "target_reserved")
         self.assertEqual(self.manifest()["batches"]["B001"].get("recovery", {}).get("retryAttempts", 0), 0)
         release(binding, self.workspace, "alpha", self.run, 99)
-        with patch("hooks.parallel_dispatch.time.time", return_value=time.time() + 10):
+        with patch("hooks.parallel_dispatch.time.time", return_value=time.time() + 31):
             owner = claim(self.workspace, "alpha", self.run, "B001", 1, "merge_candidate", "resume")
             result = settle_delivery(*args[:5], owner["ownerToken"])
         self.assertEqual(result["status"], "merged")
@@ -282,6 +284,15 @@ class DeliveryTest(unittest.TestCase):
             task = pool.submit(settle_delivery, *args[:6])
             self.assertTrue(entered.wait(5))
             try:
+                # Neither an elapsed caller deadline nor a dispatch TTL can
+                # authorize another merge while the original process lives.
+                manifest = self.manifest()
+                manifest["batches"]["B001"]["dispatch"]["expiresEpoch"] = time.time() - 1
+                save_manifest(self.workspace, "alpha", self.run, manifest)
+                self.assertEqual(claim(self.workspace, "alpha", self.run, "B001", 1,
+                                       "merge_candidate", "duplicate")["reasonCode"], "running")
+                self.assertEqual(defer(*args[:6], "caller timed out")["status"], "delivery_running")
+                self.assertEqual(finish(*args[:6], "failed")["status"], "delivery_running")
                 state = schedule(self.workspace, "alpha", self.run)
                 self.assertEqual(state["dispatchGrants"]["B001"], 1)
                 duplicate = settle_delivery(*args[:6])
@@ -292,6 +303,29 @@ class DeliveryTest(unittest.TestCase):
                 proceed.set()
             self.assertEqual(task.result()["status"], "merged")
         self.assertEqual(len(self.manifest()["mergeTrains"]), 1)
+
+    def test_delivery_claim_waits_for_same_repository_and_wakes_on_completion(self):
+        self.create(2)
+        first, _ = self.delivery("B001")
+        second, _ = self.delivery("B002")
+        for batch_id in ("B001", "B002"):
+            gate_batch(self.workspace, "alpha", self.run, batch_id)
+        manifest = self.manifest()
+        # A recovery claim reserves delivery even before its process starts.
+        manifest["batches"]["B001"]["dispatch"]["source"] = "merge_candidate"
+        manifest["batches"]["B002"]["dispatch"]["status"] = "waiting"
+        # Different workspaceRefs for one physical repository share admission.
+        manifest["repositories"]["alias"] = copy.deepcopy(manifest["repositories"]["default"])
+        manifest["batches"]["B002"]["repositoryRef"] = "alias"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        before = self.manifest()
+        denied = claim(self.workspace, "alpha", self.run, "B002", 1, "merge_candidate", "second")
+        self.assertEqual(denied["reasonCode"], "delivery_queue_wait")
+        self.assertEqual(self.manifest(), before)
+        settle_delivery(*first[:6])
+        owner = claim(self.workspace, "alpha", self.run, "B002", 1, "merge_candidate", "second")
+        self.assertEqual(owner["status"], "claimed")
+        self.assertEqual(settle_delivery(*second[:5], owner["ownerToken"])["status"], "merged")
 
     def test_cli_settles_without_a_transcribed_commit_parameter(self):
         self.create()
@@ -336,9 +370,79 @@ class DeliveryTest(unittest.TestCase):
         self.assertIsNone(self.manifest()["batches"]["B001"].get("dispatch"))
         generation = resumed["dispatchGrants"]["B001"]
         owner = claim(self.workspace, "alpha", self.run, "B001", generation, "merge_candidate", "resume")
+        for _ in range(40):
+            polled = schedule(self.workspace, "alpha", self.run)
+            self.assertEqual(polled["dispatchGrants"]["B001"], generation)
         result = settle_delivery(*args[:4], generation, owner["ownerToken"])
         self.assertEqual(result["mergeCommitSha"], before["candidateSha"])
         self.assertEqual(len(self.manifest()["mergeTrains"]), 1)
+
+    def test_old_frontend_handoff_resumes_without_reopening_the_report(self):
+        self.create()
+        args, _ = self.delivery()
+        with patch.object(train, "_promote_candidate", side_effect=RuntimeError("interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                settle_delivery(*args)
+        manifest = self.manifest()
+        op = next(iter(manifest["deliveryOperations"].values()))
+        op.update(status="awaiting_frontend_recheck", frontendRecheck={"taskId": "T001"})
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B001"], 1)
+        result = settle_delivery(*args)
+        self.assertEqual(result["status"], "merged")
+        self.assertEqual(result["operationId"], op["operationId"])
+        self.assertNotIn("frontendRecheck", self.manifest()["deliveryOperations"][op["operationId"]])
+
+    def test_frontend_git_checkout_line_endings_do_not_require_candidate_review(self):
+        git(self.repo, "config", "core.autocrlf", "true")
+        self.create()
+        manifest = self.manifest()
+        manifest["batches"]["B001"]["executionLane"] = "frontend"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        args, worktree = self.delivery(content="page behaviour\n")
+        (worktree / "shared.txt").write_bytes(b"page behaviour\n")
+        # A pre-upgrade report belongs to the TASK and stays untouched at delivery.
+        report = self.feature / "frontend-verification" / "T001" / "old-run.json"
+        report.parent.mkdir(parents=True)
+        report.write_text('{"bindingDigest":"old-lf-report","status":"passed"}')
+        before = report.read_bytes()
+        result = settle_delivery(*args)
+        self.assertEqual(result["status"], "merged")
+        record = next(iter(self.manifest()["mergeTrains"].values()))
+        self.assertEqual((Path(record["worktreePath"]) / "shared.txt").read_bytes(), b"page behaviour\r\n")
+        self.assertEqual((worktree / "shared.txt").read_bytes(), b"page behaviour\n")
+        self.assertEqual(report.read_bytes(), before)
+
+    def test_automatic_merge_of_overlapping_file_only_reviews_its_changed_content(self):
+        original = "top\n" + "unchanged\n" * 10 + "bottom\n"
+        (self.repo / "shared.txt").write_text(original)
+        git(self.repo, "add", "shared.txt")
+        git(self.repo, "commit", "-m", "shared baseline")
+        self.create(2)
+        manifest = self.manifest()
+        manifest["batches"]["B002"]["executionLane"] = "frontend"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        first, _ = self.delivery("B001", original.replace("top", "first"))
+        second, _ = self.delivery("B002", original.replace("bottom", "second"))
+        self.assertEqual(settle_delivery(*first)["status"], "merged")
+        delta = settle_delivery(*second)
+        self.assertEqual(delta["status"], "candidate_review_required")
+        self.assertEqual(delta["reviewScope"], [{"batchId": "B002", "deliverySha": second[-1], "paths": ["shared.txt"]}])
+        self.assertEqual(settle_delivery(*second, reviewed_candidate=delta["candidateSha"])["status"], "merged")
+        self.assertEqual((self.integration / "shared.txt").read_text(),
+                         original.replace("top", "first").replace("bottom", "second"))
+
+    def test_review_for_another_seal_blocks_delivery(self):
+        self.create()
+        args, _ = self.delivery()
+        batch = self.manifest()["batches"]["B001"]
+        path = Path(batch["stageStates"]["review"]["evidencePath"])
+        evidence = json.loads(path.read_text())
+        evidence["inputs"]["batchCommit"] = "0" * 40
+        path.write_text(json.dumps(evidence))
+        with self.assertRaisesRegex(ValueError, "review_not_bound_to_seal"):
+            settle_delivery(*args)
+        self.assertFalse(self.manifest().get("mergeTrains"))
 
     def test_merge_failure_can_resume_after_repeated_failure_and_a_new_generation(self):
         self.create()
@@ -419,6 +523,69 @@ class DeliveryTest(unittest.TestCase):
             settle_delivery(*args)
         self.assertEqual(self.manifest()["mergeTrains"], {})
 
+    def test_consumed_generation_three_resumes_reviewed_delivery_on_generation_four(self):
+        self.create(3)
+        for index, outcome in enumerate(("completed", "failed", "retry_pending"), 1):
+            batch_id = f"B{index:03d}"
+            args, tree = self.delivery(batch_id)
+            gate_batch(self.workspace, "alpha", self.run, batch_id)
+            manifest = self.manifest()
+            batch = manifest["batches"][batch_id]
+            batch["executionLane"] = "frontend" if index == 1 else "backend"
+            batch["dispatchGeneration"] = batch["dispatch"]["generation"] = 3
+            stages = copy.deepcopy(batch["stageStates"])
+            save_manifest(self.workspace, "alpha", self.run, manifest)
+            finish(*args[:4], 3, args[5], outcome)
+            self.assertEqual(claim(*args[:4], 3, "merge_candidate", "new-workflow")["reasonCode"], "grant_consumed")
+
+            state = schedule(self.workspace, "alpha", self.run)
+            self.assertEqual(state["dispatchGrants"][batch_id], 4)
+            self.assertIn(batch_id, state["mergeableBatches"])
+            self.assertEqual(self.manifest()["batches"][batch_id]["stageStates"], stages)
+            for _ in range(3):
+                self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"][batch_id], 4)
+            owner = claim(*args[:4], 4, "merge_candidate", "new-workflow")
+            self.assertEqual(owner["status"], "claimed")
+            self.assertEqual(finish(*args[:4], 3, args[5])["status"], "stale_owner_ignored")
+            merged = settle_delivery(*args[:4], 4, owner["ownerToken"])
+            self.assertEqual(merged["status"], "merged")
+            self.assertEqual(merged["deliverySha"], args[6])
+            batch = self.manifest()["batches"][batch_id]
+            self.assertEqual(batch["worktreePath"], str(tree))
+            self.assertEqual(batch["stageStates"], stages)
+            self.assertEqual(batch.get("recovery", {}).get("retryAttempts", 0), 0)
+            self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"][batch_id], 4)
+
+    def test_consumed_grant_recovers_its_built_candidate_and_queue_ticket(self):
+        self.create()
+        args, _ = self.delivery()
+        with patch.object(train, "_promote_candidate", side_effect=RuntimeError("interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                settle_delivery(*args)
+        before = self.manifest()
+        operation = next(iter(before["deliveryOperations"].values()))
+        candidate = next(iter(before["mergeTrains"].values()))
+        finish(*args[:6], "failed")
+        state = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(state["dispatchGrants"]["B001"], 2)
+        owner = claim(*args[:4], 2, "merge_candidate", "new-workflow")
+        merged = settle_delivery(*args[:4], 2, owner["ownerToken"])
+        self.assertEqual(merged["status"], "merged")
+        self.assertEqual(merged["mergeCommitSha"], candidate["candidateSha"])
+        self.assertEqual(len(self.manifest()["mergeTrains"]), 1)
+        recovered = self.manifest()["deliveryOperations"][merged["operationId"]]
+        self.assertEqual(recovered["ticket"], operation["ticket"])
+
+    def test_consumed_grant_recovery_waits_for_a_live_settler(self):
+        from hooks.parallel_delivery import _execution_lock
+        self.create()
+        args, _ = self.delivery()
+        gate_batch(self.workspace, "alpha", self.run, "B001")
+        finish(*args[:6], "failed")
+        with _execution_lock(self.workspace, "alpha", self.run, "B001"):
+            self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B001"], 1)
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B001"], 2)
+
     def test_cleanup_failure_preserves_merged_delivery_and_can_resume(self):
         self.create()
         args, tree = self.delivery()
@@ -467,25 +634,90 @@ class DeliveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "parallel_manifest_stale_revision"):
                 save_manifest(self.workspace, "alpha", self.run, before)
 
-    def test_conflict_reservation_keeps_target_stable_without_holding_os_lock(self):
-        from hooks.parallel_repository import repository_lock, reservation
+    def backend_conflict(self):
         self.create(2)
         first, _ = self.delivery("B001", "first\n")
         second, _ = self.delivery("B002", "second\n")
+        manifest = self.manifest()
+        for batch in manifest["batches"].values():
+            batch["executionLane"] = "backend"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
         settle_delivery(*first)
         conflict = settle_delivery(*second)
         self.assertEqual(conflict["status"], "candidate_conflicted")
+        return second, conflict
+
+    def resolve_backend_conflict(self, conflict):
+        prepared = train.prepare_resolution(self.workspace, "alpha", self.run, conflict["wave"], "default", "attempt")
+        self.assertTrue(prepared["success"], prepared)
+        (Path(prepared["worktreePath"]) / "shared.txt").write_text("first and second\n")
+        resolved = train.complete_resolution(self.workspace, "alpha", self.run, conflict["wave"], "default")
+        self.assertTrue(resolved["success"], resolved)
+        return resolved
+
+    def test_conflict_reservation_keeps_target_stable_without_holding_os_lock(self):
+        from hooks.parallel_repository import repository_lock, reservation
+        second, conflict = self.backend_conflict()
         binding = self.manifest()["repositories"]["default"]
+        owner = copy.deepcopy(self.manifest()["batches"]["B002"]["dispatch"])
+        operation = copy.deepcopy(self.manifest()["deliveryOperations"][conflict["operationId"]])
+        self.assertEqual(operation["status"], "awaiting_candidate_resolution")
+        for _ in range(40):
+            self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B002"], 1)
         with repository_lock(binding, timeout=0.1):
             self.assertEqual(reservation(binding)["wave"], conflict["wave"])
         with self.assertRaisesRegex(ValueError, "parallel_repository_target_reserved"):
             train.build_candidate(self.workspace, "alpha", self.run, wave=99, batch_ids=["B002"])
-        prepared = train.prepare_resolution(self.workspace, "alpha", self.run, conflict["wave"], "default", "attempt")
-        self.assertTrue(prepared["success"], prepared)
-        (Path(prepared["worktreePath"]) / "shared.txt").write_text("first and second\n")
-        self.assertTrue(train.complete_resolution(self.workspace, "alpha", self.run, conflict["wave"], "default")["success"])
-        self.assertEqual(settle_delivery(*second)["status"], "merged")
+        resolved = self.resolve_backend_conflict(conflict)
+        self.assertEqual(resolved["status"], "built")
+        for index in range(40):
+            state = (resume_run if index % 10 == 0 else schedule)(self.workspace, "alpha", self.run)
+            self.assertEqual(state["dispatchGrants"]["B002"], 1)
+        self.assertEqual(self.manifest()["batches"]["B002"]["dispatch"], owner)
+        self.assertEqual(self.manifest()["deliveryOperations"][conflict["operationId"]], operation)
+        delta = settle_delivery(*second)
+        self.assertEqual(delta["status"], "candidate_review_required")
+        self.assertEqual(delta["reviewScope"], [{"batchId": "B002", "deliverySha": second[-1], "paths": ["shared.txt"]}])
+        for _ in range(3):
+            self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B002"], 1)
+        with self.assertRaisesRegex(ValueError, "candidate_review_sha_changed"):
+            settle_delivery(*second, reviewed_candidate="0" * 40)
+        merged = settle_delivery(*second, reviewed_candidate=delta["candidateSha"])
+        self.assertEqual(merged["status"], "merged")
+        self.assertEqual(merged["operationId"], conflict["operationId"])
+        self.assertEqual(merged["mergeCommitSha"], resolved["candidateSha"])
+        self.assertEqual(len(self.manifest()["mergeTrains"]), 2)
         self.assertEqual(reservation(binding), {})
+
+    def test_resolved_backend_conflict_can_recover_after_original_grant_expires(self):
+        second, conflict = self.backend_conflict()
+        resolved = self.resolve_backend_conflict(conflict)
+        manifest = self.manifest()
+        ticket = manifest["deliveryOperations"][conflict["operationId"]]["ticket"]
+        manifest["batches"]["B002"]["dispatch"]["expiresEpoch"] = time.time() - 1
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        state = schedule(self.workspace, "alpha", self.run)
+        self.assertEqual(state["dispatchGrants"]["B002"], 2)
+        with self.assertRaisesRegex(ValueError, "stale_stage_owner"):
+            settle_delivery(*second)
+        owner = claim(self.workspace, "alpha", self.run, "B002", 2, "merge_candidate", "recover")
+        merged = settle_delivery(*second[:4], 2, owner["ownerToken"], reviewed_candidate=resolved["candidateSha"])
+        self.assertEqual(merged["status"], "merged")
+        self.assertEqual(merged["mergeCommitSha"], resolved["candidateSha"])
+        self.assertEqual(self.manifest()["deliveryOperations"][merged["operationId"]]["ticket"], ticket)
+        self.assertEqual(len(self.manifest()["mergeTrains"]), 2)
+
+    def test_crash_after_resuming_resolved_backend_candidate_does_not_keep_waiting(self):
+        second, conflict = self.backend_conflict()
+        resolved = self.resolve_backend_conflict(conflict)
+        with patch.object(train, "_promote_candidate", side_effect=RuntimeError("worker terminated")):
+            with self.assertRaisesRegex(RuntimeError, "worker terminated"):
+                settle_delivery(*second)
+        self.assertEqual(self.manifest()["deliveryOperations"][conflict["operationId"]]["status"], "queued")
+        state = schedule(self.workspace, "alpha", self.run)
+        self.assertEqual(state["dispatchGrants"]["B002"], 2)
+        owner = claim(self.workspace, "alpha", self.run, "B002", 2, "merge_candidate", "recover")
+        self.assertEqual(settle_delivery(*second[:4], 2, owner["ownerToken"], reviewed_candidate=resolved["candidateSha"])["status"], "merged")
 
     def test_different_repositories_build_concurrently(self):
         other = DeliveryTest()

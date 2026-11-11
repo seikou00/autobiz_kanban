@@ -344,6 +344,27 @@ const completeScheduler = { runId: "run", status: "running", maxParallel: 1,
   scheduledGroups: [], readyBatches: [], allReadyBatches: [], mergeableBatches: [],
   implementationRecoveryBatches: [], stageRecoveryBatches: [], retryPendingBatches: [], blockedBatches: [],
   parallelGroups: [], allParallelGroups: [], dispatchGrants: {}, batchTaskIds: {}, batchWorkspaces: {} };
+const successBranch = context.schedulerSchema.anyOf?.find(branch => branch.required.includes("runId"));
+const errorBranch = context.schedulerSchema.anyOf?.find(branch => branch.properties?.ok?.const === false);
+if (!successBranch || !errorBranch || errorBranch.required.includes("runId")) process.exit(33);
+if (Object.keys(completeScheduler).some(field => !successBranch.required.includes(field))) process.exit(34);
+// Model projection may omit optional empty arrays. All successful scheduler
+// fields must survive that boundary, including queues with zero entries.
+const projected = Object.fromEntries(Object.entries(completeScheduler).filter(([field, value]) =>
+  !Array.isArray(value) || value.length > 0 || successBranch.required.includes(field)));
+context.requireSchedulerResult(projected, "projected-empty-queues");
+for (const field of ["implementationRecoveryBatches", "stageRecoveryBatches"]) {
+  for (const malformed of [null, "[]", {}]) {
+    let rejected = false;
+    try { context.requireSchedulerResult({ ...completeScheduler, [field]: malformed }, "invalid-queue"); }
+    catch (_) { rejected = true; }
+    if (!rejected) process.exit(35);
+  }
+}
+let commandFailure;
+try { context.requireSchedulerResult({ ok: false, error: "scheduler_read_failed" }, "command-error"); }
+catch (error) { commandFailure = String(error); }
+if (!commandFailure?.includes("scheduler_read_failed")) process.exit(36);
 for (const field of requiredSchedulerFields) {
   const incomplete = { ...completeScheduler };
   delete incomplete[field];

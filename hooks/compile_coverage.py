@@ -11,13 +11,14 @@ import shutil
 from pathlib import Path
 
 
-def production_fingerprint(repositories, argv):
+def production_fingerprint(repositories, argv, *, snapshots=None):
     from hooks.task_runner import _git_snapshot, _is_transient_validation_path, _is_code_stage_test_asset_path
     from hooks.utest_test_environment import parse_pom, _projection
     sources = {}
     for name, root in repositories.items():
         entries = {}
-        for relative, value in _git_snapshot(root).items():
+        snapshot = snapshots[name] if snapshots is not None else _git_snapshot(root)
+        for relative, value in snapshot.items():
             if _is_transient_validation_path(relative) or _is_code_stage_test_asset_path(relative):
                 continue
             path = root / relative

@@ -1,11 +1,11 @@
 ---
 name: html-parser
-description: 统一负责绝对定位高保真 HTML 路线的整页还原、结构定性、局部组件替换，并直接写入项目目标目录。组件来源优先走项目 architecture 中的公共组件说明，其次才是本地组件与项目已安装组件库；若当前工程缺少所需组件库，则按 `SKILL.md` 改用用户提供的兜底组件库继续生成。
+description: 统一负责绝对定位高保真 HTML 路线的整页还原、结构定性、局部组件替换，并直接写入项目目标目录。组件来源优先走项目 architecture 中的公共组件说明，其次才是本地组件与项目已安装组件库；若缺少组件能力，按 frontend-policy.md 使用现有能力并记录准确缺口。
 ---
 
 # HTML 解析器
 
-本文中的 `SKILL.md` 均指 code 根技能 `../../../../SKILL.md`。
+前端专业规则遵循上游已读取的 `frontend-policy.md`；调度、TASK 身份与写入时机遵循 code 根技能。
 本文件只能由 `../SKILL.md` 转交进入，是绝对定位高保真 HTML 主线里唯一负责“整页还原 + 局部组件替换 + 代码写入”的核心依赖。
 
 ## 1. 入口契约
@@ -72,7 +72,7 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 输入源 | 读取策略 |
 | --- | --- |
 | 用户提供的 HTML | 必读 |
-| Source Bundle 列出的 specs / design / PLAN 等正式流程产物 | 按各自 Method Bundle 读取；未列入契约的上游产物不作为正式输入 |
+| code_task_context 返回的 specs / design / PLAN 正式流程产物 | 读取当前 TASK 的准确引用；不加载无关上游产物 |
 | 当前目标文件 | 增量修改时读取 |
 | 项目 `architecture/` 文档 | 与结构、技术栈、API、组件相关时读取 |
 | 项目组件源码 | 只有需要证据时再读 |
@@ -151,7 +151,7 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 
 | 图标处理规则 | 说明 |
 | --- | --- |
-| 来源顺序 | 遵循 `SKILL.md` §图标来源顺序 |
+| 来源顺序 | 遵循 `frontend-policy.md` §图标来源顺序 |
 | Stage 1 记录 | handoff 中记录关键图标映射，供 Stage 2 和最终代码生成使用 |
 | 优先动作 | 先在项目图标体系或已安装图标库里找外观最接近的真实组件图标 |
 | 允许保留原始 `svg` | 只有“真实 svg 资产”才允许作为 fallback |
@@ -176,7 +176,7 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | 折线 / 面积 / 柱条 / 饼 / 漏斗 | 识别为图表语义，不要提前降级成装饰背景或进度条 |
 | 线性图表数量 | 折线图、面积图、sparkline、迷你趋势图等线性图表必须按原稿真实趋势线 / series 数量实现，不能少线、并线、偷换成单线，也不要把多线图误还原成单指标装饰趋势 |
 | 多趋势对比图 | 多个趋势的对比图表必须把每条趋势都实现出来，并保留图例、颜色和相对比较关系，不能偷换成单趋势图 |
-| 仅有语义无图形 | 仍按图表语义记录，由后续阶段按 `SKILL.md` §图表来源顺序 落地 |
+| 仅有语义无图形 | 仍按图表语义记录，由后续阶段按 `frontend-policy.md` §图表来源顺序 落地 |
 | 交付要求 | handoff 中至少记录信号命中和图表类型映射 |
 
 ### 7.3 页面原型
@@ -196,13 +196,13 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 
 | 项 | 规则 |
 | --- | --- |
-| 总顺序 | 遵循 `SKILL.md` §组件来源优先级（图标 / 图表同表） |
+| 总顺序 | 遵循 `frontend-policy.md` §组件来源优先级（图标 / 图表同表） |
 | 替换粒度 | 一次只对一个区域做组件替换，逐区评估 |
 | 文档层命中 | 先按项目文档理解用途 / props / 示例，再用真实源码确认导入路径 |
 | 基础组件层 | 项目自身组件体系（前 3 层）无法覆盖时才进入已安装组件库层 |
 | 新依赖 | 固定 Code Workflow 不安装新依赖也不请求用户确认；复用已有组件或原生实现，并记录非阻断降级 |
 | 汇报要求 | 记录复用或降级方案；新增依赖必须为“不涉及” |
-| 图表场景 | 统一按 `SKILL.md` §图表来源顺序 |
+| 图表场景 | 统一按 `frontend-policy.md` §图表来源顺序 |
 
 ### 8.2 低风险标准结构组件化口径
 
@@ -273,7 +273,7 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | Stage 1 先行 | 如果 Stage 1 结果与原稿还有明显结构偏差，禁止继续做 Stage 2 组件化 |
 | 同页多片段 | 先统一页面壳层、分区边界和共享数据语义，再决定哪些区域拆成局部组件 |
 | 主线抽取 | 在主线里完成局部组件、函数、常量、helper / type / hook / 图表配置抽取 |
-| Assets 映射表应用 | Stage 2 开始前必须读取 `.frontend/html-analysis/<task-stem>-assets-mapping.json`，严格按照映射表中的决策处理每个图标和图片：`useAntdIcon` → 使用 Ant Design 图标组件；`useCss` → 使用 CSS 实现；`copyToProject` → 使用已复制到项目的文件并正确 import |
+| Assets 映射表应用 | Stage 2 开始前必须读取 `.frontend/html-analysis/<task-stem>-assets-mapping.json`，按当前映射保留真实资源并接入项目；候选替换须有视觉/组件证据 |
 | Stage 2 收尾 | Stage 2 结束前必须再做一轮样式细节收尾，不得把明显的 padding、边框、圆角、阴影、字色、字号、文本内容、间距、对齐问题留到后续 `/autodev-reviewer` |
 | 最终交付 | 直接写入项目目标目录 |
 | write_todos 贯穿 | Stage 1 先列页面级模块清单，并单独列脚本清单；Stage 2 再按清单逐项完成模块落盘，防止实现遗漏 |
@@ -289,36 +289,9 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | 5 | 清晰分区拆成同目录局部组件，而不是拆成多个伪页面目录 |
 | 6 | 同页复用的函数、常量、状态映射、列定义、图表配置、局部 helper / type 就近抽取 |
 
-### 9.1.1 Assets 映射表应用规则
+### 9.1.1 Assets 映射表应用
 
-**执行时机：** Stage 2 代码生成阶段开始前，必须先读取并理解 assets 映射表。
-
-**映射表位置：** `.frontend/html-analysis/<task-stem>-assets-mapping.json`
-
-**应用规则：**
-
-| 决策类型 | 处理方式 | 代码示例 |
-| --- | --- | --- |
-| `useAntdIcon` | 使用映射表中的 `replacement` 字段，引入对应的 Ant Design 图标组件 | `import { RightOutlined } from '@ant-design/icons';`<br/>`<RightOutlined className="text-[#5C69FF]" />` |
-| `useCss` | 使用映射表中的 `replacement` 字段，用 CSS 实现 | `<div className="w-full h-px bg-gray-300" />` |
-| `copyToProject` | 使用映射表中的 `importStatement` 字段，正确引入已复制到项目的文件 | `import AIIcon from '@/assets/icons/AI.svg';`<br/>`<img src={AIIcon} alt="AI" className="w-6 h-6" />` |
-
-**强制约束：**
-
-1. **必须读取映射表**：Stage 2 开始前，必须读取映射表并理解每个 asset 的处理决策
-2. **严格遵循决策**：不得擅自改变映射表中的决策（例如把 `useAntdIcon` 改成直接使用原始 SVG 文件）
-3. **验证文件存在**：对于 `copyToProject` 类型，生成代码前应验证映射表中的 `targetPath` 文件确实存在
-4. **保持颜色和尺寸**：使用 Ant Design 图标替代时，必须通过 `className` 或 `style` 保持原稿的颜色和尺寸
-5. **完整覆盖**：映射表中的每个 asset 都必须在最终代码中被正确处理，不得遗漏
-
-**检查清单：**
-
-- [ ] 已读取 `.frontend/html-analysis/<task-stem>-assets-mapping.json`
-- [ ] 映射表中标记为 `copyToProject` 的文件都已存在于项目目录
-- [ ] 代码中所有图标和图片引用都来自映射表的决策
-- [ ] Ant Design 图标的颜色和尺寸与原稿一致
-- [ ] CSS 实现的几何图形与原稿视觉一致
-- [ ] 项目 assets 的 import 路径与映射表中的 `importStatement` 一致
+读取当前输入的 schemaVersion=2 映射，assetsReady=true。真实资源按 targetPath 接入，URL 后缀按 urlSuffix 保留；实际 import 遵循项目配置。未知资源保留，替换候选仅作建议，视觉证据优先。不得服从旧版映射中的灰色占位/横线替换，也不以资源保留率衡量质量。详细规则见 assets-processing-guide.md。
 
 ### 9.2 低置信度执行模式
 
@@ -377,7 +350,7 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 
 | 项 | 规则 |
 | --- | --- |
-| 优先级 | 遵循 `SKILL.md` §项目说明优先级 |
+| 优先级 | 遵循 `frontend-policy.md` §项目说明优先级 |
 | 默认读取 | 应用结构、API、技术栈、路由/菜单/权限、状态管理、样式体系都先看项目 `architecture/` |
 | 缺失时 | 回退到源码扫描 |
 
@@ -398,8 +371,8 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | JSX 注释 | JSX 中没有 HTML 注释 |
 | 分区数量 | 与原稿一致或可解释 |
 | 字段/按钮 | 必填字段和按钮文案没有丢失 |
-| 图标 | 图标导入与引用可解析；纯图标按钮补 `Tooltip` 和 `aria-label`；**所有图标处理都严格遵循 assets 映射表的决策** |
-| Assets 映射表应用 | 已读取映射表；映射表中的每个 asset 都在代码中被正确处理；`useAntdIcon` 使用了图标组件；`useCss` 使用了 CSS 实现；`copyToProject` 使用了正确的 import 语句 |
+| 图标 | 图标导入与引用可解析；纯图标按钮补 `Tooltip` 和 `aria-label`；图标按原稿与项目证据处理，映射只辅助盘点 |
+| Assets 映射表应用 | 已读取映射表；映射表中的每个 asset 都在代码中被正确处理；真实资源已接入；采用的替换有证据；无未知资源占位 |
 | 图表 | 图表容器、数据结构、类型映射自洽；不退回假图表；sparkline 也是真图表；线性图表的趋势线 / series 数量与高保真一致 |
 | 多图表完整度 | 同一局部区域内的多图表 / 复合图表都已保留，没有漏掉小图表、辅助图、对比图或其中某条趋势 |
 | 高风险组件 | 没有发生模式误判，例如 dot status -> Tag、line progress -> circle progress、vertical plain detail -> default Descriptions |

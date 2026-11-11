@@ -433,6 +433,7 @@ def main() -> int:
     ap.add_argument("--html-file", action="append", default=[], help="HTML source file; repeat or comma-separate for same-page multi-fragment analysis.")
     ap.add_argument("--task-stem", required=True)
     ap.add_argument("--copy-html-input", action="store_true")
+    ap.add_argument("--public-root", help="Explicit URL root for /assets/... references")
     ap.add_argument("--emit-section-html", action="store_true", help="Debug mode only; default does not emit section HTML slices.")
     ap.add_argument("--emit-reference-html", action="store_true", help="Debug mode only; default does not emit page-level helper HTML files.")
     args = ap.parse_args()
@@ -513,12 +514,10 @@ def main() -> int:
     ]
     for html_file in html_files:
         assets_cmd.extend(["--html-file", str(html_file)])
+    if args.public_root:
+        assets_cmd.extend(["--public-root", str(Path(args.public_root).resolve())])
 
-    try:
-        subprocess.run(assets_cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"Warning: Assets processing failed: {exc}", file=sys.stderr)
-        print("Continuing without assets mapping table", file=sys.stderr)
+    subprocess.run(assets_cmd, check=True)  # Required asset failures must remain visible.
 
     manifest_path = analysis_dir / f"{args.task_stem}.json"
     handoff_md_path = analysis_dir / f"{args.task_stem}.md"

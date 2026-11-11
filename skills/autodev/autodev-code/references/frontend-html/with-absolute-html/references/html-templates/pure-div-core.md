@@ -63,7 +63,7 @@
 
 ## 组件优先级
 
-来源顺序遵循 `SKILL.md` §组件来源优先级。补充约束：只有当组件类型、关键 props / mode / layout 和补充样式都能从 HTML 反推出来时，才允许进入第 4 层（已安装 UI 库）。
+来源顺序遵循 `frontend-policy.md` §组件来源优先级。补充约束：只有当组件类型、关键 props / mode / layout 和补充样式都能从 HTML 反推出来时，才允许进入第 4 层（已安装 UI 库）。
 
 布局约束（参见 `SKILL.md` §高保真 HTML 全局约束）：
 

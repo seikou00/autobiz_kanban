@@ -11,7 +11,7 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
 - 当前路线参考：`references/`
 - 当前路线脚本：`scripts/`
 
-本文中提到的 `SKILL.md` 均指 code 根技能 `../../../SKILL.md`。若本文和 code 根技能冲突，以 code 根技能的 Source/Method Bundle 优先级、HTML 分支总控契约和 code_done 收尾规则为准。
+前端专业规则先读 `../references/frontend-policy.md`；任务调度与写入身份遵循 code 根技能。
 
 ## 1. 什么时候使用
 
@@ -63,7 +63,7 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
   - [ ] 按区域明确项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略。
   - [ ] 覆盖表单、表格、筛选、导航、反馈、弹窗、上传、分页、图表、图标、默认值、禁用态、选中态、空态、错误态、loading、hover / focus、responsive 和可识别交互。
   - [ ] 判断 `uiLibraryTarget=project|antd|antd-mobile|native`：项目自有组件体系优先记为 `project`；桌面 Ant Design 记为 `antd`；移动端 Ant Design Mobile 记为 `antd-mobile`；品牌化、文章化、营销化、异形视觉和高度自定义布局优先记为 `native`。
-  - [ ] 后台产品 UI 优先项目组件或桌面 Ant Design；移动端标准 HTML 按项目证据或 code 根技能兜底使用 Ant Design Mobile；品牌化、文章化、营销化、异形视觉和高度自定义布局优先保留原生 React + CSS。
+  - [ ] 后台产品 UI 优先项目组件或桌面 Ant Design；移动端标准 HTML 按项目证据及 frontend-policy.md 选择已有移动端组件；品牌化、文章化、营销化、异形视觉和高度自定义布局优先保留原生 React + CSS。
   - [ ] 遵循“语义优先，组件替换有证据”：没有源码、导出或真实用例证据时，不强行使用某个项目组件。
   - [ ] 判断 `antdMode=required|candidate|selected|notApplicable`：用户明确要求桌面 Ant Design 时为 `required`；桌面 Ant Design 可能适用但尚未决定时为 `candidate`；映射矩阵决策后实际使用桌面 Ant Design 时为 `selected`；不使用桌面 Ant Design 时为 `notApplicable`。
   - [ ] 当 `antdMode=required` 或 `antdMode=candidate` 时，读取 `references/ant-design-conversion.md` 并建立映射矩阵；`candidate` 只表示必须评估，不等于最终使用。

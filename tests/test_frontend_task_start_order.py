@@ -20,6 +20,7 @@ from tests.test_task_runner import (
     _run,
     _start,
     _workspace,
+    _verify_frontend,
 )
 
 PREPARE_HTML = (
@@ -62,7 +63,10 @@ class FrontendTaskStartOrderTest(unittest.TestCase):
             argv.extend(["--html-file", str(source)])
         result = subprocess.run(argv, cwd=code, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual((code / ASSET_PATH).read_bytes(), HTML_ASSET)
+        mapping = json.loads((code / ".frontend/html-analysis/task-t001-assets-mapping.json").read_text())
+        self.asset_path = mapping["mappings"][0]["targetPath"]
+        self.assertEqual((code / self.asset_path).read_bytes(), HTML_ASSET)
+        self.assertEqual((code / ASSET_PATH).read_bytes(), ORIGINAL_ASSET)
 
     def test_analysis_before_start_is_still_rejected_without_mutating_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,7 +80,7 @@ class FrontendTaskStartOrderTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             payload = json.loads(result.stdout)
             self.assertTrue(payload["error"].startswith("prestart_unattributed_changes_detected:"))
-            self.assertIn(ASSET_PATH, payload["unattributedFiles"])
+            self.assertIn(self.asset_path, payload["unattributedFiles"])
             self.assertIn(".frontend/html-input/task-t001-merged.html", payload["unattributedFiles"])
             self.assertFalse((feature_dir / ".task-runs/T001").exists())
             self.assertEqual(_read_batch(feature_dir)["tasks"][0]["status"], "todo")
@@ -90,6 +94,8 @@ class FrontendTaskStartOrderTest(unittest.TestCase):
 
             self._analyze(code, sources)
             (code / "src/page.tsx").write_text("export const Page = () => null;\n", encoding="utf-8")
+            checked = _verify_frontend(workspace, code, started["runId"], "src/page.tsx")
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             result = _run(
                 "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
@@ -104,7 +110,8 @@ class FrontendTaskStartOrderTest(unittest.TestCase):
             self.assertEqual(evidence["taskId"], "T001")
             self.assertEqual(evidence["runId"], started["runId"])
             operations = {item["path"]: item["operation"] for item in evidence["fileChanges"]}
-            self.assertEqual(operations[ASSET_PATH], "modified")
+            self.assertEqual(operations[self.asset_path], "created")
+            self.assertNotIn(ASSET_PATH, operations)
             for relative in [
                 ".frontend/html-analysis/task-t001.json",
                 ".frontend/html-analysis/task-t001.md",

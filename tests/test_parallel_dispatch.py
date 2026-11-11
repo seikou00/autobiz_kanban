@@ -32,6 +32,15 @@ class DispatchGrantTest(unittest.TestCase):
     def claim(self, gen=1, worker="worker"):
         return claim(self.workspace, "alpha", self.run, "B001", gen, "initial", worker)
 
+    def test_unclaimed_legacy_null_dispatch_is_claimable_and_stale_callbacks_are_ignored(self):
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["batches"]["B001"]["dispatch"] = None
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        args = (self.workspace, "alpha", self.run, "B001", 1, "old-owner")
+        self.assertEqual(finish(*args)["status"], "stale_owner_ignored")
+        self.assertEqual(defer(*args, "old failure")["status"], "stale_owner_ignored")
+        self.assertEqual(self.claim()["status"], "claimed")
+
     def test_concurrent_snapshot_claim_has_one_owner_and_finish_does_not_replay(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda i: self.claim(worker=str(i)), range(8)))

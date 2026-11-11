@@ -103,8 +103,10 @@ test('settlement returns while its publication remains active', { timeout: 1000 
   });
   Object.assign(c, { activeDispatchGrants: new Map([['B001', { generation: 1, ownerToken: 'owner' }]]),
     DELIVERY_SETTLEMENT_SCHEMA: {}, requireSuccess: x => x, requireSchedulerResult: x => x, applySchedulerState() {},
-    schedulerControlState: {}, deliveryControl: { finalized: new Map() }, runDeferredCleanup: async () => ({}),
+    schedulerControlState: {}, deliveryControl: { finalized: new Map(), inFlight: new Map(), repositoryTails: new Map() },
+    batchWorkspaces: { B001: { workspaceRef: 'repo' } }, timeoutPerBatch: 14400, runDeferredCleanup: async () => ({}),
     cleanupResults: [], mergeResults: [], markBatchResolved() {}, markCandidateResolved() {} });
+  vm.runInContext(source.slice(source.indexOf('async function promoteWithDeltaReview('), source.indexOf('async function validateAndPromoteBatch(')), c);
   vm.runInContext(source.slice(source.indexOf('async function settleReadyBatch('), source.indexOf('async function runDeferredCleanup(')), c);
   const result = await c.settleReadyBatch('B001');
   assert.equal(result.status, 'merged');

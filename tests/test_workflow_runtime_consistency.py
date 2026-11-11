@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def schema_errors(schema, value, path="$", errors=None):
     errors = [] if errors is None else errors
+    if "anyOf" in schema and not any(not schema_errors(branch, value, path) for branch in schema["anyOf"]):
+        errors.append(f"{path}: no anyOf branch matched")
     kinds = {"object": dict, "array": list, "string": str, "boolean": bool,
              "integer": int, "number": (int, float), "null": type(None)}
     expected = schema.get("type")
@@ -39,6 +41,8 @@ def schema_errors(schema, value, path="$", errors=None):
         errors.append(f"{path}: const mismatch")
     if "enum" in schema and value not in schema["enum"]:
         errors.append(f"{path}: enum mismatch")
+    if "minimum" in schema and isinstance(value, (int, float)) and value < schema["minimum"]:
+        errors.append(f"{path}: below minimum")
     if isinstance(value, dict):
         properties = schema.get("properties", {})
         for key in schema.get("required", []):
@@ -108,6 +112,18 @@ process.stdout.write(JSON.stringify(context.schemas));
         resumed = resume_run(self.workspace, "alpha", self.run)
         self.assert_schema("SCHEDULER_RESULT_SCHEMA", resumed)
         self.assert_schema("SCHEDULER_RESULT_SCHEMA", _workflow_status_view(resumed, load_manifest(self.workspace, "alpha", self.run)))
+
+    def test_scheduler_empty_queues_are_required_and_errors_need_no_snapshot(self):
+        schema = self.schemas["SCHEDULER_RESULT_SCHEMA"]
+        self.assertEqual(self.created["implementationRecoveryBatches"], [])
+        self.assertEqual(self.created["stageRecoveryBatches"], [])
+        self.assert_schema("SCHEDULER_RESULT_SCHEMA", self.created)
+        for field in ("implementationRecoveryBatches", "stageRecoveryBatches"):
+            missing = {key: value for key, value in self.created.items() if key != field}
+            self.assertTrue(schema_errors(schema, missing))
+            for invalid in (None, "[]", {}):
+                self.assertTrue(schema_errors(schema, {**self.created, field: invalid}))
+        self.assert_schema("SCHEDULER_RESULT_SCHEMA", {"ok": False, "error": "scheduler_read_failed"})
 
     def test_worktree_success_and_failure_are_both_valid_transport_results(self):
         self.assert_schema("WORKTREE_SCHEMA", provision_parallel_worktree(self.workspace, "alpha", self.run, "B001"))

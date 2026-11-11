@@ -69,6 +69,9 @@ async function execute(frontend = false, fault = null) {
       return { success: true, batchId: "B001", stage: "review", status: "passed" };
     }
     if (label === "settle-delivery-B001-1") {
+      assert.equal(options.timeoutMs, 4 * 60 * 60 * 1000);
+      assert.doesNotMatch(prompt, /frontend_recheck|frontend_verification/);
+      assert.ok(options.schema.properties.reviewScope);
       assert.doesNotMatch(prompt, /--expected-commit\s+"/);
       assert.doesNotMatch(prompt, /--skip-tests/);
       if (fault === "queued" && !queuedOnce) {
@@ -231,6 +234,58 @@ test("queued delivery returns to dispatch without failure or consuming its grant
   assert.equal(labels.filter(label => label === "stage-review-B001-attempt-1").length, 1);
 });
 
+test("slow settlements queue by repository and reuse an in-flight Batch", async () => {
+  const started = [];
+  const complete = new Map();
+  const control = { inFlight: new Map(), repositoryTails: new Map() };
+  const c = vm.createContext({
+    activeDispatchGrants: new Map(["B001", "B002", "B003"].map(id => [id, { generation: 1 }])),
+    batchWorkspaces: { B001: { workspaceRef: "a" }, B002: { workspaceRef: "a" }, B003: { workspaceRef: "b" } },
+    deliveryControl: control,
+    usableString: value => typeof value === "string" && value.length > 0,
+    executeDeliverySettlement: batchId => {
+      started.push(batchId);
+      return new Promise(resolve => complete.set(batchId, () => resolve({ batchId, status: "merged" })));
+    }
+  });
+  vm.runInContext(source.slice(source.indexOf("async function settleReadyBatch("),
+    source.indexOf("async function executeDeliverySettlement(")), c);
+  const first = c.settleReadyBatch("B001");
+  const duplicate = c.settleReadyBatch("B001");
+  const second = c.settleReadyBatch("B002");
+  const independent = c.settleReadyBatch("B003");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["B001", "B003"]);
+  complete.get("B001")();
+  assert.equal(await first, await duplicate);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["B001", "B003", "B002"]);
+  complete.get("B002")();
+  complete.get("B003")();
+  await Promise.all([second, independent]);
+  assert.equal(control.inFlight.size, 0);
+  assert.equal(control.repositoryTails.size, 0);
+});
+
+test("a failed settlement releases its repository queue", async () => {
+  const c = vm.createContext({
+    activeDispatchGrants: new Map([["B001", { generation: 1 }], ["B002", { generation: 1 }]]),
+    batchWorkspaces: { B001: { workspaceRef: "a" }, B002: { workspaceRef: "a" } },
+    deliveryControl: { inFlight: new Map(), repositoryTails: new Map() },
+    usableString: Boolean,
+    executeDeliverySettlement: async batchId => {
+      if (batchId === "B001") throw new Error("interrupted");
+      return { batchId, status: "merged" };
+    }
+  });
+  vm.runInContext(source.slice(source.indexOf("async function settleReadyBatch("),
+    source.indexOf("async function executeDeliverySettlement(")), c);
+  const first = c.settleReadyBatch("B001");
+  const second = c.settleReadyBatch("B002");
+  await assert.rejects(first, /interrupted/);
+  assert.equal((await second).status, "merged");
+});
+
 test("sealed delivery recovery goes straight to settlement without reimplementation or Review", async () => {
   const { labels, result } = await execute(false, "sealed-recovery");
   assert.equal(result.finalStatus, "succeeded", JSON.stringify({ labels, result }));
@@ -260,6 +315,22 @@ test("post-merge cleanup bypasses defer when Runtime already reported the merge"
   const result = await c.deferBatchForRetry("B001", "/worktree", "branch", "sync failed");
   assert.equal(result.status, "merged");
   assert.equal(result.durable, true);
+});
+
+test("a caller timeout keeps a live Runtime delivery queued without registering a retry", async () => {
+  const control = { finalized: new Map(), waiting: new Map() };
+  const c = vm.createContext({ activeDispatchGrants: new Map([["B001", { generation: 1, ownerToken: "token" }]]),
+    deliveryControl: control,
+    encodeFailure: String,
+    dispatchCommand: async action => {
+      assert.equal(action, "defer");
+      return { success: true, status: "delivery_running", batchId: "B001" };
+    } });
+  vm.runInContext(source.slice(source.indexOf("async function deferBatchForRetry("), source.indexOf("function mergedBatchIds(")), c);
+  const result = await c.deferBatchForRetry("B001", "/worktree", "branch", "caller timeout");
+  assert.equal(result.status, "queued");
+  assert.equal(result.durable, true);
+  assert.equal(control.waiting.get("B001"), 1);
 });
 
 for (const frontend of [false, true]) {

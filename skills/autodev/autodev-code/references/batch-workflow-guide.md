@@ -27,6 +27,14 @@ for configuration, standalone promotion commands, main synchronization, and
 recovery. Existing manifests without isolated integration keep direct mode;
 the older bootstrap/main descriptions below apply to those runs only.
 
+Frontend verification and backend production compile close at TASK implementation.
+Delivery uses the Batch review evidence for the sealed commit. Promotion compares
+committed Git content. When integration changes a file modified by the Batch,
+`candidate_review_required` provides the affected paths, delivery commits and
+candidate SHA. The Workflow reviews that diff and retries the same promotion or
+settlement with `--reviewed-candidate` set to the reviewed SHA. An interrupted
+settlement retains the candidate and ticket under the existing recovery rules.
+
 ## Start
 
 Run the launcher in the mounted workspace of the platform Workflow tool. Keep
@@ -414,7 +422,11 @@ state.
   the files, creates a noninteractive merge commit with the run's task-card
   message, and records the actual candidate SHA before promotion. Final repair
   uses the same protocol. `ready_to_complete` skips model editing and reconciles
-  an interrupted plugin commit. Do not start a production TASK for conflict
+  an interrupted plugin commit. Protocol v2 retains the delivery operation in
+  `awaiting_candidate_resolution` while editing and after resolution completes,
+  until the original owner re-enters `settle-delivery`. Scheduler polls preserve
+  that generation/token within its original grant lifetime; an expired grant
+  still requires Runtime recovery. Do not start a production TASK for conflict
   edits, invoke `seal` for the merge, or try alternative commit commands.
 - Conflict preparation also supplies exact `runDir`, `manifestPath`, and
   `contextPath` values plus context/identity digests. Read the context index,

@@ -35,6 +35,7 @@ TASK_RUN_OPTIONAL_INTEGRITY_FIELDS = (
     "executionMode",
     "parallelRunId",
     "productionCompileRequired",
+    "frontendVerificationVersion",
     "compileAttempts",
     "latestCompileAttemptId",
 )

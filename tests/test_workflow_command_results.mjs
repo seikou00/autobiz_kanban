@@ -59,6 +59,25 @@ function harness(responses = [], projectStructured = false) {
   return { context, calls, records, instructions, callOptions };
 }
 
+test("a changed candidate needs a passing review of its exact SHA before retrying promotion", async () => {
+  const sha = "c".repeat(40);
+  const delta = { status: "candidate_review_required", success: false, worktreePath: "/tmp/candidate",
+    candidateSha: sha, baseSha: "a".repeat(40), reviewScope: [{ batchId: "B009", deliverySha: "d".repeat(40), paths: ["src/页面.tsx"] }] };
+  for (const decision of [{ status: "failed", candidateSha: sha }, { status: "passed", candidateSha: "x" },
+                          { status: "passed", candidateSha: sha }]) {
+    const { context, instructions } = harness([built, wrap(delta, 1), decision, promoted]);
+    const task = context.validateAndPromoteBatch("B009", 9);
+    if (decision.status === "passed" && decision.candidateSha === sha) {
+      assert.equal((await task).promoted, true);
+      assert.ok(instructions[3].includes(`--reviewed-candidate "${sha}"`));
+    } else {
+      await assert.rejects(task, /candidate_delta_review_failed/);
+      assert.equal(instructions.length, 3);
+    }
+    assert.match(instructions[2], /src\/页面\.tsx/);
+  }
+});
+
 const preparedResolution = {
   success: true, status: "resolution_required", worktreePath: "/tmp/candidate",
   conflictedFiles: ["src/app.js"],

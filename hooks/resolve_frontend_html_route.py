@@ -46,6 +46,8 @@ ROUTE_RUN_TRANSIENT_KEYS = (
     "reviewRouteRunId",
 )
 
+FRONTEND_POLICY_VERSION = 1
+
 FRONTEND_ROOT = ROOT / "skills" / "autodev" / "autodev-code" / "references" / "frontend-html"
 ROUTE_SKILLS = {
     ROUTE_ABSOLUTE: FRONTEND_ROOT / "with-absolute-html" / "SKILL.md",
@@ -488,6 +490,8 @@ def _plan_ui_scope(
     for task in tasks:
         if not isinstance(task, dict) or task.get("uiRequired") is not True:
             continue
+        if task_id and task.get("id") != task_id:
+            continue
         ui_refs = task.get("uiRefs")
         if not isinstance(ui_refs, dict):
             continue
@@ -792,6 +796,10 @@ def route_payload_from_ui_context(
     ui_required = data.get("uiRequired") is True
     # An unreadable required source also disqualifies a caller-supplied HTML
     # file: the fallback must not be satisfied by a substitute artifact.
+    fidelity_required = any(task.get("route") in ROUTE_SKILLS for task in active_ui_tasks) or any(
+        source.get("route") in ROUTE_SKILLS or source.get("required") is True
+        for source in visual_sources
+    )
     fallback_active = ui_required and bool(missing_required_sources)
     effective_cli_html_sources = [] if (active_ui_tasks or fallback_active) else cli_html_sources
     html_sources = existing_paths([
@@ -860,6 +868,8 @@ def route_payload_from_ui_context(
         "triggered": ui_required,
         "route": route,
         "source": "UI_CONTEXT.json",
+        "fidelityRequired": fidelity_required,
+        "visualInputAvailable": bool(html_sources),
         "visualSourceIds": [
             source["sourceId"]
             for source in visual_sources
@@ -902,12 +912,12 @@ def route_payload_from_ui_context(
         payload["batches"] = frontend_batches
     if fallback_active:
         payload["requiredVisualSourceMissing"] = [dict(item) for item in missing_required_sources]
-        payload["requiredVisualSourceFallbackRoute"] = ROUTE_SPEC_DRIVEN
+        payload["requiredVisualSourceFallbackRoute"] = route
     if route_missing_declared or (missing_html_sources and not html_sources):
         payload["htmlSourceMissing"] = True
         payload["missingHtmlSourcePaths"] = missing_html_sources
         payload["htmlRequestMessage"] = _html_request_message(fd, missing_html_sources)
-        payload["htmlFallbackRoute"] = ROUTE_SPEC_DRIVEN
+        payload["htmlFallbackRoute"] = route
         if missing_html_sources:
             payload["reasons"] = [
                 *payload["reasons"],
@@ -950,7 +960,13 @@ def classify_html(paths: Iterable[Path]) -> tuple[str, list[str]]:
     metrics = html_metrics(combined)
     reasons: list[str] = []
 
+    classes = re.findall(r"\bclass(?:Name)?=[\"']([^\"']*)[\"']", combined)
+    absolute_classes = sum(bool(re.search(r"(?:^|[\s:])absolute(?:\s|$)", value)) for value in classes)
+    coordinate_classes = sum(bool(re.search(r"(?:^|[\s:])(?:left|right|top|bottom|inset)(?:-[xy])?-", value)) for value in classes)
     absolute_votes = 0
+    if absolute_classes >= 3 and coordinate_classes >= 3:
+        absolute_votes += 2
+        reasons.append(f"utility absolute/coordinate regions={absolute_classes}/{coordinate_classes}")
     if int(metrics["absolute"]) >= 3:
         absolute_votes += 2
         reasons.append(f"position:absolute count={metrics['absolute']}")
@@ -1000,9 +1016,12 @@ def route_payload(
         )
 
     fd = feature_dir(workspace, feature)
+    html_files = tuple(html_files)
     docs_text, docs = collect_doc_texts(fd)
-    html_sources = collect_html_sources(workspace, feature, html_files)
-    triggered = bool(html_sources) or has_frontend_intent(docs_text)
+    plan_route, _ = _route_from_plan(fd, batch_id=batch_id, task_id=task_id) if task_id else (None, [])
+    # Legacy features without UI_CONTEXT must not borrow another page's HTML.
+    html_sources = [] if plan_route == ROUTE_SPEC_DRIVEN and not html_files else collect_html_sources(workspace, feature, html_files)
+    triggered = bool(html_sources) or has_frontend_intent(docs_text) or plan_route == ROUTE_SPEC_DRIVEN
     reasons: list[str] = []
     if html_sources:
         reasons.append("html source found")
@@ -1017,6 +1036,12 @@ def route_payload(
         route_reasons = ["frontend/html task detected but no readable html source found"]
     else:
         route, route_reasons = classify_html(html_sources)
+
+    if not html_sources and task_id:
+        plan_route, _ = _route_from_plan(fd, batch_id=batch_id, task_id=task_id)
+        if plan_route == ROUTE_SPEC_DRIVEN:
+            route = ROUTE_SPEC_DRIVEN
+            route_reasons = ["current TASK has no HTML; implementing from specifications"]
 
     payload: dict[str, Any] = {
         "version": 1,
@@ -1039,7 +1064,7 @@ def route_payload(
 
 
 def merge_existing_flags(payload: dict[str, Any], existing: dict[str, Any]) -> dict[str, Any]:
-    if existing.get("route") != payload.get("route"):
+    if existing.get("route") != payload.get("route") or existing.get("htmlSourcePaths") != payload.get("htmlSourcePaths"):
         if payload.get("route") in ROUTE_SKILLS:
             ensure_route_run_id(payload)
         return payload
@@ -1053,6 +1078,7 @@ def merge_existing_flags(payload: dict[str, Any], existing: dict[str, Any]) -> d
         "routeRunId",
         "reviewRouteRunId",
         "routeSkillReadRanges",
+        "frontendPolicyVersion",
     ):
         if key in existing:
             payload[key] = existing[key]
@@ -1078,6 +1104,9 @@ def resolve_frontend_route(
         batch_id=batch_id,
         task_id=task_id,
     )
+    payload["frontendPolicyPath"] = str(FRONTEND_ROOT / "references" / "frontend-policy.md")
+    if start_route_run:
+        payload["frontendPolicyVersion"] = FRONTEND_POLICY_VERSION
     if write_evidence:
         path = evidence_path(workspace, feature)
         if start_route_run:

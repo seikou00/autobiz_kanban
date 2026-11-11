@@ -1,13 +1,13 @@
 ---
 name: standard-html-parser
-description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的参考。该参考以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循 code 根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和 code_done 收尾契约。
+description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的参考。该参考以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；专业规则遵循 frontend-policy.md，调度和收尾遵循 code 根技能。
 ---
 
 # 标准 HTML 解析器
 
 本参考只在上层路线技能 `../SKILL.md` 已经把当前输入明确判定为“标准 DOM / 语义明确 HTML”后进入。它替代原有薄版 `standard-html-parser`，作为 `with-standard-html` 路线的 HTML 转工程代码主执行技能。
 
-本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../SKILL.md`。若本文和根技能冲突，以 code 根技能的 Source/Method Bundle 优先级、HTML 分支总控契约、图标/图表规则、依赖安装确认规则和 code_done 收尾规则为准。
+前端专业规则遵循上游已读取的 `frontend-policy.md`；调度、TASK 身份与写入时机遵循 code 根技能。
 
 ## 1. 入口契约
 
@@ -39,7 +39,7 @@ auditRequired=<true|false>
 必须同时做到：
 
 - 保留源 HTML 的业务语义、内容完整度、视觉结构和交互意图。
-- 按根技能优先级复用项目公共组件、本地组件和已安装且真实使用的组件库。
+- 按 frontend-policy.md 的优先级复用项目公共组件、本地组件和已安装且真实使用的组件库。
 - 对产品 UI 中的表单、表格、筛选、导航、反馈、上传、弹窗等结构，优先映射到真实项目组件、桌面 Ant Design 或 Ant Design Mobile。
 - 对品牌化、文章化、营销化、异形视觉和高度自定义布局，保留原始语义 HTML / CSS，不强行 AntD 化。
 - 在主线阶段完成组件、数据、常量、类型、helper、hook、图标和图表配置抽取，不把维护性工作留到后续 `/autodev-reviewer` 阶段。
@@ -76,7 +76,7 @@ Assets 处理总结将作为编码前简报的输入材料。
 4. 对照页面模块清单确认入口、分区、局部组件、复用逻辑、样式文件和资产范围。
 5. 对照转换清单确认项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略，并消费 `uiLibraryTarget`。
 6. 当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
-7. 当 `uiLibraryTarget=antd-mobile` 时，不读取桌面 Ant Design 转换参考，不运行桌面 Ant Design 覆盖审计；按项目移动端组件规则或 code 根技能 React + Ant Design Mobile 兜底继续。
+7. 当 `uiLibraryTarget=antd-mobile` 时，不读取桌面 Ant Design 转换参考，不运行桌面 Ant Design 覆盖审计；按项目移动端组件规则及 frontend-policy.md 的技术栈兜底继续。
 8. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户本轮提供的接口材料。
 
 ## 4. Craft：编码前简报
@@ -149,7 +149,7 @@ Assets 处理总结将作为编码前简报的输入材料。
 
 ### 6.1 组件来源
 
-组件来源严格遵循根 `SKILL.md`：
+组件来源遵循 `frontend-policy.md`：
 
 1. 项目 `AGENTS.md` 指定的公共组件库。
 2. 项目 `architecture/components/`。
@@ -297,7 +297,7 @@ python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_co
 
 ### 8.1 图标
 
-图标来源、兜底和汇报遵循根 `SKILL.md`。补充执行规则：
+图标来源、兜底和汇报遵循 `frontend-policy.md`。补充执行规则：
 
 - 有明确形状或语义时，先匹配项目图标体系或已安装且真实使用的图标库。
 - 标准 HTML 里的真实 `svg` / `symbol` / `use` / `path` 可作为匹配依据。
@@ -307,7 +307,7 @@ python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_co
 
 ### 8.2 图表
 
-图表来源、询问 / 兜底链、禁止退化和交付必含内容统一遵循根 `SKILL.md §图表来源顺序`。
+图表来源、能力缺口处理、禁止退化和交付内容统一遵循 `frontend-policy.md` 的图表来源顺序。
 
 只要需求或 HTML 语义是图表，默认使用真实图表库或项目图表组件；不得退化为静态 SVG、CSS 渐变、结构式假图表、进度条或统计卡片。
 
@@ -354,8 +354,8 @@ python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_co
 
 交付前按项目可用命令执行验证：
 
-- 安装 / 构建 / lint / test 中可用且合适的命令。
-- 前端任务要启动 dev server，并用浏览器确认页面非空白、资源加载、布局无明显错位。
+- 按 frontend-route.md 使用受控统一回检；必要时选择一个已有 typecheck/build，不安装依赖，不运行行为测试。
+- 浏览器检查和项目校验统一交给 frontend_verification.py；不在 parser 直接启动后台进程或重复构建。
 - 检查桌面和移动视口：溢出、裁切、文本重叠、按钮挤压、表格横向滚动。
 - 桌面 Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
 - 当 `uiLibraryTarget=antd` 且 `antdMode=required|selected` 时，运行 `python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
@@ -381,7 +381,7 @@ python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_co
 - 剩余风险。
 - 统一前端回检输入：`target=<生成/修改的源码文件或目录>`、`sourceHtml=<原始 HTML 路径>`、`analysis=none`、`plan=<PLAN.md 或 none>`、`uiLibraryTarget=<...>`、`antdMode=<...>`、`auditRequired=<true|false>`。
 
-随后必须返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进。不要发起独立回检选择，不要调用或引用已移除的内部回检路线。
+随后必须返回 `/autodev-code` 主流程，按 frontend-route.md 执行 frontend_verification.py、处理发现后回到 code 根技能收口。不要发起独立回检选择，不要调用或引用已移除的内部回检路线。
 
 ## 13. 禁止事项
 

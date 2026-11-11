@@ -302,7 +302,7 @@ def _build_candidate(
                     task_card_id,
                     f"合并候选 {repository_ref} wave-{wave:03d} {batch_id}",
                 )
-                result = _git(path, "merge", "--no-ff", "-m", commit_message, source)
+                result = _git(path, "merge", "--no-ff", "-m", commit_message, commits[batch_id])
                 if result.returncode != 0:
                     # Detect if it's a conflict or other error
                     unmerged = _git(path, "diff", "--name-only", "--diff-filter=U", "-z")
@@ -401,15 +401,34 @@ def verify_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, r
     raise ValueError("parallel_merge_train_candidate_verification_removed_use_batch_review")
 
 
+def _candidate_review_scope(repo: Path, record: dict) -> list[dict]:
+    """Files changed by a delivery whose integrated Git content differs from its seal."""
+    def changed(revisions: str) -> set[str]:
+        result = _git(repo, "diff", "--no-renames", "--name-only", "-z", revisions, "--")
+        if result.returncode:
+            raise ValueError("candidate_review_diff_failed:" + result.stderr.strip())
+        return set(result.stdout.split("\0")) - {""}
+
+    affected = []
+    for batch_id, sealed in record["deliveryCommits"].items():
+        integrated = changed(f"{sealed}..{record['candidateSha']}")
+        if integrated:
+            owned = changed(f"{record['baseSha']}...{sealed}")
+            files = integrated & owned
+            if files:
+                affected.append({"batchId": batch_id, "deliverySha": sealed, "paths": sorted(files)})
+    return affected
+
+
 def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str,
-                      allow_unverified: bool = False) -> dict[str, Any]:
+                      allow_unverified: bool = False, reviewed_candidate: str | None = None) -> dict[str, Any]:
     with _integration_train_lock(workspace, feature, run_id, repository_ref):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("controlProtocolVersion", 1) >= 2:
             from hooks.parallel_repository import assert_reservation
             assert_reservation(manifest["repositories"][repository_ref], workspace, feature, run_id, wave)
         return _promote_candidate(workspace, feature, run_id, wave=wave, repository_ref=repository_ref,
-                                  allow_unverified=allow_unverified)
+                                  allow_unverified=allow_unverified, reviewed_candidate=reviewed_candidate)
 
 
 def _promote_candidate(
@@ -420,6 +439,7 @@ def _promote_candidate(
     wave: int,
     repository_ref: str,
     allow_unverified: bool = False,
+    reviewed_candidate: str | None = None,
 ) -> dict[str, Any]:
     """Promote a candidate through a recoverable Git/Plan saga.
 
@@ -442,6 +462,28 @@ def _promote_candidate(
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
         repo = assert_integration(binding) if isolated(manifest) else integration_repo(binding)
+        current_head = _head(repo)
+        if current_head != record["baseSha"]:
+            record.update(status="stale", staleAt=utc_now(), actualMainSha=current_head)
+            save_manifest(workspace, feature, run_id, manifest)
+            append_event(workspace, feature, run_id, "merge_train_stale", repositoryRef=repository_ref, wave=wave,
+                         candidateBaseSha=record["baseSha"], actualMainSha=current_head)
+            return {"success": False, "stale": True, "action": "rebuild_candidate", "candidateSha": record["candidateSha"],
+                    "baseSha": record["baseSha"], "actualMainSha": current_head}
+        candidate_sha = record["candidateSha"]
+        if reviewed_candidate is not None and reviewed_candidate != candidate_sha:
+            raise ValueError("candidate_review_sha_changed")
+        for batch_id in record["batchIds"]:
+            if record["deliveryCommits"][batch_id] != manifest["batches"][batch_id].get("commitSha"):
+                raise ValueError("delivery_commit_changed")
+        if reviewed_candidate is not None:
+            record["reviewedCandidateSha"] = reviewed_candidate
+        elif record.get("reviewedCandidateSha") != candidate_sha:
+            affected = _candidate_review_scope(repo, record)
+            if affected:
+                return {"success": False, "status": "candidate_review_required", "candidateSha": candidate_sha,
+                        "baseSha": record["baseSha"], "reviewScope": affected,
+                        "worktreePath": record["worktreePath"], "repositoryRef": repository_ref, "wave": wave}
         record.update({
             "status": "promoting",
             "promotionReadyStatus": "built" if review_gated_promotion else "verified",
@@ -450,17 +492,7 @@ def _promote_candidate(
         save_manifest(workspace, feature, run_id, manifest)
 
     _clean(repo)
-    current_head = _head(repo)
-    if current_head != record.get("baseSha"):
-        with run_lock(workspace, feature, run_id):
-            manifest = load_manifest(workspace, feature, run_id)
-            current = _record(manifest, repository_ref, wave)
-            if current:
-                current.update({"status": "stale", "staleAt": utc_now(), "actualMainSha": current_head})
-            save_manifest(workspace, feature, run_id, manifest)
-        append_event(workspace, feature, run_id, "merge_train_stale", repositoryRef=repository_ref, wave=wave, candidateBaseSha=record.get("baseSha"), actualMainSha=current_head)
-        return {"success": False, "stale": True, "action": "rebuild_candidate", "candidateSha": record.get("candidateSha"), "baseSha": record.get("baseSha"), "actualMainSha": current_head}
-    promoted = _git(repo, "merge", "--ff-only", str(record.get("branchName") or ""))
+    promoted = _git(repo, "merge", "--ff-only", candidate_sha)
     if promoted.returncode != 0:
         with run_lock(workspace, feature, run_id):
             manifest = load_manifest(workspace, feature, run_id)
@@ -1267,6 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
     e2e_metadata.add_argument("--metadata-json", default="{}")
     e2e_metadata.add_argument("--metadata-base64")
     assert promote_parser is not None
+    promote_parser.add_argument("--reviewed-candidate", help="SHA of the candidate whose affected files were reviewed")
     promote_parser.add_argument("--allow-stale", action="store_true")
     promote_parser.add_argument("--allow-unverified", action="store_true")
     args = parser.parse_args(argv)
@@ -1285,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.run_id,
                 wave=args.wave,
                 repository_ref=args.repository_ref,
-                allow_unverified=args.allow_unverified,
+                allow_unverified=args.allow_unverified, reviewed_candidate=args.reviewed_candidate,
             )
         elif args.command == "recover-promoted-plan":
             result = recover_promoted_plan(

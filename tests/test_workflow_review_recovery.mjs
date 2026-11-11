@@ -48,10 +48,10 @@ test("Review with external uncertainties proceeds to delivery without a test or 
       assert.match(prompt, /--decision <passed\|failed>/);
       assert.match(prompt, /--advisory-message/);
     }
-    return { ...passed, advisories: [advisory] };
+    return { ...passed, evidenceId: "STAGE-B001-REVIEW-001", advisories: [advisory] };
   };
   assert.equal((await c.runDeliveryReviewAndGate(delivery)).status, "ready_to_candidate");
-  assert.deepEqual(labels, ["stage-review-B001-attempt-1", "validate-review-B001-attempt-1"]);
+  assert.deepEqual(labels, ["stage-review-B001-attempt-1"]);
 });
 
 test("proven implementation defects still fail Review even alongside external advisories", async () => {

@@ -20,9 +20,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import stage_names
+from hooks.parallel_batch_stage import stage_names, is_test_only_reseal
 from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, utc_now
-from hooks.utest_test_environment import validate_test_commit_change
 
 
 def _digest(value: Any) -> str:
@@ -125,24 +124,13 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         else:
             expected_commit = batch.get("commitSha")
         if expected_commit and inputs.get("batchCommit") != expected_commit:
-            last_seal = batch.get("lastSeal") if isinstance(batch.get("lastSeal"), dict) else {}
-            valid_utest_reseal = (
-                stage in {"prepare", "implement", "review"}
-                and batch.get("type") != "validation"
-                and isinstance(inputs.get("batchCommit"), str)
-                and isinstance(expected_commit, str)
-                and last_seal.get("purpose") == "utest"
-                and last_seal.get("commitSha") == expected_commit
-            )
-            if valid_utest_reseal:
-                key = (inputs.get("batchCommit"), expected_commit)
+            key = (inputs.get("batchCommit"), expected_commit)
+            valid = False
+            if stage in {"prepare", "implement", "review"} and batch.get("type") != "validation" and isinstance(key[0], str):
                 if key not in reseal_checks:
-                    repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
-                    repository = manifest.get("repositories", {}).get(repository_ref, {})
-                    root = repository.get("gitRoot")
-                    reseal_checks[key] = bool(root) and validate_test_commit_change(root, *key)["allowed"]
-                valid_utest_reseal = reseal_checks[key]
-            if not valid_utest_reseal:
+                    reseal_checks[key] = is_test_only_reseal(manifest, batch, *key)
+                valid = reseal_checks[key]
+            if not valid:
                 errors.append(f"{batch_id}.{stage}_batch_commit_stale")
         if inputs.get("dependencies") != _dependency_snapshot(manifest, batch):
             errors.append(f"{batch_id}.{stage}_dependency_stale")

@@ -411,6 +411,16 @@ def build_context(
         "resolvedDesignRefs": resolved_design,
         "resolvedSourceRefs": resolved_sources,
     }
+    if task.get("uiRequired") is True:
+        from hooks.resolve_frontend_html_route import FRONTEND_ROOT
+        data_out["frontendContext"] = {
+            "policyPath": str(FRONTEND_ROOT / "references/frontend-policy.md"),
+            "routeProtocolPath": str(FRONTEND_ROOT.parent / "frontend-route.md"),
+            "verificationCommand": str(ROOT / "hooks/frontend_verification.py"),
+            "pageRefs": task.get("uiRefs", {}).get("pageRefs", []),
+            "visualSourceRefs": task.get("uiRefs", {}).get("visualSourceRefs", []),
+            "missingVisualInputPolicy": "continue_spec_driven_report_gap",
+        }
     if code_workspaces:
         try:
             repositories = resolve_repositories(code_workspaces)

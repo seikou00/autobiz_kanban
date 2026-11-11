@@ -43,7 +43,7 @@ python -X utf8 scripts/analyze_absolute_html.py "<html-file>" --project-root "<p
 2. 本地调试需要一个可独立打开的视觉基准页
 3. 后续验证步骤明确要求该文件
 
-组件替换优先级：遵循 `SKILL.md` §组件来源优先级（用户指令 > 项目公共组件 > 相似页面模式 > 已装 UI 库 > fidelity-only）。
+组件替换优先级：遵循 `frontend-policy.md` §组件来源优先级（用户指令 > 项目公共组件 > 相似页面模式 > 已装 UI 库 > fidelity-only）。
 
 允许自动修正高保真错位的场景：
 

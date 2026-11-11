@@ -1058,6 +1058,8 @@ def _start_task_unlocked(
         "snapshot": repository_state[0]["snapshot"],
         "evidenceIds": [],
     }
+    if task.get("uiRequired") is True and execution_mode == "code":
+        state["frontendVerificationVersion"] = 1
     if parallel_run_id is not None:
         state["parallelRunId"] = parallel_run_id
     pending_revalidation = task.get("pendingRevalidation")
@@ -1118,13 +1120,13 @@ def _validate_supporting_files(repositories: RepositoryMap, supporting_files: li
     return normalized
 
 
-def _compile_source_digest(repositories: RepositoryMap) -> str:
-    snapshots = {
-        name: {path: digest for path, digest in _git_snapshot(repo).items()
+def _compile_source_digest(snapshots: dict) -> str:
+    sources = {
+        name: {path: digest for path, digest in snapshot.items()
                if not _is_transient_validation_path(path)}
-        for name, repo in repositories.items()
+        for name, snapshot in snapshots.items()
     }
-    return hashlib.sha256(json.dumps(snapshots, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(sources, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _compile_context(workspace: Path, feature: str, task_id: str, code_workspace: Path | list[Path],
@@ -1168,13 +1170,14 @@ def prepare_compile(workspace: Path, feature: str, task_id: str, code_workspace:
                 if not any(target.is_relative_to(repo) for repo in repositories.values()):
                     raise TaskRunnerError("compile_build_file_workspace_mismatch", reason=f"Maven 构建文件 {target} 超出当前 TASK 的业务工作区")
         from hooks.compile_coverage import production_fingerprint
+        snapshots = {name: _git_snapshot(repo) for name, repo in repositories.items()}
         attempt = {
-            "productionFingerprint": production_fingerprint(repositories, argv),
+            "productionFingerprint": production_fingerprint(repositories, argv, snapshots=snapshots),
             "attemptId": "compile-" + uuid.uuid4().hex,
             "taskId": task_id, "runId": run_id, "parallelRunId": parallel_run_id,
             "batchId": state["batchId"], "taskContractSha256": state["taskContractSha256"],
             "argv": list(argv), "executionCwd": str(cwd), "status": "prepared",
-            "sourceDigest": _compile_source_digest(repositories), "preparedAt": _utc_now(),
+            "sourceDigest": _compile_source_digest(snapshots), "preparedAt": _utc_now(),
         }
         state.setdefault("compileAttempts", []).append(attempt)
         state["latestCompileAttemptId"] = attempt["attemptId"]
@@ -1207,7 +1210,7 @@ def record_compile(workspace: Path, feature: str, task_id: str, code_workspace: 
         attempt = next((item for item in attempts if item.get("attemptId") == attempt_id), None)
         if attempt is None or state.get("latestCompileAttemptId") != attempt_id:
             raise TaskRunnerError("compile_attempt_not_current", reason="编译结果必须引用当前 TASK/run 最新的 prepare-compile attemptId")
-        if attempt.get("sourceDigest") != _compile_source_digest(repositories):
+        if attempt.get("sourceDigest") != _compile_source_digest({name: _git_snapshot(repo) for name, repo in repositories.items()}):
             raise TaskRunnerError("compile_sources_changed", reason="生产文件在准备编译后发生变化，请保留日志并对最新代码重新编译")
         if not 0 <= exit_code <= 255 or not 0 <= log_exit_code <= 255:
             raise TaskRunnerError("compile_exit_code_invalid", reason="Bash 退出码必须在 0 到 255 之间")
@@ -1255,7 +1258,7 @@ def record_compile(workspace: Path, feature: str, task_id: str, code_workspace: 
         return dict(attempt)
 
 
-def _assert_compile_passed(feature_dir: Path, task: dict[str, Any], state: dict[str, Any], repositories: RepositoryMap) -> None:
+def _assert_compile_passed(feature_dir: Path, task: dict[str, Any], state: dict[str, Any], final_repositories: list[dict]) -> None:
     if task_execution_lane(task) != "backend" or state.get("executionMode") != "code":
         return
     attempt = next((item for item in state.get("compileAttempts", [])
@@ -1264,7 +1267,7 @@ def _assert_compile_passed(feature_dir: Path, task: dict[str, Any], state: dict[
         raise TaskRunnerError("production_compile_result_missing", reason="后端 TASK 完成前必须执行生产编译并用 prepare-compile/record-compile 登记真实结果", requiredAction="compile_and_record_current_task")
     if attempt.get("exitCode") != 0 or attempt.get("logExitCode") != 0:
         raise TaskRunnerError("production_compile_failed", reason=f"生产编译或日志写入失败：Maven/compiler exit={attempt.get('exitCode')}，log exit={attempt.get('logExitCode')}，Evidence={attempt.get('evidenceId')}")
-    if attempt.get("sourceDigest") != _compile_source_digest(repositories):
+    if attempt.get("sourceDigest") != _compile_source_digest({r["id"]: r["snapshot"] for r in final_repositories}):
         raise TaskRunnerError("production_compile_result_stale", reason="编译通过后业务文件又发生变化，必须对当前生产代码重新编译")
     evidence = next((record for record in read_records(stream_path(feature_dir))
                      if record.get("evidenceId") == attempt.get("evidenceId") and record.get("action") == "production_compile"
@@ -1533,7 +1536,15 @@ def _finish_implementation_unlocked(
             )
         completion_mode = "verified_existing"
 
-    _assert_compile_passed(feature_dir, task, state, repositories)
+    _assert_compile_passed(feature_dir, task, state, final_repositories)
+    if state.get("frontendVerificationVersion"):
+        from hooks.frontend_verification import assert_current
+        try:
+            frontend = assert_current(feature_dir, task, state, requested_workspaces[0], final_repositories[0]["snapshot"])
+        except ValueError as exc:
+            raise TaskRunnerError(str(exc), requiredAction="verify_current_frontend_task") from exc
+        state["frontendVerificationPath"] = frontend["reportPath"]
+
     state.update({
         "status": "implementation_recording",
         "completionMode": completion_mode,
@@ -2276,9 +2287,11 @@ def _compile_inspection(state: dict[str, Any], task: dict[str, Any] | None) -> d
         summary.update({key: attempt.get(key) for key in
                         ("attemptId", "executionCwd", "argv", "exitCode", "logExitCode", "evidenceId", "logPath")})
         summary["status"] = "prepared" if attempt.get("status") != "recorded" else "passed" if attempt.get("passed") else "failed"
+        if state.get("status") in {"implemented", "done"}:
+            return {**state, "productionCompileRequired": required, "compileSummary": summary}
         try:
             repositories = {item["id"]: Path(item["path"]) for item in _state_repositories(state)}
-            summary["sourceFresh"] = attempt.get("sourceDigest") == _compile_source_digest(repositories)
+            summary["sourceFresh"] = attempt.get("sourceDigest") == _compile_source_digest({name: _git_snapshot(repo) for name, repo in repositories.items()})
             if not summary["sourceFresh"]:
                 summary["status"] = "stale"
         except (TaskRunnerError, OSError, ValueError, KeyError) as exc:

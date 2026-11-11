@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_runtime import (append_event, batch_occupies_scheduler_slot, lease_path, load_manifest,
+from hooks.parallel_runtime import (DELIVERY_STAGES, append_event, batch_occupies_scheduler_slot, lease_path, load_manifest,
                                     ready_batches, mergeable_batches, stage_recovery_batches,
                                     run_dir, run_lock, save_manifest, select_runnable_batches)
 from hooks.runtime_guidance import RuntimeArgumentParser
@@ -27,7 +27,7 @@ def generation(batch: dict) -> int:
 
 
 def active_claim(batch: dict, now: float | None = None) -> bool:
-    claim = batch.get("dispatch", {})
+    claim = batch.get("dispatch") or {}
     return (claim.get("status") == "running" and claim.get("generation") == generation(batch)
             and claim.get("expiresEpoch", 0) > (time.time() if now is None else now))
 
@@ -37,6 +37,42 @@ def read(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def _delivery_ready(batch: dict) -> bool:
+    states = batch.get("stageStates") or {}
+    return (batch.get("status") in {"sealed", "ready_to_candidate"}
+            and all(states.get(stage, {}).get("status") in {"passed", "skipped", "deferred"}
+                    for stage in DELIVERY_STAGES))
+
+
+def _repository_delivery_running(manifest: dict, batch_id: str) -> bool:
+    """Reserve delivery admission before a newly claimed settler starts Git."""
+    from hooks.parallel_repository import coordinates
+    batches = manifest["batches"]
+    batch = batches[batch_id]
+    ref = batch.get("repositoryRef") or batch.get("workspaceRef")
+    repositories = manifest.get("repositories") or {}
+    binding = repositories.get(ref)
+    if not binding:
+        return False
+    repository = coordinates(binding)[0]
+    for other_id, other in batches.items():
+        if other_id == batch_id or not active_claim(other) or not _delivery_ready(other):
+            continue
+        dispatch = other.get("dispatch") or {}
+        # Initial lifecycles can be sealed while waiting in the local queue.
+        # Only an admitted recovery or a started operation owns delivery here.
+        started = any(operation.get("batchId") == other_id
+                      and operation.get("dispatchGeneration") == generation(other)
+                      and operation.get("executionTokenSha256") == dispatch.get("tokenSha256")
+                      for operation in manifest.get("deliveryOperations", {}).values())
+        if dispatch.get("source") not in {"merge_candidate", "stage_recovery"} and not started:
+            continue
+        other_ref = other.get("repositoryRef") or other.get("workspaceRef")
+        if other_ref in repositories and coordinates(repositories[other_ref])[0] == repository:
+            return True
+    return False
 
 
 def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: int,
@@ -57,7 +93,7 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
         if (queue.get("retryAfterEpoch", 0) > time.time()
                 and (not blockers or any(batches.get(key, {}).get("status") != "merged" for key in blockers))):
             return denied("delivery_queue_wait")
-        previous = batch.get("dispatch", {})
+        previous = batch.get("dispatch") or {}
         if active_claim(batch):
             if request_id and previous.get("requestId") == request_id and previous.get("worker") == worker:
                 private = read(run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json"))
@@ -66,6 +102,10 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
                     return {"success": True, "status": "claimed", "batchId": batch_id,
                             "generation": expected, "ownerToken": token, "reused": True}
             return denied("running")
+        if manifest.get("controlProtocolVersion", 1) >= 2 and _delivery_ready(batch):
+            from hooks.parallel_delivery import execution_running
+            if execution_running(workspace, feature, run_id, batch_id):
+                return denied("running")
         if previous.get("generation") == expected and previous.get("status") in {"completed", "failed", "retry_pending"}:
             return denied("grant_consumed")
         business_lease = read(lease_path(workspace, feature, run_id, batch_id))
@@ -91,6 +131,9 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             raise ValueError("parallel_dispatch_source_invalid")
         if not eligible:
             return denied("not_runnable")
+        if (manifest.get("controlProtocolVersion", 1) >= 2 and _delivery_ready(batch)
+                and _repository_delivery_running(manifest, batch_id)):
+            return denied("delivery_queue_wait")
         for dep in batch.get("dependencies", []):
             if batches.get(dep, {}).get("status") != "merged" or not batches.get(dep, {}).get("mergeCommitSha"):
                 return denied("dependencies_unmerged")
@@ -112,12 +155,16 @@ def finish(workspace: Path, feature: str, run_id: str, batch_id: str, expected: 
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest["batches"][batch_id]
-        current = batch.get("dispatch", {})
+        current = batch.get("dispatch") or {}
         if (generation(batch) != expected or current.get("generation") != expected
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if current.get("status") != "running":
             return {"success": True, "status": "already_finished", "batchId": batch_id}
+        if batch.get("status") != "merged" and manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_delivery import execution_running
+            if execution_running(workspace, feature, run_id, batch_id):
+                return {"success": True, "status": "delivery_running", "batchId": batch_id}
         if current.get("expiresEpoch", 0) <= time.time():
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if batch.get("status") == "merged" and batch.get("mergeCommitSha"):
@@ -137,7 +184,7 @@ def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest["batches"][batch_id]
-        current = batch.get("dispatch", {})
+        current = batch.get("dispatch") or {}
         if (generation(batch) != expected or current.get("generation") != expected
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
@@ -149,6 +196,10 @@ def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             return {"success": True, "status": "merged", "batchId": batch_id, "reused": True}
         if current.get("status") in {"retry_pending", "failed"} and batch.get("status") in {"retry_pending", "blocked"}:
             return {"success": True, "status": batch["status"], "batchId": batch_id, "reused": True}
+        if manifest.get("controlProtocolVersion", 1) >= 2:
+            from hooks.parallel_delivery import execution_running
+            if execution_running(workspace, feature, run_id, batch_id):
+                return {"success": True, "status": "delivery_running", "batchId": batch_id}
         if current.get("status") != "running" or current.get("expiresEpoch", 0) <= time.time():
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if batch.get("status") == "merged":

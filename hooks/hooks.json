@@ -86,7 +86,7 @@
           "timeout": 30,
           "onBlock": {
             "reason": "命令不符合当前 Batch 阶段的验证权限",
-            "systemMessage": "环境版本/帮助查询允许执行；当前 Batch 绑定的活动 Code/修复 task 允许生产纯编译；Review 禁止验证；其余构建、测试、typecheck、lint、E2E 仅由 Review 通过后的运行中 UTest 阶段执行。",
+            "systemMessage": "环境版本/帮助查询允许执行；当前 Batch 绑定的活动 Code/修复 task 允许生产纯编译；Review 禁止验证；前端静态回检、按需工程验证和预览只允许插件 frontend_verification.py 受控入口；不恢复 UTest/E2E。旧 run 的测试权限仅按旧状态契约处理。",
             "additionalContext": "guard 按真实命令和目标判断，支持 export/环境赋值、cd、多行、tee 和退出码记录，不要求固定命令字符串。被拦截时必须展示 GUARD_DIAGNOSTICS.failures 中每项 code、reason、line、statement，连同 executionCwd、taskRuns、guardVersion 和 guardPath；不能只说 guard rejected，更不能盲目删除 -o 重试。相对 cwd 需要工具真实的 workspaceRoot；执行工具自身的 cwd 限制另行报告。后端按 prepare-compile → 直接 Bash 编译并立即保存 PIPESTATUS → record-compile → finish-implementation 完成；记录成功不代表编译通过，检查 passed/exitCode/logExitCode，登记失败保留日志只重试登记。TASK/Batch/run 绑定和阶段规则仍然生效；不得附加 test/package/verify、额外验证、动态执行或后台进程，不得切换中立目录绕过 guard 或手改 Runtime。"
           },
           "persistAfterInterrupt": true

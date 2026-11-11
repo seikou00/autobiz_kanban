@@ -15,8 +15,11 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.evidence_kernel import FileLock
-from hooks.parallel_runtime import load_manifest, run_lock, run_dir, save_manifest, utc_now, plan_digest
+from hooks.parallel_runtime import DELIVERY_STAGES, append_event, load_manifest, run_lock, run_dir, save_manifest, utc_now, plan_digest
 from hooks.parallel_repository import repository_lock, assert_reservation, reserve, reservation, release_if_owned, coordinates
+
+DELIVERY_RETRY_SECONDS = 30
+DELIVERY_CONTINUATION_STATES = {"awaiting_frontend_recheck", "awaiting_candidate_resolution", "awaiting_candidate_review"}
 
 
 def _owner(manifest: dict, batch_id: str, generation: int, token: str, expected_commit: str | None = None) -> dict:
@@ -46,6 +49,15 @@ def _snapshot(workspace: Path, feature: str, run_id: str) -> dict:
 
 def _execution_lock(workspace: Path, feature: str, run_id: str, batch_id: str) -> FileLock:
     return FileLock(run_dir(workspace, feature, run_id) / "delivery-locks" / (batch_id + ".lock"), timeout=0)
+
+
+def execution_running(workspace: Path, feature: str, run_id: str, batch_id: str) -> bool:
+    # Safe under a run lock: never wait for a settler that may need that lock.
+    try:
+        with _execution_lock(workspace, feature, run_id, batch_id):
+            return False
+    except TimeoutError:
+        return True
 
 
 def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, manifest: dict) -> None:
@@ -80,17 +92,35 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
                 (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
             batch.pop("deliveryQueue", None)
             continue
-        if batch.get("status") not in {"sealed", "ready_to_candidate"} or dispatch.get("status") != "running":
+        if batch.get("status") not in {"sealed", "ready_to_candidate"}:
+            continue
+        consumed = (dispatch.get("status") in {"completed", "failed", "retry_pending"}
+                    and dispatch.get("generation") == batch.get("dispatchGeneration", 1))
+        if consumed:
+            # A Workflow may close its grant before its reviewed delivery is
+            # merged. The scheduler must offer a fresh owner for that seal.
+            states = batch.get("stageStates") or {}
+            if (not batch.get("commitSha") or batch.get("lease") is not None
+                    or any(states.get(stage, {}).get("status") not in {"passed", "skipped"}
+                           for stage in DELIVERY_STAGES)):
+                continue
+        elif dispatch.get("status") != "running":
             continue
         current = next((item for item in operations
                         if item.get("dispatchGeneration") == batch.get("dispatchGeneration", 1)
                         and (item.get("executionTokenSha256") == dispatch.get("tokenSha256")
                              or (not item.get("executionTokenSha256") and not dispatch.get("claimedEpoch")))), None)
-        if not current:
+        if not current and not consumed:
+            continue
+        if (not consumed and current.get("status") in DELIVERY_CONTINUATION_STATES
+                and dispatch.get("expiresEpoch", 0) > time.time()):
+            # The command deliberately handed control back to the Workflow.
+            # Preserve ownership through external work and the return to settle,
+            # even after a resolved candidate has changed back to built.
             continue
         candidate = next((item for item in manifest.get("mergeTrains", {}).values()
-                          if item.get("repositoryRef") == current.get("repositoryRef")
-                          and item.get("wave") == current.get("wave")), {})
+                          if item.get("repositoryRef") == (current or {}).get("repositoryRef")
+                          and item.get("wave") == (current or {}).get("wave")), {})
         if candidate.get("status") in {"candidate_conflicted", "needs_resolution"}:
             # Conflict editing and Plan recovery happen outside settle's OS
             # lock and retain their own durable continuation protocol.
@@ -99,13 +129,18 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
         try:
             lock.__enter__()
         except TimeoutError:
+            # A slow, live settler retains its authority even if the caller's
+            # response deadline elapsed. The scheduler must not expire it below.
+            if dispatch.get("status") == "running" and dispatch.get("expiresEpoch", 0) <= time.time():
+                dispatch["expiresEpoch"] = time.time() + max(60, dispatch.get("ttlSeconds", 14400))
             continue
         try:
             # Legacy settlers did not hold an execution lock. Also probe their
             # repository lock before revoking a historical grant. Both probes
             # are nonblocking even though the scheduler owns the run lock.
-            if not current.get("executionTokenSha256"):
-                repository_guard = repository_lock(manifest["repositories"][current["repositoryRef"]], timeout=0)
+            if not current or not current.get("executionTokenSha256"):
+                ref = (current or {}).get("repositoryRef") or batch.get("repositoryRef") or batch["workspaceRef"]
+                repository_guard = repository_lock(manifest["repositories"][ref], timeout=0)
                 try:
                     repository_guard.__enter__()
                 except TimeoutError:
@@ -115,15 +150,22 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
             # alone is not evidence that the settlement is still executing.
             generation = int(batch.get("dispatchGeneration", 1)) + 1
             key = hashlib.sha256(f"{run_id}:{batch_id}:{generation}:{batch['commitSha']}".encode()).hexdigest()
-            retained = {**current, "operationId": key, "dispatchGeneration": generation, "status": "queued"}
-            retained.pop("executionTokenSha256", None)
-            current.update(status="superseded", supersededBy=key)
-            manifest["deliveryOperations"][key] = retained
+            if current:
+                retained = {**current, "operationId": key, "dispatchGeneration": generation, "status": "queued"}
+                retained.pop("executionTokenSha256", None)
+                retained.pop("frontendRecheck", None)
+                current.update(status="superseded", supersededBy=key)
+                manifest["deliveryOperations"][key] = retained
             batch["dispatchGeneration"] = generation
             batch.pop("dispatch", None)
-            batch["deliveryQueue"] = {"operationId": key, "retryAfterEpoch": 0,
-                                      "blockingBatchIds": [], "reasonCode": "delivery_interrupted"}
+            reason = "delivery_grant_consumed" if consumed else "delivery_interrupted"
+            batch["deliveryQueue"] = {"retryAfterEpoch": 0, "blockingBatchIds": [], "reasonCode": reason}
+            if current:
+                batch["deliveryQueue"]["operationId"] = key
             (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
+            if consumed:
+                append_event(workspace, feature, run_id, "delivery_grant_recovered", batchId=batch_id,
+                             previousGeneration=generation - 1, dispatchGeneration=generation, reasonCode=reason)
         finally:
             lock.__exit__(None, None, None)
 
@@ -143,7 +185,7 @@ def _park_delivery(workspace: Path, feature: str, run_id: str, batch_id: str, ge
         manifest = load_manifest(workspace, feature, run_id)
         batch = _owner(manifest, batch_id, generation, token, commit)
         batch["deliveryQueue"] = {"operationId": key, "blockingBatchIds": blockers,
-                                  "retryAfterEpoch": time.time() + 5, "reasonCode": reason}
+                                  "retryAfterEpoch": time.time() + DELIVERY_RETRY_SECONDS, "reasonCode": reason}
         batch["dispatch"].update(status="waiting", reasonCode=reason)
         (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
         save_manifest(workspace, feature, run_id, manifest)
@@ -151,7 +193,9 @@ def _park_delivery(workspace: Path, feature: str, run_id: str, batch_id: str, ge
 
 
 def settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
-                    generation: int, token: str, expected_commit: str | None = None) -> dict:
+                    generation: int, token: str, expected_commit: str | None = None, *,
+                    reviewed_candidate: str | None = None) -> dict:
+
     lock = _execution_lock(workspace, feature, run_id, batch_id)
     try:
         lock.__enter__()
@@ -165,13 +209,13 @@ def settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
         return _queued_result(workspace, feature, run_id, batch_id, generation, commit, key, ref,
                               [batch_id], "delivery_already_running", released=False)
     try:
-        return _settle_delivery(workspace, feature, run_id, batch_id, generation, token, expected_commit)
+        return _settle_delivery(workspace, feature, run_id, batch_id, generation, token, expected_commit, reviewed_candidate)
     finally:
         lock.__exit__(None, None, None)
 
 
 def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
-                     generation: int, token: str, expected_commit: str | None) -> dict:
+                     generation: int, token: str, expected_commit: str | None, reviewed_candidate: str | None) -> dict:
     from hooks.parallel_batch_stage import gate_batch
     from hooks.parallel_dispatch import finish
     from hooks import parallel_merge_train as train
@@ -215,6 +259,9 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
                     operation["wave"] = max(retained)
             manifest["deliveryOperations"][key] = operation
         operation["executionTokenSha256"] = batch["dispatch"]["tokenSha256"]
+        if operation.get("status") in DELIVERY_CONTINUATION_STATES:
+            operation["status"] = "queued"
+            operation.pop("frontendRecheck", None)
         batch.pop("deliveryQueue", None)
         save_manifest(workspace, feature, run_id, manifest)
     if batch.get("status") != "merged":
@@ -241,7 +288,7 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
         earlier = [item for item in manifest["deliveryOperations"].values()
                    if item["repositoryKey"] == operation["repositoryKey"] and item["ticket"] < operation["ticket"]
                    and item.get("batchId") != batch_id
-                   and item.get("status") in {"queued", "built", "promoting"}
+                   and item.get("status") in {"queued", "built", "promoting"} | DELIVERY_CONTINUATION_STATES
                    and manifest["batches"][item["batchId"]].get("status") in {"sealed", "ready_to_candidate"}
                    and item.get("deliverySha") == manifest["batches"][item["batchId"]].get("commitSha")
                    and manifest["batches"][item["batchId"]].get("dispatchGeneration", 1) == item["dispatchGeneration"]]
@@ -304,14 +351,29 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
                 if built.get("status") in {"candidate_conflicted", "needs_resolution"}:
                     reserve(binding, workspace, feature, run_id, wave, built["baseSha"] if "baseSha" in built
                             else built["conflictContext"]["baseSha"])
+                    # Persist before the execution lock is released. Candidate
+                    # status alone stops protecting the owner once the separate
+                    # complete-resolution command records built.
+                    with run_lock(workspace, feature, run_id):
+                        manifest = load_manifest(workspace, feature, run_id)
+                        _owner(manifest, batch_id, generation, token, expected_commit)
+                        manifest["deliveryOperations"][key]["status"] = "awaiting_candidate_resolution"
+                        save_manifest(workspace, feature, run_id, manifest)
                     return {**built, "status": "candidate_conflicted", "batchId": batch_id, "operationId": key}
                 if not built.get("success"):
                     return {**built, "status": "blocked", "batchId": batch_id, "operationId": key}
                 _owner(load_manifest(workspace, feature, run_id), batch_id, generation, token, expected_commit)
                 promote_started = time.monotonic()
                 result = train._promote_candidate(workspace, feature, run_id, wave=wave, repository_ref=ref,
-                                                  allow_unverified=True)
+                                                  allow_unverified=True, reviewed_candidate=reviewed_candidate)
                 promote_ms = round((time.monotonic() - promote_started) * 1000)
+                if result.get("status") == "candidate_review_required":
+                    with run_lock(workspace, feature, run_id):
+                        manifest = load_manifest(workspace, feature, run_id)
+                        _owner(manifest, batch_id, generation, token, expected_commit)
+                        manifest["deliveryOperations"][key]["status"] = "awaiting_candidate_review"
+                        save_manifest(workspace, feature, run_id, manifest)
+                    return {**result, "batchId": batch_id, "operationId": key}
                 if not result.get("success"):
                     return {**result, "status": "needs_plan_recovery" if result.get("needsPlanRecovery") else "blocked",
                             "batchId": batch_id, "wave": wave, "repositoryRef": ref}
@@ -423,6 +485,7 @@ def build_parser():
         if action == "settle-delivery":
             for name in ("batch-id", "dispatch-token"):
                 command.add_argument("--" + name, required=True)
+            command.add_argument("--reviewed-candidate")
             command.add_argument("--expected-commit", help="Optional explicit version fence for legacy callers")
             command.add_argument("--dispatch-generation", type=int, required=True)
     return parser
@@ -434,7 +497,7 @@ def main(argv=None):
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
         if args.action == "settle-delivery":
             result = settle_delivery(workspace, feature, args.run_id, args.batch_id, args.dispatch_generation,
-                                     args.dispatch_token, args.expected_commit)
+                                     args.dispatch_token, args.expected_commit, reviewed_candidate=args.reviewed_candidate)
         elif args.action == "prepare-finalization":
             result = prepare_finalization(workspace, feature, args.run_id)
         else:

@@ -11,7 +11,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 - 当前路线参考：`references/`
 - 当前路线脚本：`scripts/`
 
-本文中提到的 `SKILL.md` 均指 code 根技能 `../../../SKILL.md`。若本文和 code 根技能冲突，以 code 根技能的 Source/Method Bundle 优先级、HTML 分支总控契约和 code_done 收尾规则为准。
+前端专业规则先读 `../references/frontend-policy.md`；任务调度与写入身份遵循 code 根技能。
 命令示例兼容两种工作目录：
 - 如果当前目录是 `autodev-code` 技能根目录，使用 `references/frontend-html/with-absolute-html/scripts/...`
 - 如果当前目录已经是 `references/frontend-html/with-absolute-html/`，使用 `scripts/...`
@@ -50,7 +50,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 本文件只负责：总原则、主流程 write_todos、交接边界与失败兜底。
 
-它不展开实现细则，不替代 code 根技能 `../../../SKILL.md` 的全局优先级，也不重复 `references/html-parser.md` 的执行规则。
+它不展开实现细则，前端优先级遵循 frontend-policy.md，任务调度遵循 code 根技能，也不重复 `references/html-parser.md` 的执行规则。
 本路线的真实执行顺序见第 3 节；未完成第 3 节前，不得提前转交 `references/html-parser.md`。
 
 ## 3. 路线总原则
@@ -204,7 +204,7 @@ Assets 处理总结将作为后续”编码前简报”的输入材料。详细�
 ### 步骤 8: 生成代码
 
 - [ ] 完成主线代码生成、页面拆分 / 抽取与最低校验。
-- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明”已跳过 Stage 1 脚本及原因”），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进；不得发起独立回检选择。
+- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明”已跳过 Stage 1 脚本及原因”），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，按 frontend-route.md 执行受控统一回检后，由 code 根技能收口；不得发起独立回检选择。
 
 ## 5. 转交规则
 
@@ -248,7 +248,7 @@ Assets 处理总结将作为后续”编码前简报”的输入材料。详细�
 
 | 文件 | 一句话职责 |
 | --- | --- |
-| `../../../SKILL.md` | `/autodev-code` 总入口 + 全局优先级与执行清单 |
+| `../../../SKILL.md` | `/autodev-code` 总入口、任务身份与执行清单 |
 | `SKILL.md` | 绝对定位高保真 HTML 路线入口、读取顺序与转交规则 |
 | `references/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
 | `/autodev-code` 主流程 | HTML 上下文完成后执行项目级验证、统一前端回检与 `code_done` 推进 |

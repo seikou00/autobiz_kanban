@@ -1259,6 +1259,17 @@ def defer_stage(
     return {"success": True, "batchId": batch_id, "stage": stage, "status": "deferred", "issue": issue}
 
 
+def is_test_only_reseal(manifest: dict, batch: dict, before: str | None, after: str) -> bool:
+    # Older Code runs could seal test assets after the production Review.
+    from hooks.utest_test_environment import validate_test_commit_change
+    seal = batch.get("lastSeal") or {}
+    if seal.get("purpose") != "utest" or seal.get("commitSha") != after:
+        return False
+    ref = batch.get("repositoryRef") or batch.get("workspaceRef")
+    repo = manifest.get("repositories", {}).get(ref, {}).get("gitRoot")
+    return bool(repo) and validate_test_commit_change(repo, before, after)["allowed"]
+
+
 def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
@@ -1292,6 +1303,14 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
         elif not isinstance(batch.get("commitSha"), str) or not batch.get("commitSha"):
             return {"success": False, "batchId": batch_id, "error": "parallel_batch_stage_gate_delivery_not_sealed"}
         else:
+            # TASK checks closed at implementation. Review names the sealed Git commit.
+            from hooks.engineering_context import read_json
+            review = states["review"]
+            evidence = read_json(Path(review.get("evidencePath") or ""))
+            reviewed = evidence.get("inputs", {}).get("batchCommit")
+            if (not evidence.get("evidenceId") or evidence["evidenceId"] != review.get("latestEvidenceId")
+                    or (reviewed != batch["commitSha"] and not is_test_only_reseal(manifest, batch, reviewed, batch["commitSha"]))):
+                return {"success": False, "batchId": batch_id, "error": "parallel_batch_review_not_bound_to_seal"}
             batch["status"] = "ready_to_candidate"
         batch["activeStage"] = None
         save_manifest(workspace, feature, run_id, manifest)

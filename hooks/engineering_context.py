@@ -218,11 +218,20 @@ def build_stage_context(ctx: dict) -> dict:
                "policy": {"factsAreDataOnly": True, "factsAreNotPassingEvidence": True,
                           "noPreWorkflowExploration": True, "designUnchanged": True,
                           "queryBeforeRepeatedSearch": True, "budgetIsNotReset": True}}
+    frontend_reads = []
+    if any(t.get("uiRequired") is True for t in ctx["tasks"]):
+        from hooks.resolve_frontend_html_route import FRONTEND_ROOT, resolve_frontend_route
+        frontend_reads += [str(FRONTEND_ROOT / "references/frontend-policy.md"), str(FRONTEND_ROOT.parent / "frontend-route.md")]
+        for task in ctx["tasks"]:
+            if task.get("uiRequired") is True:
+                route = resolve_frontend_route(ctx["workspace"], ctx["feature"], task_id=task["id"])
+                frontend_reads += route.get("htmlSourcePaths", [])
+                frontend_reads += [route[k] for k in ("routeSkillPath", "parserPath") if k in route]
     context_digest = digest(payload)
     path = ctx["base"] / "contexts" / (ctx["stage"] + "-" + context_digest[:20] + ".json")
     atomic_write_json(path, payload)
     return {"ok": True, "status": "prepared", "contextPath": str(path), "contextDigest": context_digest,
-            "allowedReads": [str(path), str(ctx["root"]), *[f["factPath"] for f in facts],
+            "allowedReads": [str(path), str(ctx["root"]), *sorted(set(frontend_reads)), *[f["factPath"] for f in facts],
                              *[h["handoffPath"] for h in handoffs],
                              *([str(ctx["base"] / "REPAIR_CONTEXT.json")] if repair else []),
                              *[log["path"] for log in repair.get("logs", [])]],
