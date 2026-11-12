@@ -226,7 +226,7 @@ def assert_current(fd: Path, task: dict, state: dict, root: Path, snapshot: dict
         raise ValueError('frontend_verification_task_contract_changed')
     if result.get('taskId') != task['id'] or result.get('taskRunId') != state['runId']:
         raise ValueError('frontend_verification_run_mismatch')
-    if route.get('htmlSourcePaths'):
+    if route.get('htmlSourcePaths') and result.get('visual', {}).get('status') == 'passed':
         validate_capture(result.get('capture', {}), digest(expected), len(route['htmlSourcePaths']))
     return result
 
@@ -345,6 +345,18 @@ def asset_status(root: Path, route: dict) -> dict:
 
 def publish_route_summary(args, result: dict) -> None:
     """Keep the existing code_done gate connected without replacing per-task proof."""
+    if args.parallel_run_id:
+        from hooks.parallel_runtime import load_manifest, run_lock, save_manifest
+        with run_lock(args.workspace, args.feature, args.parallel_run_id):
+            manifest = load_manifest(args.workspace, args.feature, args.parallel_run_id)
+            issue_id = f'FRONTEND-VISUAL-{args.task_id}'
+            issues = [issue for issue in manifest.get('deferredIssues', []) if issue.get('issueId') != issue_id]
+            for advisory in result.get('advisories', []):
+                issues.append({'issueId': issue_id, 'kind': advisory['type'], 'batchId': args._frontend_batch_id,
+                               'stage': 'implement', 'message': f"{args.task_id}: {advisory['message']}",
+                               'disposition': 'recorded_advisory', 'blocksWorkflow': False, 'status': 'open'})
+            manifest['deferredIssues'] = issues
+            save_manifest(args.workspace, args.feature, args.parallel_run_id, manifest)
     from hooks.resolve_frontend_html_route import evidence_path, mark_evidence
     route = read(evidence_path(args.workspace, args.feature))
     if not route or route.get('route') != result['binding']['route']:
@@ -360,6 +372,7 @@ def _verify(args) -> dict:
     from hooks import task_runner as tr
     fd = feature_dir(args.workspace, args.feature)
     _, batch, task = tr._load_plan_and_task(fd, args.task_id, require_active_batch=False)
+    args._frontend_batch_id = batch
     _, state = tr._load_run(fd, args.task_id, args.run_id)
     root = args.code_workspace.resolve()
     if args.candidate_wave is not None:
@@ -429,9 +442,16 @@ def _verify(args) -> dict:
         if not same or 'capture' not in result or result['capture'].get('recipe') != recipe or result['capture'].get('errors') or result.get('visual', {}).get('status') == 'failed':
             output = path.parent / (args.run_id + '-capture')
             output.mkdir(parents=True, exist_ok=True)
-            result['capture'] = capture(root, output, args, route.get('htmlSourcePaths', []), result['assets'].get('publicRoot'))
-            result['capture']['bindingDigest'] = digest(current)
-            result['capture']['recipe'] = recipe
+            try:
+                result['capture'] = capture(root, output, args, route.get('htmlSourcePaths', []), result['assets'].get('publicRoot'))
+                result['capture']['bindingDigest'] = digest(current)
+                result['capture']['recipe'] = recipe
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                if isinstance(exc, ValueError) and not str(exc).startswith(('frontend_capture_failed:', 'frontend_preview_not_ready:')):
+                    raise
+                result['capture'] = {'status': 'unavailable', 'error': str(exc)}
+                if same and previous.get('capture', {}).get('errors'):
+                    result['capture']['errors'] = previous['capture']['errors']
             result['visual'] = {'status': 'not-run'}
     if args.actual_screenshot:
         args._frontend_operation = 'capture'
@@ -466,21 +486,29 @@ def _verify(args) -> dict:
     # Source/resource edits during validation invalidate the entire attempt.
     if current != binding(root, route, targets):
         raise ValueError('frontend_source_changed_during_verification')
+    # A retry without a new passing review cannot erase a known visual defect.
+    if same and previous.get('visual', {}).get('status') == 'failed' and result['visual']['status'] != 'passed':
+        result['visual'] = previous['visual']
     must_fix = result['assets']['status'] == 'failed' or result['static']['status'] == 'failed' or result.get('projectCheck', {}).get('status') in {'failed', 'blocked'}
     needs_visual = bool(route.get('htmlSourcePaths'))
-    if result.get('visual', {}).get('status') == 'failed':
+    if result.get('visual', {}).get('status') == 'failed' or result.get('capture', {}).get('errors'):
         must_fix = True
+    result['advisories'] = []
+    if (needs_visual and result['visual']['status'] == 'not-run') or result.get('capture', {}).get('status') == 'unavailable':
+        reason = result.get('capture', {}).get('error') or '未提供实际页面与原始 HTML 的视觉核对结果'
+        result['advisories'].append({'type': 'frontend_visual_unverified', 'message': reason, 'blocksWorkflow': False})
     if any(result.get(k, {}).get('status') == 'blocked' for k in ('projectCheck', 'capture', 'visual')):
         result['status'] = 'blocked'
     elif must_fix:
         result['status'] = 'failed'
     elif needs_visual and result['visual']['status'] != 'passed':
-        result['status'] = 'unverified'
-        result['requiredAction'] = 'capture actual page and original HTML, inspect screenshots, then supply --visual-report with bindingDigest/decision/findings'
+        result['status'] = 'has-suggestions'
     else:
-        suggestion = any(r.get('summary', {}).get('suggestion', 0) for r in result['static']['reports'])
+        suggestion = bool(result['advisories']) or any(r.get('summary', {}).get('suggestion', 0) for r in result['static']['reports'])
         result['status'] = 'has-suggestions' if suggestion else 'passed'
     result['fidelityStatus'] = result['visual']['status'] if needs_visual else 'not-applicable'
+    if needs_visual and result['visual']['status'] == 'not-run':
+        result['fidelityStatus'] = 'unverified'
     result['cacheHit'] = same
     atomic_write_json(path, result)
     publish_route_summary(args, result)

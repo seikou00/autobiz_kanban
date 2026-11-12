@@ -1,9 +1,12 @@
 from __future__ import annotations
 from argparse import Namespace
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch, Mock
@@ -150,7 +153,7 @@ class FrontendVerificationTest(unittest.TestCase):
             html.write_text('<main class="flex"><span class="absolute left-0 top-0">x</span></main>')
             self.assertEqual(classify_html([html])[0], 'standard-html')
 
-    def test_readable_html_requires_current_visual_evidence_but_missing_input_does_not(self):
+    def test_readable_html_allows_unverified_visuals_and_still_checks_claimed_visual_proof(self):
         import base64
         with tempfile.TemporaryDirectory() as tmp:
             workspace, fd, code, state = self.setup_task(Path(tmp))
@@ -161,9 +164,10 @@ class FrontendVerificationTest(unittest.TestCase):
                 visual_report=None, timeout=60)
             with patch.object(fv, 'resolve_frontend_route', return_value={'route': 'absolute-html', 'htmlSourcePaths': [str(source)]}):
                 result = fv.verify(args)
-                self.assertEqual(result['status'], 'unverified')
-                with self.assertRaisesRegex(ValueError, 'missing_or_failed'):
-                    fv.assert_current(fd, {'id': 'T001'}, state, code)
+                self.assertEqual(result['status'], 'has-suggestions')
+                self.assertEqual(result['fidelityStatus'], 'unverified')
+                self.assertFalse(result['advisories'][0]['blocksWorkflow'])
+                fv.assert_current(fd, {'id': 'T001'}, state, code)
                 image = Path(tmp) / 'screen.png'
                 image.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='))
                 visual = Path(tmp) / 'visual.json'
@@ -171,6 +175,7 @@ class FrontendVerificationTest(unittest.TestCase):
                 args.actual_screenshot = image; args.reference_screenshot = [image]; args.visual_report = visual
                 result = fv.verify(args)
                 self.assertEqual(result['fidelityStatus'], 'passed')
+                self.assertEqual(result['advisories'], [])
                 fv.assert_current(fd, {'id': 'T001'}, state, code)
                 stored_screenshot = Path(result['capture']['screenshots'][0]['path'])
                 screenshot_bytes = stored_screenshot.read_bytes()
@@ -188,6 +193,100 @@ class FrontendVerificationTest(unittest.TestCase):
                 result = fv.verify(args)
                 self.assertIn(result['status'], {'passed', 'has-suggestions'})
                 self.assertEqual(result['fidelityStatus'], 'not-applicable')
+
+    def test_missing_visual_environment_allows_real_task_finish_but_keeps_failures_blocking(self):
+        from hooks import task_runner as tr
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, fd, code, state = self.setup_task(Path(tmp))
+            source = Path(tmp) / 'original.html'
+            source.write_text('<html><body>Ready</body></html>')
+            args = Namespace(workspace=workspace, feature='alpha', task_id='T001', run_id=state['runId'], code_workspace=code,
+                parallel_run_id=None, lease_token=None, workspace_ref=None, candidate_wave=None, target=['src/Page.tsx'],
+                check_script=None, capture=True, actual_screenshot=None, reference_screenshot=None,
+                visual_report=None, timeout=60, url=None, preview_script='dev', page_path='/', width=1440, height=900)
+            route = {'route': 'absolute-html', 'htmlSourcePaths': [str(source)]}
+            with patch.object(fv, 'resolve_frontend_route', return_value=route):
+                for error in (FileNotFoundError('vite executable missing'),
+                              ValueError('frontend_capture_failed:Playwright unavailable'),
+                              subprocess.TimeoutExpired('browser', 1)):
+                    with self.subTest(error=str(error)), patch.object(fv, 'capture', side_effect=error):
+                        result = fv.verify(args)
+                        self.assertEqual(result['status'], 'has-suggestions')
+                        self.assertEqual(result['fidelityStatus'], 'unverified')
+                        self.assertIn(str(error), result['advisories'][0]['message'])
+                        fv.assert_current(fd, {'id': 'T001'}, state, code)
+                with patch.object(fv, 'capture', return_value={'errors': ['404 /broken-asset.png'], 'screenshots': []}):
+                    self.assertEqual(fv.verify(args)['status'], 'failed')
+                with patch.object(fv, 'capture', side_effect=FileNotFoundError('browser unavailable')):
+                    self.assertEqual(fv.verify(args)['status'], 'failed')
+                args.capture = False
+                # Refresh after a source change so an old capture cannot claim this revision.
+                (code / 'src/Page.tsx').write_text('export default function Page(){return <div>Updated</div>;}')
+                self.assertEqual(fv.verify(args)['status'], 'has-suggestions')
+                stdout = io.StringIO()
+                argv = ['frontend_verification.py', '--workspace', str(workspace), '--feature', 'alpha',
+                        '--task-id', 'T001', '--run-id', state['runId'], '--code-workspace', str(code), '--target', 'src/Page.tsx']
+                with patch.object(sys, 'argv', argv), redirect_stdout(stdout):
+                    self.assertEqual(fv.main(), 0)
+                summary = json.loads(stdout.getvalue())
+                self.assertEqual(summary['fidelityStatus'], 'unverified')
+                self.assertEqual(summary['advisories'][0]['type'], 'frontend_visual_unverified')
+                self.assertTrue(tr.finish_implementation(workspace, 'alpha', 'T001', code, state['runId'],
+                                                        no_code_change_why=None, supporting_files=[])[0])
+
+    def test_a_known_visual_defect_survives_an_unavailable_capture_retry(self):
+        import base64
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, fd, code, state = self.setup_task(Path(tmp))
+            source = Path(tmp) / 'original.html'
+            source.write_text('<html><body>Ready</body></html>')
+            args = Namespace(workspace=workspace, feature='alpha', task_id='T001', run_id=state['runId'], code_workspace=code,
+                parallel_run_id=None, lease_token=None, workspace_ref=None, candidate_wave=None, target=['src/Page.tsx'],
+                check_script=None, capture=False, actual_screenshot=None, reference_screenshot=None,
+                visual_report=None, timeout=60, url=None, preview_script='dev', page_path='/', width=1440, height=900)
+            with patch.object(fv, 'resolve_frontend_route', return_value={'route': 'absolute-html', 'htmlSourcePaths': [str(source)]}):
+                result = fv.verify(args)
+                image = Path(tmp) / 'screen.png'
+                image.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='))
+                visual = Path(tmp) / 'visual.json'
+                visual.write_text(json.dumps({'bindingDigest': result['bindingDigest'], 'decision': 'failed',
+                                              'findings': [{'severity': 'must-fix', 'message': 'Page layout is broken'}]}))
+                args.actual_screenshot = image
+                args.reference_screenshot = [image]
+                args.visual_report = visual
+                self.assertEqual(fv.verify(args)['status'], 'failed')
+                args.actual_screenshot = args.visual_report = None
+                args.capture = True
+                with patch.object(fv, 'capture', side_effect=FileNotFoundError('browser unavailable')):
+                    result = fv.verify(args)
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['visual']['status'], 'failed')
+                with self.assertRaisesRegex(ValueError, 'missing_or_failed'):
+                    fv.assert_current(fd, {'id': 'T001'}, state, code)
+
+    def test_visual_advisory_is_reported_once_and_cleared_after_validation(self):
+        from tests.test_parallel_delivery import DeliveryTest
+        from hooks.parallel_evidence_aggregate import aggregate_evidence
+        from hooks.parallel_delivery import settle_delivery
+        delivery = DeliveryTest()
+        delivery.setUp()
+        self.addCleanup(delivery.doCleanups)
+        delivery.create()
+        args = Namespace(workspace=delivery.workspace, feature='alpha', parallel_run_id=delivery.run,
+                         task_id='T001', _frontend_batch_id='B001')
+        result = {'binding': {'route': 'absolute-html'}, 'status': 'has-suggestions',
+                  'advisories': [{'type': 'frontend_visual_unverified', 'message': 'Browser unavailable'}]}
+        for _ in range(2):
+            fv.publish_route_summary(args, result)
+        self.assertEqual(len(delivery.manifest()['deferredIssues']), 1)
+        settle_delivery(*delivery.delivery()[0])
+        report = aggregate_evidence(delivery.workspace, 'alpha', delivery.run)
+        self.assertTrue(report['passed'])
+        self.assertFalse(report['hasBlockingDeferredIssues'])
+        self.assertEqual(report['deferredIssues'][0]['kind'], 'frontend_visual_unverified')
+        result.update(status='passed', advisories=[])
+        fv.publish_route_summary(args, result)
+        self.assertEqual(delivery.manifest()['deferredIssues'], [])
 
     def test_verification_reports_are_runtime_owned(self):
         from hooks.runtime_artifact_guard import guard

@@ -17,15 +17,16 @@ python -X utf8 <pluginPath>/hooks/frontend_verification.py --workspace <artifact
 每个 TASK/run 使用一份实现回检报告。首次 finish-implementation 核对当前源码并登记 Evidence，重复 finish 复用已登记的结果。
 
 - failed：读取 static.reports 的 must-fix 定向修复并重跑，最多两轮。执行失败如实报告，不能假写 passed。
-- passed/has-suggestions：可 finish-implementation；建议项透明保留。
-- unverified：有可读 HTML 但还没有当前页面的视觉证据。先用已有浏览器工具截图（真实项目页面+每份原始 HTML）；也可使用下述受控预览，不安装依赖。
+- passed/has-suggestions：可 finish-implementation；建议项透明保留。缺少多模态能力、浏览器环境或视觉核对结果时，静态与资产检查通过即可按 has-suggestions 继续，fidelityStatus=unverified，advisories 记录视觉缺口并进入最终报告。
 
 可选 `--check-script typecheck`（或 build/check:types）：仅必要时执行一个项目已配置的简单编译脚本，同一源码和脚本结果复用，不默认 build+lint+test 全跑。
 
-可选 `--capture --preview-script dev --page-path /真实路由 --width <原稿视口宽> --height <高>`：项目已有简单 Vite/Next dev 脚本及 Playwright 时，受控启动、截图并自动停止。已有本地服务可用 `--capture --url http://127.0.0.1:<port>/<route>`。不直接启动脱管后台进程，不安装依赖。环境不可用时保留准确错误；可改用已有浏览器工具。
+页面检查直接使用平台内置 `browser_*` 工具。按当前实际暴露的工具调用 `browser_navigate`、`browser_snapshot`、`browser_evaluate` 等，访问当前 Batch 工作树对应的页面；原稿使用平台支持的本地文件地址或已有预览地址。纯文本模型使用 DOM、文本和样式信息做辅助检查。项目没有可访问的页面服务时，记录该缺口并继续，不把平台浏览器可用等同于业务页面已启动。
 
-外部浏览器截图通过 `--actual-screenshot <png> --reference-screenshot <png>` 登记，多份原稿重复 reference-screenshot。截图必须属于当前源码。检查截图后写临时 JSON：`{"bindingDigest":"<报告 binding 对象的 digest；优先使用 capture.bindingDigest>","decision":"passed|failed","findings":[...]}`，以 `--visual-report <json>` 再执行同一命令。findings 中 must-fix 必须判失败，不能以“文件存在”替代视觉判断。使用工具 capture 时读取 report.capture.bindingDigest 和截图路径。
+只有模型支持图像输入且平台实际提供可用截图工具时，才截取当前页面及原稿。平台返回的本地 PNG 通过 `--actual-screenshot <png> --reference-screenshot <png>` 登记，多份原稿重复 reference-screenshot。截图必须属于当前 Batch 源码；使用工具返回的真实路径。检查截图后写临时 JSON：`{"bindingDigest":"<报告 binding 对象的 digest；优先使用 capture.bindingDigest>","decision":"passed|failed","findings":[...]}`，以 `--visual-report <json>` 再执行同一命令。findings 中 must-fix 必须判失败，不能以“文件存在”替代视觉判断。平台截图工具未暴露、被禁用或无法提供本地 PNG 时，保留视觉未验证 advisory 并继续。
 
-无高保真稿的页面只要求当前静态回检，fidelityStatus=not-applicable；按需做运行检查。缺稿不会强制等待截图。可读稿件的页面需当前视觉证据，未执行显示 unverified。环境无法验证时报告缺口，不绕过 finish 门禁。
+本平台已提供浏览器能力，不搜索项目、插件或全局的 Playwright 包、浏览器缓存，不执行 npx/npm 安装，也不为本流程启动插件的独立 `--capture` 截图链路。工具不可用时原样记录原因，按现有降级规则收口。
+
+无高保真稿的页面 fidelityStatus=not-applicable；按需做运行检查。有可读稿件且模型具备图像能力、已有浏览器环境时，使用当前页面及原稿截图核对视觉。缺少条件时直接保留视觉未验证 advisory 并继续 finish，后续汇总展示该缺口。截图环境启动失败会保留具体原因；已发现的视觉缺陷、静态错误和资产错误仍阻塞完成。
 
 TASK 实现或生产返修期间修改了相关源码，需在 finish 前完成当前版本的回检。封存后，前后端统一使用封存提交及其 Review 证据交付。候选推广按 Git 提交比较本 Batch 改过的文件，存在内容差异时 Workflow 只读复核这些文件。原 TASK 报告继续保存在原路径。

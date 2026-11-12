@@ -32,6 +32,6 @@ AGENTS.md → 相关项目说明 → 真实源码 → 本技能参考。复用�
 
 ## 验证与速度
 
-统一回检由 frontend-route.md 指定的 frontend_verification.py 执行。复用同源码/输入/检查器的报告；不重复分析，不默认跑全量 build/lint/test。按需选择一个已有类型检查或构建脚本。可读 HTML 的视觉核对需实际项目截图与原稿证据；无稿页面不要求原稿截图。使用已有浏览器能力或已装 Playwright，不为了回检安装依赖。
+统一回检由 frontend-route.md 指定的 frontend_verification.py 执行。复用同源码/输入/检查器的报告；不重复分析，不默认跑全量 build/lint/test。按需选择一个已有类型检查或构建脚本。页面检查使用平台内置 browser_* 工具；纯文本模型可检查 DOM 和文本。模型支持图像且平台实际提供截图工具时，使用当前 Batch 页面截图与原稿证据。禁止为本流程搜索外部 Playwright、检查全局浏览器缓存或安装浏览器依赖。
 
-没有执行浏览器检查就保留 not-run/unverified；静态通过不等于视觉通过。必须修复项同轮定向处理，最多两轮，修改后重验；建议项可透明保留。具体命令、缓存和恢复见 frontend-route.md，不在各 parser 重复建立验证流程。
+缺少多模态能力、浏览器环境或视觉核对结果时，保留视觉未验证的非阻断 advisory；静态与资产检查通过即可继续 finish-implementation，最终报告展示视觉缺口。已发现的视觉缺陷仍需修复，同轮定向处理最多两轮，修改后重验。具体命令、缓存和恢复见 frontend-route.md，不在各 parser 重复建立验证流程。

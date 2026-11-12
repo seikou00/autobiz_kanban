@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 URL_RE = re.compile(r'url\(\s*[\"\']?([^\"\')]+)[\"\']?\s*\)', re.I)
 IMPORT_RE = re.compile(r'@import\s+[\"\']([^\"\']+)[\"\']', re.I)
@@ -52,10 +52,21 @@ def extract_asset_references(html_content: str) -> list[dict[str, Any]]:
     return parser.references
 
 
-def classify_asset(asset_ref: dict[str, Any], project_root: Path) -> dict[str, Any]:
+def resolve_asset_reference(reference: str, base: Path) -> tuple[Path, str]:
+    """Prefer an existing local filename, then interpret query/fragment suffixes."""
+    literal = (base / unquote(reference).lstrip('/')).resolve()
+    if literal.is_file():
+        return literal, ''
+    url = urlsplit(reference)
+    source = (base / unquote(url.path).lstrip('/')).resolve()
+    suffix = ('?' + url.query if url.query else '') + ('#' + url.fragment if url.fragment else '')
+    return source, suffix
+
+
+def classify_asset(asset_ref: dict[str, Any], project_root: Path, *, source: Path | None = None) -> dict[str, Any]:
     """Never substitute visual content based on a filename or a retention quota."""
     path = asset_ref['path']
-    name = Path(urlsplit(path).path).name
+    name = (source or Path(unquote(urlsplit(path).path))).name
     suffix = Path(name).suffix.lower()
     kind = 'chart' if re.search(r'(sparkline|chart|trend|funnel)', name, re.I) else 'image' if suffix in {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif'} else 'unknown'
     return {'originalFile': path, 'semantic': asset_ref.get('altText') or name,
@@ -86,13 +97,14 @@ def generate_mapping_table(task_stem: str, html_files: list[Path], project_root:
                                      'decision': 'unchanged', 'copyStatus': 'external' if url.scheme != 'data' else 'embedded'})
                 continue
             raw = Path(unquote(url.path))
-            item = {**classify_asset(ref, project_root), 'sourceDocument': str(document),
-                    'urlSuffix': ('?' + url.query if url.query else '') + ('#' + url.fragment if url.fragment else '')}
+            base = public_root if raw.is_absolute() and public_root is not None else document.parent
+            source, suffix = resolve_asset_reference(ref['path'], base)
+            item = {**classify_asset(ref, project_root, source=source), 'sourceDocument': str(document),
+                    'urlSuffix': suffix}
             if raw.is_absolute() and public_root is None:
                 item.update(copyStatus='failed', error='root_relative_asset_requires_public_root')
                 mappings.append(item)
                 continue
-            source = ((public_root / str(raw).lstrip('/')) if raw.is_absolute() else document.parent / raw).resolve()
             if not any(source.is_relative_to(root) for root in roots):
                 # ../assets is allowed beside an HTML bundle, within its declared parent.
                 if not any(source.is_relative_to(root.parent / 'assets') for root in roots):
@@ -102,7 +114,8 @@ def generate_mapping_table(task_stem: str, html_files: list[Path], project_root:
             if source in seen:
                 # Preserve every reference, but only copy/scan each source once.
                 first = next(m for m in mappings if m.get('resolvedSource') == str(source))
-                first.setdefault('references', []).append({'sourceDocument': str(document), 'url': ref['path']})
+                first.setdefault('references', []).append({'sourceDocument': str(document), 'url': ref['path'],
+                                                          'urlSuffix': suffix})
                 continue
             seen.add(source)
             item['resolvedSource'] = str(source)
@@ -150,9 +163,12 @@ def copy_assets_to_project(mappings: list[dict[str, Any]], project_root: Path, h
     for mapped in mappings:
         if mapped.get('copyStatus') != 'verified':
             continue
-        by_reference[(mapped['sourceDocument'], mapped['originalFile'])] = mapped
+        by_reference[(mapped['sourceDocument'], mapped['originalFile'])] = (mapped, mapped.get('urlSuffix', ''))
         for ref in mapped.get('references', []):
-            by_reference[(ref['sourceDocument'], ref['url'])] = mapped
+            # Older mappings stored only the URL for additional references.
+            url = urlsplit(ref['url'])
+            suffix = ref.get('urlSuffix', ('?' + url.query if url.query else '') + ('#' + url.fragment if url.fragment else ''))
+            by_reference[(ref['sourceDocument'], ref['url'])] = (mapped, suffix)
     for item in mappings:
         if item.get('copyStatus') != 'verified' or Path(item['resolvedSource']).suffix.lower() not in {'.css', '.svg'}:
             continue
@@ -160,15 +176,12 @@ def copy_assets_to_project(mappings: list[dict[str, Any]], project_root: Path, h
         target = project_root / item['targetPath']
         def replace(match):
             raw = match.group(1).strip()
-            url = urlsplit(raw)
-            if url.scheme or url.netloc or not url.path:
+            reference = by_reference.get((str(source), raw))
+            if not reference:
                 return match.group(0)
-            dependency = by_reference.get((str(source), raw))
-            if not dependency:
-                return match.group(0)
+            dependency, suffix = reference
             relative = os.path.relpath(project_root / dependency['targetPath'], target.parent).replace(os.sep, '/')
-            suffix = ('?' + url.query if url.query else '') + ('#' + url.fragment if url.fragment else '')
-            return match.group(0).replace(raw, relative + suffix)
+            return match.group(0).replace(raw, quote(relative, safe='/') + suffix)
         original = read_text(source)
         content = original
         for regex in (URL_RE, IMPORT_RE):
