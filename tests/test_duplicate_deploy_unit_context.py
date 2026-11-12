@@ -59,12 +59,10 @@ class DuplicateDeployUnitContextTest(unittest.TestCase):
     def test_legacy_loader_isolates_selected_duplicate(self):
         result = render_legacy(self.selected(), plugin_root=self.root)
         duplicate, normal = result["agentmdLoadStatus"]
-        self.assertEqual(
-            result["message"],
-            "remote 1 / local 0 / 缺 1；清单中重复的 deployUnitId: U.duplicate",
-        )
+        self.assertIn("remote 1 / local 0 / 缺 1；部署单元 U.duplicate 未加载", result["message"])
+        self.assertIn("agents.manifest.json", result["message"])
         self.assertFalse(duplicate["loaded"])
-        self.assertIn("deployUnitId 重复: U.duplicate", duplicate["message"])
+        self.assertIn("deployUnitId 重复", duplicate["message"])
         self.assertTrue(normal["loaded"])
         self.assertEqual(normal["source"], "remote")
         self.assertIn("# S1 system", result["sessionContext"])
@@ -87,12 +85,10 @@ class DuplicateDeployUnitContextTest(unittest.TestCase):
                 self.selected(), plugin_root=self.root, knowledge_path=str(self.sys)
             )
         duplicate, normal = result["agentmdLoadStatus"]
-        self.assertEqual(
-            result["message"],
-            "remote 1 / local 0 / 缺 1；清单中重复的 deployUnitId: U.duplicate",
-        )
+        self.assertIn("remote 1 / local 0 / 缺 1；部署单元 U.duplicate 未加载", result["message"])
+        self.assertIn("agents.manifest.json", result["message"])
         self.assertFalse(duplicate["loaded"])
-        self.assertIn("deployUnitId 重复: U.duplicate", duplicate["message"])
+        self.assertIn("deployUnitId 重复", duplicate["message"])
         self.assertTrue(normal["loaded"])
         self.assertIn("# collected normal unit", result["sessionContext"])
         self.assertNotIn("# ambiguous local content", result["sessionContext"])

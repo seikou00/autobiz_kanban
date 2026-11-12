@@ -85,14 +85,11 @@ def _local_repo(body="# 本地知识库\n- 本地约束\n"):
     return str(d)
 
 
-def _workspace(body="# 会话工作区指令\n- 工作区约束\n", *, context_body=None):
-    """临时会话工作区目录；body 为 None 时不写 AGENTS.md（目录存在但无指令文件）；
-    context_body 非 None 时额外写入 CONTEXT.md（领域词汇表，④ 层）。"""
+def _workspace(body="# 会话工作区指令\n- 工作区约束\n"):
+    """临时会话工作区目录；body 为 None 时不写 AGENTS.md。"""
     d = Path(tempfile.mkdtemp())
     if body is not None:
         (d / "AGENTS.md").write_text(body, encoding="utf-8")
-    if context_body is not None:
-        (d / "CONTEXT.md").write_text(context_body, encoding="utf-8")
     return str(d)
 
 
@@ -878,7 +875,9 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertEqual(len(status), 1)
         self.assertFalse(status[0]["loaded"])
         self.assertEqual(status[0]["source"], "local")
-        self.assertEqual(status[0]["message"], "未找到知识库 AGENTS.md 和本地 AGENTS.md")
+        self.assertIn("知识清单未登记该部署单元", status[0]["message"])
+        self.assertIn(display_path_join("/no/such/dir", "AGENTS.md"), res["message"])
+        self.assertIn("部署单元 GHOST.1 未加载", res["message"])
         self.assertIn("缺 1", res["message"])
         self.assertNotIn("[GHOST.1](#", res["sessionContext"])  # 无内容→不加锚点链接
 
@@ -1095,13 +1094,22 @@ class RenderWorkspaceTest(unittest.TestCase):
 
 
 class RenderDomainContextTest(unittest.TestCase):
-    def test_domain_context_injected_after_unit_with_selection(self):
-        # 选中单元 + 工作区 AGENTS.md + CONTEXT.md：④ 段以裸标签外包、排在单元级整段之后。
-        ws = _workspace(context_body=GLOSSARY)
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        plugin_workspace = Path(directory.name).resolve()
+        self.project_args = {"plugin_workspace": str(plugin_workspace), "project": "alpha"}
+        artifact_dir = plugin_workspace / "alpha" / ".autobizdevops"
+        artifact_dir.mkdir(parents=True)
+        self.context_path = artifact_dir / "CONTEXT.md"
+
+    def test_domain_context_injected_when_selected_unit_has_no_knowledge(self):
+        self.context_path.write_text(GLOSSARY, encoding="utf-8")
         res = render(
             [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
-            plugin_root=_plugin_root(),
-            session_workspace_path=ws,
+            plugin_root=_plugin_root(write_remote=()),
+            session_workspace_path=_workspace(),
+            **self.project_args,
         )
         prompt = res["sessionContext"]
         self.assertIn('<DOMAIN_CONTEXT id="domain-context" scope="项目级领域词汇表">', prompt)
@@ -1117,14 +1125,14 @@ class RenderDomainContextTest(unittest.TestCase):
         )
         self.assertTrue(status[1]["loaded"])
         self.assertEqual(status[1]["source"], "local")
-        self.assertEqual(status[1]["path"], display_path_join(ws, "CONTEXT.md"))
+        self.assertEqual(status[1]["path"], display_path_join(self.context_path))
         # message 的单元摘要不把会话级条目算进去
-        self.assertIn("remote 1 / local 0 / 缺 0", res["message"])
+        self.assertIn("remote 0 / local 0 / 缺 1", res["message"])
 
     def test_domain_context_only_no_selection(self):
         # 未选单元、无工作区 AGENTS.md、仅 CONTEXT.md → 只注入 ④ 段，无 SCOPE/SYSTEM/UNIT。
-        ws = _workspace(body=None, context_body=GLOSSARY)
-        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.context_path.write_text(GLOSSARY, encoding="utf-8")
+        res = render([], plugin_root=_plugin_root(), **self.project_args)
         self.assertTrue(res["ok"])
         prompt = res["sessionContext"]
         self.assertIn("<DOMAIN_CONTEXT", prompt)
@@ -1139,9 +1147,8 @@ class RenderDomainContextTest(unittest.TestCase):
         self.assertEqual(status[0]["deployUnitId"], "领域词汇表")
 
     def test_domain_context_and_workspace_coexist_no_dedup(self):
-        # AGENTS.md 与 CONTEXT.md 同目录并存：两段都注入、互不去重、状态各一条。
-        ws = _workspace(context_body=GLOSSARY)
-        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.context_path.write_text(GLOSSARY, encoding="utf-8")
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=_workspace(), **self.project_args)
         prompt = res["sessionContext"]
         self.assertIn("## 会话工作区指令", prompt)
         self.assertIn("- 工作区约束", prompt)
@@ -1151,13 +1158,13 @@ class RenderDomainContextTest(unittest.TestCase):
         status = res["agentmdLoadStatus"]
         self.assertEqual([s["deployUnitId"] for s in status], ["本地工作区", "领域词汇表"])
 
-    def test_domain_context_missing_file_skips_section(self):
-        # 只有 AGENTS.md、无 CONTEXT.md → 不生成 ④ 段、无其状态条目（缺失是常态不是错误）。
-        ws = _workspace()
+    def test_domain_context_only_reads_project_artifacts(self):
+        ws = Path(_workspace())
+        (ws / "CONTEXT.md").write_text(GLOSSARY, encoding="utf-8")
         res = render(
-            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
-            plugin_root=_plugin_root(),
-            session_workspace_path=ws,
+            [],
+            session_workspace_path=str(ws),
+            **self.project_args,
         )
         self.assertNotIn("<DOMAIN_CONTEXT", res["sessionContext"])
         self.assertFalse(
@@ -1166,36 +1173,35 @@ class RenderDomainContextTest(unittest.TestCase):
 
     def test_domain_context_blank_file_skips_section(self):
         # CONTEXT.md 全空白等同缺失；连同无 AGENTS.md、未选单元 → 空注入。
-        ws = _workspace(body=None, context_body="   \n\n")
-        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.context_path.write_text("   \n\n", encoding="utf-8")
+        res = render([], plugin_root=_plugin_root(), **self.project_args)
         self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
-        self.assertEqual(res["message"], "未选择部署单元，无需注入")
+        self.assertIn("未选择部署单元，未注入会话上下文", res["message"])
+        self.assertIn(f"文件无正文（{display_path_join(self.context_path)}）", res["message"])
 
-    def test_domain_context_untouched_by_agents_dedup(self):
-        # 会话工作区 == 单元 localRepoPath 且单元走 local 兜底：AGENTS.md 同文件去重照旧生效，
-        # CONTEXT.md 文件名不同、不受去重影响，照常注入。
+    def test_domain_context_skipped_when_local_agents_supply_unit_knowledge(self):
         local = _local_repo()
-        (Path(local) / "CONTEXT.md").write_text(GLOSSARY, encoding="utf-8")
+        self.context_path.write_text(GLOSSARY, encoding="utf-8")
         res = render(
             [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
-            plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 单元 remote 缺失→local 兜底
+            plugin_root=_plugin_root(write_remote=()),
             session_workspace_path=local,
+            **self.project_args,
         )
         prompt = res["sessionContext"]
         self.assertNotIn("## 会话工作区指令", prompt)  # AGENTS.md 去重仍生效
-        self.assertIn("<DOMAIN_CONTEXT", prompt)  # 词汇表不受去重影响
-        self.assertIn("**导出任务 (ExportTask)**", prompt)
-        # 工作区条目被去重丢弃后，词汇表条目居首，其后各单元
+        self.assertIn("# 本地知识库", prompt)
+        self.assertNotIn("<DOMAIN_CONTEXT", prompt)
         status = res["agentmdLoadStatus"]
-        self.assertEqual([s["deployUnitId"] for s in status], ["领域词汇表", "LF39.18_Outservice"])
+        self.assertEqual([s["deployUnitId"] for s in status], ["LF39.18_Outservice"])
 
     def test_win32_domain_context_status_uses_backslash(self):
-        ws = _workspace(body=None, context_body=GLOSSARY)
-        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws, platform="win32")
+        self.context_path.write_text(GLOSSARY, encoding="utf-8")
+        res = render([], plugin_root=_plugin_root(), platform="win32", **self.project_args)
         self.assertEqual(
             res["agentmdLoadStatus"][0]["path"],
-            display_path_join(ws, "CONTEXT.md", platform="win32"),
+            display_path_join(self.context_path, platform="win32"),
         )
 
 

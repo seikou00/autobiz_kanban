@@ -4,7 +4,7 @@
 
 ## 位置与创建
 
-- 路径：会话工作区目录下的 `CONTEXT.md`。项目级、跨 feature 持久；不属于任何 feature 的阶段产物，不进 feature 目录，不随 feature 归档。
+- 项目词汇表位于 `${pluginWorkspace}/${projectDir}/.autobizdevops/CONTEXT.md`，供同一项目的各个 Feature 共用。
 - lazy 创建：第一个术语对齐时才创建；创建时先原样写入下方文件头模板，再追加词条。
 
 ## 回写规则

@@ -232,7 +232,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         self.assertTrue(status["loaded"])
         self.assertIn("已回退本地 AGENTS.md", status["message"])
         self.assertIn("空数组", status["message"])
-        self.assertIn("archguardservice", status["message"])
+        self.assertIn("获取应用类型信息失败: 请求超时", status["message"])
         log = stderr.getvalue()
         self.assertIn("collector.env info script=", log)
         self.assertIn("collector.--deployUnit U1 stderr [WARN] 获取应用类型信息失败: 请求超时", log)

@@ -50,22 +50,20 @@ from hooks.agents_repo import (  # noqa: E402
     load_manifest,
 )
 from hooks.render_session_context import (  # noqa: E402
-    LOCAL_AGENTS_MD,
     WORKSPACE_AGENTS_MD,
     _agent_config,
-    _build_domain_context,
     _build_workspace_content,
     _compose_prompt,
-    _domain_context_status,
     _fill_plugin_root,
     _heading_slug,
+    _load_domain_context,
     _norm_path,
     _parse_selected,
-    _read_nonempty,
     _ref_for,
     _resolve_one,
     _session_runtime_policy,
     _unit_heading_label,
+    _unloaded_unit_messages,
     _workspace_binding,
     _workspace_status,
     render as render_legacy,
@@ -207,7 +205,7 @@ def _run_collector(
     *,
     knowledge_path: str,
     node_command: str = "node",
-) -> object:
+) -> Tuple[object, str]:
     """以 argv 调用 Node 接口，不通过 shell 解释 deployUnit 或 Windows 路径。"""
     command = [
         node_command,
@@ -244,6 +242,7 @@ def _run_collector(
 
     failed = proc.returncode != 0
     _log_collector_output(stage, proc.stdout, proc.stderr, include_stdout=failed)
+    stderr = _short_error(_as_text(proc.stderr))
     if failed:
         detail = _short_error(proc.stderr or proc.stdout) or "无任何输出"
         if not Path(knowledge_path).is_dir():
@@ -253,14 +252,15 @@ def _run_collector(
             f"知识恢复接口失败（返回码 {proc.returncode}）: {detail}"
         )
     output = (proc.stdout or "").strip().lstrip("\ufeff")
+    detail = f"（{stderr}）" if stderr else ""
     if not output:
-        raise KnowledgeCollectorError("知识恢复接口未输出 JSON")
+        raise KnowledgeCollectorError(f"知识恢复接口未输出 JSON{detail}")
     try:
-        return json.loads(output)
+        return json.loads(output), stderr
     except json.JSONDecodeError as exc:
         _timing_log(stage, "stdout", output, limit=DIAGNOSTIC_LOG_LIMIT)
         raise KnowledgeCollectorError(
-            f"知识恢复接口返回非法 JSON: {_short_error(output)}"
+            f"知识恢复接口返回非法 JSON（{_short_error(output)}）{detail}"
         ) from exc
 
 
@@ -270,7 +270,7 @@ def _list_deploy_units(
     knowledge_path: str,
     node_command: str = "node",
 ) -> List[str]:
-    payload = _run_collector(
+    payload, stderr = _run_collector(
         collector_script,
         ["--listDeployUnits"],
         knowledge_path=knowledge_path,
@@ -279,7 +279,8 @@ def _list_deploy_units(
     if not isinstance(payload, list) or any(
         not isinstance(item, str) or not item.strip() for item in payload
     ):
-        raise KnowledgeCollectorError("--listDeployUnits 必须返回字符串数组")
+        detail = f"（{stderr}）" if stderr else ""
+        raise KnowledgeCollectorError(f"--listDeployUnits 必须返回字符串数组{detail}")
     return list(dict.fromkeys(item.strip() for item in payload))
 
 
@@ -317,7 +318,7 @@ def _deploy_unit_prompt(
     knowledge_path: str,
     node_command: str = "node",
 ) -> str:
-    payload = _run_collector(
+    payload, stderr = _run_collector(
         collector_script,
         ["--deployUnit", deploy_unit_id],
         knowledge_path=knowledge_path,
@@ -325,11 +326,9 @@ def _deploy_unit_prompt(
     )
     if not isinstance(payload, dict):
         # collector 在多个失败分支都只输出 []，这里补上可能原因
-        hint = (
-            "；collector 返回空数组，通常是应用类型接口(archguardservice)调用失败，"
-            "或匹配文件所在目录向上找不到 AGENTS.md"
-            if payload == [] else ""
-        )
+        hint = "；collector 返回空数组" if payload == [] else ""
+        if stderr:
+            hint += f"；collector 诊断（{stderr}）"
         raise KnowledgeCollectorError(
             f"deployUnit {deploy_unit_id} 必须返回 JSON 对象，实际为 "
             f"{type(payload).__name__}: "
@@ -339,9 +338,10 @@ def _deploy_unit_prompt(
     file_lists = payload.get("fileLists")
     file_count = len(file_lists) if isinstance(file_lists, list) else "缺失"
     if not isinstance(system_prompt, str) or not system_prompt.strip():
+        detail = f"；collector 诊断（{stderr}）" if stderr else ""
         raise KnowledgeCollectorError(
             f"deployUnit {deploy_unit_id} 返回缺少非空 systemPrompt"
-            f"（keys={sorted(payload)} fileLists={file_count}）"
+            f"（keys={sorted(payload)} fileLists={file_count}）{detail}"
         )
     _timing_log("unit.{}".format(deploy_unit_id), "remote_hit",
                 "prompt_chars={} fileLists={}".format(len(system_prompt), file_count))
@@ -398,7 +398,8 @@ def _resolve_unit(
     platform: Optional[str],
     node_command: str,
     manifest_pair: Optional[Tuple[SystemEntry, DeployUnit]] = None,
-) -> Tuple[dict, Optional[Path], Optional[str], Optional[dict]]:
+    manifest_issue: str = "",
+) -> Tuple[dict, Optional[Path], Optional[str], Optional[dict], Optional[Tuple[str, str]]]:
     uid = selected["deployUnitId"]
     collector_error = ""
     if uid not in supported_units:
@@ -429,10 +430,12 @@ def _resolve_unit(
                 None,
                 prompt,
                 None,
+                None,
             )
 
     # collector 的 header 覆盖集合并非发布单元全集；清单映射是独立的知识来源。
     system_section = None
+    system_error = None
     if manifest_pair is not None:
         system, unit = manifest_pair
         root = Path(knowledge_path)
@@ -442,7 +445,9 @@ def _resolve_unit(
             plugin_root=None, platform=platform, allow_local_fallback=False,
             knowledge_root=root,
         )
-        if system_content is not None:
+        if system_content is None:
+            system_error = system.system_id, system_status["message"]
+        else:
             title = system.system_id
             if system.system_name:
                 title += f"（{system.system_name}）"
@@ -469,44 +474,27 @@ def _resolve_unit(
             status, unit_path, content = system_status, None, None
         if status["loaded"]:
             status["message"] = f"已回退 agents.manifest.json: {collector_error}"
-            return status, unit_path, content, system_section
-        collector_error += "；agents.manifest.json 对应知识文件未找到或为空"
+            return status, unit_path, content, system_section, system_error
+        if unit.agents_rel:
+            collector_error += f"；单元知识未加载（{status['message']}）"
+        else:
+            collector_error += "；清单未配置独立单元知识文件"
+    elif manifest_issue:
+        collector_error += f"；{manifest_issue}"
 
     _timing_log("unit.{}".format(uid), "local_fallback", collector_error)
-    local_repo = selected.get("localRepoPath", "")
-    local_path = Path(local_repo) / LOCAL_AGENTS_MD if local_repo else None
-    local_display = (
-        display_path_join(local_repo, LOCAL_AGENTS_MD, platform=platform) if local_repo else ""
+    status, local_path, local_content = _resolve_one(
+        uid, "", selected.get("localRepoPath", ""), plugin_root=None, platform=platform,
     )
-    local_content = _read_nonempty(local_path) if local_path is not None else None
     _timing_log("unit.{}".format(uid), "local_agents", "path={} found={}".format(
-        local_path or "<未配置 localRepoPath>", local_content is not None,
+        status["path"] or "<未配置 localRepoPath>", status["loaded"],
     ))
-    if local_content is not None:
-        return (
-            {
-                "deployUnitId": uid,
-                "path": local_display,
-                "loaded": True,
-                "source": "local",
-                "message": f"知识接口未命中，已回退本地 AGENTS.md: {collector_error}",
-            },
-            local_path,
-            local_content,
-            system_section,
-        )
-    return (
-        {
-            "deployUnitId": uid,
-            "path": local_display or display_path_join(knowledge_path, platform=platform),
-            "loaded": False,
-            "source": "local",
-            "message": f"{collector_error}；未找到本地 AGENTS.md",
-        },
-        None,
-        None,
-        system_section,
-    )
+    if status["loaded"]:
+        status["message"] = f"已回退本地 AGENTS.md（{collector_error}）"
+    else:
+        status["message"] = f"{collector_error}；{status['message']}"
+        status["path"] = status["path"] or display_path_join(knowledge_path, platform=platform)
+    return status, local_path, local_content, system_section, system_error
 
 
 def render(
@@ -581,6 +569,8 @@ def render(
 
     duplicate_unit_ids: set[str] = set()
     manifest_path = Path(resolved_knowledge_path) / MANIFEST_NAME
+    manifest_display = display_path_join(manifest_path, platform=platform)
+    manifest_issue = f"知识清单未登记该部署单元（{manifest_display}）"
     pairs = {}
     try:
         manifest = load_manifest(
@@ -590,8 +580,9 @@ def render(
         pairs = index_unit_pairs(manifest)
         for uid in duplicate_unit_ids:
             pairs.pop(uid, None)
-    except AgentsManifestError as exc:
+    except (AgentsManifestError, OSError, UnicodeError) as exc:
         duplicate_unit_ids.clear()
+        manifest_issue = f"无法加载知识清单（{manifest_display}，{exc}）"
         _timing_log("manifest.load", "warning", str(exc))
 
     agent_config = _agent_config(
@@ -606,14 +597,12 @@ def render(
         plugin_root=plugin_root,
         platform=platform,
     )
-    workspace_content = _timed_call(
-        "workspace.agents", _build_workspace_content, session_workspace_path,
-    )
-    domain_context = _timed_call(
-        "workspace.domain", _build_domain_context, session_workspace_path,
+    workspace_content, workspace_error = _timed_call(
+        "workspace.agents", _build_workspace_content, session_workspace_path, platform=platform,
     )
     load_status: List[dict] = []
     system_sections: List[dict] = []
+    system_errors: dict[str, str] = {}
     system_loaded: Set[str] = set()
     unit_sections: List[dict] = []
     unit_has_section: Set[str] = set()
@@ -623,15 +612,15 @@ def render(
         if item["deployUnitId"] in duplicate_unit_ids:
             status = {
                 "deployUnitId": item["deployUnitId"],
-                "path": display_path_join(manifest_path, platform=platform),
+                "path": manifest_display,
                 "loaded": False,
                 "source": "remote",
-                "message": f"agents.manifest.json 中 deployUnitId 重复: {item['deployUnitId']}",
+                "message": f"清单中 deployUnitId 重复（{manifest_display}）",
             }
             load_status.append(status)
             _timing_log("unit.{}".format(item["deployUnitId"]), "result", status["message"])
             continue
-        status, content_path, content, system_section = _timed_call(
+        status, content_path, content, system_section, system_error = _timed_call(
             "unit.{}.resolve".format(item["deployUnitId"]), _resolve_unit,
             item,
             supported_units=supported_units,
@@ -640,8 +629,12 @@ def render(
             platform=platform,
             node_command=node_command,
             manifest_pair=pairs.get(item["deployUnitId"]),
+            manifest_issue=manifest_issue,
         )
         load_status.append(status)
+        if system_error is not None:
+            system_id, reason = system_error
+            system_errors[system_id] = reason
         _timing_log("unit.{}".format(item["deployUnitId"]), "result",
                     "source={} loaded={} path={} {}".format(
                         status["source"], status["loaded"], status["path"], status["message"],
@@ -696,6 +689,11 @@ def render(
             }
         )
 
+    domain_context, domain_status, domain_message = None, None, ""
+    if not system_sections and not unit_sections:
+        domain_context, domain_status, domain_message = _timed_call(
+            "project.domain", _load_domain_context, plugin_workspace, project, platform=platform,
+        )
     prompt = _timed_call(
         "context.compose", _compose_prompt,
         bindings,
@@ -709,13 +707,15 @@ def render(
         key = status["source"] if status["loaded"] else "miss"
         units_by_source[key].append(status["deployUnitId"])
     remote_n, local_n, miss_n = (len(units_by_source[key]) for key in ("remote", "local", "miss"))
-    message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
-    selected_duplicates = sorted({
-        item["deployUnitId"] for item in selected
-        if item["deployUnitId"] in duplicate_unit_ids
-    })
-    if selected_duplicates:
-        message += "；清单中重复的 deployUnitId: " + ", ".join(selected_duplicates)
+    details = [f"remote {remote_n} / local {local_n} / 缺 {miss_n}"]
+    details.extend(_unloaded_unit_messages(load_status))
+    details.extend(
+        f"系统 {system_id} 未加载（{reason}）"
+        for system_id, reason in system_errors.items() if system_id not in system_loaded
+    )
+    if not any((system_sections, unit_sections, domain_context, workspace_content)):
+        details.extend(("未注入任何知识正文", workspace_error))
+    details.append(domain_message)
     _timing_log("render.summary", "done", "remote={} local={} miss={}".format(
         json.dumps(units_by_source["remote"], ensure_ascii=False),
         json.dumps(units_by_source["local"], ensure_ascii=False),
@@ -725,11 +725,11 @@ def render(
     session_entries: List[dict] = []
     if workspace_content is not None:
         session_entries.append(_workspace_status(session_workspace_path, platform=platform))
-    if domain_context is not None:
-        session_entries.append(_domain_context_status(session_workspace_path, platform=platform))
+    if domain_status is not None:
+        session_entries.append(domain_status)
     return {
         "ok": True,
-        "message": message,
+        "message": "；".join(filter(None, details)),
         "sessionContext": prompt,
         "agentmdLoadStatus": [*session_entries, *load_status],
         "agentConfig": agent_config,

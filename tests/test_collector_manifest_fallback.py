@@ -113,6 +113,71 @@ class CollectorManifestFallbackTest(unittest.TestCase):
             self.assertTrue(status["loaded"], status["message"])
             self.assertEqual(status["source"], "remote")
 
+    def test_project_glossary_requires_empty_unit_and_system_sections(self):
+        glossary = self.write(self.root, "alpha/.autobizdevops/CONTEXT.md", "项目词汇表正文")
+        cases = (
+            ("", "", True),
+            ("", "系统知识正文", False),
+            ("单元知识正文", "", False),
+            ("单元知识正文", "系统知识正文", False),
+        )
+        for unit_content, system_content, expected in cases:
+            with self.subTest(unit=unit_content, system=system_content):
+                self.manifest([("U1", "LF39/unit.md")], system_content=system_content or " \n")
+                self.write(self.knowledge_root, "LF39/unit.md", unit_content or " \n")
+
+                result, _, _ = self.render_with_collector(
+                    self.selection("U1"), plugin_workspace=str(self.root), project="alpha",
+                )
+
+                self.assertEqual("项目词汇表正文" in result["sessionContext"], expected)
+                glossary_paths = [
+                    status["path"] for status in result["agentmdLoadStatus"]
+                    if status["deployUnitId"] == "领域词汇表"
+                ]
+                self.assertEqual(glossary_paths, [str(glossary)] if expected else [])
+                self.assertEqual(f"已注入领域词汇表（{glossary}）" in result["message"], expected)
+
+    def test_failed_injection_reports_each_attempted_file(self):
+        self.manifest([("U1", "LF39/unit.md")])
+        unit_path = self.write(self.knowledge_root, "LF39/unit.md", " \n")
+        artifact_dir = self.root / "alpha" / ".autobizdevops"
+        artifact_dir.mkdir(parents=True)
+
+        for list_error in (None, KnowledgeCollectorError("collector 列表接口超时")):
+            with self.subTest(list_error=list_error):
+                result, _, _ = self.render_with_collector(
+                    self.selection("U1"), plugin_workspace=str(self.root), project="alpha",
+                    session_workspace_path=str(self.root), list_error=list_error,
+                )
+
+                message = result["message"]
+                self.assertIn("部署单元 U1 未加载", message)
+                self.assertIn("系统 LF39 未加载", message)
+                self.assertIn(f"文件无正文（{unit_path}）", message)
+                for missing in (
+                    self.knowledge_root / "LF39/AGENTS.md",
+                    self.local_root / "AGENTS.md",
+                    self.root / "AGENTS.md",
+                    artifact_dir / "CONTEXT.md",
+                ):
+                    self.assertIn(f"文件不存在（{missing}）", message)
+                self.assertIn("未注入任何知识正文", message)
+
+    def test_collected_unit_prompt_skips_project_glossary(self):
+        self.write(self.root, "alpha/.autobizdevops/CONTEXT.md", "项目词汇表正文")
+        result, _, _ = self.render_with_collector(
+            self.selection("U1"),
+            supported=["U1"],
+            prompts={"U1": "<knowledge>单元知识索引</knowledge>"},
+            plugin_workspace=str(self.root),
+            project="alpha",
+        )
+
+        self.assert_remote(result)
+        self.assertIn("单元知识索引", result["sessionContext"])
+        self.assertNotIn("<DOMAIN_CONTEXT", result["sessionContext"])
+
     def test_logged_unit_missing_from_ten_collector_ids_uses_manifest(self):
         self.manifest(
             [(LOGGED_UNIT_ID, "LF39/compliance.md")],
@@ -234,7 +299,7 @@ class CollectorManifestFallbackTest(unittest.TestCase):
                 )
 
                 self.assertTrue(result["ok"])
-                self.assertEqual(result["message"], "remote 0 / local 1 / 缺 0")
+                self.assertTrue(result["message"].startswith("remote 0 / local 1 / 缺 0"))
                 status = result["agentmdLoadStatus"][0]
                 self.assertTrue(status["loaded"])
                 self.assertEqual(status["source"], "local")
