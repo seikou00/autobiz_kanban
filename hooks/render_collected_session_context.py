@@ -324,24 +324,25 @@ def _deploy_unit_prompt(
         knowledge_path=knowledge_path,
         node_command=node_command,
     )
+    diagnostic = f"；collector 诊断（{stderr}）" if stderr else ""
+    if payload == []:
+        raise KnowledgeCollectorError(
+            f"collector 为部署单元 {deploy_unit_id} 返回空数组，未提供知识正文"
+            f"（知识库 {knowledge_path}）{diagnostic}"
+        )
     if not isinstance(payload, dict):
-        # collector 在多个失败分支都只输出 []，这里补上可能原因
-        hint = "；collector 返回空数组" if payload == [] else ""
-        if stderr:
-            hint += f"；collector 诊断（{stderr}）"
         raise KnowledgeCollectorError(
             f"deployUnit {deploy_unit_id} 必须返回 JSON 对象，实际为 "
             f"{type(payload).__name__}: "
-            f"{_short_error(json.dumps(payload, ensure_ascii=False), 200)}{hint}"
+            f"{_short_error(json.dumps(payload, ensure_ascii=False), 200)}{diagnostic}"
         )
     system_prompt = payload.get("systemPrompt")
     file_lists = payload.get("fileLists")
     file_count = len(file_lists) if isinstance(file_lists, list) else "缺失"
     if not isinstance(system_prompt, str) or not system_prompt.strip():
-        detail = f"；collector 诊断（{stderr}）" if stderr else ""
         raise KnowledgeCollectorError(
             f"deployUnit {deploy_unit_id} 返回缺少非空 systemPrompt"
-            f"（keys={sorted(payload)} fileLists={file_count}）{detail}"
+            f"（keys={sorted(payload)} fileLists={file_count}）{diagnostic}"
         )
     _timing_log("unit.{}".format(deploy_unit_id), "remote_hit",
                 "prompt_chars={} fileLists={}".format(len(system_prompt), file_count))
@@ -709,6 +710,10 @@ def render(
     remote_n, local_n, miss_n = (len(units_by_source[key]) for key in ("remote", "local", "miss"))
     details = [f"remote {remote_n} / local {local_n} / 缺 {miss_n}"]
     details.extend(_unloaded_unit_messages(load_status))
+    details.extend(
+        f"部署单元 {status['deployUnitId']} {status['message']}"
+        for status in load_status if status["loaded"] and status["message"]
+    )
     details.extend(
         f"系统 {system_id} 未加载（{reason}）"
         for system_id, reason in system_errors.items() if system_id not in system_loaded

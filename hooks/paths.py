@@ -42,7 +42,6 @@ def _validate_plugin_output_workspace(
     plugin_workspace_name: str,
     project_name: str,
     missing_suffix: str = "",
-    require_state: bool = True,
 ) -> Path:
     missing = [
         name
@@ -66,7 +65,7 @@ def _validate_plugin_output_workspace(
         raise ValueError(f"{project_name} 对应的项目插件目录不存在: {workspace}")
 
     state_json_path = workspace / ".autobizdevops" / "state.json"
-    if require_state and not state_json_path.is_file():
+    if not state_json_path.is_file():
         raise ValueError(f"state.json 未找到: {state_json_path}")
     return workspace
 
@@ -85,16 +84,13 @@ def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path
 def get_plugin_output_workspace_from_args(
     plugin_workspace: Optional[PathLike],
     project: Optional[str],
-    *,
-    require_state: bool = True,
 ) -> Path:
-    """通过显式 CLI 参数定位项目插件目录，默认要求项目已有 state.json。"""
+    """通过显式 CLI 参数定位项目插件目录，不读取进程环境变量。"""
     return _validate_plugin_output_workspace(
         str(plugin_workspace or "").strip(),
         str(project or "").strip(),
         plugin_workspace_name="--plugin-workspace",
         project_name="--project",
-        require_state=require_state,
     )
 
 

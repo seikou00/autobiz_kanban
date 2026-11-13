@@ -1,0 +1,73 @@
+name: Package workspace
+
+"on":
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        options:
+          - regular
+          - gray
+        default: regular
+      gray_suffix:
+        description: Add the _Gray suffix when packaging the gray channel
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-workspace-${{ github.ref }}
+  queue: max
+
+jobs:
+  package:
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Build ZIP
+        id: package
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          GRAY_SUFFIX: ${{ inputs.gray_suffix }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/workspace-package"
+          output="$RUNNER_TEMP/workspace-package/autobiz_kanban_workspace.zip"
+          case "$CHANNEL" in
+            regular) bash package_workspace.sh "$output" ;;
+            gray)
+              if [[ "$GRAY_SUFFIX" == true ]]; then
+                bash package_workspace_gray.sh "$output"
+              else
+                bash package_workspace_gray.sh --no-gray "$output"
+              fi
+              ;;
+            *) exit 1 ;;
+          esac
+          shopt -s nullglob
+          packages=("$RUNNER_TEMP"/workspace-package/*.zip)
+          [[ ${#packages[@]} -eq 1 ]]
+          printf 'path=%s\n' "${packages[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.package.outputs.path }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Save release version to the selected branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- plugin.json scripts/gray_release_version.txt scripts/package_release_history.json
+          git commit -m "chore: record workspace package version"
+          git push origin "HEAD:$GITHUB_REF"

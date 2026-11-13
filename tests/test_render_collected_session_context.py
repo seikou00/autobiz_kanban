@@ -225,7 +225,9 @@ class CollectedSessionContextTest(unittest.TestCase):
                 collector_script="collect-knowledge.js",
             )
 
-        self.assertEqual(result["message"], "remote 0 / local 1 / 缺 0")
+        self.assertIn("remote 0 / local 1 / 缺 0", result["message"])
+        self.assertIn("部署单元 U1 已回退本地 AGENTS.md", result["message"])
+        self.assertIn("获取应用类型信息失败: 请求超时", result["message"])
         self.assertIn("# 本地知识", result["sessionContext"])
         status = result["agentmdLoadStatus"][0]
         self.assertEqual(status["source"], "local")
@@ -266,9 +268,31 @@ class CollectedSessionContextTest(unittest.TestCase):
                 knowledge_path=missing,
             )
 
-        message = result["agentmdLoadStatus"][0]["message"]
+        message = result["message"]
         self.assertIn("返回码 1", message)
         self.assertIn(f"knowledgePath 不存在: {missing}", message)
+
+    def test_cli_reports_silent_empty_result_and_missing_files_in_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            local = root / "repo"
+            responses = [_proc(""), _proc(["U1"]), _proc([])]
+            args = [
+                "--selected-deployUnit", json.dumps([{"deployUnitId": "U1", "localRepoPath": str(local)}]),
+                "--knowledge-path", str(root / "sys"),
+                "--plugin-workspace", str(root), "--project", "demo",
+            ]
+            stdout = io.StringIO()
+            with patch(
+                "hooks.render_collected_session_context.subprocess.run", side_effect=responses,
+            ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(_main(args), 0)
+
+            message = json.loads(stdout.getvalue())["message"]
+            self.assertIn("collector 为部署单元 U1 返回空数组", message)
+            self.assertIn(str(root / "sys" / "agents.manifest.json"), message)
+            self.assertIn(str(local / "AGENTS.md"), message)
+            self.assertIn(str(root / "demo" / ".autobizdevops" / "CONTEXT.md"), message)
 
     def test_npm_install_failure_still_allows_collector(self):
         def fake_run(command, **_kwargs):

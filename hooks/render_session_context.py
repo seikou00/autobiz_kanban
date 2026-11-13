@@ -724,13 +724,17 @@ def _load_domain_context(
     platform: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[dict], str]:
     """读取项目词汇表并返回正文、加载状态和摘要。"""
+    plugin_workspace = (plugin_workspace or "").strip()
+    project = (project or "").strip()
     try:
-        workspace = get_plugin_output_workspace_from_args(
-            plugin_workspace, project, require_state=False,
-        )
+        if not plugin_workspace or not project:
+            raise ValueError("需要 --plugin-workspace 和 --project")
+        if project in {".", ".."} or "/" in project or "\\" in project or Path(project).anchor:
+            raise ValueError(f"--project 必须是单个项目目录名（{project}）")
+        workspace = Path(plugin_workspace).expanduser() / project
+        path = get_autobizdevops_dir(workspace) / PROJECT_CONTEXT_MD
     except (OSError, ValueError, RuntimeError) as exc:
         return None, None, f"无法定位领域词汇表 {PROJECT_CONTEXT_MD}（{exc}）"
-    path = get_autobizdevops_dir(workspace) / PROJECT_CONTEXT_MD
     display_path = display_path_join(path, platform=platform)
     content, error = _read_context_file(path, display_path)
     if content is None:

@@ -294,7 +294,7 @@ async function main(options) {
   }
 
   if (!fs.existsSync(knowledgeDir)) {
-    console.error(`知识地址不存在（${knowledgeDir}）`);
+    // console.error(`错误: 知识地址不存在: ${knowledgeDir}`);
     process.exit(1);
   }
 
@@ -312,7 +312,7 @@ async function main(options) {
 
   if (!appTypeInfo.success) {
     // ===== 接口调用失败，降级到workspace下的AGENTS.md文件 =====
-    console.error(`archguardservice 应用类型查询失败（${appTypeInfo.errorMsg}）`);
+    // console.error(`[WARN] 获取应用类型信息失败: ${appTypeInfo.errorMsg}`);
     // console.error('[WARN] 接口调用失败，降级到workspace下的AGENTS.md文件...');
     // 只有当workspace参数已提供时，才尝试使用workspace下的AGENTS.md文件
     if (workspaceDir) {
@@ -323,7 +323,7 @@ async function main(options) {
         // console.error(`[INFO] 找到workspace下的AGENTS.md: ${agentsMdPath}`);
       } else {
         // 接口调用失败，且workspace下也没有AGENTS.md，直接返回空数组
-        console.error(`未找到工作区指令文件（${workspaceAgentsPath}）`);
+        // console.error(`[WARN] workspace目录下未找到AGENTS.md文件，返回空数组`);
         console.log(JSON.stringify([], null, 2));
         return;
       }
@@ -366,9 +366,6 @@ async function main(options) {
       const matchedFileDir = path.dirname(matchedFile);
       // console.error(`[INFO] 匹配文件所在目录: ${matchedFileDir}`);
       agentsMdPath = findAgentsMdUpward(matchedFileDir);
-      if (!agentsMdPath) {
-        console.error(`未找到知识库指令文件（从 ${path.join(matchedFileDir, 'AGENTS.md')} 起逐级向上查找）`);
-      }
     } else {
       // ===== 步骤2: 找不到匹配文件，直接使用workspace目录下的AGENTS.md文件 =====
       // console.error('[INFO] 步骤2: 未找到匹配文件，使用workspace目录下的AGENTS.md文件...');
@@ -381,13 +378,13 @@ async function main(options) {
           // console.error(`[INFO] 找到workspace下的AGENTS.md: ${agentsMdPath}`);
         } else {
           // 未找到匹配文件，且workspace下也没有AGENTS.md，直接返回空数组
-          console.error(`未找到工作区指令文件（${workspaceAgentsPath}）`);
+          // console.error(`[WARN] workspace目录下未找到AGENTS.md文件，返回空数组`);
           console.log(JSON.stringify([], null, 2));
           return;
         }
       } else {
         // 未提供workspace参数，直接返回空数组
-        console.error(`知识库中没有匹配部署单元 ${deployUnit} 的 Markdown 文件（${knowledgeDir}）`);
+        // console.error(`[WARN] 未提供workspace参数，返回空数组`);
         console.log(JSON.stringify([], null, 2));
         return;
       }
