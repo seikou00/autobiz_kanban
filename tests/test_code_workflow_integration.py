@@ -116,7 +116,6 @@ def test_fixed_workflow_entrypoint():
         "resolve-conflicted-candidate",
         "immediate_candidate_resolution_failed",
         "runFinalRepairAndReport",
-        "queueRetryExhaustedBatchRepairs",
         "errorMessage",
         "--ttl-seconds ${timeoutPerBatch}",
         "heartbeat",
@@ -164,7 +163,6 @@ def test_fixed_workflow_entrypoint():
         "REVIEW_VALIDATION_SCHEMA",
         "run_in_background",
         "task_output",
-        "MAX_FINAL_RETRY_DRAINS",
         "drain_recovered_batches",
         "Review execution mode=fixed_code_workflow",
         "Code Workflow 已获自主执行授权",
@@ -627,7 +625,6 @@ const vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const context = {
   schedulerCycles: 0,
-  MAX_SCHEDULER_CYCLES: 10,
   quarantinedBatchIds: new Set(),
   mergeableBatches: [],
   lastScheduler: { activeWorkers: 0 },
@@ -713,7 +710,7 @@ const context = {
 };
 vm.createContext(context);
 const start = source.indexOf("function takeNextRunnableLifecycle(");
-const end = source.indexOf("function canStartLifecycle(");
+const end = source.indexOf("function dispatchHasPotentialWork(");
 if (start < 0 || end < 0) process.exit(2);
 vm.runInContext(source.slice(start, end), context);
 const claimed = new Set();

@@ -138,7 +138,7 @@ test("a real dispatch worker completes under the restricted clock/random globals
     Math.random = () => { throw new Error("random unavailable"); };
   `, c);
   Object.assign(c, { workflowInvocationId: "a".repeat(32), timeoutPerBatch: 60, maxParallel: 1,
-    schedulerCycles: 0, MAX_SCHEDULER_CYCLES: 100,
+    schedulerCycles: 0,
     lastScheduler: { activeWorkers: 0, observedEpochMs: 1000, readyBatches: ["B001"] },
     isValidBatchId: value => /^B\d+$/.test(value), usableString: value => typeof value === "string" && value.length > 0,
     errorText: String, recordUnresolved: record => { throw new Error(JSON.stringify(record)); },

@@ -63,7 +63,6 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".autobizdevops/features/*/.parallel-runs/",
     ".autobizdevops/worktrees/",
 )
-MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
 
 
 def _parse_timestamp_epoch(value: object) -> float | None:
@@ -179,19 +178,16 @@ def _mark_retry_pending_locked(
                       and "parallel_worktree_provision_lock_busy" in error)
     if provision_wait:
         failure["reasonCode"] = "parallel_worktree_provision_lock_busy"
-    unchanged = previous_recovery.get("status") != "manual_retry_queued" and previous_recovery.get("failureFingerprint") == failure["fingerprint"]
-    if not provision_wait and (failure["classification"] == "precondition" or unchanged):
+    if failure["classification"] == "precondition":
         batch.update(status="blocked", error=error, activeStage=None)
-        batch["recovery"] = {**previous_recovery, "status": "precondition_blocked" if failure["classification"] == "precondition" else "unchanged_failure",
+        batch["recovery"] = {**previous_recovery, "status": "precondition_blocked",
                              "failureClassification": failure["classification"], "failureFingerprint": failure["fingerprint"],
                              "reasonCode": failure["reasonCode"], "lastError": error,
-                             "nextAction": "inspect_reported_precondition" if failure["classification"] == "precondition" else "inspect_unchanged_failure_before_retry"}
+                             "nextAction": "inspect_reported_precondition"}
         return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
     retry_attempts = (
         int(previous_recovery.get("retryAttempts", 0))
         if provision_wait
-        else 1
-        if previous == "blocked" and previous_recovery.get("status") == "retry_exhausted"
         else int(previous_recovery.get("retryAttempts", 0)) + 1
     )
     resume_status = (
@@ -249,6 +245,8 @@ def _mark_retry_pending_locked(
             },
         }
     )
+    batch["recovery"].pop("maxAutomaticAttempts", None)
+    batch["recovery"].pop("nextAction", None)
     return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
 
 
@@ -1477,9 +1475,11 @@ def resume_run(
             # A sealed/candidate delivery cannot still have a legitimate
             # implementation worker.  Include train-recovery batches so an
             # old started run cannot make Plan recovery fail again.
-            if str(batch_id) not in promoted_train_batch_ids and batch.get("status") not in {
-                "retry_pending", "sealed", "ready_to_candidate", "needs_resolution"
-            }:
+            legacy_retry = batch.get("status") == "blocked" and can_manually_resume_batch(batch)
+            if (str(batch_id) not in promoted_train_batch_ids
+                    and batch.get("status") not in {
+                        "retry_pending", "sealed", "ready_to_candidate", "needs_resolution"
+                    } and not legacy_retry):
                 continue
             worktree_path = batch.get("worktreePath")
             if not isinstance(worktree_path, str) or not worktree_path.strip():
@@ -1590,8 +1590,26 @@ def resume_run(
         # invariant before deciding whether the preserved delivery is sealed,
         # mergeable, or ready to be scheduled again.
         retry_leases_cleared: list[str] = []
+        legacy_retries_repaired: list[str] = []
         for batch_id, batch in manifest.get("batches", {}).items():
-            if not isinstance(batch, dict) or batch.get("status") != "retry_pending":
+            if not isinstance(batch, dict):
+                continue
+            # Runs written with the old retry budget may already be blocked.
+            # Reuse the normal recovery marker, preserving its delivery stage
+            # and counter. Integrity checks below still gate all scheduling.
+            lease_cleared = False
+            if batch.get("status") == "blocked" and can_manually_resume_batch(batch):
+                recovery = batch["recovery"]
+                lease_cleared = _mark_retry_pending_locked(
+                    workspace, feature, run_id, manifest, str(batch_id), batch,
+                    error=str(batch.get("error") or recovery.get("lastError") or "batch_execution_failed"),
+                    previous_status=str(recovery.get("resumeStatus") or "blocked"),
+                )
+                batch["recovery"]["retryAttempts"] = int(recovery.get("retryAttempts", 0))
+                legacy_retries_repaired.append(str(batch_id))
+            if lease_cleared:
+                retry_leases_cleared.append(str(batch_id))
+            if batch.get("status") != "retry_pending":
                 continue
             if _clear_retry_lease_locked(workspace, feature, run_id, str(batch_id), batch):
                 retry_leases_cleared.append(str(batch_id))
@@ -1601,7 +1619,7 @@ def resume_run(
         # transaction; this immediate durable boundary minimizes that window,
         # while the same loop reconciles the remaining one-sided state on the
         # next resume.
-        if retry_leases_cleared:
+        if retry_leases_cleared or legacy_retries_repaired:
             save_manifest(workspace, feature, run_id, manifest)
         for batch_id in retry_leases_cleared:
             append_event(
@@ -1690,10 +1708,9 @@ def resume_run(
             if batch.get("mergeCommitSha"):
                 batch["status"] = "merged"
                 continue
-            # Keep task-scoped terminal/recovery states intact.  In
-            # particular, a retry-exhausted Batch with a retained commit must
-            # not be silently resurrected as `sealed` on the next resume.
-            # Valid active leases are also left to their actual worker.
+            # Keep task-scoped terminal/recovery states intact. Retryable
+            # legacy blocks were requeued above; other blocked deliveries
+            # and valid active leases still belong to their repair/worker.
             if batch.get("status") in {
                 "retry_pending",
                 "blocked",
@@ -1777,23 +1794,10 @@ def resume_run(
                 "errors": invalid_deliveries,
             }
         retry_resumed: list[str] = []
-        retry_exhausted: list[str] = []
         for batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict) or batch.get("status") != "retry_pending":
                 continue
             recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
-            retry_attempts = int(recovery.get("retryAttempts", 0))
-            if (retry_attempts >= MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS
-                    and recovery.get("reasonCode") != "parallel_worktree_provision_lock_busy"):
-                batch["status"] = "blocked"
-                batch["activeStage"] = None
-                batch["recovery"] = {
-                    **recovery,
-                    "status": "retry_exhausted",
-                    "maxAutomaticAttempts": MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS,
-                }
-                retry_exhausted.append(str(batch_id))
-                continue
             implementation_resume = (
                 _implementation_resume_details(manifest, str(batch_id), batch)
                 if not batch.get("commitSha")
@@ -1876,12 +1880,10 @@ def resume_run(
         append_event(workspace, feature, run_id, "run_resumed")
     for batch_id in retry_resumed:
         append_event(workspace, feature, run_id, "batch_retry_rescheduled", batchId=batch_id)
-    for batch_id in retry_exhausted:
-        append_event(workspace, feature, run_id, "batch_retry_exhausted", batchId=batch_id)
     result = schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
     result["reclaimedStaleBatches"] = stale_recovered
     result["rescheduledRetryBatches"] = retry_resumed
-    result["retryExhaustedBatches"] = retry_exhausted
+    result["retryExhaustedBatches"] = []  # Compatibility with older workflow consumers.
     return result
 
 
@@ -1889,10 +1891,10 @@ def can_manually_resume_batch(batch: dict[str, Any]) -> bool:
     recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
     return batch.get("status") in {"retry_pending", "failed"} or (
         batch.get("status") == "blocked"
-        and (recovery.get("status") == "retry_exhausted"
+        and ((recovery.get("status") == "retry_exhausted"
+              and recovery.get("failureClassification") != "precondition")
              or (recovery.get("status") == "unchanged_failure"
-                 and recovery.get("failureClassification") == "retryable"
-                 and bool(batch.get("commitSha")) and _next_open_delivery_stage(batch) is None))
+                 and recovery.get("failureClassification") == "retryable"))
     )
 
 
@@ -1904,11 +1906,9 @@ def manual_resume_run(
 ) -> dict[str, Any]:
     """Explicitly re-admit retryable Batches after an operator intervention.
 
-    Automatic retries deliberately stop after a small bounded budget.  A user
-    asking the Code workflow to continue is a separate admission decision, not
-    another automatic retry: retain the failed Worktree and evidence, reset the
-    automatic counter, then let ``resume_run`` perform its normal integrity
-    checks and scheduling.  This never revives merge conflicts, cancellation,
+    Retain the failed Worktree, evidence and cumulative retry counter, then let
+    ``resume_run`` perform its normal integrity checks and scheduling.
+    This never revives merge conflicts, cancellation,
     or generic blocked states because those need a more specific repair path.
     """
     manually_queued: list[str] = []
@@ -1930,7 +1930,6 @@ def manual_resume_run(
                 continue
             batch["recovery"] = {
                 **recovery,
-                "retryAttempts": 0,
                 "manualRetryAttempts": int(recovery.get("manualRetryAttempts", 0)) + 1,
                 "lastManualRetryAt": manifest.get("updatedAt"),
                 "status": "manual_retry_queued",

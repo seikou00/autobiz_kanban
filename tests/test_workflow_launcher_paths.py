@@ -403,14 +403,17 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 {"id": "B001", "status": "failed", "workspaceRef": "api", "deps": []}]},
                 batches={"B001": {"tasks": [{"workspaceRef": "api"}]}}, tasks=[], task_batches={})
             closed = {stage: {"status": "passed"} for stage in ("prepare", "implement", "review", "test")}
-            for status in ("sealed", "ready_to_candidate", "blocked"):
-                with self.subTest(status=status), mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), \
+            for status, commit, states in (
+                ("sealed", "sealed", closed), ("ready_to_candidate", "sealed", closed),
+                ("blocked", "sealed", closed), ("blocked", None, {}),
+            ):
+                with self.subTest(status=status, commit=commit), mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), \
                         mock.patch("hooks.workflow_launcher.validate_plan_for_parallel", return_value={
                             "canParallel": False, "reason": "no_pending_batches", "errors": []}), \
                         mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-delivery"), \
                         mock.patch("hooks.workflow_launcher.load_manifest", return_value={
                             "runId": "cw-delivery", "batches": {"B001": {
-                                "status": status, "commitSha": "sealed", "stageStates": closed,
+                                "status": status, "commitSha": commit, "stageStates": states,
                                 "recovery": {"status": "unchanged_failure", "failureClassification": "retryable"}}}}):
                     result = analyze_batches("delivery", plugin, workspace, "TEST-001")
                     self.assertTrue(result["canStartWorkflow"], result)

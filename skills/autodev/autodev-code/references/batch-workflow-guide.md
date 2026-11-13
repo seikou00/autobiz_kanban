@@ -319,12 +319,12 @@ while unrelated ready work fills available slots immediately.
 
 An execution-stage failure is recorded as `retry_pending`, not terminal
 `failed`. Scheduler `resume` reclaims its lease and reschedules the Batch in
-its existing Worktree while unrelated Batches continue. After the bounded
-automatic retry budget is exhausted, that Batch becomes `blocked`; only its
-dependent branch stops, and the Workflow reports unresolved work. After
-diagnostics are addressed, an operator may explicitly
-mark that Batch `retry_pending` and resume the same run; it is never stranded
-as an irrecoverable `failed` record.
+its existing Worktree while unrelated Batches continue. Retryable execution
+failures have no attempt limit, including repeated identical failures;
+`retryAttempts` records history without blocking recovery. Scheduler `resume`
+also recovers legacy `retry_exhausted` and retryable `unchanged_failure` blocks.
+Precondition errors, cancellation and merge conflicts retain their specific
+repair paths. Successful recovery continues normal delivery and finalization.
 
 ## Batch Agent Boundaries
 

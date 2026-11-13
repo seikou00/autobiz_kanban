@@ -116,7 +116,7 @@ class DispatchGrantTest(unittest.TestCase):
         defer(self.workspace, "alpha", self.run, "B001", 4, owner["ownerToken"], "transport_failure")
         self.assertEqual(1, load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["recovery"]["retryAttempts"])
 
-    def test_provision_wait_preserves_prior_business_failure_budget(self):
+    def test_provision_wait_preserves_prior_business_failure_counter(self):
         manifest = load_manifest(self.workspace, "alpha", self.run)
         manifest["batches"]["B001"]["recovery"] = {"retryAttempts": 1}
         save_manifest(self.workspace, "alpha", self.run, manifest)
@@ -126,7 +126,10 @@ class DispatchGrantTest(unittest.TestCase):
         self.assertIn("B001", resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"])
         owner = self.claim(2)
         defer(self.workspace, "alpha", self.run, "B001", 2, owner["ownerToken"], "transport_failure")
-        self.assertIn("B001", resume_run(self.workspace, "alpha", self.run)["retryExhaustedBatches"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertIn("B001", resumed["rescheduledRetryBatches"])
+        self.assertEqual([], resumed["retryExhaustedBatches"])
+        self.assertEqual(2, load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["recovery"]["retryAttempts"])
 
     def _single_slot_worktree(self):
         manifest = load_manifest(self.workspace, "alpha", self.run)

@@ -13,7 +13,6 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 5;
 const DEFAULT_BATCH_TIMEOUT_SECONDS = 4 * 60 * 60;
-const MAX_SCHEDULER_CYCLES = 100;
 // Idle dispatch workers keep checking the durable scheduler snapshot while
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
@@ -23,11 +22,6 @@ const schedulerControlState = { available: true, failures: 0 };
 const deliveryControl = { deliveries: new Map(), finalized: new Map(), waiting: new Map(),
   inFlight: new Map(), repositoryTails: new Map() };
 const workspaceSyncControl = { inFlight: new Map(), pending: new Map(), results: new Map(), notifications: [], failureSequence: 0 };
-// The scheduler is the authority for the per-Batch retry budget (currently
-// two failure admissions). Keep one extra pass to let the scheduler turn a
-// legacy retry marker with a zero counter into its explicit exhausted state.
-// Final repair keeps draining until that budget is consumed or no retry remains.
-const MAX_FINAL_RETRY_DRAINS = 3;
 // Review findings receive one targeted production repair.
 const SINGLE_REPAIRABLE_STAGES = new Set(["review"]);
 const BATCH_RESULT_SCHEMA = {
@@ -2500,18 +2494,6 @@ function nextDispatchRequestId(state, invocationId, drainLabel, workerIndex) {
   return `${invocationId}:${drainLabel}:${workerIndex}:${state.claimSequence}`;
 }
 
-function canStartLifecycle() {
-  schedulerCycles += 1;
-  if (schedulerCycles <= MAX_SCHEDULER_CYCLES) return true;
-  recordUnresolved({
-    kind: "scheduler",
-    status: "cycle_limit_exceeded",
-    durable: false,
-    error: `parallel_scheduler_cycle_limit_exceeded:${schedulerCycles}`,
-  });
-  return false;
-}
-
 function dispatchHasPotentialWork(state) {
   if (!state || typeof state !== "object") return false;
   return Boolean(
@@ -2648,7 +2630,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
           grant = { generation: job.generation, ownerToken: acquired.ownerToken };
           if (typeof deliveryControl !== "undefined") deliveryControl.waiting.delete(job.batchId);
           activeDispatchGrants.set(job.batchId, grant);
-          if (!canStartLifecycle()) return;
+          schedulerCycles += 1;
           idlePolls = 0;
           idleStarted = dispatchSnapshotEpoch(lastScheduler);
           dispatcherState.ranAny = true;
@@ -3023,15 +3005,6 @@ async function persistUndurableBatchFailures() {
   }
 }
 
-async function queueRetryExhaustedBatchRepairs() {
-  // A new drain is not a new retry budget or dispatch generation.
-  for (const batch of unresolvedBatchDetails()) {
-    if (batch.status !== "blocked" || batch.recoveryStatus !== "retry_exhausted") continue;
-    finalRepairResults.push({ kind: "retry_budget_exhausted", batchId: batch.batchId,
-      status: "blocked", durable: true, error: batch.error });
-  }
-}
-
 async function attemptFinalCandidateRepair(record) {
   if (!usableString(record.repositoryRef) || !Number.isFinite(Number(record.wave))) return;
   const batchIds = Array.isArray(record.batchIds) && record.batchIds.length
@@ -3132,7 +3105,6 @@ async function runFinalRepairAndReport() {
   if (!initial) return null;
   if (admission && admission.status === "ready") return initial;
   await persistUndurableBatchFailures();
-  await queueRetryExhaustedBatchRepairs();
 
   // Candidate conflicts are retried only after independent work has drained.
   // One attempt per candidate prevents a permanently conflicted candidate from
@@ -3151,15 +3123,6 @@ async function runFinalRepairAndReport() {
   while (repairState) {
     const retryPending = retryPendingBatchesOf(repairState);
     if (retryPending.length) {
-      if (retryDrain >= MAX_FINAL_RETRY_DRAINS) {
-        finalRepairResults.push({
-          kind: "resume_retry_pending",
-          status: "automatic_retry_budget_exhausted",
-          retryDrain,
-          retryPendingBatchIds: retryPending,
-        });
-        break;
-      }
       retryDrain += 1;
       try {
         repairState = await recoverPendingRetries(repairState, `final-repair-resume-retry-pending-${retryDrain}`);

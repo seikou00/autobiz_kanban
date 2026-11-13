@@ -502,29 +502,22 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(first_manifest["status"], "running")
             self.assertEqual(first_resume["scheduledGroups"], [["B001", "B002"]])
 
-            mark_batch(
-                workspace,
-                "alpha",
-                run_id,
-                "B001",
-                "retry_pending",
-                error="repeat_worker_failure",
-            )
-            exhausted = resume_run(workspace, "alpha", run_id)
-            exhausted_manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(exhausted["retryExhaustedBatches"], ["B001"])
-            self.assertEqual(exhausted_manifest["batches"]["B001"]["status"], "blocked")
-            self.assertEqual(exhausted_manifest["batches"]["B002"]["status"], "pending")
-            self.assertEqual(exhausted["blockedBatches"], ["B001"])
-            self.assertEqual(exhausted["scheduledGroups"], [["B002"]])
-
-            # An operator can explicitly requeue a retry-exhausted Batch after
-            # addressing its diagnostics; it is no longer a permanently
-            # terminal `failed` record.
-            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="operator_retry")
-            requeued = resume_run(workspace, "alpha", run_id)
-            self.assertEqual(requeued["rescheduledRetryBatches"], ["B001"])
-            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
+            # Both changing failures and an identical failure fingerprint may
+            # exceed the old two-attempt budget without blocking either peer.
+            for attempt, error in enumerate([
+                "second_worker_failure", "third_worker_failure",
+                "repeated_worker_failure", "repeated_worker_failure", "repeated_worker_failure",
+            ], start=2):
+                mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error=error)
+                resumed = resume_run(workspace, "alpha", run_id)
+                manifest = load_manifest(workspace, "alpha", run_id)
+                self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+                self.assertEqual(resumed["retryExhaustedBatches"], [])
+                self.assertEqual(resumed["blockedBatches"], [])
+                self.assertEqual(resumed["scheduledGroups"], [["B001", "B002"]])
+                self.assertEqual(manifest["batches"]["B001"]["status"], "pending")
+                self.assertEqual(manifest["batches"]["B002"]["status"], "pending")
+                self.assertEqual(manifest["batches"]["B001"]["recovery"]["retryAttempts"], attempt)
 
     def test_retry_pending_transition_clears_lease_before_reschedule(self) -> None:
         """A retry marker must take lease authority away from a failed worker."""
@@ -643,8 +636,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
         self.assertEqual(archived_implementation, "preserve this implementation\n")
         self.assertEqual(new_worktree_head, new_head)
 
-    def test_manual_resume_resets_retry_exhausted_batch(self) -> None:
-        """An explicit user retry is a fresh admission, not a third automatic retry."""
+    def test_manual_resume_preserves_legacy_retry_counter(self) -> None:
+        """Explicit continuation retains the cumulative failure history."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
             _configure_defer_to_test_stages(feature_dir)
@@ -657,11 +650,13 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             )
             run_id = created["runId"]
 
-            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="first_failure")
-            resume_run(workspace, "alpha", run_id)
-            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="second_failure")
-            exhausted = resume_run(workspace, "alpha", run_id)
-            self.assertEqual(exhausted["retryExhaustedBatches"], ["B001"])
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["batches"]["B001"].update({
+                "status": "blocked", "error": "worker_interrupted",
+                "recovery": {"status": "retry_exhausted", "retryAttempts": 2,
+                             "maxAutomaticAttempts": 2, "resumeStatus": "pending"},
+            })
+            save_manifest(workspace, "alpha", run_id, manifest)
 
             resumed = manual_resume_run(workspace, "alpha", run_id)
             batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
@@ -670,7 +665,72 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
             self.assertEqual(batch["status"], "pending")
             self.assertEqual(batch["recovery"]["manualRetryAttempts"], 1)
-            self.assertEqual(batch["recovery"]["retryAttempts"], 1)
+            self.assertEqual(batch["recovery"]["retryAttempts"], 3)
+            self.assertNotIn("maxAutomaticAttempts", batch["recovery"])
+
+    def test_resume_recovers_legacy_retry_blocks_in_the_existing_worktree(self) -> None:
+        for recovery_status in ("retry_exhausted", "unchanged_failure"):
+            with self.subTest(status=recovery_status), tempfile.TemporaryDirectory() as tmp:
+                workspace, feature_dir, repo = _workspace(Path(tmp))
+                _configure_defer_to_test_stages(feature_dir)
+                run_id = create_run(workspace, "alpha", max_parallel=4, timeout_seconds=60,
+                                    code_workspaces=[str(repo)])["runId"]
+                provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                worktree = Path(provisioned["worktreePath"])
+                (worktree / "partial.txt").write_text("preserve work\n", encoding="utf-8")
+                acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+                manifest = load_manifest(workspace, "alpha", run_id)
+                generation = manifest["batches"]["B001"].get("dispatchGeneration", 1)
+                manifest["status"] = "blocked"
+                manifest["batches"]["B001"].update({
+                    "status": "blocked", "error": "empty_agent_output",
+                    "recovery": {"status": recovery_status, "failureClassification": "retryable",
+                                 "retryAttempts": 7, "maxAutomaticAttempts": 2, "resumeStatus": "pending",
+                                 "nextAction": "inspect_unchanged_failure_before_retry"},
+                })
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                resumed = resume_run(workspace, "alpha", run_id)
+                batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+                self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+                self.assertEqual(batch["status"], "pending")
+                self.assertEqual(batch["recovery"]["retryAttempts"], 7)
+                self.assertEqual(batch["dispatchGeneration"], generation + 1)
+                self.assertEqual(batch["recovery"]["kind"], "implementation_resume")
+                self.assertNotIn("maxAutomaticAttempts", batch["recovery"])
+                self.assertNotIn("nextAction", batch["recovery"])
+                self.assertEqual(batch["worktreePath"], str(worktree))
+                self.assertEqual((worktree / "partial.txt").read_text(), "preserve work\n")
+                self.assertFalse(lease_path(workspace, "alpha", run_id, "B001").exists())
+                again = resume_run(workspace, "alpha", run_id)
+                self.assertEqual(again["rescheduledRetryBatches"], [])
+                self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["dispatchGeneration"],
+                                 generation + 1)
+
+    def test_resume_preserves_non_retryable_blocks_and_terminal_batches(self) -> None:
+        cases = [
+            ("blocked", "precondition_blocked", "precondition"),
+            ("blocked", "unchanged_failure", "precondition"),
+            ("blocked", "retry_exhausted", "precondition"),
+            ("blocked", "unknown", "retryable"),
+            ("needs_resolution", "retry_exhausted", "retryable"),
+            ("cancelled", "retry_exhausted", "retryable"),
+        ]
+        for status, recovery_status, classification in cases:
+            with self.subTest(status=status, recovery=recovery_status), tempfile.TemporaryDirectory() as tmp:
+                workspace, feature_dir, repo = _workspace(Path(tmp))
+                _configure_defer_to_test_stages(feature_dir)
+                run_id = create_run(workspace, "alpha", max_parallel=4, timeout_seconds=60,
+                                    code_workspaces=[str(repo)])["runId"]
+                manifest = load_manifest(workspace, "alpha", run_id)
+                manifest["batches"]["B001"].update({
+                    "status": status,
+                    "recovery": {"status": recovery_status, "failureClassification": classification},
+                })
+                save_manifest(workspace, "alpha", run_id, manifest)
+                resumed = resume_run(workspace, "alpha", run_id)
+                self.assertEqual(resumed["rescheduledRetryBatches"], [])
+                self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], status)
 
     def test_resume_repairs_legacy_retry_pending_lease(self) -> None:
         """Resume must repair retry records written before atomic lease cleanup."""
