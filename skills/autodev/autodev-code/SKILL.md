@@ -44,3 +44,5 @@ Review 收口后的交付由 Merge Train 集成；全部 Batch 交付后直接�
 只有用户另外明确要求正式 Git 合并时，才使用独立的 `parallel_integration.py prepare/promote` 工具；按现有授权执行，不主动询问是否需要合并。准确参数和冲突恢复见 `${pluginPath}/docs/feature-integration-worktree.md`。
 
 固定 Workflow 汇总完成后自动执行 `update_checkpoint.py --feature "${feature}" --checkpoint code_done --json`，通过现有门禁后推进状态。`continue_next_stage` 表示已完成 Code，可按共享交接协议读取下一阶段；不在本 Workflow 启动下一技能。launcher 返回 `code_done_ready` 或 Workflow 返回 `retry_code_checkpoint` 时，读取真实状态；仍为 `code_in_progress` 则自动执行上述命令补齐，不要求合并或验收确认。状态推进失败必须如实报告，不声称已完成、不手改 Plan、manifest、Evidence 或 checkpoint 绕过。Code/Rework 提交均由封存器生成，格式见 `${pluginPath}/docs/code-commit-messages.md`。简报实际结果并按 `${pluginPath}/skills/references/ui-continuation-guide.md` 交接。
+
+标准看板在 code_done 后推荐交付报告技能；以当前 Feature 的动态路由为准。

@@ -2759,7 +2759,19 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
     return failures
 
 
+def validate_delivery_report(ctx: HookContext) -> int:
+    from hooks.delivery_report.publish import validate
+    from hooks.delivery_report.sources import resolve_scope
+    try:
+        validate(resolve_scope(ctx.root, ctx.slug))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return fail_line(ctx, "invalid_delivery_report", f" detail={exc}",
+                         target="DELIVERY_REPORT.html", repair="按本阶段技能重新生成匹配本次交付的 HTML 和 JSON。")
+    return 0
+
+
 VALIDATORS = {
+    "delivery_report_pair": validate_delivery_report,
     "e2e_cases_contract": validate_e2e_cases_contract,
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,

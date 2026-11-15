@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
+import re
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -418,6 +420,74 @@ def _candidate_review_scope(repo: Path, record: dict) -> list[dict]:
             if files:
                 affected.append({"batchId": batch_id, "deliverySha": sealed, "paths": sorted(files)})
     return affected
+
+
+def record_candidate_review(workspace: Path, feature: str, run_id: str, *, wave: int,
+                            repository_ref: str, payload: dict) -> dict[str, Any]:
+    """Retain the exact Review response before Workflow returns or raises."""
+    def fingerprint(value):
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+    if not isinstance(payload, dict) or payload.get("status") not in {"passed", "failed", "error"}:
+        raise ValueError("candidate_review_result_invalid")
+    result, scope = payload.get("reviewResult"), payload.get("reviewScope")
+    if (not isinstance(result, dict) or not isinstance(scope, list) or not scope
+            or not isinstance(payload.get("attemptId"), str) or not payload["attemptId"].strip()):
+        raise ValueError("candidate_review_payload_invalid")
+    for key in ("candidateSha", "baseSha"):
+        if not isinstance(payload.get(key), str) or not re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", payload[key]):
+            raise ValueError("candidate_review_sha_invalid")
+    if payload["status"] == "passed" and (result.get("status") != "passed"
+            or result.get("candidateSha") != payload["candidateSha"] or result.get("success") is False or result.get("error")):
+        raise ValueError("candidate_review_pass_mismatch")
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        record = _record(manifest, repository_ref, wave)
+        if (not record or manifest.get("featureId") != feature
+                or record.get("baseSha") != payload["baseSha"] or record.get("candidateSha") != payload["candidateSha"]):
+            raise ValueError("candidate_review_binding_changed")
+        commits = record.get("deliveryCommits") or {}
+        for item in scope:
+            if (not isinstance(item, dict) or item.get("batchId") not in commits
+                    or item.get("deliverySha") != commits[item["batchId"]]
+                    or not isinstance(item.get("paths"), list) or not item["paths"]
+                    or not all(isinstance(p, str) and p for p in item["paths"])):
+                raise ValueError("candidate_review_scope_mismatch")
+        facts = {"schemaVersion": "autodev.candidate-review.v1", "featureId": feature, "runId": run_id,
+                 "repositoryRef": repository_ref, "wave": wave, "baseSha": payload["baseSha"],
+                 "candidateSha": payload["candidateSha"], "deliveryCommits": commits,
+                 "attemptId": payload["attemptId"], "status": payload["status"],
+                 "reviewScope": scope, "reviewResult": result}
+        review_id = fingerprint(facts)
+        directory = run_dir(workspace, feature, run_id) / "candidate-reviews"
+        path = directory / (review_id + ".json")
+        if directory.is_symlink() or path.is_symlink():
+            raise ValueError("candidate_review_evidence_path_invalid")
+        if path.exists():
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(stored, dict) or stored.get("reviewId") != review_id
+                    or stored.get("digest") != "sha256:" + fingerprint({k: v for k, v in stored.items() if k != "digest"})
+                    or {k: v for k, v in stored.items() if k not in {"reviewId", "recordedAt", "sequence", "digest"}} != facts):
+                raise ValueError("candidate_review_evidence_changed")
+            reused = True
+        else:
+            sequences = [0]
+            for prior in directory.glob('*.json'):
+                try:
+                    sequence = json.loads(prior.read_text(encoding='utf-8')).get('sequence')
+                    if isinstance(sequence, int) and not isinstance(sequence, bool):
+                        sequences.append(sequence)
+                except (OSError, ValueError, AttributeError):
+                    continue
+            stored = {**facts, "reviewId": review_id, "recordedAt": utc_now(), "sequence": max(sequences) + 1}
+            stored["digest"] = "sha256:" + fingerprint(stored)
+            atomic_write_json(path, stored)
+            append_event(workspace, feature, run_id, "candidate_review_recorded", repositoryRef=repository_ref,
+                         wave=wave, candidateSha=payload["candidateSha"], reviewId=review_id, reviewStatus=payload["status"])
+            reused = False
+    return {"success": True, "status": "recorded", "reviewId": review_id,
+            "candidateSha": payload["candidateSha"], "evidencePath": str(path), "reused": reused}
 
 
 def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str,
@@ -1274,7 +1344,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate staged parallel Batch Merge Trains")
     sub = parser.add_subparsers(dest="command", required=True)
     promote_parser: argparse.ArgumentParser | None = None
-    for name in ("build-candidate", "verify-candidate", "promote-candidate", "recover-promoted-plan", "prepare-resolution", "complete-resolution", "resolve-candidate", "resume-candidate", "discard-candidate"):
+    for name in ("build-candidate", "verify-candidate", "promote-candidate", "record-candidate-review", "recover-promoted-plan", "prepare-resolution", "complete-resolution", "resolve-candidate", "resume-candidate", "discard-candidate"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -1287,6 +1357,8 @@ def main(argv: list[str] | None = None) -> int:
             promote_parser = item
         elif name == "prepare-resolution":
             item.add_argument("--attempt-id", default="", help="stable identity for one Workflow resolution step")
+        elif name == "record-candidate-review":
+            item.add_argument("--review-base64", required=True)
     e2e_begin = sub.add_parser("begin-e2e")
     e2e_finish = sub.add_parser("finish-e2e")
     e2e_skip = sub.add_parser("skip-e2e")
@@ -1311,6 +1383,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"parallel_merge_train_repository_mismatch:{args.repository_ref}:{result.get('repositoryRef')}")
         elif args.command == "verify-candidate":
             result = verify_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
+        elif args.command == "record-candidate-review":
+            payload = json.loads(base64.b64decode(args.review_base64, validate=True).decode("utf-8"))
+            result = record_candidate_review(workspace, feature, args.run_id, wave=args.wave,
+                                             repository_ref=args.repository_ref, payload=payload)
         elif args.command == "promote-candidate":
             result = promote_candidate(
                 workspace,

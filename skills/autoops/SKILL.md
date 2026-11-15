@@ -72,3 +72,5 @@ python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 4. 若脚本推荐 `/autoops-archive`，继续归档；`archived` 后 Ops 阶段结束。
 
 ---
+
+标准流程从交付报告完成态进入 CI/CD，自定义流程按有效路由交接。

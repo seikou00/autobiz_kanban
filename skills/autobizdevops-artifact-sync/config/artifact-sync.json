@@ -1,5 +1,5 @@
 {
-  "allowedCheckpoints": ["plan_done","code_done", "cicd_in_progress", "cicd_done", "archived"],
+  "allowedCheckpoints": ["plan_done","code_done", "delivery_report_done", "cicd_in_progress", "cicd_done", "archived"],
   "stages": {
     "biz": {
       "biz.prd": {
@@ -21,6 +21,10 @@
       },
       "dev.detail_design": {
         "DETAIL_DESIGN.md": "文件级详细设计文档。"
+      },
+      "dev.delivery_report": {
+        "DELIVERY_REPORT.html": "离线交付报告。",
+        "DELIVERY_REPORT.json": "交付报告数据与来源。"
       },
       "dev.code": {
         "FEATURE_API_DETAIL.md": "当前 Feature 涉及接口的详细说明。"

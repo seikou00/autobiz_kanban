@@ -1,6 +1,7 @@
 """Configuration-driven artifact sync, publication and retry behavior."""
 from __future__ import annotations
 
+import hashlib
 import contextlib
 import copy
 import io
@@ -70,6 +71,12 @@ class ArtifactSyncTest(unittest.TestCase):
         for paths in sync.configured_nodes(self.config).values():
             for pattern in paths:
                 self.write_artifact(SAMPLES.get(pattern, pattern))
+        report = {"schemaVersion": "autodev.delivery-report.v1", "featureId": "alpha"}
+        html_template = '<script type="application/json" id="report-data">{{REPORT}}</script>'
+        report["templateDigest"] = hashlib.sha256(html_template.encode()).hexdigest()
+        report["reportId"] = sync.json_digest(report)
+        self.write_artifact(sync.REPORT_JSON, json.dumps(report))
+        self.write_artifact(sync.REPORT_HTML, html_template.replace("{{REPORT}}",json.dumps(report)))
         self.employee_id = "001234"
         self.uploaded = []
         self.upload_snapshots = []
@@ -93,6 +100,25 @@ class ArtifactSyncTest(unittest.TestCase):
         path = self.feature_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+    def test_mismatched_report_pair_is_excluded_together(self):
+        self.write_artifact(sync.REPORT_HTML, '<script type="application/json" id="report-data">{}</script>')
+        selected, diagnostics = sync.scan_artifacts(
+            self.feature_dir, feature="alpha", project_code="P001", employee_id=self.employee_id,
+            config=self.config)
+        self.assertNotIn(sync.REPORT_HTML, selected)
+        self.assertNotIn(sync.REPORT_JSON, selected)
+        self.assertTrue(any(item["reason"] == "report_pair_unavailable" for item in diagnostics))
+        self.assertFalse((self.feature_dir / ".delivery-report").exists())
+
+    def test_report_markup_modified_after_generation_is_excluded(self):
+        path = self.feature_dir / sync.REPORT_HTML
+        self.write_artifact(sync.REPORT_HTML, "<p>修改的交付结论</p>" + path.read_text())
+        selected, diagnostics = sync.scan_artifacts(
+            self.feature_dir, feature="alpha", project_code="P001", employee_id=self.employee_id,
+            config=self.config)
+        self.assertNotIn(sync.REPORT_JSON, selected)
+        self.assertTrue(any(d["reason"] == "report_pair_unavailable" for d in diagnostics))
 
     def oversized(self, name):
         with (self.feature_dir / name).open("wb") as handle:

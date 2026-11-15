@@ -18,12 +18,12 @@ python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 根路由只路由 Board 中声明的节点：Specs、Technical Design、Plan、可选 Detailed
-Design、Code。`review` 是固定 Code Workflow 的 Batch
+Design、Code、交付报告。`review` 是固定 Code Workflow 的 Batch
 子阶段，不是 Board 节点，也不允许写入独立 checkpoint。
 
 ```text
-prd_done → specs → design → plan → [detail design] → code → cicd
-                                             └─ Code 内部：implement → review → test → B-E2E → evidence aggregate
+prd_done → specs → design → plan → [detail design] → code → delivery report → cicd
+                                             └─ Code 内部：implement → review → merge → evidence aggregate
 ```
 
 ## Code 阶段
@@ -31,7 +31,7 @@ prd_done → specs → design → plan → [detail design] → code → cicd
 进入 `/autodev-code` 后，先执行其“Code 入口：先获取看板 ID”：缺少有效 ID 时直接让用户填写，已提供或恢复同一 Run 时复用；拿到有效 ID 后才进行准入检查、推进 checkpoint、捕获基线和启动 Workflow。
 
 编码开始后，全局 checkpoint 只保持 `code_in_progress`，直到固定
-Workflow 已完成所有交付 Batch、B-E2E 与证据聚合，再推进到 `code_done`。
+Workflow 已完成所有交付 Batch 与证据聚合，再推进到 `code_done`。
 
 - `task_runner start` 仅授权当前实现 TASK 的生产代码写入；已 implemented 的
   TASK 不得为测试重新启动 run。
@@ -41,4 +41,4 @@ Workflow 已完成所有交付 Batch、B-E2E 与证据聚合，再推进到 `cod
   `verify_*` checkpoint。
 
 失败时由固定 Workflow 记录 Batch evidence 或生成 `needs_fix`；Plan 契约问题才
-回到 `plan_in_progress`。Code 完成后按 `resolve_next_skill.py` 进入 CI/CD。
+回到 `plan_in_progress`。Code 完成后按 `resolve_next_skill.py` 交接下一步。标准链进入 /autodev-delivery-report 生成交付报告，再交接 CI/CD。

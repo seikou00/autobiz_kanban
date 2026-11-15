@@ -103,7 +103,7 @@ class UpdateCheckpointDynamicStageTest(unittest.TestCase):
         self.assertEqual(records[self.feature]["checkpoint"], "code_done")
         route, exit_code = resolve_route(self.project, self.feature)
         self.assertEqual(exit_code, 0, route)
-        self.assertEqual(route["recommendedNextSkill"], "autoops-cicd")
+        self.assertEqual(route["recommendedNextSkill"], "autodev-delivery-report")
 
 
 if __name__ == "__main__":
