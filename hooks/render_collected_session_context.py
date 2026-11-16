@@ -72,6 +72,9 @@ from hooks.render_session_context import (  # noqa: E402
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
 NPM_INSTALL_TIMEOUT_SECONDS = 300
+# DevClaw gives the whole session adapter 15 seconds. Leave time for local fallback.
+SESSION_COLLECTOR_BUDGET_SECONDS = 6
+SESSION_NPM_INSTALL_TIMEOUT_SECONDS = 3
 DIAGNOSTIC_LOG_LIMIT = 2000
 
 
@@ -161,7 +164,9 @@ def _dependency_files_present(workdir):
     )
 
 
-def _npm_install(collector_script: str, *, npm_command: str = "npm") -> str:
+def _npm_install(
+    collector_script: str, *, npm_command: str = "npm", deadline: Optional[float] = None,
+) -> str:
     """依赖关键文件缺失时，在 collector 所在目录安装依赖。
 
     返回空串表示成功，否则返回失败原因，由调用方决定是否继续。
@@ -172,9 +177,14 @@ def _npm_install(collector_script: str, *, npm_command: str = "npm") -> str:
         return ""
     _timing_log("npm.install", "required", "gray-matter 依赖目录或关键文件缺失")
     executable = shutil.which(npm_command) or npm_command
+    timeout = NPM_INSTALL_TIMEOUT_SECONDS
+    if deadline is not None:
+        timeout = min(SESSION_NPM_INSTALL_TIMEOUT_SECONDS, deadline - time.monotonic())
+        if timeout <= 0:
+            return "会话知识收集已超时，跳过 npm install"
     try:
         proc = _timed_call(
-            "npm.install(timeout={}s)".format(NPM_INSTALL_TIMEOUT_SECONDS),
+            "npm.install(timeout={:.1f}s)".format(timeout),
             subprocess.run,
             [executable, "install"],
             cwd=str(workdir),
@@ -183,13 +193,13 @@ def _npm_install(collector_script: str, *, npm_command: str = "npm") -> str:
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=NPM_INSTALL_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         missing = exc.filename or npm_command
         return f"未找到依赖安装命令: {missing}，请安装 Node.js/npm 或用 --npm-command 指定路径"
     except subprocess.TimeoutExpired:
-        return f"依赖安装超时（{NPM_INSTALL_TIMEOUT_SECONDS} 秒），请在 {workdir} 手动执行 npm install"
+        return f"依赖安装超时（{timeout:g} 秒），请在 {workdir} 手动执行 npm install"
     except OSError as exc:
         return f"启动依赖安装失败: {_short_error(str(exc))}"
 
@@ -205,6 +215,7 @@ def _run_collector(
     *,
     knowledge_path: str,
     node_command: str = "node",
+    deadline: Optional[float] = None,
 ) -> Tuple[object, str]:
     """以 argv 调用 Node 接口，不通过 shell 解释 deployUnit 或 Windows 路径。"""
     command = [
@@ -217,9 +228,14 @@ def _run_collector(
     stage = "collector.{}".format(" ".join(collector_args))
     _timing_log(stage, "argv", json.dumps(command, ensure_ascii=False),
                 limit=DIAGNOSTIC_LOG_LIMIT)
+    timeout = KNOWLEDGE_COLLECT_TIMEOUT_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise KnowledgeCollectorError("会话知识收集已超时")
     try:
         proc = _timed_call(
-            "{}(timeout={}s)".format(stage, KNOWLEDGE_COLLECT_TIMEOUT_SECONDS),
+            "{}(timeout={:.1f}s)".format(stage, timeout),
             subprocess.run,
             command,
             capture_output=True,
@@ -227,7 +243,7 @@ def _run_collector(
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=KNOWLEDGE_COLLECT_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         missing = exc.filename or node_command
@@ -235,7 +251,7 @@ def _run_collector(
     except subprocess.TimeoutExpired as exc:
         _log_collector_output(stage, exc.stdout, exc.stderr, include_stdout=True)
         raise KnowledgeCollectorError(
-            f"知识恢复接口超时（{KNOWLEDGE_COLLECT_TIMEOUT_SECONDS} 秒）"
+            f"知识恢复接口超时（{timeout:.1f} 秒）"
         ) from exc
     except OSError as exc:
         raise KnowledgeCollectorError(f"启动知识恢复接口失败: {_short_error(str(exc))}") from exc
@@ -269,12 +285,14 @@ def _list_deploy_units(
     *,
     knowledge_path: str,
     node_command: str = "node",
+    deadline: Optional[float] = None,
 ) -> List[str]:
     payload, stderr = _run_collector(
         collector_script,
         ["--listDeployUnits"],
         knowledge_path=knowledge_path,
         node_command=node_command,
+        deadline=deadline,
     )
     if not isinstance(payload, list) or any(
         not isinstance(item, str) or not item.strip() for item in payload
@@ -290,10 +308,11 @@ def list_supported_deploy_units(
     knowledge_path: str,
     node_command: str = "node",
     npm_command: str = "npm",
+    deadline: Optional[float] = None,
 ) -> List[str]:
     """按需安装 collector 依赖并读取其支持的部署单元。"""
     _log_collector_env(collector_script, knowledge_path, node_command)
-    npm_error = _npm_install(collector_script, npm_command=npm_command)
+    npm_error = _npm_install(collector_script, npm_command=npm_command, deadline=deadline)
     if npm_error:
         _timing_log("npm.install", "warning", npm_error)
     try:
@@ -301,6 +320,7 @@ def list_supported_deploy_units(
             collector_script,
             knowledge_path=knowledge_path,
             node_command=node_command,
+            deadline=deadline,
         )
     except KnowledgeCollectorError as exc:
         reason = f"{npm_error}；{exc}" if npm_error else str(exc)
@@ -317,12 +337,14 @@ def _deploy_unit_prompt(
     *,
     knowledge_path: str,
     node_command: str = "node",
+    deadline: Optional[float] = None,
 ) -> str:
     payload, stderr = _run_collector(
         collector_script,
         ["--deployUnit", deploy_unit_id],
         knowledge_path=knowledge_path,
         node_command=node_command,
+        deadline=deadline,
     )
     diagnostic = f"；collector 诊断（{stderr}）" if stderr else ""
     if payload == []:
@@ -378,7 +400,7 @@ def _legacy_result(
         knowledge_root=Path(knowledge_path),
     )
     old_message = str(result.get("message", "") or "")
-    prefix = f"collector 不可用，已回退旧逻辑: {_short_error(reason)}"
+    prefix = f"collector 不可用，已回退旧逻辑（知识目录 {knowledge_path}）: {_short_error(reason)}"
     result["message"] = f"{prefix}；{old_message}" if old_message else prefix
     return result
 
@@ -398,6 +420,7 @@ def _resolve_unit(
     knowledge_path: str,
     platform: Optional[str],
     node_command: str,
+    deadline: float,
     manifest_pair: Optional[Tuple[SystemEntry, DeployUnit]] = None,
     manifest_issue: str = "",
 ) -> Tuple[dict, Optional[Path], Optional[str], Optional[dict], Optional[Tuple[str, str]]]:
@@ -416,6 +439,7 @@ def _resolve_unit(
                 uid,
                 knowledge_path=knowledge_path,
                 node_command=node_command,
+                deadline=deadline,
             )
         except KnowledgeCollectorError as exc:
             collector_error = str(exc)
@@ -544,6 +568,7 @@ def render(
             ensure_ascii=False,
         ),
     ), limit=DIAGNOSTIC_LOG_LIMIT)
+    deadline = time.monotonic() + SESSION_COLLECTOR_BUDGET_SECONDS
     try:
         supported_units = set(
             list_supported_deploy_units(
@@ -551,6 +576,7 @@ def render(
                 knowledge_path=resolved_knowledge_path,
                 node_command=node_command,
                 npm_command=npm_command,
+                deadline=deadline,
             )
         )
     except KnowledgeCollectorError as exc:
@@ -629,6 +655,7 @@ def render(
             knowledge_path=resolved_knowledge_path,
             platform=platform,
             node_command=node_command,
+            deadline=deadline,
             manifest_pair=pairs.get(item["deployUnitId"]),
             manifest_issue=manifest_issue,
         )
@@ -781,10 +808,14 @@ def _manifest_indexes_any(root: str, deploy_unit_ids: Sequence[str]) -> bool:
     if not deploy_unit_ids:
         return False
     try:
-        manifest = load_manifest(manifest_path=Path(root) / MANIFEST_NAME)
-    except (AgentsManifestError, OSError):
+        duplicate_unit_ids: set[str] = set()
+        manifest = load_manifest(
+            manifest_path=Path(root) / MANIFEST_NAME, duplicate_unit_ids=duplicate_unit_ids,
+        )
+    except (AgentsManifestError, OSError, UnicodeError):
         return False
-    return any(unit_id in index_unit_pairs(manifest) for unit_id in deploy_unit_ids)
+    indexed = index_unit_pairs(manifest)
+    return any(uid in indexed and uid not in duplicate_unit_ids for uid in deploy_unit_ids)
 
 
 def _resolve_knowledge_path(
