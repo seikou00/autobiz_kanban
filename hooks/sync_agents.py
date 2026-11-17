@@ -72,6 +72,7 @@ from hooks.agents_repo import (  # noqa: E402
 )
 from board_core.contracts import BoardConfigError, load_board_config  # noqa: E402
 from hooks.render_collected_session_context import (  # noqa: E402
+    NPM_INSTALL_TIMEOUT_SECONDS,
     KnowledgeCollectorError,
     list_supported_deploy_units,
     prepare_collector_dependencies,
@@ -392,7 +393,9 @@ def run(
     ssh_url: Optional[str] = None,
     prefer_manifest: bool = False,
 ) -> dict:
-    deadline = time.monotonic() + KNOWLEDGE_SYNC_TIMEOUT_SECONDS
+    started = time.monotonic()
+    git_deadline = started + KNOWLEDGE_SYNC_TIMEOUT_SECONDS
+    collector_deadline = started + NPM_INSTALL_TIMEOUT_SECONDS
     _log_environment()
     try:
         url, resolved_ref, resolved_ssh_url = _resolve_repo(repo_url, ref, ssh_url)
@@ -409,9 +412,11 @@ def run(
     with ThreadPoolExecutor(max_workers=1) as executor:
         dependencies = None
         if not prefer_manifest:
-            dependencies = executor.submit(prepare_collector_dependencies, str(KNOWLEDGE_COLLECTOR_PATH), deadline=deadline)
+            dependencies = executor.submit(
+                prepare_collector_dependencies, str(KNOWLEDGE_COLLECTOR_PATH), deadline=collector_deadline,
+            )
         try:
-            repo_info = sync_repo(url, resolved_ref, dest, resolved_ssh_url, deadline=deadline)
+            repo_info = sync_repo(url, resolved_ref, dest, resolved_ssh_url, deadline=git_deadline)
         except FileNotFoundError:
             return _fail("未找到 git 可执行文件，请确认运行环境已安装 git")
         except RuntimeError as exc:
@@ -440,7 +445,7 @@ def run(
     collector_units: Optional[List[str]] = None
     collector_error = ""
     try:
-        collector_units = _collector_supported_units(dest, deadline, dependency_error)
+        collector_units = _collector_supported_units(dest, collector_deadline, dependency_error)
     except KnowledgeCollectorError as exc:
         collector_error = str(exc)
 

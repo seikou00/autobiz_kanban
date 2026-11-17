@@ -72,7 +72,7 @@ from hooks.render_session_context import (  # noqa: E402
 
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
-NPM_INSTALL_TIMEOUT_SECONDS = 5
+NPM_INSTALL_TIMEOUT_SECONDS = 15
 # DevClaw gives the whole session adapter 15 seconds. Leave time for local fallback.
 SESSION_COLLECTOR_BUDGET_SECONDS = 6
 SESSION_NPM_INSTALL_TIMEOUT_SECONDS = 3

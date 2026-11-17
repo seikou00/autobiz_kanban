@@ -32,18 +32,22 @@ class SessionCollectorTimeoutTest(unittest.TestCase):
             installing = Event()
             cloned = Event()
 
-            def clone(*_args, **_kwargs):
+            def clone(*_args, deadline):
                 nonlocal now
+                self.assertEqual(deadline, 10)
                 self.assertTrue(installing.wait(timeout=2))
                 now = 8
                 cloned.set()
                 return {"commit": "test"}
 
             def timeout(command, *, timeout, **kwargs):
+                nonlocal now
                 timeouts.append(timeout)
                 if command[-1] == "install":
                     installing.set()
                     self.assertTrue(cloned.wait(timeout=2))
+                    now = 13
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 raise subprocess.TimeoutExpired(command, timeout)
 
             with (
@@ -66,7 +70,7 @@ class SessionCollectorTimeoutTest(unittest.TestCase):
             ):
                 self.assertEqual(sync_agents.main(["--write-board-config"]), 0)
 
-            self.assertEqual(timeouts, [5, 2])
+            self.assertEqual(timeouts, [15, 2])
             result = json.loads(stdout.getvalue())
             self.assertTrue(result["boardConfigWritten"])
             self.assertEqual(result["supported_deploy_units_source"], "agents.manifest.json")
