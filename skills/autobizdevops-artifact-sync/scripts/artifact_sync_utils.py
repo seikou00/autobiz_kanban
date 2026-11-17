@@ -220,8 +220,6 @@ def snapshot_file_artifact(
 
 
 CATALOG_EXACT_METADATA = {
-    "DELIVERY_REPORT.html": ("delivery_report", "final"),
-    "DELIVERY_REPORT.json": ("delivery_report_data", "final"),
     "PRD.md": ("requirement", "final"),
     "source-context.json": ("requirement_source", "final"),
     "UI_CONTEXT.json": ("ui_context", "final"),
@@ -385,40 +383,6 @@ def ignored_artifact(relative_path: str, *, globbed: bool) -> bool:
                or (globbed and part.startswith(".")) for part in parts)
 
 
-REPORT_HTML = "DELIVERY_REPORT.html"
-REPORT_JSON = "DELIVERY_REPORT.json"
-
-
-def check_report_pair(directory, selected, feature):
-    """Check the scanned bytes without writing to a Feature or importing the plugin runtime."""
-    if (directory / ".delivery-report/pending").exists():
-        raise ValueError("报告正在发布")
-    payload = {}
-    for name in (REPORT_HTML, REPORT_JSON):
-        if name not in selected:
-            raise ValueError("缺少配对的交付报告")
-        path = directory / name
-        if path.is_symlink() or path.stat().st_size > MAX_FILE_SIZE:
-            raise ValueError("报告路径或大小已变化")
-        payload[name] = path.read_bytes()
-        if hashlib.sha256(payload[name]).hexdigest() != selected[name]["sha256"]:
-            raise ValueError("报告在扫描期间已变化")
-    data = json.loads(payload[REPORT_JSON])
-    if (not isinstance(data, dict) or data.get("featureId") != feature
-            or data.get("schemaVersion") != "autodev.delivery-report.v1"
-            or data.get("reportId") != json_digest({k: v for k, v in data.items() if k != "reportId"})):
-        raise ValueError("交付报告身份或摘要不匹配")
-    marker = '<script type="application/json" id="report-data">'
-    html = payload[REPORT_HTML].decode("utf-8").replace("\r\n", "\n")
-    prefix, found, tail = html.partition(marker)
-    embedded, end, suffix = tail.partition("</script>")
-    if not found or not end or json.loads(embedded) != data:
-        raise ValueError("HTML 和 JSON 报告版本不一致")
-    template = prefix + marker + "{{REPORT}}" + end + suffix
-    if hashlib.sha256(template.encode("utf-8")).hexdigest() != data.get("templateDigest"):
-        raise ValueError("HTML 模板内容与报告摘要不一致")
-
-
 def scan_artifacts(
     feature_dir: Path, *, feature: str, project_code: str, employee_id: str, config: dict[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -455,14 +419,6 @@ def scan_artifacts(
                     diagnostics.append({"path": relative, "stage": node, "reason": "file_unreadable", "error": str(exc)})
                     continue
                 selected[relative] = dict(artifact, stage=node, description=description)
-    if REPORT_HTML in selected or REPORT_JSON in selected:
-        try:
-            check_report_pair(feature_dir, selected, feature)
-        except (ValueError, OSError) as exc:
-            for name in (REPORT_HTML, REPORT_JSON):
-                selected.pop(name, None)
-            diagnostics.append({"stage": "dev.delivery_report", "path": REPORT_HTML,
-                                "reason": "report_pair_unavailable", "error": str(exc)})
     return dict(sorted(selected.items())), diagnostics
 
 

@@ -202,12 +202,6 @@
           "code_done"
         ],
         "code_done": [
-          "delivery_report_in_progress"
-        ],
-        "delivery_report_in_progress": [
-          "delivery_report_done"
-        ],
-        "delivery_report_done": [
           "cicd_in_progress"
         ],
         "cicd_in_progress": [
@@ -222,7 +216,6 @@
           "design_in_progress",
           "plan_in_progress",
           "code_in_progress",
-          "delivery_report_in_progress",
           "cicd_in_progress"
         ],
         "archived": []
@@ -238,8 +231,6 @@
         "plan_done": "Plan 完成",
         "code_in_progress": "Code",
         "code_done": "Code 完成",
-        "delivery_report_in_progress": "交付报告",
-        "delivery_report_done": "交付报告完成",
         "cicd_in_progress": "CI/CD",
         "cicd_done": "CI/CD 完成",
         "needs_fix": "需要修复",
@@ -749,9 +740,9 @@
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-delivery-report",
-              "userMessage": "请使用 /autodev-delivery-report 生成当前 Feature 的交付报告。",
-              "dialogTips": "当前阶段：交付报告。汇总需求、设计、任务与编码证据，生成离线 HTML。"
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。批次内 review 与证据汇总已完成，不重复执行。"
             }
           }
         ],
@@ -891,158 +882,6 @@
             "sync-status.json",
             "artifact-sync",
             "hooks.ndjson"
-          ]
-        }
-      },
-      {
-        "id": "dev.delivery_report",
-        "label": "交付报告",
-        "group": "Dev",
-        "skill": "autodev-delivery-report",
-        "order": 70,
-        "runtimePolicy": {
-          "agentMode": "solo"
-        },
-        "description": "从当前 Feature 的阶段产物生成可追溯的 HTML 交付报告。",
-        "states": [
-          {
-            "nodeStatus": "not_started",
-            "label": "未开始",
-            "nextAction": {
-              "slashSkill": "autodev-delivery-report",
-              "userMessage": "请使用 /autodev-delivery-report 生成当前 Feature 的交付报告。",
-              "dialogTips": "当前阶段：交付报告。汇总需求、设计、任务与编码证据，生成离线 HTML。"
-            }
-          },
-          {
-            "nodeStatus": "in_progress",
-            "label": "进行中",
-            "nextAction": {
-              "slashSkill": "autodev-delivery-report",
-              "userMessage": "请使用 /autodev-delivery-report 生成当前 Feature 的交付报告。",
-              "dialogTips": "当前阶段：交付报告。汇总需求、设计、任务与编码证据，生成离线 HTML。"
-            }
-          },
-          {
-            "nodeStatus": "done",
-            "label": "已完成",
-            "nextAction": {
-              "slashSkill": "autoops-cicd",
-              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：CI/CD。交付报告已生成。"
-            }
-          }
-        ],
-        "checkpoints": [
-          "delivery_report_in_progress",
-          "delivery_report_done"
-        ],
-        "artifacts": {
-          "inputs": [
-            {
-              "id": "proposal",
-              "label": "变更提案",
-              "artifactType": "file",
-              "path": "proposal.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "specs",
-              "label": "行为规格",
-              "artifactType": "file",
-              "path": "specs/**/*.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "prd_optional",
-              "label": "PRD参考",
-              "artifactType": "file",
-              "path": "PRD.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "plan_json",
-              "label": "计划机器事实源",
-              "artifactType": "json",
-              "path": "plan.json",
-              "required": true,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "detail_design_optional",
-              "label": "详细设计参考",
-              "artifactType": "file",
-              "path": "DETAIL_DESIGN.md",
-              "required": false,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "ui_context_json",
-              "label": "UI范围机器事实源",
-              "artifactType": "json",
-              "path": "UI_CONTEXT.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            },
-            {
-              "id": "evidence_stream",
-              "label": "证据流",
-              "artifactType": "json",
-              "path": "evidence/EVIDENCE.jsonl",
-              "required": true,
-              "extract": {
-                "degrade": "缺少当前迭代输入时记录缺口，对应页面字段暂按 0 显示。"
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "id": "delivery_report_html",
-              "label": "HTML 交付报告",
-              "path": "DELIVERY_REPORT.html",
-              "artifactType": "file",
-              "required": true
-            },
-            {
-              "id": "delivery_report_json",
-              "label": "交付报告数据",
-              "path": "DELIVERY_REPORT.json",
-              "artifactType": "json",
-              "required": true
-            }
-          ]
-        },
-        "validators": [
-          "delivery_report_pair"
-        ],
-        "rollback": {
-          "archive": [
-            ".delivery-report"
           ]
         }
       },

@@ -21,7 +21,7 @@ from hooks.rollback_stage import execute_stage_rollback, prepare_stage_rollback 
 
 # Final evidence is now sealed when Code completes.  ``verify_done`` and
 # ``finish`` belonged to the retired standalone Verify workflow.
-VERIFIED_CHECKPOINTS = {"code_done", "delivery_report_in_progress", "delivery_report_done", "cicd_in_progress", "cicd_done"}
+VERIFIED_CHECKPOINTS = {"code_done", "cicd_in_progress", "cicd_done"}
 
 
 def invalidate_if_stale(workspace, feature):

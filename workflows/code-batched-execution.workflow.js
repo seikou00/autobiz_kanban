@@ -1773,39 +1773,13 @@ async function promoteWithDeltaReview(command, instructions, options) {
       !item || !usableString(item.batchId) || !validSha(item.deliverySha) || !Array.isArray(item.paths) || !item.paths.length || !item.paths.every(usableString))) {
     throw new Error("candidate_review_context_invalid");
   }
-  if (!usableString(first.repositoryRef) || !Number.isInteger(first.wave) || first.wave < 1) {
-    throw new Error("candidate_review_binding_invalid");
-  }
-  let review;
-  try {
-    review = unwrap(await workflowAgent(
+  const review = unwrap(await workflowAgent(
     `只读复核候选 ${sha} 中发生变化的已审文件。集成前提交=${first.baseSha}，仓库=${JSON.stringify(first.worktreePath)}，各 Batch 封存提交及受影响文件=${JSON.stringify(scope)}。` +
     `用只读 git diff 比较两个来源提交与此候选提交，仅检查列出的路径。确认合并保留双方行为，前端检查可见行为及组件调用，后端检查接口及业务逻辑。实际缺陷或无法确认时返回 failed 和具体原因。通过时返回 passed 和此 candidateSha。不得修改代码、报告或执行推广。`,
     { label: `${options.label}-review-changes`, phase: options.phase, timeoutMs: options.timeoutMs,
       schema: { type: "object", properties: { status: { type: "string" }, candidateSha: { type: "string" }, error: { type: "string" } }, required: ["status", "candidateSha"] } }
-    ));
-  } catch (error) {
-    review = { status: "error", error: errorText(error) };
-  }
-  const accepted = review?.status === "passed" && review.candidateSha === sha && !hasFailureSignal(review);
-  promoteWithDeltaReview.reviewSequence = (promoteWithDeltaReview.reviewSequence || 0) + 1;
-  const payload = { baseSha: first.baseSha, candidateSha: sha, reviewScope: scope,
-    attemptId: `${workflowInvocationId}-${options.label}-${promoteWithDeltaReview.reviewSequence}`,
-    status: accepted ? "passed" : review?.status === "error" ? "error" : "failed",
-    reviewResult: review && typeof review === "object" && !Array.isArray(review) ? review : { status: "invalid", error: String(review) } };
-  const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
-  const receipt = unwrap(await workflowAgent(
-    `只执行 python -X utf8 ${quote(mergeTrainPath)} record-candidate-review --workspace ${quote(artifactWorkspace)} --feature ${quote(feature)} --run-id ${quote(runId)} --repository-ref ${quote(first.repositoryRef)} --wave ${first.wave} --review-base64 "${encodeFailure(JSON.stringify(payload))}"。` +
-    `保存本次候选 Review 原始结果和版本绑定后原样返回 stdout JSON；不得改写结果、评审代码或执行推广。此步骤成功仅代表记录已保存。`,
-    { label: `${options.label}-record-review-${promoteWithDeltaReview.reviewSequence}`, phase: options.phase,
-      schema: { type: "object", properties: { success: { type: "boolean" }, status: { type: "string" },
-        reviewId: { type: "string" }, candidateSha: { type: "string" }, evidencePath: { type: "string" }, error: { type: "string" } },
-        required: ["success", "status"], additionalProperties: true } }
   ));
-  if (receipt.success !== true || receipt.status !== "recorded" || receipt.candidateSha !== sha || !/^[a-f0-9]{64}$/.test(receipt.reviewId || "")) {
-    throw new Error(`candidate_review_record_failed:${errorText(receipt)}`);
-  }
-  if (!accepted) {
+  if (review.status !== "passed" || review.candidateSha !== sha || hasFailureSignal(review)) {
     throw new Error(`candidate_delta_review_failed:${errorText(review)}`);
   }
   return unwrap(await execute(`${command} --reviewed-candidate "${sha}"`, `${options.label}-reviewed`));

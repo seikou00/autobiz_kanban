@@ -428,7 +428,7 @@ class RuntimePolicyTest(unittest.TestCase):
         for node in nodes:
             with self.subTest(node=node["id"]):
                 policy = _runtime_policy(node["id"])
-                expected_mode = "workflow" if node["id"] == "dev.code" else ("solo" if node["id"] in {"dev.specs", "dev.design", "dev.plan", "dev.delivery_report"} else "multi")
+                expected_mode = "workflow" if node["id"] == "dev.code" else ("solo" if node["id"] in {"dev.specs", "dev.design", "dev.plan"} else "multi")
                 self.assertEqual(policy["agentMode"], expected_mode)
                 self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
 

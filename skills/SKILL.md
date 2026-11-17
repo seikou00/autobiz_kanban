@@ -70,8 +70,9 @@ python -X utf8 "${pluginPath}/read_state_json.py"
 python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
-- 若脚本返回 Dev 流程选择，进入 `/autodev` 处理该选择。
-- 按 `recommendedNextSkill` 的所属阶段交接：`autobiz-*` 进入 /autobiz，`autodev-*` 进入 /autodev，`autoops-*` 进入 /autoops。标准链的 code_done 进入交付报告，delivery_report_done 进入 CI/CD。流程选择与跳过节点以有效路由为准。
+- `currentNodeId` 所属 group 为 `Biz` 时，进入 `/autobiz`。
+- `currentNodeId` 所属 group 为 `Dev`，或 `checkpoint` 为 `prd_done` 且脚本返回 Dev profile 选择时，进入 `/autodev`。
+- `currentNodeId` 所属 group 为 `Ops`，或 `checkpoint` 为 `code_done` / `cicd_done` 时，进入 `/autoops`。
 - `ok: false`、checkpoint 为空/未知，或无法唯一确定当前 Feature 时，必须停止并提示用户选择或修复状态。
 
 ### Checkpoint 更新命令

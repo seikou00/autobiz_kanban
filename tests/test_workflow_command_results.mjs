@@ -26,7 +26,7 @@ function harness(responses = [], projectStructured = false) {
   const context = vm.createContext({
     batchWorkspaces: { B009: { workspaceRef: "default" } },
     mergeTrainPath: "/plugin/hooks/parallel_merge_train.py",
-    artifactWorkspace: "/tmp/workspace", feature: "feature", runId: "run", workflowInvocationId: "invocation",
+    artifactWorkspace: "/tmp/workspace", feature: "feature", runId: "run",
     errorText: value => String(value),
     recordUnresolved: record => records.push(record),
     finalRepairResults: [], mergeResults: [],
@@ -38,7 +38,6 @@ function harness(responses = [], projectStructured = false) {
       callOptions.push(options);
       assert.ok(responses.length, `Unexpected agent call: ${options.label}`);
       const response = responses.shift();
-      if (response instanceof Error) throw response;
       if (projectStructured && options.schema) {
         // Model a transport that only projects explicitly declared fields.
         const value = context.unwrap(response);
@@ -54,7 +53,6 @@ function harness(responses = [], projectStructured = false) {
     vm.runInContext(source.slice(from, to), context);
   }
   load("function normalizeStructuredOutput(", "const input = unwrap(args);");
-  load("function encodeFailure(", "async function dispatchCommand(");
   load("function mergedBatchIds(", "async function cleanupMergedWorktrees(");
   load("async function resolveMergeCandidate(", "async function promoteReadyBatch(");
   load("async function attemptFinalCandidateRepair(", "async function runFinalRepairAndReport(");
@@ -64,42 +62,20 @@ function harness(responses = [], projectStructured = false) {
 test("a changed candidate needs a passing review of its exact SHA before retrying promotion", async () => {
   const sha = "c".repeat(40);
   const delta = { status: "candidate_review_required", success: false, worktreePath: "/tmp/candidate",
-    repositoryRef: "default", wave: 9,
     candidateSha: sha, baseSha: "a".repeat(40), reviewScope: [{ batchId: "B009", deliverySha: "d".repeat(40), paths: ["src/页面.tsx"] }] };
   for (const decision of [{ status: "failed", candidateSha: sha }, { status: "passed", candidateSha: "x" },
                           { status: "passed", candidateSha: sha }]) {
-    const receipt = { success: true, status: "recorded", reviewId: "e".repeat(64), candidateSha: sha };
-    const { context, instructions } = harness([built, wrap(delta, 1), decision, receipt, promoted]);
+    const { context, instructions } = harness([built, wrap(delta, 1), decision, promoted]);
     const task = context.validateAndPromoteBatch("B009", 9);
     if (decision.status === "passed" && decision.candidateSha === sha) {
       assert.equal((await task).promoted, true);
-      assert.ok(instructions[4].includes(`--reviewed-candidate "${sha}"`));
+      assert.ok(instructions[3].includes(`--reviewed-candidate "${sha}"`));
     } else {
       await assert.rejects(task, /candidate_delta_review_failed/);
-      assert.equal(instructions.length, 4);
+      assert.equal(instructions.length, 3);
     }
     assert.match(instructions[2], /src\/页面\.tsx/);
-    const payload = JSON.parse(Buffer.from(instructions[3].match(/--review-base64 "([A-Za-z0-9+/=]+)"/)[1], "base64").toString());
-    assert.equal(payload.reviewResult.candidateSha, decision.candidateSha);
-    assert.equal(payload.status, decision.status === "passed" && decision.candidateSha === sha ? "passed" : "failed");
   }
-});
-
-test("candidate Review transport errors are retained, and persistence failure prevents promotion", async () => {
-  const sha = "c".repeat(40);
-  const delta = { status: "candidate_review_required", repositoryRef: "default", wave: 9, candidateSha: sha,
-    baseSha: "a".repeat(40), worktreePath: "/tmp/candidate",
-    reviewScope: [{ batchId: "B009", deliverySha: "d".repeat(40), paths: ["src/app.js"] }] };
-  const message = "中文 ' $(touch ignored) `literal`";
-  const failed = harness([built, delta, new Error(message), { success: true, status: "recorded", reviewId: "e".repeat(64), candidateSha: sha }]);
-  await assert.rejects(failed.context.validateAndPromoteBatch("B009", 9), /candidate_delta_review_failed/);
-  const prompt = failed.instructions[3];
-  const payload = JSON.parse(Buffer.from(prompt.match(/--review-base64 "([A-Za-z0-9+/=]+)"/)[1], "base64").toString());
-  assert.equal(payload.status, "error");assert.match(payload.reviewResult.error, /中文/);
-  assert(!prompt.includes("$(touch ignored)"));
-  const unsaved = harness([built, delta, { status: "passed", candidateSha: sha }, { success: false, status: "failed" }]);
-  await assert.rejects(unsaved.context.validateAndPromoteBatch("B009", 9), /candidate_review_record_failed/);
-  assert.equal(unsaved.instructions.length, 4);
 });
 
 const preparedResolution = {
