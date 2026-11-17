@@ -76,7 +76,7 @@ class CollectedSessionContextTest(unittest.TestCase):
                 self.fail("不应额外启动依赖检查进程: {}".format(command))
 
             with patch(
-                "hooks.render_collected_session_context.subprocess.run", side_effect=fake_run
+                "hooks.render_collected_session_context._run_with_timeout", side_effect=fake_run
             ):
                 for _ in range(2):
                     result = render(
@@ -98,7 +98,7 @@ class CollectedSessionContextTest(unittest.TestCase):
                 for name in files:
                     (package / name).write_text("", encoding="utf-8")
                 with patch(
-                    "hooks.render_collected_session_context.subprocess.run",
+                    "hooks.render_collected_session_context._run_with_timeout",
                     side_effect=[_proc(""), _proc(["U1"]), _proc({"systemPrompt": "知识"})],
                 ) as run:
                     result = render(
@@ -137,7 +137,7 @@ class CollectedSessionContextTest(unittest.TestCase):
             }
         ]
         with patch(
-            "hooks.render_collected_session_context.subprocess.run", side_effect=fake_run
+            "hooks.render_collected_session_context._run_with_timeout", side_effect=fake_run
         ):
             result = render(
                 selected,
@@ -177,7 +177,7 @@ class CollectedSessionContextTest(unittest.TestCase):
     def test_list_interface_failure_delegates_to_legacy_renderer(self):
         plugin_root = _legacy_plugin_root()
         with patch(
-            "hooks.render_collected_session_context.subprocess.run",
+            "hooks.render_collected_session_context._run_with_timeout",
             return_value=_proc("", returncode=1, stderr="collector unavailable"),
         ):
             result = render(
@@ -196,7 +196,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         (local / "AGENTS.md").write_text("# 本地知识\n", encoding="utf-8")
         responses = [_proc(""), _proc(["U1"]), _proc({"unexpected": "value"})]
         with patch(
-            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+            "hooks.render_collected_session_context._run_with_timeout", side_effect=responses
         ):
             result = render(
                 [{"deployUnitId": "U1", "localRepoPath": str(local)}],
@@ -218,7 +218,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         ]
         stderr = io.StringIO()
         with patch(
-            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+            "hooks.render_collected_session_context._run_with_timeout", side_effect=responses
         ), contextlib.redirect_stderr(stderr):
             result = render(
                 [{"deployUnitId": "U1", "localRepoPath": str(local)}],
@@ -244,7 +244,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         responses = [_proc(""), _proc(["LF39.18_WG_FLOW", "OTHER"])]
         stderr = io.StringIO()
         with patch(
-            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+            "hooks.render_collected_session_context._run_with_timeout", side_effect=responses
         ), contextlib.redirect_stderr(stderr):
             result = render(
                 [{"deployUnitId": "LF39.18_wg_flow", "localRepoPath": ""}],
@@ -260,7 +260,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         missing = str(Path(tempfile.mkdtemp()) / "missing")
         responses = [_proc(""), _proc(["U1"]), _proc("", returncode=1)]
         with patch(
-            "hooks.render_collected_session_context.subprocess.run", side_effect=responses
+            "hooks.render_collected_session_context._run_with_timeout", side_effect=responses
         ), contextlib.redirect_stderr(io.StringIO()):
             result = render(
                 [{"deployUnitId": "U1", "localRepoPath": ""}],
@@ -284,7 +284,7 @@ class CollectedSessionContextTest(unittest.TestCase):
             ]
             stdout = io.StringIO()
             with patch(
-                "hooks.render_collected_session_context.subprocess.run", side_effect=responses,
+                "hooks.render_collected_session_context._run_with_timeout", side_effect=responses,
             ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(_main(args), 0)
 
@@ -303,7 +303,7 @@ class CollectedSessionContextTest(unittest.TestCase):
             return _proc({"systemPrompt": "# 远端知识\n"})
 
         with patch(
-            "hooks.render_collected_session_context.subprocess.run", side_effect=fake_run
+            "hooks.render_collected_session_context._run_with_timeout", side_effect=fake_run
         ):
             result = render(
                 [{"deployUnitId": "U1", "localRepoPath": ""}],
@@ -316,7 +316,7 @@ class CollectedSessionContextTest(unittest.TestCase):
     def test_npm_install_failure_is_reported_when_collector_also_fails(self):
         plugin_root = _legacy_plugin_root()
         with patch(
-            "hooks.render_collected_session_context.subprocess.run",
+            "hooks.render_collected_session_context._run_with_timeout",
             return_value=_proc("", returncode=1, stderr="registry unreachable"),
         ):
             result = render(
@@ -329,7 +329,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         self.assertIn("已回退旧逻辑", result["message"])
 
     def test_empty_selection_does_not_start_collector(self):
-        with patch("hooks.render_collected_session_context.subprocess.run") as run:
+        with patch("hooks.render_collected_session_context._run_with_timeout") as run:
             result = render([])
         run.assert_not_called()
         self.assertTrue(result["ok"])
@@ -412,7 +412,7 @@ class CollectedSessionContextTest(unittest.TestCase):
         ]
         stdout = io.StringIO()
         with patch(
-            "hooks.render_collected_session_context.subprocess.run",
+            "hooks.render_collected_session_context._run_with_timeout",
             return_value=_proc("", returncode=1, stderr="collector unavailable"),
         ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(_main(args), 0)

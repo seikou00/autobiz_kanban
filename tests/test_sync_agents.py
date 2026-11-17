@@ -469,12 +469,12 @@ class SyncRepoFallbackTest(unittest.TestCase):
 
         def fake_run_git(args, *, cwd=None, timeout=None):
             if args[0] == "clone" and self.HTTPS in args:
-                self.assertEqual(timeout, sync_agents.HTTPS_CLONE_TIMEOUT_SECONDS)
+                self.assertEqual(timeout, sync_agents.KNOWLEDGE_COMMAND_TIMEOUT_SECONDS)
                 dest.mkdir(parents=True, exist_ok=True)
                 marker.write_text("https partial", encoding="utf-8")
                 raise subprocess.TimeoutExpired(["git", *args], timeout)
             if args[0] == "clone" and self.SSH in args:
-                self.assertIsNone(timeout)
+                self.assertEqual(timeout, 10)
                 self.assertFalse(marker.exists())
                 return _git_result()
             if args[0] == "rev-parse":
@@ -491,7 +491,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
         dest = self._dest()
         results = [
             _git_result(1, stderr="branch form failed"),
-            subprocess.TimeoutExpired(["git", "clone"], sync_agents.HTTPS_CLONE_TIMEOUT_SECONDS),
+            subprocess.TimeoutExpired(["git", "clone"], sync_agents.KNOWLEDGE_COMMAND_TIMEOUT_SECONDS),
             _git_result(),
             _git_result(stdout="ssh-commit\n"),
         ]
@@ -501,7 +501,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
         self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
         self.assertEqual(
             [kwargs.get("timeout") for _, kwargs in run_git.call_args_list],
-            [20, 20, None, None],
+            [10, 10, 10, 10],
         )
 
     def test_ssh_uses_same_plain_clone_and_checkout_strategy(self):
