@@ -72,7 +72,7 @@ from hooks.render_session_context import (  # noqa: E402
 
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
-KNOWLEDGE_COMMAND_TIMEOUT_SECONDS = 10
+NPM_INSTALL_TIMEOUT_SECONDS = 5
 # DevClaw gives the whole session adapter 15 seconds. Leave time for local fallback.
 SESSION_COLLECTOR_BUDGET_SECONDS = 6
 SESSION_NPM_INSTALL_TIMEOUT_SECONDS = 3
@@ -205,8 +205,9 @@ def _run_with_timeout(command, *, timeout, cwd=None):
         )
 
 
-def _npm_install(
-    collector_script: str, *, npm_command: str, timeout: float, deadline: Optional[float],
+def prepare_collector_dependencies(
+    collector_script: str, *, npm_command: str = "npm",
+    timeout: float = NPM_INSTALL_TIMEOUT_SECONDS, deadline: Optional[float] = None,
 ) -> str:
     """依赖关键文件缺失时，在 collector 所在目录安装依赖。
 
@@ -339,13 +340,16 @@ def list_supported_deploy_units(
     node_command: str = "node",
     npm_command: str = "npm",
     deadline: Optional[float] = None,
-    npm_install_timeout: float = KNOWLEDGE_COMMAND_TIMEOUT_SECONDS,
+    npm_install_timeout: float = NPM_INSTALL_TIMEOUT_SECONDS,
+    dependency_error: Optional[str] = None,
 ) -> List[str]:
     """按需安装 collector 依赖并读取其支持的部署单元。"""
     _log_collector_env(collector_script, knowledge_path, node_command)
-    npm_error = _npm_install(
-        collector_script, npm_command=npm_command, timeout=npm_install_timeout, deadline=deadline,
-    )
+    npm_error = dependency_error
+    if npm_error is None:
+        npm_error = prepare_collector_dependencies(
+            collector_script, npm_command=npm_command, timeout=npm_install_timeout, deadline=deadline,
+        )
     if npm_error:
         _timing_log("npm.install", "warning", npm_error)
     try:

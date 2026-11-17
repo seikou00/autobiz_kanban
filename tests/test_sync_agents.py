@@ -133,6 +133,8 @@ class RunFailurePathTest(unittest.TestCase):
         stdout = io.StringIO()
         with mock.patch.object(sync_agents, "get_agents_root", return_value=dest), mock.patch.object(
             sync_agents, "_run_git", side_effect=failures
+        ), mock.patch.object(
+            sync_agents, "prepare_collector_dependencies", return_value="",
         ), contextlib.redirect_stdout(stdout):
             code = sync_agents.main(
                 [
@@ -155,6 +157,11 @@ class RunFailurePathTest(unittest.TestCase):
 
 
 class RunSuccessPathTest(unittest.TestCase):
+    def setUp(self):
+        dependencies = mock.patch.object(sync_agents, "prepare_collector_dependencies", return_value="")
+        self.addCleanup(dependencies.stop)
+        dependencies.start()
+
     def test_payload_records_canonical_urls_and_actual_transport(self):
         config = (
             '{"agentsRepo": {"url": "https://git/x.git", '
@@ -180,6 +187,7 @@ class RunSuccessPathTest(unittest.TestCase):
             "dev",
             mock.ANY,
             "git@git:x.git",
+            deadline=mock.ANY,
         )
         self.assertEqual(
             result["repo"],
@@ -463,46 +471,51 @@ class SyncRepoFallbackTest(unittest.TestCase):
         clone_urls = [args[-2] for args, _, _ in calls if args[0] == "clone"]
         self.assertEqual(clone_urls, [self.HTTPS, self.HTTPS, self.SSH])
 
-    def test_https_clone_timeout_stops_https_and_uses_ssh(self):
+    def test_https_clone_exhausting_budget_skips_ssh(self):
         dest = self._dest()
-        marker = dest / "partial"
+        now = 0.0
 
         def fake_run_git(args, *, cwd=None, timeout=None):
-            if args[0] == "clone" and self.HTTPS in args:
-                self.assertEqual(timeout, sync_agents.KNOWLEDGE_COMMAND_TIMEOUT_SECONDS)
-                dest.mkdir(parents=True, exist_ok=True)
-                marker.write_text("https partial", encoding="utf-8")
-                raise subprocess.TimeoutExpired(["git", *args], timeout)
-            if args[0] == "clone" and self.SSH in args:
-                self.assertEqual(timeout, 10)
-                self.assertFalse(marker.exists())
-                return _git_result()
-            if args[0] == "rev-parse":
-                return _git_result(stdout="ssh-commit\n")
-            raise AssertionError(f"unexpected git call: {args}")
+            nonlocal now
+            self.assertEqual(timeout, 10)
+            now += timeout
+            raise subprocess.TimeoutExpired(args, timeout)
 
-        with mock.patch.object(sync_agents, "_run_git", side_effect=fake_run_git) as run_git:
-            info = sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
+        with (
+            mock.patch.object(sync_agents.time, "monotonic", side_effect=lambda: now),
+            mock.patch.object(sync_agents, "_run_git", side_effect=fake_run_git) as run_git,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "克隆 超时"):
+                sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
 
-        self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
-        self.assertEqual(run_git.call_count, 3)
+        run_git.assert_called_once()
 
-    def test_https_plain_clone_also_has_timeout(self):
+    def test_https_retry_and_ssh_share_remaining_budget(self):
         dest = self._dest()
-        results = [
-            _git_result(1, stderr="branch form failed"),
-            subprocess.TimeoutExpired(["git", "clone"], sync_agents.KNOWLEDGE_COMMAND_TIMEOUT_SECONDS),
-            _git_result(),
-            _git_result(stdout="ssh-commit\n"),
-        ]
-        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+        now = 0.0
+        timeouts = []
+        results = iter([
+            (2, _git_result(1, stderr="branch form failed")),
+            (3, _git_result(1, stderr="plain form failed")),
+            (4, _git_result()),
+            (0, _git_result(stdout="ssh-commit\n")),
+        ])
+
+        def fake_run_git(args, *, cwd=None, timeout=None):
+            nonlocal now
+            timeouts.append(timeout)
+            elapsed, result = next(results)
+            now += elapsed
+            return result
+
+        with (
+            mock.patch.object(sync_agents.time, "monotonic", side_effect=lambda: now),
+            mock.patch.object(sync_agents, "_run_git", side_effect=fake_run_git),
+        ):
             info = sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
 
         self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
-        self.assertEqual(
-            [kwargs.get("timeout") for _, kwargs in run_git.call_args_list],
-            [10, 10, 10, 10],
-        )
+        self.assertEqual(timeouts, [10, 8, 5, 1])
 
     def test_ssh_uses_same_plain_clone_and_checkout_strategy(self):
         dest = self._dest()

@@ -53,6 +53,7 @@ import stat
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -71,15 +72,16 @@ from hooks.agents_repo import (  # noqa: E402
 )
 from board_core.contracts import BoardConfigError, load_board_config  # noqa: E402
 from hooks.render_collected_session_context import (  # noqa: E402
-    KNOWLEDGE_COMMAND_TIMEOUT_SECONDS,
     KnowledgeCollectorError,
-    _run_with_timeout,
     list_supported_deploy_units,
+    prepare_collector_dependencies,
 )
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 KNOWLEDGE_COLLECTOR_PATH = ROOT / "hooks" / "collect-knowledge.js"
 DEFAULT_REF = "main"
+KNOWLEDGE_SYNC_TIMEOUT_SECONDS = 10
+SYNC_COLLECTOR_TIMEOUT_SECONDS = 5
 # 超时杀掉进程树后，最多再等这么久收尾读取输出，避免被残留进程的管道拖住。
 KILL_REAP_SECONDS = 1
 # 同步在后台运行，不能停在凭据输入/GCM 弹窗上：无凭据时直接失败。
@@ -188,7 +190,7 @@ def _run_git(
     args: List[str],
     *,
     cwd: Optional[Path] = None,
-    timeout: float = KNOWLEDGE_COMMAND_TIMEOUT_SECONDS,
+    timeout: float,
 ) -> subprocess.CompletedProcess:
     described = _describe_args(args)
     _log(f"git {described} 开始 timeout={timeout}")
@@ -265,7 +267,7 @@ def _clone_from_url(
     url: str,
     ref: str,
     dest: Path,
-    clone_timeout: float = KNOWLEDGE_COMMAND_TIMEOUT_SECONDS,
+    deadline: float,
 ) -> str:
     """用单个 URL 克隆 ref，返回 commit。
 
@@ -273,65 +275,73 @@ def _clone_from_url(
     失败时抛普通 RuntimeError，让上层不要把 ref 错误误判为传输失败。任一
     clone 超时时立即抛 _CloneUnavailableError，不再尝试同 URL 的另一种方式。
     """
+    def run_git(args: List[str], *, cwd: Optional[Path] = None):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(args, 0)
+        return _run_git(args, cwd=cwd, timeout=remaining)
+
     if dest.exists():
         _rmtree(dest)
     try:
-        clone = _run_git(
+        clone = run_git(
             ["clone", "--depth", "1", "--branch", ref, url, str(dest)],
-            timeout=clone_timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise _CloneUnavailableError(
-            _git_timeout_error("克隆", clone_timeout)
+            _git_timeout_error("克隆", KNOWLEDGE_SYNC_TIMEOUT_SECONDS)
         ) from exc
     if clone.returncode != 0:
         # ref 可能是 commit/tag，--branch 不适用：退回普通 clone 再切换。
         if dest.exists():
             _rmtree(dest)
         try:
-            fallback = _run_git(
+            fallback = run_git(
                 ["clone", "--depth", "1", url, str(dest)],
-                timeout=clone_timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise _CloneUnavailableError(
-                _git_timeout_error("克隆", clone_timeout)
+                _git_timeout_error("克隆", KNOWLEDGE_SYNC_TIMEOUT_SECONDS)
             ) from exc
         if fallback.returncode != 0:
             raise _CloneUnavailableError(_git_error(fallback, "克隆"))
         try:
-            checkout = _run_git(["checkout", ref], cwd=dest, timeout=clone_timeout)
+            checkout = run_git(["checkout", ref], cwd=dest)
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(_git_timeout_error(f"切换到 {ref}", clone_timeout)) from exc
+            raise RuntimeError(_git_timeout_error(f"切换到 {ref}", KNOWLEDGE_SYNC_TIMEOUT_SECONDS)) from exc
         if checkout.returncode != 0:
             raise RuntimeError(_git_error(checkout, f"切换到 {ref}"))
 
     try:
-        rev = _run_git(["rev-parse", "HEAD"], cwd=dest, timeout=clone_timeout)
+        rev = run_git(["rev-parse", "HEAD"], cwd=dest)
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(_git_timeout_error("读取提交号", clone_timeout)) from exc
+        raise RuntimeError(_git_timeout_error("读取提交号", KNOWLEDGE_SYNC_TIMEOUT_SECONDS)) from exc
     return rev.stdout.strip() if rev.returncode == 0 else ""
 
 
-def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> dict:
+def sync_repo(
+    url: str, ref: str, dest: Path, ssh_url: Optional[str] = None, *, deadline: Optional[float] = None,
+) -> dict:
     """每次删掉旧 ``sys/`` 后重克隆，返回 {commit, transport}。
 
     不做增量 fetch：无论 dest 之前是 git 仓库、残留的非 git 目录、还是不存在，
     都先整目录删除再 clone。仅当 https:// 主地址的两种 clone 均失败且 ssh_url
     非空时，才清理残留并通过 SSH 重试同一 ref；checkout/ref 等错误不会触发兜底。
     """
+    if deadline is None:
+        deadline = time.monotonic() + KNOWLEDGE_SYNC_TIMEOUT_SECONDS
     dest.parent.mkdir(parents=True, exist_ok=True)
     fallback_url = (ssh_url or "").strip()
     _log(f"同步开始 url={_mask_url(url)} ref={ref} ssh_url={fallback_url or '-'}")
     try:
-        commit = _clone_from_url(url, ref, dest)
+        commit = _clone_from_url(url, ref, dest, deadline)
     except _CloneUnavailableError as https_error:
         _log(f"主地址克隆不可用: {https_error}")
-        if not url.strip().lower().startswith("https://") or not fallback_url:
+        if not fallback_url or not url.strip().lower().startswith("https://") or time.monotonic() >= deadline:
             raise
         _log(f"进入 SSH 兜底 url={fallback_url}")
         try:
-            commit = _clone_from_url(fallback_url, ref, dest)
+            commit = _clone_from_url(fallback_url, ref, dest, deadline)
         except RuntimeError as ssh_error:
             raise RuntimeError(
                 f"HTTPS 克隆失败: {https_error}\nSSH 兜底失败: {ssh_error}"
@@ -342,11 +352,12 @@ def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> 
     return {"commit": commit, "transport": _transport_for_url(url)}
 
 
-def _collector_supported_units(knowledge_path: Path, deadline: float) -> List[str]:
+def _collector_supported_units(knowledge_path: Path, deadline: float, dependency_error: Optional[str]) -> List[str]:
     return list_supported_deploy_units(
         str(KNOWLEDGE_COLLECTOR_PATH),
         knowledge_path=str(knowledge_path),
-        deadline=deadline,
+        deadline=min(deadline, time.monotonic() + SYNC_COLLECTOR_TIMEOUT_SECONDS),
+        dependency_error=dependency_error,
     )
 
 
@@ -369,15 +380,9 @@ def _collector_payload(
 
 
 def _log_environment() -> None:
-    try:
-        git_version = _run_with_timeout(
-            ["git", "--version"], timeout=KNOWLEDGE_COMMAND_TIMEOUT_SECONDS
-        ).stdout.strip()
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        git_version = f"获取失败 {exc!r}"
     _log(
         f"环境 platform={sys.platform} python={sys.version.split()[0]} "
-        f"git={git_version} git_path={shutil.which('git') or '-'}"
+        f"git_path={shutil.which('git') or '-'}"
     )
 
 
@@ -387,7 +392,7 @@ def run(
     ssh_url: Optional[str] = None,
     prefer_manifest: bool = False,
 ) -> dict:
-    collector_deadline = time.monotonic() + KNOWLEDGE_COMMAND_TIMEOUT_SECONDS
+    deadline = time.monotonic() + KNOWLEDGE_SYNC_TIMEOUT_SECONDS
     _log_environment()
     try:
         url, resolved_ref, resolved_ssh_url = _resolve_repo(repo_url, ref, ssh_url)
@@ -401,15 +406,19 @@ def run(
         )
 
     dest = get_agents_root()
-    try:
-        repo_info = sync_repo(url, resolved_ref, dest, resolved_ssh_url)
-    except FileNotFoundError:
-        return _fail("未找到 git 可执行文件，请确认运行环境已安装 git")
-    except RuntimeError as exc:
-        return _fail(str(exc))
-    except OSError as exc:
-        # 如清理旧 sys/ 时文件仍被占用（杀毒软件/编辑器锁定）：保持 UI 只收 JSON 的契约。
-        return _fail(f"同步 agents 仓库失败: {exc}")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        dependencies = None
+        if not prefer_manifest:
+            dependencies = executor.submit(prepare_collector_dependencies, str(KNOWLEDGE_COLLECTOR_PATH), deadline=deadline)
+        try:
+            repo_info = sync_repo(url, resolved_ref, dest, resolved_ssh_url, deadline=deadline)
+        except FileNotFoundError:
+            return _fail("未找到 git 可执行文件，请确认运行环境已安装 git")
+        except RuntimeError as exc:
+            return _fail(str(exc))
+        except OSError as exc:
+            return _fail(f"同步 agents 仓库失败: {exc}")
+        dependency_error = dependencies.result() if dependencies is not None else None
 
     repo_info = {
         "url": url,
@@ -431,7 +440,7 @@ def run(
     collector_units: Optional[List[str]] = None
     collector_error = ""
     try:
-        collector_units = _collector_supported_units(dest, collector_deadline)
+        collector_units = _collector_supported_units(dest, deadline, dependency_error)
     except KnowledgeCollectorError as exc:
         collector_error = str(exc)
 

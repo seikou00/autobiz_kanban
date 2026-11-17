@@ -6,6 +6,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from functools import partial
 from pathlib import Path
+from threading import Event
 from unittest.mock import call, patch
 
 from hooks import render_collected_session_context as session
@@ -13,7 +14,7 @@ from hooks import sync_agents
 
 
 class SessionCollectorTimeoutTest(unittest.TestCase):
-    def test_pull_knowledge_npm_timeout_still_writes_manifest_units(self):
+    def test_pull_knowledge_overlaps_install_with_clone_and_falls_back_on_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             knowledge_path = root / "sys"
@@ -28,16 +29,21 @@ class SessionCollectorTimeoutTest(unittest.TestCase):
             }), encoding="utf-8")
             now = 0.0
             timeouts = []
+            installing = Event()
+            cloned = Event()
 
-            def clone(*_args):
+            def clone(*_args, **_kwargs):
                 nonlocal now
-                now += 4
+                self.assertTrue(installing.wait(timeout=2))
+                now = 8
+                cloned.set()
                 return {"commit": "test"}
 
             def timeout(command, *, timeout, **kwargs):
-                nonlocal now
                 timeouts.append(timeout)
-                now += timeout
+                if command[-1] == "install":
+                    installing.set()
+                    self.assertTrue(cloned.wait(timeout=2))
                 raise subprocess.TimeoutExpired(command, timeout)
 
             with (
@@ -60,7 +66,7 @@ class SessionCollectorTimeoutTest(unittest.TestCase):
             ):
                 self.assertEqual(sync_agents.main(["--write-board-config"]), 0)
 
-            self.assertEqual(timeouts, [6])
+            self.assertEqual(timeouts, [5, 2])
             result = json.loads(stdout.getvalue())
             self.assertTrue(result["boardConfigWritten"])
             self.assertEqual(result["supported_deploy_units_source"], "agents.manifest.json")
