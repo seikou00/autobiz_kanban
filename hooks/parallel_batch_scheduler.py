@@ -60,6 +60,7 @@ from hooks.repository_snapshot import (
 )
 _BOOTSTRAP_IGNORE_RULES = (
     ".cmbdevclaw/large_tool_results/",
+    ".autobizdevops/",
     ".autobizdevops/features/*/.parallel-runs/",
     ".autobizdevops/worktrees/",
 )

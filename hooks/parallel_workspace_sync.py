@@ -4,6 +4,7 @@
 Three-way merges run in a disposable detached worktree. Backup refs and an
 apply journal make a stopped publication resumable without resetting the source
 branch, stashing its files, or requiring a clean user checkout.
+Files matched by the user's Git ignore rules are skipped, even when tracked.
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve
 from hooks.parallel_runtime import global_worktrees_root, load_manifest, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_repository import coordinates
 
+_RUNTIME_DIRECTORIES = {".cmbdevclaw", ".autobizdevops", ".parallel-runs"}
+
 
 def _git(repo: Path, *args: str, env: dict | None = None, data: bytes | None = None, check: bool = True,
          hooks_path: Path | None = None, log_path: Path | None = None):
@@ -50,13 +53,35 @@ def _names(repo: Path, *args: str) -> list[str]:
     return [os.fsdecode(value) for value in _git(repo, *args).stdout.split(b"\0") if value]
 
 
+def _ignored_paths(source: Path, names) -> set[str]:
+    names = set(names)
+    ignored = {name for name in names if _RUNTIME_DIRECTORIES.intersection(
+        part.lower() for part in PurePosixPath(name).parts)}
+    candidates = sorted(names - ignored)
+    if candidates:
+        # --no-index also checks legacy files that Git already tracks.
+        result = _git(source, "check-ignore", "--no-index", "-z", "--stdin",
+                      data=b"".join(os.fsencode(name) + b"\0" for name in candidates), check=False)
+        if result.returncode not in {0, 1}:
+            raise ValueError("workspace_sync_ignore_check_failed:" + result.stderr.decode("utf-8", "replace").strip())
+        ignored.update(os.fsdecode(value) for value in result.stdout.split(b"\0") if value)
+    return ignored
+
+
+def _path_batches(names):
+    paths = [f":(literal){name}" for name in sorted(names)]
+    # Keep explicit path arguments within Windows command-line limits, too.
+    for offset in range(0, len(paths), 32):
+        yield paths[offset:offset + 32]
+
+
 def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
 def _relative(value: str) -> str:
     path = PurePosixPath(value)
-    if (path.is_absolute() or any(part.lower() in {"..", ".git", ".cmbdevclaw"} for part in path.parts)
+    if (path.is_absolute() or any(part.lower() in {"..", ".git"} | _RUNTIME_DIRECTORIES for part in path.parts)
             or "\\" in value or not path.parts):
         raise ValueError("workspace_sync_path_invalid:" + value)
     return value
@@ -103,7 +128,7 @@ def _paths(workspace: Path, feature: str, run_id: str, ref: str):
 
 def _summary(state: dict, ref: str) -> dict:
     keys = ("status", "attemptId", "sourcePath", "sourceBranch", "sourceHead", "lastSyncedSha", "targetSha",
-            "worktreePath", "contextPath", "backupPath", "conflictedFiles", "error", "reasonCode")
+            "worktreePath", "contextPath", "backupPath", "conflictedFiles", "error", "reasonCode", "skippedIgnoredFiles")
     result = {"success": True, "repositoryRef": ref, **{key: state[key] for key in keys if key in state}}
     if state.get("status") == "synced":
         for key in ("worktreePath", "contextPath", "conflictedFiles"):
@@ -242,11 +267,16 @@ def _prepare(workspace: Path, feature: str, run_id: str, ref: str, binding: dict
         index_path = source / index_path
     if index_path.exists():
         shutil.copy2(index_path, backup / "user.index")
-    dirty = set(_names(source, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--", ".", ":(exclude).cmbdevclaw/**"))
-    dirty.update(_names(source, "diff", "--cached", "--name-only", "--no-renames", "-z", "--", ".", ":(exclude).cmbdevclaw/**"))
-    dirty.update(_names(source, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", ":(exclude).cmbdevclaw/**"))
+    dirty = set(_names(source, "diff", "--name-only", "--no-renames", "-z", "HEAD"))
+    dirty.update(_names(source, "diff", "--cached", "--name-only", "--no-renames", "-z"))
+    dirty.update(_names(source, "ls-files", "--others", "--exclude-standard", "-z"))
     incoming = set(_names(source, "diff", "--name-only", "--no-renames", "-z", base, target))
-    scope = dirty | incoming
+    head_paths = set(_names(source, "ls-tree", "-r", "--name-only", "-z", head))
+    target_paths = set(_names(source, "ls-tree", "-r", "--name-only", "-z", target))
+    ignored = _ignored_paths(source, dirty | incoming | head_paths | target_paths)
+    state["skippedIgnoredFiles"] = sorted((dirty | incoming) & ignored)
+    dirty -= ignored
+    scope = (dirty | incoming) - ignored
     originals = {}
     for name in sorted(scope):
         _relative(name)
@@ -257,13 +287,15 @@ def _prepare(workspace: Path, feature: str, run_id: str, ref: str, binding: dict
     _persist(workspace, feature, run_id, ref, state_path, state)
     environment = {"GIT_INDEX_FILE": str(backup / "snapshot.index")}
     _git(source, "read-tree", head, env=environment)
-    _git(source, "add", "-A", "--", ".", ":(exclude).cmbdevclaw/**", env=environment)
-    # An incoming tracked path can collide with a locally ignored file. Include
-    # just those collisions in the user side instead of silently replacing them
-    # or recursively snapshotting ignored dependency/build directories.
-    for name in sorted(incoming):
-        if originals[name]["kind"] in {"file", "symlink"}:
-            _git(source, "add", "-f", "--", f":(literal){name}", env=environment)
+    # Stage only allowed paths. A staged-only addition removed from disk is
+    # preserved in user.index, but does not belong in the file snapshot.
+    staging = {name for name in scope if name in head_paths or originals[name]["kind"] in {"file", "symlink"}}
+    for paths in _path_batches(staging):
+        _git(source, "add", "-A", "--", *paths, env=environment)
+    # Ignored files may already be tracked. Align just the temporary index with
+    # their incoming versions to avoid conflicts; never copy them to the user.
+    for paths in _path_batches(ignored):
+        _git(source, "reset", target, "--", *paths, env=environment)
     tree = _value(source, "write-tree", env=environment)
     if _identity(source, binding) != (branch, head) or any(_source_file(source, name)[0] != value for name, value in originals.items()):
         raise ValueError("workspace_sync_source_changed_during_snapshot")
@@ -347,8 +379,12 @@ def _finish_preparation(workspace: Path, feature: str, run_id: str, ref: str, st
 def _plan(state: dict) -> None:
     candidate, backup = Path(state["worktreePath"]), Path(state["backupPath"])
     changes = _names(candidate, "diff", "--name-only", "--no-renames", "-z", state["snapshotTree"], state["mergedTree"])
+    ignored = _ignored_paths(Path(state["sourcePath"]), changes)
+    state["skippedIgnoredFiles"] = sorted(set(state.get("skippedIgnoredFiles", [])) | ignored)
     plan = []
     for name in changes:
+        if name in ignored:
+            continue
         _relative(name)
         if name not in state["originals"]:
             raise ValueError("workspace_sync_unexpected_merge_path:" + name)
@@ -402,11 +438,17 @@ def _apply(workspace: Path, feature: str, run_id: str, ref: str, binding: dict, 
     if _identity(source, binding) != (state["sourceBranch"], state["sourceHead"]):
         state.update(status="refresh_required", reasonCode="source_head_changed")
         return _persist(workspace, feature, run_id, ref, path, state)
-    for change in state["changes"]:
+    ignored = _ignored_paths(source, (change["path"] for change in state["changes"]))
+    state["skippedIgnoredFiles"] = sorted(set(state.get("skippedIgnoredFiles", [])) | ignored)
+    changes = [change for change in state["changes"] if change["path"] not in ignored]
+    for change in changes:
         if _source_file(source, change["path"])[0] not in (change["before"], change["after"]):
             state.update(status="refresh_required", reasonCode="user_edited_during_sync")
             return _persist(workspace, feature, run_id, ref, path, state)
-    for change in sorted(state["changes"], key=lambda item: (item["after"]["kind"] != "missing", item["path"])):
+    for change in sorted(changes, key=lambda item: (item["after"]["kind"] != "missing", item["path"])):
+        if _ignored_paths(source, [change["path"]]):
+            state["skippedIgnoredFiles"] = sorted(set(state["skippedIgnoredFiles"]) | {change["path"]})
+            continue
         if load_manifest(workspace, feature, run_id).get("status") in {"cancelled", "rolled_back", "cleaned"}:
             raise ValueError("workspace_sync_run_inactive")
         if _identity(source, binding) != (state["sourceBranch"], state["sourceHead"]):
@@ -453,6 +495,16 @@ def sync_workspace(workspace: Path, feature: str, run_id: str, repository_ref: s
                 raise ValueError("workspace_sync_target_not_integrated")
             binding["headSha"] = target_sha
         state = _read(path)
+        if state.get("status") in {"preparing", "conflicted"} and _ignored_paths(
+                Path(binding["gitRoot"]), state.get("originals", {})):
+            if complete_attempt and (state.get("attemptId") != complete_attempt
+                    or not resolver_id or state.get("resolverId") != resolver_id):
+                raise ValueError("workspace_sync_stale_resolution")
+            if state.get("snapshotSha"):
+                _cleanup(workspace, run_id, state)
+            state.update(status="refresh_required", reasonCode="source_ignore_rules_changed")
+            if complete_attempt:
+                return _persist(workspace, feature, run_id, ref, path, state)
         if target_sha and state.get("status") in {"conflicted", "merged", "applying"} and state.get("targetSha") != target_sha:
             # The exhausted predecessor may have a conflict or partial apply.
             # Snapshot the actual user files again against lastSyncedSha; its
