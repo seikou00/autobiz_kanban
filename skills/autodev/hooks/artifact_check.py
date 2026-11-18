@@ -992,6 +992,8 @@ def _git_repo_root(root: Path) -> Path | None:
         completed = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -105,10 +106,13 @@ def run_antd_audit(target: Path) -> tuple[list[dict[str, Any]], int]:
             )
         ], 1
     proc = subprocess.run(
-        [sys.executable, str(script), str(target), "--format", "markdown"],
+        [sys.executable, "-X", "utf8", str(script), str(target), "--format", "markdown"],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
+        env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
     )
     if proc.returncode == 0:
         return [
@@ -278,6 +282,10 @@ def write_or_print(content: str, output: str | None) -> None:
 
 
 def main() -> int:
+    # CLI output is a UTF-8 protocol even when Windows/PYTHONIOENCODING uses GBK.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Run unified frontend post-generation review.")
     parser.add_argument("--target", required=True, help="Generated page/component file or directory.")
     parser.add_argument("--source-html", help="Original source HTML used for fidelity clues.")

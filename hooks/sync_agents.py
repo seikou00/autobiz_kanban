@@ -368,7 +368,7 @@ def _collector_payload(
 def _log_environment() -> None:
     try:
         git_version = subprocess.run(
-            ["git", "--version"], capture_output=True, text=True, check=False, timeout=10
+            ["git", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=10
         ).stdout.strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         git_version = f"获取失败 {exc!r}"

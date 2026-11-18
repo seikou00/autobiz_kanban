@@ -342,7 +342,8 @@ def preflight(args, ctx, kind="test"):
         raise ValueError("utest_source_repair_requires_failing_evidence")
     if kind == "test" and args.retry_kind == "source_repair":
         import subprocess
-        current = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, timeout=10).stdout.strip()
+        current = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True,
+                                 text=True, encoding="utf-8", errors="replace", timeout=10).stdout.strip()
         if current == command.get("sourceCommit"):
             raise ValueError("utest_source_repair_requires_new_reviewed_production_commit")
         response = command["response"]
@@ -446,7 +447,8 @@ def begin(args, ctx):
             raise ValueError("utest_diagnostic_claim_expired_or_replaced: preflight again; do not replay stale script")
     command.update(status="running", attempts=args.attempt_number, startedEpoch=now)
     import subprocess
-    command["sourceCommit"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ctx[2], text=True, capture_output=True, timeout=10).stdout.strip()
+    command["sourceCommit"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ctx[2], text=True,
+                                            encoding="utf-8", errors="replace", capture_output=True, timeout=10).stdout.strip()
     if kind == "test":
         from hooks.engineering_context import context_base, read_json
         from hooks.engineering_facts import FactStore

@@ -101,7 +101,8 @@ def inspect_class(args, ctx):
                 if not binary:
                     raise ValueError("javap_unavailable")
                 inspected = subprocess.run([binary, "-classpath", str(jar), "-p", "-c", args.class_name],
-                                           capture_output=True, text=True, timeout=max(0.1, deadline - time.monotonic()))
+                                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                           timeout=max(0.1, deadline - time.monotonic()))
                 content = inspected.stdout + inspected.stderr
                 result.update(status="found" if inspected.returncode == 0 else "blocked", kind="bytecode",
                               exitCode=inspected.returncode, content=content[:65536], truncated=len(content) > 65536)

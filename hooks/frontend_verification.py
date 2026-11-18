@@ -249,7 +249,9 @@ def check_script(root: Path, name: str, timeout: int) -> dict:
     executable = root / 'node_modules' / '.bin' / (argv[0] + ('.cmd' if os.name == 'nt' else ''))
     if not executable.is_file():
         raise ValueError(f'frontend_compiler_unavailable:{argv[0]}')
-    proc = subprocess.run([str(executable), *argv[1:]], cwd=root, capture_output=True, text=True, timeout=timeout)
+    # Compiler/native-tool diagnostics need not be UTF-8, even in Python UTF-8 mode.
+    proc = subprocess.run([str(executable), *argv[1:]], cwd=root, capture_output=True,
+                          text=True, encoding='utf-8', errors='replace', timeout=timeout)
     return {'status': 'passed' if proc.returncode == 0 else 'failed', 'argv': argv,
             'exitCode': proc.returncode, 'output': proc.stdout + proc.stderr}
 
@@ -306,7 +308,8 @@ def capture(root: Path, output: Path, args, sources: list[str], public_root: str
                 time.sleep(.2)
         command = ['node', str(ROOT / 'hooks/capture_frontend.cjs'), str(root), url, str(output),
                    str(args.width), str(args.height), json.dumps({'sources': sources, 'publicRoot': public_root})]
-        renderer = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        # Keep JSON bytes separate from potentially non-UTF-8 native diagnostics.
+        renderer = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     start_new_session=os.name != 'nt')
         try:
             stdout, stderr = renderer.communicate(timeout=args.timeout)
@@ -314,8 +317,11 @@ def capture(root: Path, output: Path, args, sources: list[str], public_root: str
             if renderer.poll() is None:
                 stop_process(renderer)
         if renderer.returncode:
-            raise ValueError('frontend_capture_failed:' + (stderr or stdout)[-2000:])
-        return json.loads(stdout)
+            raise ValueError('frontend_capture_failed:' + (stderr or stdout).decode('utf-8', errors='replace')[-2000:])
+        try:
+            return json.loads(stdout.decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f'frontend_capture_invalid_json:{exc}') from exc
     finally:
         if server:
             stop_process(server)
@@ -425,11 +431,14 @@ def _verify(args) -> dict:
                 argv = [sys.executable, '-X', 'utf8', '-B', str(FRONTEND_ROOT / 'scripts/review_runner.py'), '--target', str(root / target), '--format', 'json']
                 if source:
                     argv += ['--source-html', source]
-                proc = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
+                proc = subprocess.run(argv, capture_output=True,
                                       env={**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}, timeout=args.timeout)
                 if proc.returncode not in {0, 1}:
-                    raise ValueError('frontend_static_execution_failed:' + (proc.stderr or proc.stdout)[-2000:])
-                reports.append(json.loads(proc.stdout))
+                    raise ValueError('frontend_static_execution_failed:' + (proc.stderr or proc.stdout).decode('utf-8', errors='replace')[-2000:])
+                try:
+                    reports.append(json.loads(proc.stdout.decode('utf-8')))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(f'frontend_static_invalid_json:{exc}') from exc
         findings = [f for r in reports for f in r.get('findings', [])]
         result['static'] = {'status': 'failed' if any(f.get('severity') == 'must-fix' for f in findings) else 'passed', 'reports': reports}
     if args.check_script:

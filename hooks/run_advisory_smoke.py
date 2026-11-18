@@ -72,6 +72,8 @@ def _run_command(command: str, *, cwd: Path, timeout: int) -> tuple[int, str, st
             cwd=str(cwd),
             shell=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             env={**os.environ, "PYTHONUTF8": "1"},
             timeout=timeout,
@@ -92,6 +94,8 @@ def _git_repo_root(root: Path) -> Path | None:
         completed = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
@@ -117,12 +121,16 @@ def _git_source_errors(workspace: Path, source_path: str) -> list[str]:
         tracked = subprocess.run(
             ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", rel],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         ).returncode == 0
         ignored = subprocess.run(
             ["git", "-C", str(repo_root), "check-ignore", "--quiet", "--no-index", "--", rel],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         ).returncode == 0
