@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple
@@ -71,7 +72,7 @@ from hooks.render_session_context import (  # noqa: E402
 
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
-NPM_INSTALL_TIMEOUT_SECONDS = 300
+NPM_INSTALL_TIMEOUT_SECONDS = 15
 # DevClaw gives the whole session adapter 15 seconds. Leave time for local fallback.
 SESSION_COLLECTOR_BUDGET_SECONDS = 6
 SESSION_NPM_INSTALL_TIMEOUT_SECONDS = 3
@@ -164,8 +165,49 @@ def _dependency_files_present(workdir):
     )
 
 
-def _npm_install(
-    collector_script: str, *, npm_command: str = "npm", deadline: Optional[float] = None,
+def _run_with_timeout(command, *, timeout, cwd=None):
+    """Capture output without waiting for descendant-held pipes on Windows."""
+    if sys.platform != "win32":
+        return subprocess.run(
+            command, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False, timeout=timeout,
+        )
+
+    # npm.cmd may leave node.exe running with inherited stdout/stderr handles.
+    # Regular files let wait() enforce the deadline without waiting for pipe EOF.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(
+            command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+        )
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=1, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                _timing_log("process.cleanup", "warning", str(exc))
+            try:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                _timing_log("process.cleanup", "warning", str(exc))
+            raise
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(
+            command, returncode, stdout.read().decode("utf-8", errors="replace"),
+            stderr.read().decode("utf-8", errors="replace"),
+        )
+
+
+def prepare_collector_dependencies(
+    collector_script: str, *, npm_command: str = "npm",
+    timeout: float = NPM_INSTALL_TIMEOUT_SECONDS, deadline: Optional[float] = None,
 ) -> str:
     """依赖关键文件缺失时，在 collector 所在目录安装依赖。
 
@@ -177,22 +219,16 @@ def _npm_install(
         return ""
     _timing_log("npm.install", "required", "gray-matter 依赖目录或关键文件缺失")
     executable = shutil.which(npm_command) or npm_command
-    timeout = NPM_INSTALL_TIMEOUT_SECONDS
     if deadline is not None:
-        timeout = min(SESSION_NPM_INSTALL_TIMEOUT_SECONDS, deadline - time.monotonic())
+        timeout = min(timeout, deadline - time.monotonic())
         if timeout <= 0:
-            return "会话知识收集已超时，跳过 npm install"
+            return "知识收集已超时，跳过 npm install"
     try:
         proc = _timed_call(
             "npm.install(timeout={:.1f}s)".format(timeout),
-            subprocess.run,
+            _run_with_timeout,
             [executable, "install"],
             cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
             timeout=timeout,
         )
     except FileNotFoundError as exc:
@@ -232,17 +268,12 @@ def _run_collector(
     if deadline is not None:
         timeout = min(timeout, deadline - time.monotonic())
         if timeout <= 0:
-            raise KnowledgeCollectorError("会话知识收集已超时")
+            raise KnowledgeCollectorError("知识收集已超时")
     try:
         proc = _timed_call(
             "{}(timeout={:.1f}s)".format(stage, timeout),
-            subprocess.run,
+            _run_with_timeout,
             command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
             timeout=timeout,
         )
     except FileNotFoundError as exc:
@@ -309,10 +340,16 @@ def list_supported_deploy_units(
     node_command: str = "node",
     npm_command: str = "npm",
     deadline: Optional[float] = None,
+    npm_install_timeout: float = NPM_INSTALL_TIMEOUT_SECONDS,
+    dependency_error: Optional[str] = None,
 ) -> List[str]:
     """按需安装 collector 依赖并读取其支持的部署单元。"""
     _log_collector_env(collector_script, knowledge_path, node_command)
-    npm_error = _npm_install(collector_script, npm_command=npm_command, deadline=deadline)
+    npm_error = dependency_error
+    if npm_error is None:
+        npm_error = prepare_collector_dependencies(
+            collector_script, npm_command=npm_command, timeout=npm_install_timeout, deadline=deadline,
+        )
     if npm_error:
         _timing_log("npm.install", "warning", npm_error)
     try:
@@ -577,6 +614,7 @@ def render(
                 node_command=node_command,
                 npm_command=npm_command,
                 deadline=deadline,
+                npm_install_timeout=SESSION_NPM_INSTALL_TIMEOUT_SECONDS,
             )
         )
     except KnowledgeCollectorError as exc:
