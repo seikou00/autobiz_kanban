@@ -44,7 +44,7 @@ def compile_coverage(feature_dir, parallel_run_id, batch_id, task, worktree):
     states = []
     for path in (Path(feature_dir) / '.task-runs' / task['id']).glob('*.json'):
         try:
-            state = json.loads(path.read_text())
+            state = json.loads(path.read_text(encoding='utf-8'))
             if state.get('parallelRunId') == parallel_run_id and state.get('batchId') == batch_id:
                 states.append(state)
         except (OSError, ValueError):

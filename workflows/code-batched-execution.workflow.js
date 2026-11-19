@@ -220,6 +220,7 @@ const WORKSPACE_SYNC_SCHEMA = {
     sourceHead: { type: "string" }, lastSyncedSha: { type: ["string", "null"] }, targetSha: { type: "string" },
     worktreePath: { type: "string" }, contextPath: { type: "string" }, backupPath: { type: "string" },
     conflictedFiles: { type: "array", items: { type: "string" } },
+    skippedIgnoredFiles: { type: "array", items: { type: "string" } },
     reasonCode: { type: "string" }, error: { type: "string" }, reused: { type: "boolean" },
     desiredSha: { type: "string" }, jobId: { type: "string" }, hasPending: { type: "boolean" },
     attempts: { type: "integer" }, retryAfterSeconds: { type: "number" },
@@ -1952,6 +1953,7 @@ async function runWorkspaceSyncQueue(initial) {
       (current.error ? `同步提示：仓库 ${ref} 的 Batch 已合并，但工作区同步尚未成功。错误=${JSON.stringify(current.error)}；当前状态=${current.status}；重试等待秒数=${current.retryAfterSeconds || 0}。\n` : "") +
       `只执行 python -X utf8 "${script}" ${action} ${binding} ${extra}。` +
       `插件按持久化队列顺序将 Batch 成果以未提交文件写回用户目录。原样返回完整 JSON，包括 queue、错误、重试时间和同步进度。` +
+      `按用户工作目录生效的 Git 忽略规则跳过文件（含历史已跟踪文件），用 skippedIgnoredFiles 列出跳过项。` +
       `不移动用户分支 HEAD、不改用户暂存区、不提交代码。同步失败不改变 Batch 已合并状态；不得自行执行 Git、清空工作区或要求用户确认。`,
       { label, phase: "工作区同步", schema: WORKSPACE_SYNC_SCHEMA }
     ));

@@ -68,7 +68,7 @@ def capture_binding(feature_dir, code_root, case, *, entry_url, auth_status, cac
         _git(root, 'ls-files', '--error-unmatch', POLICY_FILE)
         if _git(root, 'status', '--porcelain', '--', POLICY_FILE).strip():
             return None
-        policy = json.loads(policy_path.read_text())
+        policy = json.loads(policy_path.read_text(encoding='utf-8'))
         if not isinstance(policy, dict):
             return None
         argv = policy.get('environmentProbe')
@@ -83,7 +83,8 @@ def capture_binding(feature_dir, code_root, case, *, entry_url, auth_status, cac
             return None
         key = (str(root), digest(policy))
         if key not in cache:
-            observed = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=5, check=True)
+            observed = subprocess.run(argv, cwd=root, capture_output=True, text=True,
+                                      encoding='utf-8', errors='strict', timeout=5, check=True)
             if len(observed.stdout) > 32768:
                 return None
             cache[key] = json.loads(observed.stdout)

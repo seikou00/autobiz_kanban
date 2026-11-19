@@ -4,6 +4,10 @@
 
 同步使用上次 `lastSyncedSha`、用户当前内容及队列任务固定的目标 SHA。备份保存在 run 的 `workspace-sync` 目录，含暂存区副本、文件原始内容及逐文件写回日志；私有 `refs/autobiz-workspace-backups/` 引用保存 Git 快照，不进入用户分支历史。写回不清空、不 stash 用户工作区；中断后跳过已完成文件并继续，用户在计算或解冲突期间再次编辑时重新计算。暂存、未暂存、未跟踪、二进制及符号链接内容均保留。同步问题单独记录，不撤销已合并 Batch；最终收口和恢复会继续同步。
 
+artifact workspace 可以直接使用业务仓库根目录。Scheduler 在仓库本地 `info/exclude` 中忽略完整的 `.autobizdevops/`；Code 基线采集与同步还会独立保护平台与插件控制目录，兼容旧 Run 和历史已跟踪的产物，避免 Plan、状态与证据更新干扰业务交付。
+
+同步按用户工作目录当前生效的 Git 忽略规则跳过文件，包括嵌套 `.gitignore`、`info/exclude` 和全局规则；历史已跟踪的文件也适用，`!` 放行项正常处理。忽略项不写回、不删除，也不强制暂存，返回结果以 `skippedIgnoredFiles` 列出本次跳过项。
+
 自动收口不执行 `sync-main`。最终报告使用 aggregate 本次读取的 `workspaceSync` 与 `repositoryHeads`，不沿用先前的同步缓存；同步 SHA 尚未追上当前集成 SHA 时仍显示待同步。用户基线分支、需求集成分支及其 Worktree 均保留，交付清理队列只处理已交付的 Batch 和候选临时 Worktree。
 
 `settle-delivery` 完成合并后只登记同步待办并立即返回 `merged`，Workflow 随后执行独立同步；最终收口同样先返回待办，再补同步。临时同步 Worktree 的创建和合并按命令指定空 hooks 目录，保留 LFS 内容过滤，不改用户全局 Git 配置。Git 原始输出保存在同步备份目录的 `*.stdout.log` / `*.stderr.log`；错误文本容错转为 UTF-8。`preparing` 中断会校验并复用已创建的临时 Worktree，已合并 Batch 的后续诊断不会重新登记为业务失败。

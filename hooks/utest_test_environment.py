@@ -121,7 +121,7 @@ def validate_worktree_pom(worktree, relative_path, *, after=None):
     if not path.is_relative_to(root) or path.name != "pom.xml":
         return {"allowed": False, "reason": "utest_pom_path_invalid"}
     result = subprocess.run(["git", "show", "HEAD:" + Path(relative_path).as_posix()],
-                            cwd=root, text=True, capture_output=True, timeout=10)
+                            cwd=root, text=True, encoding="utf-8", errors="strict", capture_output=True, timeout=10)
     if result.returncode:
         return {"allowed": False, "reason": "utest_pom_baseline_missing"}
     try:

@@ -77,7 +77,7 @@ ROLLBACK_STATE_MODES = (
     ROLLBACK_STATE_PREVIOUS_DONE,
 )
 _PLATFORM_RUNTIME_EXCLUDE = ":(exclude).cmbdevclaw/**"
-_PLATFORM_RUNTIME_PREFIX = ".cmbdevclaw/"
+_CODE_CONTROL_PREFIXES = (".cmbdevclaw/", ".autobizdevops/", ".parallel-runs/")
 _WORKFLOW_ARTIFACT_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
 _GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
 CODE_SESSION_BASELINE_VERSION = 2
@@ -303,7 +303,7 @@ def _head_blob_entries(repository: Path, head_commit: object) -> dict[str, tuple
         if len(blob_sha) not in _GIT_OBJECT_ID_LENGTHS or any(char not in "0123456789abcdef" for char in blob_sha.lower()):
             raise ValueError(f"Code Session Git blob SHA 无效: {repository}")
         relative = encoded_path.decode("utf-8", "surrogateescape")
-        if relative.startswith(_PLATFORM_RUNTIME_PREFIX):
+        if relative.lower().startswith(_CODE_CONTROL_PREFIXES):
             continue
         entries[relative] = (mode, blob_sha)
     return entries
@@ -397,6 +397,10 @@ def _capture_repository_baseline_entries(
     # contents cannot be recovered safely from the baseline commit, so retain
     # the current working-tree version just as the legacy baseline did.
     for relative in sorted((index_paths - set(head_entries)) | untracked_paths):
+        # Control files can live inside the business checkout, including the
+        # baseline's own logs and objects. They are not source rollback data.
+        if relative.lower().startswith(_CODE_CONTROL_PREFIXES):
+            continue
         if relative in files:
             continue
         candidate = repository / relative

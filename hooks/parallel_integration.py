@@ -430,7 +430,8 @@ def _sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = F
                 continue
             # Reconcile an interruption after Git committed but before JSON.
             if state.get("status") == "merging":
-                merge_head = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=repo, capture_output=True, text=True)
+                merge_head = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=repo,
+                                            capture_output=True, text=True, encoding="utf-8", errors="replace")
                 if merge_head.returncode:
                     head = git(repo, "rev-parse", "HEAD")
                     if head != state["baseSha"] and git(repo, "show", "-s", "--format=%P", "HEAD").split() == [state["baseSha"], state["targetSha"]]:
@@ -461,7 +462,8 @@ def _sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = F
             manifest.pop("finalEvidenceAggregate", None)
             manifest["mainPromotion"] = {"status": "validation_required"}
             save_manifest(workspace, feature, run_id, manifest)
-            result = subprocess.run(["git", "merge", "--no-ff", "-m", build_commit_message(manifest["taskCardId"], f"同步主分支 {binding['baseBranch']}"), target], cwd=repo, capture_output=True, text=True)
+            result = subprocess.run(["git", "merge", "--no-ff", "-m", build_commit_message(manifest["taskCardId"], f"同步主分支 {binding['baseBranch']}"), target],
+                                    cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if result.returncode:
                 files = [name for name in git(repo, "diff", "--name-only", "--diff-filter=U", "-z").split("\0") if name]
                 binding["mainSync"].update({"status": "conflicted" if files else "merging", "conflictedFiles": files, "outsideDigest": outside_diff_digest(repo, files) if files else None})

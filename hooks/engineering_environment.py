@@ -102,7 +102,7 @@ def restore_diagnostic(cached: dict, cwd: Path, argv: list[str]) -> bool:
 
 def _claim(path: Path) -> dict:
     try:
-        value = json.loads(path.with_suffix(".claim.json").read_text())
+        value = json.loads(path.with_suffix(".claim.json").read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
     except (ValueError, OSError):
         return {}

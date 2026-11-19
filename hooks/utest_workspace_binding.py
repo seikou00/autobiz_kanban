@@ -74,6 +74,8 @@ def _git_root(raw_path):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except OSError:
@@ -94,6 +96,8 @@ def _git_common_dir(raw_path):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except OSError:

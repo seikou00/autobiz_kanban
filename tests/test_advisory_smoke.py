@@ -15,11 +15,26 @@ HOOKS_DIR = ROOT / "hooks"
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
-from hooks.run_advisory_smoke import main as smoke_main, run_advisory_smoke  # noqa: E402
+from hooks.run_advisory_smoke import main as smoke_main, run_advisory_smoke, _run_command  # noqa: E402
 from hooks.evidence_store import read_records, stream_path  # noqa: E402
 
 
 class AdvisorySmokeRunnerTest(unittest.TestCase):
+    def test_non_utf8_diagnostics_preserve_command_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / 'native_output.py'
+            script.write_text(
+                "import os, sys\n"
+                "os.write(1, '中文输出'.encode('utf-8'))\n"
+                "os.write(2, b'native error: \\xb4\\xed\\xce\\xf3')\n"
+                "sys.exit(3)\n", encoding='utf-8')
+            exit_code, status, output = _run_command(f'"{sys.executable}" "{script}"', cwd=root, timeout=10)
+            self.assertEqual(exit_code, 3)
+            self.assertEqual(status, 'fail')
+            self.assertIn('中文输出', output)
+            self.assertIn('native error:', output)
+
     def _feature_dir(self, workspace: Path) -> Path:
         feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
         feature_dir.mkdir(parents=True, exist_ok=True)

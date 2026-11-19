@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -93,6 +94,45 @@ class FrontendReviewRunnerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(result["summary"]["mustFix"], 0)
         self.assertEqual(result["summary"]["suggestion"], 0)
+
+    def test_cli_emits_utf8_even_when_stdio_is_configured_as_gbk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self.write(Path(tmp), "静态示例.tsx", "export default function Page() { return <div>示例</div>; }\n")
+            env = {**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "gbk"}
+            for script in (RUNNER, HTML_CHECKER):
+                target_args = ["--target", str(target)] if script == RUNNER else [str(target)]
+                for output_format in ("json", "markdown"):
+                    for flags in ([], ["-X", "utf8"]):
+                        with self.subTest(script=script.name, output_format=output_format, flags=flags):
+                            proc = subprocess.run(
+                                [sys.executable, *flags, "-B", str(script), *target_args, "--format", output_format],
+                                cwd=ROOT, capture_output=True, env=env, check=False,
+                            )
+                            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", errors="replace"))
+                            stdout = proc.stdout.decode("utf-8")
+                            self.assertIn("静态 HTML 回检未发现确定性问题", stdout)
+                            self.assertIn(target.name, stdout)
+                            if output_format == "json":
+                                result = json.loads(stdout)
+                                self.assertEqual(result["target"], str(target.resolve()))
+                                self.assertEqual(result["summary"]["executionErrors"], 0)
+
+    def test_antd_child_preserves_chinese_paths_under_gbk_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = self.write(root, "静态示例.tsx", "export default function Page() { return <button>示例</button>; }\n")
+            proc = subprocess.run(
+                [sys.executable, "-B", str(RUNNER), "--target", str(root), "--antd-audit", "on", "--format", "json"],
+                cwd=ROOT, capture_output=True, check=False,
+                env={**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "gbk"},
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr.decode("utf-8", errors="replace"))
+            result = json.loads(proc.stdout.decode("utf-8"))
+            self.assertEqual(result["summary"]["executionErrors"], 0)
+            findings = [item for item in result["findings"] if item["category"] == "antd-audit"]
+            self.assertTrue(findings)
+            self.assertEqual(findings[0]["file"], str(target.resolve()))
+            self.assertIn("<button>", findings[0]["message"])
 
     def test_static_findings_return_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

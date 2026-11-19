@@ -7,6 +7,7 @@ import argparse
 from html.parser import HTMLParser
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -427,6 +428,10 @@ def format_items(items: list[dict[str, Any]]) -> list[str]:
 
 
 def main() -> int:
+    # Match the UTF-8 JSON/Markdown protocol expected by frontend_verification.py.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Run static HTML-result review checks.")
     parser.add_argument("target")
     parser.add_argument("--source-html")

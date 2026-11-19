@@ -313,6 +313,8 @@ class ModelBasedResolver:
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
             new_sha = subprocess.run(
@@ -320,6 +322,8 @@ class ModelBasedResolver:
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             ).stdout.strip()
 

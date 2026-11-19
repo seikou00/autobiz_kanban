@@ -614,7 +614,7 @@ def _get_changed_files(workspace: str) -> List[str]:
         import subprocess
         result = subprocess.run(
             ['git', 'diff', '--name-only', '--diff-filter=ACMR', '-u'],
-            capture_output=True, text=True, cwd=workspace, timeout=30
+            capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=workspace, timeout=30
         )
         if result.returncode != 0:
             print(f"[hook] git diff 失败: {result.stderr.strip()}", file=sys.stderr)

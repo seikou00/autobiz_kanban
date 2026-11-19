@@ -40,12 +40,16 @@ class WorkspaceSyncTest(unittest.TestCase):
         return git(self.repo, "ls-files", "--stage")
 
     def publish_extended(self, edit):
-        args, tree = self.fixture.delivery()
+        args, tree = self.fixture.delivery(review=False)
         edit(tree)
         git(tree, "add", "-A")
         git(tree, "commit", "--amend", "--no-edit")
         from hooks.parallel_batch_scheduler import mark_batch
-        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed", commitSha=git(tree, "rev-parse", "HEAD"))
+        from hooks.parallel_batch_stage import start_stage, complete_stage
+        sha = git(tree, "rev-parse", "HEAD")
+        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed", commitSha=sha)
+        start_stage(self.workspace, "alpha", self.run, "B001", "review")
+        complete_stage(self.workspace, "alpha", self.run, "B001", "review", metadata={"batchCommit": sha})
         self.assertEqual(settle_delivery(*args[:6])["status"], "merged")
         return safely_sync(self.workspace, "alpha", self.run, "default")
 
@@ -59,6 +63,34 @@ class WorkspaceSyncTest(unittest.TestCase):
             self.assertEqual(self.source_index(), initial_index)
         self.assertTrue(self.synchronize()["reused"])
         self.assertEqual(result["lastSyncedSha"], git(self.fixture.integration, "rev-parse", "HEAD"))
+
+    def test_ignored_platform_files_do_not_block_business_publication(self):
+        (self.repo / ".gitignore").write_text(".cmbdevclaw/\n")
+        runtime = self.repo / ".cmbdevclaw" / "workflows" / "state.json"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("live platform state\n")
+        (self.repo / "本地 新文件.txt").write_text("local business edit\n")
+        initial_index = self.source_index()
+        result = self.publish()
+        self.assertEqual(result["status"], "synced", result)
+        self.assertEqual((self.repo / "B001.txt").read_text(), "B001")
+        self.assertEqual(runtime.read_text(), "live platform state\n")
+        self.assertEqual((self.repo / "本地 新文件.txt").read_text(), "local business edit\n")
+        self.assertEqual(self.source_index(), initial_index)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
+        journal = json.loads((Path(result["backupPath"]) / "journal.json").read_text())
+        self.assertFalse(any(name.startswith(".cmbdevclaw/") for name in journal["originals"]))
+
+    def test_staged_addition_removed_from_disk_stays_only_in_the_user_index(self):
+        staged_only = self.repo / "staged-only.txt"
+        staged_only.write_text("staged content\n")
+        git(self.repo, "add", "--", staged_only.name)
+        staged_only.unlink()
+        initial_index = self.source_index()
+        result = self.publish()
+        self.assertEqual(result["status"], "synced", result)
+        self.assertFalse(staged_only.exists())
+        self.assertEqual(self.source_index(), initial_index)
 
     def test_merge_and_finalization_return_pending_without_running_publication(self):
         with patch.object(sync, "sync_workspace", side_effect=AssertionError("publication must be a separate step")):
@@ -237,10 +269,92 @@ class WorkspaceSyncTest(unittest.TestCase):
         (self.repo / ".gitignore").write_text("B001.txt\n")
         (self.repo / "B001.txt").write_text("ignored local content\n")
         result = self.publish()
-        self.assertEqual(result["status"], "conflicted", result)
+        self.assertEqual(result["status"], "synced", result)
         self.assertEqual((self.repo / "B001.txt").read_text(), "ignored local content\n")
-        context = json.loads(Path(result["contextPath"]).read_text())
-        self.assertEqual(Path(context["files"][0]["user"]).read_text(), "ignored local content\n")
+        self.assertIn("B001.txt", result["skippedIgnoredFiles"])
+        self.assertEqual(self.publish("B002")["status"], "synced")
+        self.assertEqual((self.repo / "B002.txt").read_text(), "B002")
+
+    def test_all_git_ignore_sources_skip_tracked_and_new_files_but_keep_negations(self):
+        (self.repo / ".gitignore").write_text("*.cache\ncache/*\n!cache/keep.txt\nexisting.txt\n")
+        nested = self.repo / "nested"
+        nested.mkdir()
+        (nested / ".gitignore").write_text("private.txt\n")
+        exclude = Path(git(self.repo, "rev-parse", "--git-path", "info/exclude"))
+        if not exclude.is_absolute():
+            exclude = self.repo / exclude
+        with exclude.open("a") as stream:
+            stream.write("\nlocal-only.tmp\n")
+        global_ignore = self.repo.parent / "global-ignore"
+        global_ignore.write_text("global-only.tmp\n")
+        git(self.repo, "config", "core.excludesFile", str(global_ignore))
+        legacy = self.repo / "legacy.cache"
+        legacy.write_text("legacy tracked version\n")
+        git(self.repo, "add", "-f", "--", legacy.name)
+        git(self.repo, "commit", "-m", "legacy ignored file")
+        self.head = git(self.repo, "rev-parse", "HEAD")
+        skipped = ["legacy.cache", "cache/private.txt", "nested/private.txt", "local-only.tmp",
+                   "global-only.tmp", "中文 缓存.cache", "换行\n缓存.cache", "existing.txt"]
+        for name in skipped:
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("user ignored content\n")
+        initial_index = self.source_index()
+
+        def edit(tree):
+            files = skipped[:-1] + ["remote.cache", "cache/keep.txt"]
+            for name in files:
+                path = tree / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("batch content\n")
+            git(tree, "add", "-f", "--", *files)
+            git(tree, "rm", "--", "existing.txt")
+
+        result = self.publish_extended(edit)
+        self.assertEqual(result["status"], "synced", result)
+        self.assertTrue(set(skipped + ["remote.cache"]) <= set(result["skippedIgnoredFiles"]))
+        for name in skipped:
+            self.assertEqual((self.repo / name).read_text(), "user ignored content\n")
+        self.assertFalse((self.repo / "remote.cache").exists())
+        self.assertEqual((self.repo / "cache/keep.txt").read_text(), "batch content\n")
+        self.assertEqual((self.repo / "B001.txt").read_text(), "B001")
+        self.assertEqual(self.source_index(), initial_index)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
+
+    def test_new_ignore_rule_refreshes_an_existing_conflict_without_overwriting_it(self):
+        (self.repo / "B001.txt").write_text("user content\n")
+        self.assertEqual(self.publish()["status"], "conflicted")
+        conflict = self.synchronize("resolver")
+        (self.repo / ".gitignore").write_text("B001.txt\n")
+        refreshed = self.synchronize("resolver", conflict["attemptId"])
+        self.assertEqual(refreshed["status"], "refresh_required", refreshed)
+        result = self.synchronize("resolver")
+        self.assertEqual(result["status"], "synced", result)
+        self.assertEqual((self.repo / "B001.txt").read_text(), "user content\n")
+        self.assertIn("B001.txt", result["skippedIgnoredFiles"])
+
+    def test_ignore_rules_introduced_during_publication_skip_later_files(self):
+        result = self.publish_extended(lambda tree: (tree / ".gitignore").write_text("B001.txt\n"))
+        self.assertEqual(result["status"], "synced", result)
+        self.assertTrue((self.repo / ".gitignore").is_file())
+        self.assertFalse((self.repo / "B001.txt").exists())
+        self.assertIn("B001.txt", result["skippedIgnoredFiles"])
+
+    def test_ignore_check_errors_stop_publication_without_reopening_the_batch(self):
+        import subprocess
+        call = sync._git
+
+        def failed_ignore_check(root, *args, **kwargs):
+            if args[0] == "check-ignore":
+                return subprocess.CompletedProcess(args, 128, b"", b"cannot read ignore rules")
+            return call(root, *args, **kwargs)
+
+        with patch.object(sync, "_git", side_effect=failed_ignore_check):
+            result = self.publish()
+        self.assertEqual(result["status"], "pending", result)
+        self.assertIn("workspace_sync_ignore_check_failed", result["error"])
+        self.assertFalse((self.repo / "B001.txt").exists())
+        self.assertEqual(self.fixture.manifest()["batches"]["B001"]["status"], "merged")
 
     def test_new_user_edits_during_conflict_resolution_are_not_overwritten(self):
         (self.repo / "B001.txt").write_text("user v1\n")
@@ -257,13 +371,16 @@ class WorkspaceSyncTest(unittest.TestCase):
         self.assertEqual(Path(context["files"][0]["user"]).read_text(), "user v2\n")
 
     def test_interrupted_file_writes_resume_without_a_second_merge_or_lost_edit(self):
-        args, tree = self.fixture.delivery()
+        args, tree = self.fixture.delivery(review=False)
         (tree / "second.txt").write_text("second\n")
         git(tree, "add", "second.txt")
         git(tree, "commit", "--amend", "--no-edit")
         from hooks.parallel_batch_scheduler import mark_batch
+        from hooks.parallel_batch_stage import start_stage, complete_stage
         sha = git(tree, "rev-parse", "HEAD")
         mark_batch(self.workspace, "alpha", self.run, "B001", "sealed", commitSha=sha)
+        start_stage(self.workspace, "alpha", self.run, "B001", "review")
+        complete_stage(self.workspace, "alpha", self.run, "B001", "review", metadata={"batchCommit": sha})
         write = sync._write_file
         calls = []
         def interrupted(*arguments):
@@ -451,6 +568,91 @@ class WorkspaceSyncTest(unittest.TestCase):
         report = aggregate_evidence(self.workspace, "alpha", self.run, finish_workflow=True)
         self.assertEqual(report["status"], "succeeded", report)
         self.assertEqual(report["errors"], [])
+
+
+class LegacyRuntimeWorkspaceSyncTest(unittest.TestCase):
+    def test_eight_pending_batches_recover_with_previously_committed_runtime_files(self):
+        from hooks import parallel_workspace_queue as queue
+        from hooks.parallel_batch_scheduler import mark_batch
+        from hooks.parallel_batch_stage import start_stage, complete_stage
+
+        fixture = fixtures.DeliveryTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        repo, workspace = fixture.repo, fixture.workspace
+        runtime = repo / ".cmbdevclaw" / "state.json"
+        runtime.parent.mkdir()
+        runtime.write_text("legacy committed runtime\n")
+        (repo / ".gitignore").write_text(".cmbdevclaw/\n")
+        git(repo, "add", "--", ".gitignore")
+        git(repo, "add", "-f", "--", ".cmbdevclaw/state.json")
+        git(repo, "commit", "-m", "legacy runtime baseline")
+        plan_path = fixture.feature / "plan.json"
+        plan = json.loads(plan_path.read_text())
+        plan["codeWorkspaces"] = {"default": str(repo)}
+        plan_path.write_text(json.dumps(plan))
+        fixture.create(8)
+        head = git(repo, "rev-parse", "HEAD")
+        for number in range(1, 9):
+            batch_id = f"B{number:03d}"
+            args, tree = fixture.delivery(batch_id, review=False)
+            if number == 1:
+                # Legacy deliveries can contain runtime changes, too.
+                (tree / ".cmbdevclaw/state.json").write_text("batch runtime\n")
+                git(tree, "add", "-f", "--", ".cmbdevclaw/state.json")
+                git(tree, "commit", "--amend", "--no-edit")
+                mark_batch(workspace, "alpha", fixture.run, batch_id, "sealed", commitSha=git(tree, "rev-parse", "HEAD"))
+            elif number == 2:
+                git(tree, "rm", "--", ".cmbdevclaw/state.json")
+                git(tree, "commit", "--amend", "--no-edit")
+                mark_batch(workspace, "alpha", fixture.run, batch_id, "sealed", commitSha=git(tree, "rev-parse", "HEAD"))
+            start_stage(workspace, "alpha", fixture.run, batch_id, "review")
+            complete_stage(workspace, "alpha", fixture.run, batch_id, "review", metadata={"batchCommit": git(tree, "rev-parse", "HEAD")})
+            self.assertEqual(settle_delivery(*args[:6])["status"], "merged")
+
+        runtime.write_text("user staged runtime\n")
+        git(repo, "add", "-f", "--", ".cmbdevclaw/state.json")
+        runtime.write_text("live platform runtime\n")
+        ignored = runtime.parent / "new-runtime.json"
+        ignored.write_text("ignored runtime\n")
+        existing = repo / "existing.txt"
+        existing.write_text("staged business edit\n")
+        git(repo, "add", "--", "existing.txt")
+        existing.write_text("unstaged business edit\n")
+        index = Path(git(repo, "rev-parse", "--git-path", "index"))
+        if not index.is_absolute():
+            index = repo / index
+        original_index = index.read_bytes()
+        call = sync._git
+
+        def old_staging(root, *args, **kwargs):
+            if args[:2] == ("add", "-A"):
+                args = ("add", "-A", "--", ".", ":(exclude).cmbdevclaw/**")
+            return call(root, *args, **kwargs)
+
+        # Reproduce the old add failure, including its durable queue state.
+        with patch.object(sync, "_git", side_effect=old_staging), patch.object(queue.time, "time", return_value=10000000000):
+            failed = queue.operate(workspace, "alpha", fixture.run, "default", "resolver")
+        self.assertEqual(failed["status"], "retry_wait", failed)
+        self.assertIn("workspace_sync_git_failed:add", failed["error"])
+        self.assertEqual(len(failed["pendingBatchIds"]), 8)
+
+        with patch.object(queue.time, "time", return_value=10000000010):
+            for _ in range(8):
+                result = queue.operate(workspace, "alpha", fixture.run, "default", "resolver")
+                self.assertTrue(result["success"], result)
+        self.assertEqual(result["status"], "synced", result)
+        self.assertEqual(result["pendingBatchIds"], [])
+        self.assertTrue(all(job["status"] == "synced" for job in result["queue"]))
+        self.assertTrue(all(batch["status"] == "merged" for batch in fixture.manifest()["batches"].values()))
+        for number in range(1, 9):
+            batch_id = f"B{number:03d}"
+            self.assertEqual((repo / f"{batch_id}.txt").read_text(), batch_id)
+        self.assertEqual(runtime.read_text(), "live platform runtime\n")
+        self.assertEqual(ignored.read_text(), "ignored runtime\n")
+        self.assertEqual(existing.read_text(), "unstaged business edit\n")
+        self.assertEqual(index.read_bytes(), original_index)
+        self.assertEqual(git(repo, "rev-parse", "HEAD"), head)
 
 
 if __name__ == "__main__":

@@ -98,8 +98,9 @@ class FrontendVerificationTest(unittest.TestCase):
             checkers = Path(tmp) / 'checkers'
             (checkers / 'scripts').mkdir(parents=True)
             (checkers / 'scripts/review_runner.py').write_text(
-                "import json, subprocess, sys\n"
+                "import json, os, subprocess, sys\n"
                 "child = subprocess.check_output([sys.executable, '-c', 'import sys; print(sys.flags.utf8_mode)'], text=True).strip()\n"
+                "os.write(2, b'native diagnostic: \\xb4\\xed\\xce\\xf3')\n"
                 "print(json.dumps({'findings': [], 'label': '中文', 'utf8': sys.flags.utf8_mode, 'childUtf8': child}, ensure_ascii=False))\n",
                 encoding='utf-8')
             args = Namespace(workspace=workspace, feature='alpha', task_id='T001', run_id=state['runId'], code_workspace=code,
@@ -114,6 +115,86 @@ class FrontendVerificationTest(unittest.TestCase):
             self.assertEqual(report['label'], '中文')
             self.assertEqual(report['utf8'], 1)
             self.assertEqual(report['childUtf8'], '1')
+
+    def test_static_process_errors_and_invalid_json_remain_blocked(self):
+        cases = [
+            (2, b'', 'frontend_static_execution_failed:native diagnostic:'),
+            (0, b'{"findings": [], "label": "\xff"}', 'frontend_static_invalid_json:'),
+            (0, b'not JSON', 'frontend_static_invalid_json:'),
+        ]
+        for exit_code, stdout, reason in cases:
+            with self.subTest(exit_code=exit_code, stdout=stdout), tempfile.TemporaryDirectory() as tmp:
+                workspace, fd, code, state = self.setup_task(Path(tmp))
+                checkers = Path(tmp) / 'checkers'
+                (checkers / 'scripts').mkdir(parents=True)
+                (checkers / 'scripts/review_runner.py').write_text(
+                    f"import os, sys\nos.write(1, {stdout!r})\n"
+                    "os.write(2, b'native diagnostic: \\xb4\\xed\\xce\\xf3')\n"
+                    f"sys.exit({exit_code})\n", encoding='utf-8')
+                args = Namespace(workspace=workspace, feature='alpha', task_id='T001', run_id=state['runId'],
+                    code_workspace=code, parallel_run_id=None, lease_token=None, workspace_ref=None,
+                    candidate_wave=None, target=['src/Page.tsx'], check_script=None, capture=False,
+                    actual_screenshot=None, reference_screenshot=None, visual_report=None, timeout=60)
+                with patch.object(fv, 'FRONTEND_ROOT', checkers), patch.object(fv, 'checker_digest', return_value='checker'):
+                    with self.assertRaisesRegex(ValueError, reason):
+                        fv.verify(args)
+                report = fv.read(fv.report_path(fd, 'T001', state['runId']))
+                self.assertEqual(report['status'], 'blocked')
+                self.assertEqual(report['static']['status'], 'blocked')
+                self.assertTrue(report['lastError'].startswith(reason))
+
+    def test_compiler_output_preserves_utf8_and_tolerates_native_diagnostics(self):
+        real_run = subprocess.run
+        cases = [
+            (0, '编译通过'.encode('utf-8'), b'', 'passed', '编译通过'),
+            (2, b'', b'typecheck failed: \xb1\xe0\xd2\xeb', 'failed', 'typecheck failed:'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'package.json').write_text(json.dumps({'scripts': {'typecheck': 'tsc --noEmit'}}), encoding='utf-8')
+            executable = root / 'node_modules/.bin' / ('tsc.cmd' if os.name == 'nt' else 'tsc')
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            for exit_code, stdout, stderr, status, message in cases:
+                with self.subTest(exit_code=exit_code):
+                    command = [sys.executable, '-c',
+                        f'import os, sys; os.write(1, {stdout!r}); os.write(2, {stderr!r}); sys.exit({exit_code})']
+                    def compiler(argv, **kwargs):
+                        return real_run(command, **kwargs)
+                    with patch.object(fv.subprocess, 'run', side_effect=compiler):
+                        result = fv.check_script(root, 'typecheck', 10)
+                    self.assertEqual(result['status'], status)
+                    self.assertEqual(result['exitCode'], exit_code)
+                    self.assertEqual(result['argv'], ['tsc', '--noEmit'])
+                    self.assertIn(message, result['output'])
+
+    def test_capture_separates_utf8_json_from_native_diagnostics(self):
+        real_popen = subprocess.Popen
+        payload = {'screenshots': [], 'errors': [], 'label': '中文截图'}
+        stdout = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        cases = [
+            (0, stdout, None),
+            (1, b'', 'frontend_capture_failed:native diagnostic:'),
+            (0, b'{"label": "\xff"}', 'frontend_capture_invalid_json:'),
+            (0, b'not JSON', 'frontend_capture_invalid_json:'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Namespace(url='http://127.0.0.1:12345', preview_script=None, timeout=10, width=1440, height=900)
+            for exit_code, stdout, reason in cases:
+                with self.subTest(exit_code=exit_code, stdout=stdout):
+                    command = [sys.executable, '-c',
+                        f'import os, sys; os.write(1, {stdout!r}); '
+                        "os.write(2, b'native diagnostic: \\xb4\\xed\\xce\\xf3'); "
+                        f'sys.exit({exit_code})']
+                    def renderer(argv, **kwargs):
+                        return real_popen(command, **kwargs)
+                    with patch.object(fv.subprocess, 'Popen', side_effect=renderer), patch('urllib.request.urlopen'):
+                        if reason:
+                            with self.assertRaisesRegex(ValueError, reason):
+                                fv.capture(root, root, args, [])
+                        else:
+                            self.assertEqual(fv.capture(root, root, args, []), payload)
 
     def test_task_without_html_does_not_borrow_sibling_visual_sources(self):
         import copy
