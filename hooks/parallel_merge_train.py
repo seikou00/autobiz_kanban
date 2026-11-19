@@ -28,7 +28,7 @@ from hooks.git_runtime import git_command
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure, record_e2e_skip
-from hooks.parallel_runtime import append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
+from hooks.parallel_runtime import INACTIVE_RUN_STATES, append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_integration import integration_repo, assert_integration, isolated, record_integration_head
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
@@ -243,6 +243,8 @@ def _build_candidate(
         raise ValueError("parallel_merge_train_batch_ids_required")
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            raise ValueError("parallel_merge_train_run_inactive")
         task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
         eligible = set(mergeable_batches(manifest))
         invalid = [batch_id for batch_id in ids if batch_id not in eligible]
@@ -452,6 +454,8 @@ def _promote_candidate(
     """
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            raise ValueError("parallel_merge_train_run_inactive")
         record = _record(manifest, repository_ref, wave)
         allowed_statuses = {"verified"}
         if allow_unverified:
@@ -825,11 +829,14 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
     return {"success": bool(result.get("success")), "e2eStatus": "passed", "result": result, "environment": environment, "cleanupErrors": cleanup_errors}
 
 
-def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str, attempt_id: str = "") -> dict[str, Any]:
+def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str,
+                       attempt_id: str = "", *, workflow_retry: bool = False) -> dict[str, Any]:
     """Give the model a durable, candidate-specific permission to edit conflicts."""
     lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
     with FileLock(lock), run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return {"success": False, "status": manifest["status"], "error": "parallel_merge_train_run_inactive"}
         record = _record(manifest, repository_ref, wave)
         if not record:
             return {"success": False, "error": "candidate_record_missing"}
@@ -867,7 +874,7 @@ def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, re
             if previous and (previous.get("parents") != parents or previous.get("outsideDiffDigest") != outside):
                 raise ValueError("candidate_resolution_git_state_changed")
             same_attempt = bool(attempt_id and previous.get("status") == "running" and previous.get("attemptId") == attempt_id)
-            if not same_attempt and context.attempts >= maximum:
+            if not workflow_retry and not same_attempt and context.attempts >= maximum:
                 if previous:
                     previous["status"] = "exhausted"
                     record["status"] = "needs_resolution"
@@ -916,6 +923,8 @@ def _complete_resolution(workspace: Path, feature: str, run_id: str, wave: int, 
     lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
     with FileLock(lock), run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return {"success": False, "status": manifest["status"], "error": "parallel_merge_train_run_inactive"}
         record = _record(manifest, repository_ref, wave)
         if not record:
             return {"success": False, "error": "candidate_record_missing"}
@@ -1288,6 +1297,7 @@ def main(argv: list[str] | None = None) -> int:
             promote_parser = item
         elif name == "prepare-resolution":
             item.add_argument("--attempt-id", default="", help="stable identity for one Workflow resolution step")
+            item.add_argument("--workflow-retry", action="store_true", help="continue the retained candidate through the fixed Workflow")
     e2e_begin = sub.add_parser("begin-e2e")
     e2e_finish = sub.add_parser("finish-e2e")
     e2e_skip = sub.add_parser("skip-e2e")
@@ -1332,7 +1342,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "resolve-candidate":
             result = resolve_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "prepare-resolution":
-            result = prepare_resolution(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref, attempt_id=args.attempt_id)
+            result = prepare_resolution(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref,
+                                        attempt_id=args.attempt_id, workflow_retry=args.workflow_retry)
         elif args.command == "complete-resolution":
             result = complete_resolution(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "resume-candidate":

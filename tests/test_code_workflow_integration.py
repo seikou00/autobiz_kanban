@@ -663,6 +663,7 @@ vm.createContext(context);
 const start = source.indexOf("function takeNextRunnableLifecycle(");
 const end = source.indexOf("async function drainRunnableLifecycles(");
 if (start < 0 || end < 0) process.exit(2);
+vm.runInContext(source.slice(source.indexOf("function inactiveRun("), source.indexOf("function requireSchedulerResult(")), context);
 vm.runInContext(source.slice(start, end), context);
 context.dispatchCommand = async (action, job) => ({ success: true, status: action === "claim" ? "claimed" : "finished", ownerToken: "token", batchId: job.batchId });
 (async () => {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -30,6 +31,7 @@ from hooks.parallel_runtime import (
     batch_write_sets_conflict,
     create_manifest,
     DELIVERY_STAGES,
+    INACTIVE_RUN_STATES,
     get_active_run,
     lease_path,
     list_runs,
@@ -178,6 +180,8 @@ def _mark_retry_pending_locked(
         review = (batch.get("stageStates") or {}).get("review")
         if isinstance(review, dict) and review.get("status") in {"passed", "skipped", "deferred"}:
             review.update(status="pending", latestEvidenceId=None, completedAt=None)
+        if previous == "ready_to_candidate":
+            previous = "sealed"
     # Provision has not begun business work. Waiting for another Batch's
     # checkout is contention, even when the same lock stays busy repeatedly.
     provision_wait = (previous == "pending" and not batch.get("commitSha") and not batch.get("lease")
@@ -258,13 +262,14 @@ def _recover_stale_active_batches_locked(
     feature: str,
     run_id: str,
     manifest: dict[str, Any],
+    delivery_owned: set[str],
 ) -> list[dict[str, str]]:
     """Recover lost workers, including lease-free interrupted Review stages."""
     now = time.time()
     timeout_seconds = max(1, int(manifest.get("timeoutPerBatch", 3600)))
     recovered: list[dict[str, str]] = []
     for raw_batch_id, batch in manifest.get("batches", {}).items():
-        if not isinstance(batch, dict):
+        if not isinstance(batch, dict) or raw_batch_id in delivery_owned:
             continue
         dispatch = batch.get("dispatch") or {}
         consumed_grant = (dispatch.get("generation") == batch.get("dispatchGeneration", 1)
@@ -807,6 +812,7 @@ def create_run(
     allow_bootstrap: bool = False,
     task_card_id: str | None = None,
     integration_mode: str | None = None,
+    workflow_invocation_id: str | None = None,
 ) -> dict[str, Any]:
     # Kept as an ignored Python API compatibility parameter for older callers.
     # The CLI and fixed Workflow no longer expose it: platform workspace identity
@@ -823,7 +829,7 @@ def create_run(
     # does not create a leftover ``.parallel-runs`` directory just to acquire
     # a scheduler lock.  It also prevents Plan edits racing run creation.
     with FileLock(feature_dir(workspace, feature) / ".plan.lock"):
-        if get_active_run(workspace, feature) is not None:
+        if _invocation_run_id(workspace, feature, workflow_invocation_id) or get_active_run(workspace, feature) is not None:
             raise ValueError("parallel_run_already_active")
         bundle = load_plan_bundle(feature_dir(workspace, feature))
         from hooks.workflow_launcher import _load_runtime_config
@@ -848,6 +854,7 @@ def create_run(
             runtime_config=runtime_config,  # Pass runtime config
             task_card_id=normalized_task_card_id,
             integration_mode=mode,
+            workflow_invocation_id=workflow_invocation_id,
         )
         manifest["isolation"] = {
             "mode": "native_git_worktrees",
@@ -992,7 +999,7 @@ def schedule(
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") in PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
+        if manifest.get("status") in INACTIVE_RUN_STATES | PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
             return {"runId": run_id, "status": manifest["status"], "scheduledGroups": [],
                     "controlProtocolVersion": manifest.get("controlProtocolVersion", 1),
                     "controlRevision": manifest.get("controlRevision", 0),
@@ -1002,11 +1009,13 @@ def schedule(
                     "batchTaskIds": {}, "batchWorkspaces": {}, "activeWorkers": 0,
                     "maxParallel": manifest["maxParallel"], **promotion_view(manifest)}
         from hooks.parallel_delivery import reconcile_deliveries_locked
-        reconcile_deliveries_locked(workspace, feature, run_id, manifest)
-        if manifest.get("status") not in {"cancelled", "cleaned", "rolled_back", "succeeded", "succeeded_with_issues"}:
+        delivery_owned = reconcile_deliveries_locked(workspace, feature, run_id, manifest)
+        if manifest.get("status") not in {"succeeded", "succeeded_with_issues"}:
             _recover_blocked_batches_locked(workspace, feature, run_id, manifest)
-            _recover_stale_active_batches_locked(workspace, feature, run_id, manifest)
+            _recover_stale_active_batches_locked(workspace, feature, run_id, manifest, delivery_owned)
         for batch_id, batch in manifest.get("batches", {}).items():
+            if batch_id in delivery_owned:
+                continue
             dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
                     and dispatch.get("expiresEpoch", 0) <= time.time()
@@ -1398,6 +1407,8 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
     retry_lease_cleared = False
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            raise ValueError("parallel_batch_run_inactive")
         batch = manifest.get("batches", {}).get(batch_id)
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
@@ -1473,6 +1484,8 @@ def resume_run(
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
     initial = load_manifest(workspace, feature, run_id)
+    if initial.get("status") in INACTIVE_RUN_STATES:
+        return {"runId": run_id, "status": initial["status"], "skipped": "terminal_run"}
     from hooks.parallel_runtime import workflow_report_pending
     report_states = {"awaiting_user_confirmation", "promotion_prepared", "integration_retained",
                      "succeeded", "succeeded_with_issues", "verifying"}
@@ -1626,8 +1639,10 @@ def resume_run(
             }
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") in {"cancelled", "cleaned", "rolled_back"}:
+        if manifest.get("status") in INACTIVE_RUN_STATES:
             return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
+        from hooks.parallel_delivery import reconcile_deliveries_locked
+        delivery_owned = reconcile_deliveries_locked(workspace, feature, run_id, manifest)
         # Older runs (and an interrupted Workflow cleanup) can have reached
         # ``retry_pending`` before their lease handoff completed.  Repair that
         # invariant before deciding whether the preserved delivery is sealed,
@@ -1668,6 +1683,7 @@ def resume_run(
             feature,
             run_id,
             manifest,
+            delivery_owned,
         )
         active_stale_recovered = len(stale_recovered)
         for item in stale_recovered:
@@ -1976,6 +1992,13 @@ def manual_resume_run(
     return result
 
 
+def _invocation_run_id(workspace: Path, feature: str, invocation_id: str | None) -> str | None:
+    if invocation_id:
+        return next((str(run["runId"]) for run in list_runs(workspace, feature)
+                     if invocation_id in run.get("workflowInvocationIds", [])), None)
+    return None
+
+
 def ensure_run(
     workspace: Path,
     feature: str,
@@ -1986,9 +2009,12 @@ def ensure_run(
     allow_bootstrap: bool = False,
     workspace_refs: list[str] | None = None,
     task_card_id: str | None = None,
+    workflow_invocation_id: str | None = None,
 ) -> dict[str, Any]:
     """Create one scheduler run or safely resume the existing durable run."""
-    active_run_id = get_active_run(workspace, feature)
+    if workflow_invocation_id is not None and not re.fullmatch(r"[a-f0-9]{32}", workflow_invocation_id):
+        raise ValueError("workflow_invocation_id_invalid")
+    active_run_id = _invocation_run_id(workspace, feature, workflow_invocation_id) or get_active_run(workspace, feature)
     if active_run_id is None:
         try:
             result = create_run(
@@ -1999,6 +2025,7 @@ def ensure_run(
                 code_workspaces=code_workspaces,
                 allow_bootstrap=allow_bootstrap,
                 task_card_id=task_card_id,
+                workflow_invocation_id=workflow_invocation_id,
             )
             if workspace_refs:
                 result = schedule(workspace, feature, str(result["runId"]), workspace_refs=workspace_refs)
@@ -2010,13 +2037,20 @@ def ensure_run(
             # idempotent reuse path instead of creating a second run.
             if str(exc) != "parallel_run_already_active":
                 raise
-            active_run_id = get_active_run(workspace, feature)
+            active_run_id = _invocation_run_id(workspace, feature, workflow_invocation_id) or get_active_run(workspace, feature)
             if active_run_id is None:
                 raise
     # Resume is also the scheduler-owned recovery boundary for retained
     # per-Batch conflicts.  It preserves their worktrees and excludes their
     # Batches from output, but must still release independent DAG branches.
     # `resume_run` retains the stricter global plan/source-integrity gates.
+    if workflow_invocation_id:
+        with run_lock(workspace, feature, active_run_id):
+            manifest = load_manifest(workspace, feature, active_run_id)
+            invocation_ids = manifest.setdefault("workflowInvocationIds", [])
+            if workflow_invocation_id not in invocation_ids:
+                invocation_ids.append(workflow_invocation_id)
+                save_manifest(workspace, feature, active_run_id, manifest)
     result = resume_run(workspace, feature, active_run_id, workspace_refs=workspace_refs)
     result["reused"] = True
     return result
@@ -2125,6 +2159,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
         if name == "status":
             item.add_argument("--workflow-view", action="store_true", help="emit only fields consumed by the fixed Code Workflow")
+        if name == "ensure":
+            item.add_argument("--workflow-invocation-id")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
     mark.add_argument("--feature", required=True)
@@ -2167,6 +2203,7 @@ def main(argv: list[str] | None = None) -> int:
                     allow_bootstrap=args.allow_bootstrap,
                     workspace_refs=args.workspace_refs,
                     task_card_id=args.task_card_id,
+                    workflow_invocation_id=args.workflow_invocation_id,
                 ),
             )
         if args.command == "status":

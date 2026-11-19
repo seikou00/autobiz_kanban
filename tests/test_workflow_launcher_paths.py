@@ -475,7 +475,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertTrue(result["useWorkflow"])
         self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
         self.assertEqual(result["workflowArgs"]["resumeMode"], "automatic")
-        self.assertIsNone(result["workflowArgs"]["resumeRunId"])
+        self.assertEqual(result["workflowArgs"]["resumeRunId"], "cw-stage-006")
         self.assertEqual(result["stageRecoveryBatchIds"], ["B006"])
         self.assertEqual(result["retryRecoveryBatchIds"], [])
         self.assertEqual(result["batches"], [
@@ -547,7 +547,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertTrue(result["useWorkflow"])
         self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
         self.assertEqual(result["workflowArgs"]["resumeMode"], "automatic")
-        self.assertIsNone(result["workflowArgs"]["resumeRunId"])
+        self.assertEqual(result["workflowArgs"]["resumeRunId"], "cw-implementation-008")
         self.assertEqual(result["implementationRecoveryBatchIds"], ["B008"])
         self.assertEqual(result["retryRecoveryBatchIds"], [])
         self.assertEqual(result["reason"], "fixed_workflow_for_implementation_recovery:cw-implementation-008:B008")

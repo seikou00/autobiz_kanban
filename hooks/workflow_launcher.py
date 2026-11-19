@@ -691,7 +691,7 @@ def analyze_batches(
                 "runtimeContractDigest": deployment["runtimeContract"]["digest"],
                 "taskCardId": selected_task_card_id,
                 "resumeMode": "manual" if manual_resume else "automatic",
-                "resumeRunId": active_run_id if manual_resume else None,
+                "resumeRunId": active_run_id,
             },
             "reason": (
                 f"fixed_workflow_for_manual_recovery:{active_run_id}:{','.join(sorted(recovery_batch_ids))}"

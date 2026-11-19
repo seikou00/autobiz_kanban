@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
 from hooks.evidence_kernel import FileLock
 from hooks.git_runtime import git_command
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_runtime import global_worktrees_root, load_manifest, run_dir, run_lock, save_manifest, utc_now
+from hooks.parallel_runtime import INACTIVE_RUN_STATES, global_worktrees_root, load_manifest, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_repository import coordinates
 from hooks.repository_snapshot import RUNTIME_DIRECTORIES
 
@@ -451,8 +451,6 @@ def _apply(workspace: Path, feature: str, run_id: str, ref: str, binding: dict, 
         if _ignored_paths(source, [change["path"]]):
             state["skippedIgnoredFiles"] = sorted(set(state["skippedIgnoredFiles"]) | {change["path"]})
             continue
-        if load_manifest(workspace, feature, run_id).get("status") in {"cancelled", "rolled_back", "cleaned"}:
-            raise ValueError("workspace_sync_run_inactive")
         if _identity(source, binding) != (state["sourceBranch"], state["sourceHead"]):
             state.update(status="refresh_required", reasonCode="source_head_changed")
             return _persist(workspace, feature, run_id, ref, path, state)
@@ -462,7 +460,10 @@ def _apply(workspace: Path, feature: str, run_id: str, ref: str, binding: dict, 
         if current != change["before"]:
             state.update(status="refresh_required", reasonCode="user_edited_during_sync")
             return _persist(workspace, feature, run_id, ref, path, state)
-        _write_file(source, Path(state["backupPath"]), change)
+        with run_lock(workspace, feature, run_id):
+            if load_manifest(workspace, feature, run_id).get("status") in INACTIVE_RUN_STATES:
+                raise ValueError("workspace_sync_run_inactive")
+            _write_file(source, Path(state["backupPath"]), change)
     state.update(status="synced", lastSyncedSha=state["targetSha"], syncedAt=utc_now())
     result = _persist(workspace, feature, run_id, ref, path, state)
     _cleanup(workspace, run_id, state)

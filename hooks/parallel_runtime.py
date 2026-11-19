@@ -34,6 +34,7 @@ RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
 MIN_GUARDED_TTL_SECONDS = 4 * 60 * 60
 DEFAULT_RUN_LOCK_TIMEOUT_SECONDS = 30
+INACTIVE_RUN_STATES = frozenset({"cancelled", "rolled_back", "cleaned"})
 
 
 def batch_occupies_scheduler_slot(batch: object) -> bool:
@@ -331,6 +332,7 @@ def create_manifest(
     runtime_config: dict[str, Any] | None = None,
     task_card_id: str | None = None,
     integration_mode: str | None = None,
+    workflow_invocation_id: str | None = None,
 ) -> dict[str, Any]:
     bundle = load_plan_bundle(feature_dir(workspace, feature))
     errors = parallel_plan_errors(bundle)
@@ -498,6 +500,8 @@ def create_manifest(
             "mode": "native_git_worktrees", "owner": "plugin", "cleanupOwner": "plugin",
             "provisioner": "hooks/worktree_manager.py", "workspaceRefs": sorted(repositories),
         }
+    if workflow_invocation_id:
+        manifest["workflowInvocationIds"] = [workflow_invocation_id]
     atomic_write_json(manifest_path(workspace, feature, run_id), manifest)
     return manifest
 
@@ -582,6 +586,8 @@ def acquire_lease(
         ttl_seconds = max(ttl_seconds, MIN_GUARDED_TTL_SECONDS)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            raise ValueError("parallel_batch_run_inactive")
         batch = manifest.get("batches", {}).get(batch_id)
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
@@ -698,7 +704,10 @@ def check_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
         return False
     if lease.get("dispatchGeneration") is not None:
         try:
-            batch = load_manifest(workspace, feature, run_id)["batches"][batch_id]
+            manifest = load_manifest(workspace, feature, run_id)
+            if manifest.get("status") in INACTIVE_RUN_STATES:
+                return False
+            batch = manifest["batches"][batch_id]
             dispatch = batch.get("dispatch") or {}
             if (batch.get("dispatchGeneration", 1) != lease["dispatchGeneration"]
                     or dispatch.get("tokenSha256") != lease.get("dispatchTokenSha256")

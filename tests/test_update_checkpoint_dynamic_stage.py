@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from board_core.state_store import load_state_json_records, write_state_records
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.update_checkpoint import apply_implicit_skip_decisions, main
 from hooks.route_checkpoint import resolve_route
+from hooks.parallel_runtime import manifest_path
 
 
 class UpdateCheckpointDynamicStageTest(unittest.TestCase):
@@ -104,6 +106,24 @@ class UpdateCheckpointDynamicStageTest(unittest.TestCase):
         route, exit_code = resolve_route(self.project, self.feature)
         self.assertEqual(exit_code, 0, route)
         self.assertEqual(route["recommendedNextSkill"], "autoops-cicd")
+
+    def test_code_done_respects_the_bound_workflow_status(self) -> None:
+        self._enter_code()
+        manifest = manifest_path(self.project, self.feature, "cw-test")
+        manifest.parent.mkdir(parents=True)
+        command = ["--checkpoint", "code_done", "--json", "--code-run-id", "cw-test"]
+        for status, expected in (("rolled_back", "code_in_progress"), ("succeeded", "code_done")):
+            manifest.write_text(json.dumps({"runId": "cw-test", "status": status}))
+            stdout = io.StringIO()
+            with patch.dict(os.environ, self.env, clear=True), patch(
+                "hooks.update_checkpoint.validate_lifecycle", return_value=[]
+            ), patch("hooks.update_checkpoint.write_hook_logs"), contextlib.redirect_stdout(stdout):
+                self.assertEqual(main(command), int(status == "rolled_back"))
+            records, errors, _ = load_state_json_records(self.project)
+            self.assertEqual(errors, [])
+            self.assertEqual(records[self.feature]["checkpoint"], expected)
+            if status == "rolled_back":
+                self.assertEqual(json.loads(stdout.getvalue())["status"], "rolled_back")
 
 
 if __name__ == "__main__":

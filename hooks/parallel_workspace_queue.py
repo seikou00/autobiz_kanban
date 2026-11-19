@@ -11,7 +11,7 @@ from pathlib import Path
 
 from hooks.evidence_kernel import FileLock
 from hooks.parallel_repository import coordinates
-from hooks.parallel_runtime import load_manifest, run_lock, save_manifest, utc_now
+from hooks.parallel_runtime import INACTIVE_RUN_STATES, load_manifest, run_lock, save_manifest, utc_now
 
 RETRY_DELAYS = (5, 30, 120)
 OWNER_TTL = 15 * 60
@@ -50,6 +50,10 @@ def reconcile_locked(manifest: dict, ref: str) -> list[dict]:
 
 def next_job(jobs: list[dict]) -> dict | None:
     remaining = [job for job in jobs if job["status"] not in DONE]
+    # Keep the current publication journal pinned through edits or a restart.
+    running = next((job for job in remaining if job["status"] == "running"), None)
+    if running is not None:
+        return running
     # A newer cumulative target may cover an older publication that is in
     # backoff; only a verified successful receipt marks that older job covered.
     ready = next((job for job in remaining if job["status"] != "failed"
@@ -105,6 +109,11 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
     if manifest.get("integrationMode") != "isolated":
         return {"success": True, "status": "skipped", "repositoryRef": repository_ref}
     ref = manifest["repositories"][repository_ref].get("integrationRepositoryRef", repository_ref)
+    def inactive_receipt(current: dict) -> dict:
+        return {"success": True, "repositoryRef": ref, "status": current["status"], "hasPending": True}
+
+    if manifest.get("status") in INACTIVE_RUN_STATES:
+        return inactive_receipt(manifest)
     binding = manifest["repositories"][ref]
     guard = FileLock(coordinates(binding)[0] / "workspace-queue.lock", timeout=0)
     try:
@@ -115,8 +124,8 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
     try:
         with run_lock(workspace, feature, run_id):
             manifest = load_manifest(workspace, feature, run_id)
-            if manifest.get("status") in {"cancelled", "rolled_back", "cleaned"}:
-                raise ValueError("workspace_sync_run_inactive")
+            if manifest.get("status") in INACTIVE_RUN_STATES:
+                return inactive_receipt(manifest)
             jobs = reconcile_locked(manifest, ref)
             job = next_job(jobs)
             if not job:
@@ -178,6 +187,8 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                         covered_ids.append(earlier["jobId"])
             with run_lock(workspace, feature, run_id):
                 manifest = load_manifest(workspace, feature, run_id)
+                if manifest.get("status") in INACTIVE_RUN_STATES:
+                    return inactive_receipt(manifest)
                 current = next(item for item in manifest["workspaceSyncQueue"][ref] if item["jobId"] == job["jobId"])
                 if receipt["status"] == "synced":
                     current.update(status="covered" if covered else "synced", completedAt=utc_now())
@@ -199,6 +210,8 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
         except Exception as exc:
             with run_lock(workspace, feature, run_id):
                 manifest = load_manifest(workspace, feature, run_id)
+                if manifest.get("status") in INACTIVE_RUN_STATES:
+                    return inactive_receipt(manifest)
                 current = next(item for item in manifest["workspaceSyncQueue"][ref] if item["jobId"] == job["jobId"])
                 result = _failure(manifest, ref, current, str(exc), f"attempt:{current['attempts']}")
                 save_manifest(workspace, feature, run_id, manifest)

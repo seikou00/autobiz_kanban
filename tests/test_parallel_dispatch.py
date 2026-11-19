@@ -345,6 +345,7 @@ class DispatchGrantTest(unittest.TestCase):
         from hooks.parallel_batch_stage import finish_review, gate_batch
         owner, _, _ = self._review_checkpoint()
         finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")
+        self.assertEqual(gate_batch(self.workspace, "alpha", self.run, "B001")["status"], "ready_to_candidate")
         batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
         Path(batch["stageStates"]["review"]["evidencePath"]).unlink()
         rejected = gate_batch(self.workspace, "alpha", self.run, "B001")
@@ -352,11 +353,37 @@ class DispatchGrantTest(unittest.TestCase):
         defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], rejected["error"])
         resumed = resume_run(self.workspace, "alpha", self.run)
         self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
+        self.assertEqual(resumed["mergeableBatches"], [])
         recovered = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
         for stage in ("prepare", "implement"):
             self.assertEqual(recovered["stageStates"][stage], batch["stageStates"][stage])
         start_stage(self.workspace, "alpha", self.run, "B001", "review")
         self.assertEqual(finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")["status"], "passed")
+
+    def test_ensure_replay_and_dispatch_preserve_cancellation(self):
+        from hooks.parallel_batch_scheduler import ensure_run
+        from hooks.parallel_runtime import list_runs
+
+        options = {"max_parallel": 2, "timeout_seconds": 60,
+                   "code_workspaces": [load_manifest(self.workspace, "alpha", self.run)["repositories"]["default"]["gitRoot"]],
+                   "task_card_id": "TEST-001", "workflow_invocation_id": "a" * 32}
+        first = ensure_run(self.workspace, "alpha", **options)
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["status"] = "cancelled"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        replay = ensure_run(self.workspace, "alpha", **options)
+        self.assertEqual((replay["runId"], replay["status"]), (first["runId"], "cancelled"))
+        self.assertEqual(len(list_runs(self.workspace, "alpha")), 1)
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["readyBatches"], [])
+        self.assertEqual(self.claim()["reasonCode"], "parallel_dispatch_run_inactive")
+
+        created = ensure_run(self.workspace, "alpha", **{**options, "workflow_invocation_id": "b" * 32})
+        manifest = load_manifest(self.workspace, "alpha", created["runId"])
+        manifest["status"] = "cancelled"
+        save_manifest(self.workspace, "alpha", created["runId"], manifest)
+        replay = ensure_run(self.workspace, "alpha", **{**options, "workflow_invocation_id": "b" * 32})
+        self.assertEqual((replay["runId"], replay["status"]), (created["runId"], "cancelled"))
+        self.assertEqual(len(list_runs(self.workspace, "alpha")), 2)
 
     def test_expired_pending_claim_can_be_taken_over_and_old_finish_is_fenced(self):
         old = self.claim()

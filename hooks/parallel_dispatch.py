@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_runtime import (DELIVERY_STAGES, append_event, batch_occupies_scheduler_slot, lease_path, load_manifest,
+from hooks.parallel_runtime import (DELIVERY_STAGES, INACTIVE_RUN_STATES, append_event, batch_occupies_scheduler_slot, lease_path, load_manifest,
                                     ready_batches, mergeable_batches, stage_recovery_batches,
                                     run_dir, run_lock, save_manifest, select_runnable_batches)
 from hooks.runtime_guidance import RuntimeArgumentParser
@@ -86,6 +86,8 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
         def denied(reason):
             return {"success": True, "status": "not_claimed", "batchId": batch_id,
                     "generation": generation(batch), "reasonCode": reason}
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return denied("parallel_dispatch_run_inactive")
         if expected != generation(batch):
             return denied("stale_generation")
         queue = batch.get("deliveryQueue") or {}
@@ -156,7 +158,8 @@ def finish(workspace: Path, feature: str, run_id: str, batch_id: str, expected: 
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest["batches"][batch_id]
         current = batch.get("dispatch") or {}
-        if (generation(batch) != expected or current.get("generation") != expected
+        if (manifest.get("status") in INACTIVE_RUN_STATES
+                or generation(batch) != expected or current.get("generation") != expected
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if current.get("status") != "running":
@@ -185,7 +188,8 @@ def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest["batches"][batch_id]
         current = batch.get("dispatch") or {}
-        if (generation(batch) != expected or current.get("generation") != expected
+        if (manifest.get("status") in INACTIVE_RUN_STATES
+                or generation(batch) != expected or current.get("generation") != expected
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if batch.get("status") == "merged" and batch.get("mergeCommitSha"):

@@ -43,6 +43,7 @@ function dispatchHarness() {
     runInitialBatchLifecycle: async () => ({ batchId: "B001", status: "merged" }),
     setTimeout, clearTimeout, DISPATCH_POLL_INTERVAL_MS: 30000,
   });
+  vm.runInContext(source.slice(source.indexOf("function inactiveRun("), source.indexOf("function requireSchedulerResult(")), context);
   vm.runInContext(source.slice(source.indexOf("function takeNextRunnableLifecycle("), source.indexOf("async function drainRunnableLifecycles(")), context);
   return context;
 }

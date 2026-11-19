@@ -4,12 +4,14 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("../workflows/code-batched-execution.workflow.js", import.meta.url), "utf8");
+const inactiveRun = vm.runInNewContext(`(${source.slice(source.indexOf("function inactiveRun("),
+  source.indexOf("function requireSchedulerResult(")).trim()})`);
 const finalization = source.slice(source.indexOf('async function runFinalValidation() {'),
   source.indexOf('\nif (controlProtocolVersion >= 2) {', source.indexOf('async function runFinalValidation() {')))
   + '\nreturn await runFinalValidation();';
 
 async function finalize({ isolated = true, missingSnapshot = false,
-  aggregateFailure = false, aggregateUnavailable = false, blockingErrors = [], checkpointFailure = false } = {}) {
+  aggregateFailure = false, aggregateUnavailable = false, blockingErrors = [], checkpointFailure = false, stoppedAt = null } = {}) {
   const commands = [];
   let auditAttempts = 0, checkpointAttempts = 0;
   const context = {
@@ -17,7 +19,7 @@ async function finalize({ isolated = true, missingSnapshot = false,
     finalScheduler: {}, lastScheduler: {}, artifactWorkspace: "/artifacts", feature: "feature", runId: "run",
     pluginPath: "/plugin", mergeTrainPath: "/plugin/merge-train", aggregatePath: "/plugin/aggregate",
     VERIFICATION_SCHEMA: {},
-    phase() {}, recordUnresolved() {}, unresolvedRecords: [], waitWorkspaceSyncRetry: async () => {},
+    phase() {}, recordUnresolved() {}, unresolvedRecords: [], waitWorkspaceSyncRetry: async () => {}, inactiveRun,
     completionReport: value => value,
     joinPath: (...parts) => parts.join("/"),
     errorText: error => String(error),
@@ -30,6 +32,7 @@ async function finalize({ isolated = true, missingSnapshot = false,
     },
     async workflowAgent(prompt, options) {
       commands.push({ prompt, label: options.label });
+      if (options.label === stoppedAt) return { ok: false, status: "rolled_back" };
       switch (options.label) {
         case "complete-code-checkpoint":
           assert.match(prompt, /--checkpoint code_done --json/);
@@ -115,16 +118,26 @@ test("checkpoint retries do not replay a completed evidence audit", async () => 
   assert.equal(commands.filter(command => command.label === "complete-code-checkpoint").length, 6);
 });
 
+test("a rollback during finalization stops audit or checkpoint retries", async () => {
+  for (const stoppedAt of ["aggregate-staged-evidence", "complete-code-checkpoint"]) {
+    const { result, commands } = await finalize({ stoppedAt });
+    assert.equal(result.finalStatus, "rolled_back");
+    assert.equal(result.nextAction, "none");
+    assert.equal(commands.at(-1).label, stoppedAt);
+    assert.equal(commands.filter(command => command.label === stoppedAt).length, 1);
+  }
+});
+
 test("legacy confirmation states continue into reporting while active promotion remains protected", async () => {
   const earlyReturn = source.slice(source.indexOf("const runId = prepared.runId;"), source.indexOf("let retryRecoveryInFlight"));
   for (const status of ["awaiting_user_confirmation", "promotion_prepared", "integration_retained"]) {
     const result = await vm.runInNewContext(`(async () => { ${earlyReturn}\nreturn { continued: true }; })()`, {
-      feature: "feature", prepared: { runId: "same-run", status },
+      feature: "feature", prepared: { runId: "same-run", status }, inactiveRun,
     });
     assert.equal(result.continued, true, status);
   }
   const result = await vm.runInNewContext(`(async () => { ${earlyReturn} })()`, {
-    feature: "feature", prepared: { runId: "same-run", status: "promoting_main" },
+    feature: "feature", prepared: { runId: "same-run", status: "promoting_main" }, inactiveRun,
   });
   assert.equal(result.runId, "same-run");
   assert.equal(result.finalStatus, "promoting_main");

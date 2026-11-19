@@ -164,6 +164,26 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(stale["reasonCode"], "workspace_sync_stale_job")
         self.assertEqual(stale["queue"][0]["failures"], 1)
 
+    def test_conflict_completion_keeps_its_job_when_earlier_backoff_expires(self):
+        from pathlib import Path
+
+        (self.repo / "B002.txt").write_text("user edit\n")
+        self.merge("B001")
+        self.merge("B002")
+        epoch = 2000000000
+        with patch.object(queue.time, "time", return_value=epoch):
+            self.process(action="fail", error="temporary", failure_id="initial")
+            conflict = self.process()
+        self.assertEqual(conflict["status"], "conflicted")
+        self.assertEqual(conflict["targetSha"], conflict["queue"][1]["targetSha"])
+        (Path(conflict["worktreePath"]) / "B002.txt").write_text("resolved user and batch edit\n")
+        with patch.object(queue.time, "time", return_value=epoch + 6):
+            self.assertEqual(self.manifest()["workspaceSyncQueue"]["default"][0]["status"], "retry_wait")
+            result = self.process(action="complete", job_id=conflict["jobId"], attempt_id=conflict["attemptId"])
+        self.assertEqual(result["status"], "synced", result)
+        self.assertEqual([job["status"] for job in result["queue"]], ["covered", "synced"])
+        self.assertEqual((self.repo / "B002.txt").read_text(), "resolved user and batch edit\n")
+
     def test_scheduler_recovers_registration_gap_before_finalization(self):
         self.merge("B001")
         with run_lock(self.workspace, "alpha", self.run):

@@ -117,6 +117,11 @@ async function execute(frontend = false, fault = null) {
       if (!workspaceState) return { success: true, status: "skipped", repositoryRef: "default" };
       if (workspaceState.status === "synced") return workspaceState;
       assert.match(prompt, /parallel_workspace_sync\.py" process/);
+      if (fault === "workspace-unavailable") {
+        workspaceState = { ...workspaceState, success: false, status: "retry_wait",
+          error: "workspace is temporarily read-only", retryAfterSeconds: 120 };
+        return workspaceState;
+      }
       if (fault === "workspace-agent-timeout" && syncFailures++ < 2) throw new Error("workspace sync agent timed out after merge");
       if (fault === "workspace-command-error" && syncFailures++ < 2) return { success: false, repositoryRef: "default", status: "pending", error: "Git LFS \ufffd\ufffd" };
       workspaceState = { ...workspaceState, success: true, error: undefined, status: "conflicted" };
@@ -316,6 +321,15 @@ for (const fault of ["workspace-synced", "workspace-conflict", "workspace-refres
     if (fault === "workspace-refresh") assert.equal(labels.filter(label => label.startsWith("workspace-sync-complete-")).length, 2);
   });
 }
+
+test("finalization completes with a durable pending receipt when publication keeps failing", async () => {
+  const { labels, result } = await execute(false, "workspace-unavailable");
+  assert.equal(result.finalStatus, "succeeded_with_issues");
+  assert.equal(result.nextAction, "resume_workspace_sync");
+  assert.equal(result.workspaceSyncPending[0].status, "retry_wait");
+  assert.equal(labels.filter(label => label.startsWith("settle-delivery-")).length, 1);
+  assert.ok(labels.includes("complete-code-checkpoint"));
+});
 
 test("post-merge cleanup bypasses defer when Runtime already reported the merge", async () => {
   const c = vm.createContext({ activeDispatchGrants: new Map([["B001", { generation: 1, ownerToken: "token" }]]),

@@ -364,6 +364,17 @@ class MergeResolutionHandoffTest(unittest.TestCase):
             final = prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="final")
             self.assertEqual(final["error"], "max_resolution_attempts_exceeded")
 
+    def test_fixed_workflow_can_continue_an_exhausted_candidate_in_place(self):
+        with conflicted_candidate(maximum=1) as (workspace, _, candidate, filename, _, _):
+            prepare_resolution(workspace, "feature", "run", 1, "default", attempt_id="first")
+            self.assertEqual(prepare(workspace)["error"], "max_resolution_attempts_exceeded")
+            next_attempt = prepare_resolution(workspace, "feature", "run", 1, "default",
+                                              attempt_id="workflow-retry", workflow_retry=True)
+            self.assertEqual(next_attempt["status"], "resolution_required")
+            self.assertEqual(next_attempt["worktreePath"], str(candidate.resolve()))
+            (candidate / filename).write_text("resolved source\n")
+            self.assertEqual(complete(workspace)["status"], "built")
+
     def test_commit_hooks_remain_enabled_and_commit_retry_does_not_need_model_edits(self):
         with conflicted_candidate() as (workspace, repo, candidate, filename, base, _):
             prepare(workspace)

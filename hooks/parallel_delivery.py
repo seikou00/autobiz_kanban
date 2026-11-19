@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.evidence_kernel import FileLock
-from hooks.parallel_runtime import DELIVERY_STAGES, append_event, load_manifest, run_lock, run_dir, save_manifest, utc_now, plan_digest
+from hooks.parallel_runtime import DELIVERY_STAGES, INACTIVE_RUN_STATES, append_event, load_manifest, run_lock, run_dir, save_manifest, utc_now, plan_digest
 from hooks.parallel_repository import repository_lock, assert_reservation, reserve, reservation, release_if_owned, coordinates
 
 DELIVERY_RETRY_SECONDS = 30
@@ -60,15 +60,15 @@ def execution_running(workspace: Path, feature: str, run_id: str, batch_id: str)
         return True
 
 
-def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, manifest: dict) -> None:
+def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, manifest: dict) -> set[str]:
     """Recover receipts and abandoned settlers without charging a code retry.
 
     The caller holds the run lock. Execution locks are probed without waiting,
     so a live settlement (which may itself need the run lock) is never revoked.
     """
-    if (manifest.get("controlProtocolVersion", 1) < 2
-            or manifest.get("status") in {"cancelled", "rolled_back", "cleaned"}):
-        return
+    owned = set()
+    if manifest.get("controlProtocolVersion", 1) < 2 or manifest.get("status") in INACTIVE_RUN_STATES:
+        return owned
     # A crash can occur after promotion but before publication registration.
     # Repair that gap on the scheduler's ordinary resume/status path as well as
     # finalization, without running any Git or workspace writes under this lock.
@@ -112,6 +112,7 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
                              or (not item.get("executionTokenSha256") and not dispatch.get("claimedEpoch")))), None)
         if not current and not consumed:
             continue
+        owned.add(batch_id)
         if (not consumed and current.get("status") in DELIVERY_CONTINUATION_STATES
                 and dispatch.get("expiresEpoch", 0) > time.time()):
             # The command deliberately handed control back to the Workflow.
@@ -168,6 +169,7 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
                              previousGeneration=generation - 1, dispatchGeneration=generation, reasonCode=reason)
         finally:
             lock.__exit__(None, None, None)
+    return owned
 
 
 def _queued_result(workspace: Path, feature: str, run_id: str, batch_id: str, generation: int,
@@ -421,6 +423,8 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
     _snapshot(workspace, feature, run_id)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return {"success": True, "status": manifest["status"], "runId": run_id}
         unfinished = [key for key, batch in manifest["batches"].items()
                       if batch.get("status") != "merged" or not batch.get("mergeCommitSha")
                       or (batch.get("dispatch") or {}).get("status") == "running"]

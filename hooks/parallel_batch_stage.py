@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from hooks.runtime_guidance import RuntimeArgumentParser
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import (
+    INACTIVE_RUN_STATES,
     append_event,
     DELIVERY_STAGES,
     load_manifest,
@@ -106,6 +107,8 @@ _CLI_DISPATCH_AUTH = ContextVar("stage_dispatch_auth", default=None)
 
 
 def _batch(manifest: dict[str, Any], batch_id: str) -> dict[str, Any]:
+    if manifest.get("status") in INACTIVE_RUN_STATES:
+        raise ValueError("parallel_batch_run_inactive")
     batch = manifest.get("batches", {}).get(batch_id)
     if not isinstance(batch, dict):
         batch = manifest.get("validationBatches", {}).get(batch_id)

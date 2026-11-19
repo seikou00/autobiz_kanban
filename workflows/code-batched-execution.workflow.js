@@ -616,11 +616,16 @@ function usableString(value) {
     && !["undefined", "null"].includes(value.trim().toLowerCase());
 }
 
+function inactiveRun(state) {
+  return ["cancelled", "rolled_back", "cleaned"].includes(state && state.status);
+}
+
 function requireSchedulerResult(value, label) {
   const result = unwrap(value);
   // Run status is domain state. A successful status read can report blocked
   // while independent Batches remain eligible; command failures still stop.
   requireSuccess({ ...result, status: undefined }, label);
+  if (usableString(result.runId) && inactiveRun(result)) return result;
   const isObject = candidate => candidate && typeof candidate === "object" && !Array.isArray(candidate);
   if (
     !usableString(result.runId)
@@ -796,6 +801,10 @@ if (
 if (!/^[a-f0-9]{32}$/.test(workflowInvocationId || "")) {
   throw new Error("workflow_invocation_id_missing_or_invalid:rerun_launcher");
 }
+if ((resumeMode === "manual" || resumeRunId != null)
+    && (typeof resumeRunId !== "string" || !/^[A-Za-z0-9._-]+$/.test(resumeRunId))) {
+  throw new Error("resume_run_id_missing_or_invalid:rerun_launcher");
+}
 if (!/^[a-f0-9]{64}$/.test(runtimeContractDigest || "")) {
   throw new Error("workflow_runtime_contract_missing:rerun_launcher");
 }
@@ -902,16 +911,13 @@ try {
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/engineering_context.py")}" contract --expected-digest "${runtimeContractDigest}"。原样返回 JSON；失败时停止并重新运行 launcher，不创建 Batch、不探索工程、不修改任何文件。`,
     { label: "verify-engineering-deployment", phase: "准备" }
   ), "engineering deployment");
-  const prepareCommand = resumeMode === "manual"
-    ? `python -X utf8 "${schedulerPath}" manual-resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}"`
+  const prepareCommand = resumeRunId
+    ? `python -X utf8 "${schedulerPath}" ${resumeMode === "manual" ? "manual-resume" : "resume"} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}"`
     : `python -X utf8 "${schedulerPath}" ensure ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
-      `--task-card-id "${taskCardId.trim()}" ` +
+      `--task-card-id "${taskCardId.trim()}" --workflow-invocation-id "${workflowInvocationId}" ` +
       `--max-parallel ${maxParallel} ` +
       `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs}`;
-  if (resumeMode === "manual" && !usableString(resumeRunId)) {
-    throw new Error("manual_resume_run_id_missing");
-  }
   prepared = requireSchedulerResult(await workflowAgent(
     `确保固定 Code DAG run。执行：${prepareCommand}。` +
     (resumeMode === "manual"
@@ -930,6 +936,9 @@ try {
 }
 
 const runId = prepared.runId;
+if (inactiveRun(prepared)) {
+  return { ok: false, feature, runId, finalStatus: prepared.status, nextAction: "none" };
+}
 maxParallel = prepared.maxParallel;
 const controlProtocolVersion = prepared.controlProtocolVersion || 1;
 if (["promoting_main", "integration_sync_required", "integration_sync_conflicted"].includes(prepared.status)) {
@@ -1150,6 +1159,7 @@ function markSchedulerRecovered() {
 function applySchedulerState(scheduler) {
   if (!scheduler || typeof scheduler !== "object") return lastScheduler;
   if (lastScheduler && lastScheduler.runId && scheduler.runId !== lastScheduler.runId) return lastScheduler;
+  if (inactiveRun(lastScheduler) && !inactiveRun(scheduler)) return lastScheduler;
   if (Number.isInteger(lastScheduler && lastScheduler.controlRevision)
       && Number.isInteger(scheduler.controlRevision)
       && scheduler.controlRevision < lastScheduler.controlRevision) return lastScheduler;
@@ -1216,7 +1226,7 @@ async function readSchedulerState(label, phaseName = "准备") {
       const missingBatches = view && view.batches && typeof view.batches === "object"
         ? Object.keys(state.batchTaskIds).filter(batchId => !view.batches[batchId])
         : Object.keys(state.batchTaskIds);
-      if (!view || !view.batches || !view.mergeTrains || !Array.isArray(view.deferredIssues) || missingBatches.length) {
+      if (!inactiveRun(state) && (!view || !view.batches || !view.mergeTrains || !Array.isArray(view.deferredIssues) || missingBatches.length)) {
         throw new Error(`parallel_scheduler_manifest_view_incomplete:${missingBatches.join(",")}`);
       }
       const applied = applySchedulerState(state);
@@ -1708,7 +1718,7 @@ async function resolveMergeCandidate(repositoryRef, wave, label, executionPhase)
     required: ["success"], additionalProperties: true,
   };
   const prepared = unwrap(await workflowAgent(
-    `准备既有 Merge Train 候选的冲突解决：执行 python -X utf8 "${mergeTrainPath}" prepare-resolution ${bindingArgs} --attempt-id "${label}"。` +
+    `准备既有 Merge Train 候选的冲突解决：执行 python -X utf8 "${mergeTrainPath}" prepare-resolution ${bindingArgs} --attempt-id "${label}" --workflow-retry。` +
     `运行清单位置已知：${JSON.stringify(`${artifactWorkspace}/.autobizdevops/features/${feature}/.parallel-runs/${runId}/manifest.json`)}。无需搜索目录或读取插件源码定位产物。` +
     `完整保留命令返回的 runDir、manifestPath、contextPath、contextDigest、identityDigest、repositoryRef、wave、conflictedFiles；上下文包由插件准备。` +
     `使用 execute 的默认合法工作区，不把工具 cwd/workdir 切换到候选；候选目录由插件内部处理。只执行这个插件命令并返回 stdout JSON；失败时返回原始结果，不得自行解决、暂存或提交，不得创建候选或修改集成分支、基线分支。`,
@@ -1915,19 +1925,22 @@ function enqueueWorkspaceSync(initial) {
 }
 
 async function drainWorkspaceSync() {
+  workspaceSyncControl.finishing = true;
   while (workspaceSyncControl.inFlight.size) {
     await Promise.all([...workspaceSyncControl.inFlight.values()]);
   }
 }
 
-async function waitWorkspaceSyncRetry(seconds) {
+async function waitWorkspaceSyncRetry(seconds, publication = false) {
   // Long backoffs are interruptible between bounded waits by the host runtime.
   let remaining = Math.max(0, seconds * 1000);
   while (remaining > 0) {
-    const delay = Math.min(60000, remaining);
+    if (publication && workspaceSyncControl.finishing && remaining > 5000) return false;
+    const delay = Math.min(publication ? 5000 : 60000, remaining);
     await new Promise(resolve => setTimeout(resolve, delay));
     remaining -= delay;
   }
+  return true;
 }
 
 async function runWorkspaceSyncQueue(initial) {
@@ -1937,7 +1950,7 @@ async function runWorkspaceSyncQueue(initial) {
   // the durable queue; an old callback must never erase a newer demand.
   const script = joinPath(pluginPath, "hooks/parallel_workspace_sync.py");
   const binding = `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${ref}" --resolver-id "${workflowInvocationId}"`;
-  let current = initial, refreshPasses = 0, transportFailures = 0;
+  let current = initial, refreshPasses = 0, transportFailures = 0, finalPasses = 0;
   const call = async (action, extra, label) => {
     const result = unwrap(await workflowAgent(
       (current.error ? `同步提示：仓库 ${ref} 的 Batch 已合并，但工作区同步尚未成功。错误=${JSON.stringify(current.error)}；当前状态=${current.status}；重试等待秒数=${current.retryAfterSeconds || 0}。\n` : "") +
@@ -1947,6 +1960,7 @@ async function runWorkspaceSyncQueue(initial) {
       `不移动用户分支 HEAD、不改用户暂存区、不提交代码。同步失败不改变 Batch 已合并状态；不得自行执行 Git、清空工作区或要求用户确认。`,
       { label, phase: "工作区同步", schema: WORKSPACE_SYNC_SCHEMA }
     ));
+    if (result && result.repositoryRef === ref && inactiveRun(result)) return result;
     if (!result || typeof result.success !== "boolean" || result.repositoryRef !== ref
         || (!["retry_wait", "failed"].includes(result.status) && hasFailureSignal(result)) || !["queued", "running", "pending", "retry_wait", "failed", "busy", "conflicted", "refresh_required", "synced", "skipped"].includes(result.status)) {
       throw new Error(`workspace_sync_receipt_invalid:${errorText(result)}`);
@@ -1954,6 +1968,7 @@ async function runWorkspaceSyncQueue(initial) {
     return result;
   };
   for (let pass = 1; ; pass += 1) {
+    const previousSyncedSha = current.lastSyncedSha;
     try {
       current = await call("process", "", `workspace-sync-${ref}-${pass}`);
       if (current.status === "conflicted") {
@@ -1990,6 +2005,7 @@ async function runWorkspaceSyncQueue(initial) {
       }
     }
     workspaceSyncControl.results.set(ref, current);
+    if (inactiveRun(current)) return current;
     for (const job of current.queue || []) {
       if (job.status === "failed" && !workspaceSyncControl.notifications.some(item => item.jobId === job.jobId && item.status === "failed")) {
         workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: job.jobId, status: "failed", error: job.error, batchIds: job.batchIds });
@@ -2003,8 +2019,13 @@ async function runWorkspaceSyncQueue(initial) {
     if (current.status === "failed") {
       current = await call("retry", "", `workspace-sync-retry-${ref}-${pass}`);
     }
+    if (inactiveRun(current)) return current;
+    if (workspaceSyncControl.finishing) {
+      if (current.lastSyncedSha && current.lastSyncedSha !== previousSyncedSha) finalPasses = 0;
+      else if (++finalPasses >= 3) return current;
+    }
     if (current.status === "refresh_required") continue;
-    await waitWorkspaceSyncRetry(Number(current.retryAfterSeconds) || 5);
+    if (!await waitWorkspaceSyncRetry(Number(current.retryAfterSeconds) || 5, true)) return current;
   }
 }
 
@@ -2569,6 +2590,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
   // Keep the existing short-wait budget when the normal idle poll is slower.
   const maxIdlePolls = Math.ceil((timeoutPerBatch + 60) / 60);
   for (;;) {
+    if (inactiveRun(lastScheduler)) return;
     const waitSequence = dispatcherState.changeSequence || 0;
     const waitRevision = lastScheduler && lastScheduler.controlRevision;
     if (typeof schedulerControlState !== "undefined" && !schedulerControlState.available) {
@@ -2756,7 +2778,6 @@ async function drainRunnableLifecycles(drainLabel) {
   } catch (error) {
     recordUnresolved({ kind: "scheduler", status: "parallel_execution_failed", durable: false, error });
   }
-  await drainWorkspaceSync();
   ranAny = dispatcherState.ranAny || schedulerCycles > 0;
   const snapshot = lastScheduler;
   return {
@@ -2814,8 +2835,8 @@ function unresolvedBatchDetails(scheduler = lastScheduler) {
   }
   for (const record of activeUnresolvedRecords()) {
     if (!isValidBatchId(record.batchId) || ["cleanup", "deferred_issue", "validation", "scheduler"].includes(record.kind)) continue;
+    if (batchMap[record.batchId]?.status === "merged" && usableString(batchMap[record.batchId].mergeCommitSha)) continue;
     const existing = byId.get(record.batchId) || { batchId: record.batchId, dependencies: [], blockedBy: [], blocks: [] };
-    if (existing.status === "merged") continue;
     byId.set(record.batchId, {
       ...existing,
       status: existing.status || record.status || "unresolved",
@@ -2834,6 +2855,10 @@ function unresolvedMergeCandidateDetails(scheduler = lastScheduler) {
     ? manifest.mergeTrains
     : {};
   const byKey = new Map();
+  const allMerged = ids => ids.length > 0 && ids.every(batchId => {
+    const batch = manifest && manifest.batches && manifest.batches[batchId];
+    return batch && batch.status === "merged" && usableString(batch.mergeCommitSha);
+  });
   const add = candidate => {
     const key = `${candidate.repositoryRef || "unknown"}|${candidate.wave || "unknown"}`;
     const existing = byKey.get(key) || {};
@@ -2846,13 +2871,7 @@ function unresolvedMergeCandidateDetails(scheduler = lastScheduler) {
     // Retain the older candidate for audit, but do not make that historical
     // record look unfinished once every delivery it references has a durable
     // merge commit.
-    if (
-      trainBatchIds.length > 0
-      && trainBatchIds.every(batchId => {
-        const batch = manifest && manifest.batches && manifest.batches[batchId];
-        return batch && batch.status === "merged" && usableString(batch.mergeCommitSha);
-      })
-    ) continue;
+    if (allMerged(trainBatchIds)) continue;
     const ids = trainBatchIds.filter(isValidBatchId);
     add({
       trainId,
@@ -2868,12 +2887,14 @@ function unresolvedMergeCandidateDetails(scheduler = lastScheduler) {
   }
   for (const record of activeUnresolvedRecords()) {
     if (record.kind !== "merge_candidate") continue;
+    const ids = record.batchIds?.length ? record.batchIds : record.batchId ? [record.batchId] : [];
+    if (allMerged(ids)) continue;
     add({
       repositoryRef: record.repositoryRef,
       wave: record.wave,
       status: record.status,
       error: record.error,
-      batchIds: record.batchIds || (record.batchId ? [record.batchId] : []),
+      batchIds: ids,
       worktreePath: record.worktreePath,
       conflictedFiles: record.conflictedFiles,
       durable: record.durable === true,
@@ -3085,12 +3106,12 @@ async function prepareDeliveryFinalization(label) {
       `只执行 python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" prepare-finalization --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。原样返回 success、status、repairRequired、batchIds；不返回调度快照，不执行测试或清理。`,
       { label, phase: "最终修复与报告", schema: FINALIZATION_RESULT_SCHEMA }
     ), "prepare finalization");
+    if (inactiveRun(result)) return result;
     if (result.success !== true || !Array.isArray(result.batchIds)
         || !["ready", "repair_required"].includes(result.status)
         || result.repairRequired !== (result.status === "repair_required")
         || (result.status === "ready" && result.batchIds.length)) throw new Error("parallel_finalization_result_invalid");
     for (const sync of result.workspaceSync || []) enqueueWorkspaceSync(sync);
-    await drainWorkspaceSync();
     return result;
   } catch (error) {
     recordSchedulerFailure(label, error);
@@ -3103,8 +3124,10 @@ async function runFinalRepairAndReport() {
   const v2 = typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2;
   const admission = v2 ? await prepareDeliveryFinalization("prepare-delivery-finalization") : null;
   if (v2 && !admission) return null;
+  if (inactiveRun(admission)) return admission;
   const initial = await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
   if (!initial) return null;
+  if (inactiveRun(initial)) return initial;
   if (admission && admission.status === "ready") return initial;
   await persistUndurableBatchFailures();
 
@@ -3160,6 +3183,7 @@ async function runFinalRepairAndReport() {
   const final = await readSchedulerState("final-report-snapshot", "最终修复与报告");
   if (v2 && final && allWorkflowDeliveriesMerged(final)) {
     const ready = await prepareDeliveryFinalization("prepare-delivery-finalization-after-repair");
+    if (inactiveRun(ready)) return ready;
     if (!ready || ready.status !== "ready") return null;
     return readSchedulerState("final-repair-admitted-snapshot", "最终修复与报告");
   }
@@ -3170,17 +3194,16 @@ async function runUntilDeliveriesComplete() {
   // Local attempts and idle windows only yield back to this recovery loop.
   // Durable stage/merge/publication receipts decide what runs next, never an
   // invocation-wide retry count. Host cancellation can still stop the run.
-  const stopped = state => ["cancelled", "rolled_back", "cleaned"].includes(
-    state && (state.status || (state.manifest && state.manifest.status)));
   for (let pass = 1; ; pass += 1) {
-    if (stopped(lastScheduler)) return lastScheduler;
+    if (inactiveRun(lastScheduler)) return lastScheduler;
     let final = null;
     try {
       await drainRunnableLifecycles(pass === 1 ? "drain" : `resume-drain-${pass}`);
+      if (inactiveRun(lastScheduler)) return lastScheduler;
       final = await runFinalRepairAndReport();
-      if (final) applySchedulerState(final);
+      if (final) final = applySchedulerState(final);
+      if (inactiveRun(lastScheduler)) return lastScheduler;
       if (allWorkflowDeliveriesMerged(final)) return final;
-      if (stopped(final || lastScheduler)) return final || lastScheduler;
     } catch (error) {
       recordSchedulerFailure(`workflow-resume-${pass}`, error);
     }
@@ -3201,9 +3224,10 @@ applySchedulerState(prepared);
 // branches and their newly-ready downstream waves get dispatched first.
 const finalScheduler = await runUntilDeliveriesComplete();
 if (finalScheduler) applySchedulerState(finalScheduler);
+await drainWorkspaceSync();
 
-if (!allWorkflowDeliveriesMerged(finalScheduler)) {
-  const stopped = finalScheduler && ["cancelled", "rolled_back", "cleaned"].includes(finalScheduler.status);
+if (inactiveRun(finalScheduler) || !allWorkflowDeliveriesMerged(finalScheduler)) {
+  const stopped = inactiveRun(finalScheduler);
   return completionReport({
     finalStatus: stopped ? finalScheduler.status : "completed_with_unresolved",
     scheduler: finalScheduler || lastScheduler,
@@ -3221,6 +3245,9 @@ try {
     `只汇总当前集成提交的交付与 Review 证据，不创建验证 Worktree 或准备测试环境。这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 如实报告，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时直接完成，不询问用户是否合并或验收，不执行 promote、commit 或 reset。原样返回 JSON，完整保留 Runtime 本次读取的 workspaceSync 和 repositoryHeads，禁止用之前的同步回执替换。`,
     { label: "aggregate-staged-evidence", phase: "最终汇总", schema: VERIFICATION_SCHEMA }
   ));
+  if (inactiveRun(verification)) {
+    return completionReport({ finalStatus: verification.status, scheduler: finalScheduler, nextAction: "none" });
+  }
   if (!verification || verification.unparsedStructuredOutput === true
       || verification.ok === false || verification.success === false
       || verification.policy !== "report_only" || typeof verification.passed !== "boolean"
@@ -3246,11 +3273,15 @@ for (const record of unresolvedRecords) {
 const hasAuditIssues = verification.hasIssues || verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
 for (let attempt = 1; ; attempt += 1) {
 try {
-  verification.codeCheckpoint = requireSuccess(await workflowAgent(
-    `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/update_checkpoint.py")}" --feature "${feature}" --checkpoint code_done --json。` +
+  const checkpoint = unwrap(await workflowAgent(
+    `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/update_checkpoint.py")}" --feature "${feature}" --checkpoint code_done --json --code-run-id "${runId}"。` +
     `使用插件环境中的 artifact workspace "${artifactWorkspace}"，不传 --workspace、不手改状态文件、不跳过现有产物和证据校验。清理 pending 不阻止 Code 完成；成功后不启动下一阶段、不询问用户是否合并。原样返回 JSON。`,
     { label: "complete-code-checkpoint", phase: "最终汇总" }
-  ), "code done checkpoint");
+  ));
+  if (inactiveRun(checkpoint)) {
+    return completionReport({ finalStatus: checkpoint.status, scheduler: finalScheduler, nextAction: "none" });
+  }
+  verification.codeCheckpoint = requireSuccess(checkpoint, "code done checkpoint");
   if (verification.codeCheckpoint.ok !== true || verification.codeCheckpoint.new_checkpoint !== "code_done") {
     throw new Error(`code_done_checkpoint_receipt_invalid:${JSON.stringify(verification.codeCheckpoint)}`);
   }

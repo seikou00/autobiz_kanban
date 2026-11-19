@@ -592,8 +592,26 @@ class DeliveryTest(unittest.TestCase):
         gate_batch(self.workspace, "alpha", self.run, "B001")
         finish(*args[:6], "failed")
         with _execution_lock(self.workspace, "alpha", self.run, "B001"):
-            self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B001"], 1)
+            snapshot = schedule(self.workspace, "alpha", self.run)
+            self.assertEqual(snapshot["dispatchGrants"]["B001"], 1)
+            self.assertEqual(snapshot["retryPendingBatches"], [])
         self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B001"], 2)
+
+    def test_rollback_after_delivery_stops_finalization_and_publication(self):
+        from hooks.parallel_batch_lifecycle import rollback_run
+        from hooks.parallel_evidence_aggregate import aggregate_evidence
+        from hooks.parallel_workspace_queue import operate
+
+        self.create()
+        args, _ = self.delivery()
+        settle_delivery(*args)
+        self.assertEqual(prepare_finalization(*args[:3])["status"], "ready")
+        rollback_run(*args[:3], confirm=True)
+        self.assertEqual(prepare_finalization(*args[:3])["status"], "rolled_back")
+        self.assertEqual(aggregate_evidence(*args[:3], finish_workflow=True)["status"], "rolled_back")
+        self.assertEqual(operate(*args[:3], "default", "resolver")["status"], "rolled_back")
+        self.assertEqual(self.manifest()["status"], "rolled_back")
+        self.assertFalse((self.repo / "B001.txt").exists())
 
     def test_cleanup_failure_preserves_merged_delivery_and_can_resume(self):
         self.create()

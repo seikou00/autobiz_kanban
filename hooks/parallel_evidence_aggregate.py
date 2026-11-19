@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_batch_stage import stage_names, is_test_only_reseal
-from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, utc_now
+from hooks.parallel_runtime import INACTIVE_RUN_STATES, append_event, load_manifest, run_dir, run_lock, save_manifest, utc_now
 
 
 def _digest(value: Any) -> str:
@@ -140,6 +140,8 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
 def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, finish_workflow: bool = False) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return {"runId": run_id, "status": manifest["status"], "blockingErrors": []}
         errors: list[str] = []
         blocking_errors: list[str] = []
         deliveries = manifest.get("batches", {})

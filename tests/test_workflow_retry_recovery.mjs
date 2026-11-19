@@ -313,7 +313,22 @@ test("explicit run cancellation stops automatic recovery", async () => {
   const state = { status: "cancelled", manifest: { batches: {} } };
   const c = vm.createContext({ lastScheduler: state,
     drainRunnableLifecycles: async () => assert.fail("cancelled runs must not restart") });
+  vm.runInContext(source.slice(source.indexOf("function inactiveRun("), source.indexOf("function requireSchedulerResult(")), c);
   vm.runInContext(source.slice(source.indexOf('async function runUntilDeliveriesComplete('),
     source.indexOf('// A resumed run can already contain')), c);
   assert.equal(await c.runUntilDeliveriesComplete(), state);
+});
+
+test("a durable merge supersedes in-memory batch and candidate errors", () => {
+  const c = harness();
+  const state = snapshot(1, "merged", 1000);
+  state.manifest.batches.B001 = { status: "merged", mergeCommitSha: "upstream" };
+  state.manifest.batches.B002.mergeCommitSha = "merged-by-runtime";
+  c.activeUnresolvedRecords = () => [
+    { kind: "batch", batchId: "B002", status: "timeout" },
+    { kind: "merge_candidate", batchIds: ["B002"], repositoryRef: "default", wave: 1, status: "needs_resolution" },
+  ];
+  vm.runInContext(source.slice(source.indexOf("function manifestFromScheduler("),
+    source.indexOf("function completionReport(")), c);
+  assert.equal(c.allWorkflowDeliveriesMerged(state), true);
 });

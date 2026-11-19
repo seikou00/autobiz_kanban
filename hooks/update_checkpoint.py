@@ -783,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--feature", "-f", help="feature slug; defaults to FEATURE_ID")
     parser.add_argument("--checkpoint", "-c", help="target checkpoint")
+    parser.add_argument("--code-run-id", help="bind code_done to the Code Workflow run")
     parser.add_argument(
         "--skip-node",
         action="append",
@@ -807,6 +808,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="validate and print target content without writing")
     parser.add_argument("--json", action="store_true", help="print JSON result")
     args = parser.parse_args(raw_args)
+    if args.code_run_id and args.checkpoint != "code_done":
+        parser.error("--code-run-id requires --checkpoint code_done")
 
     if bool(args.skip_node) == bool(args.checkpoint):
         print("checkpoint 更新失败: 必须且只能提供 --checkpoint 或 --skip-node 之一", file=sys.stderr)
@@ -843,6 +846,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"checkpoint 更新失败: {exc}", file=sys.stderr)
         return 1
 
+    if args.code_run_id:
+        from hooks.parallel_runtime import INACTIVE_RUN_STATES, load_manifest, run_lock
+        try:
+            with run_lock(workspace, feature, args.code_run_id):
+                manifest = load_manifest(workspace, feature, args.code_run_id)
+                if manifest.get("status") in INACTIVE_RUN_STATES:
+                    print(json.dumps({"ok": False, "status": manifest["status"], "error": "code_run_inactive"}))
+                    return 1
+                return _update(args, workspace, feature)
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 1
+    return _update(args, workspace, feature)
+
+
+def _update(args: argparse.Namespace, workspace: Path, feature: str) -> int:
     if args.skip_node:
         result = prepare_skip_update(
             workspace=workspace,

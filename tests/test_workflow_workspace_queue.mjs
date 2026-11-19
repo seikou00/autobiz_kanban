@@ -15,6 +15,7 @@ function harness(agent) {
     setTimeout: (fn, ms) => { waits.push(ms); queueMicrotask(fn); },
   });
   vm.runInContext(source.slice(source.indexOf('async function synchronizeUserWorkspace('), source.indexOf('async function settleReadyBatch(')), c);
+  vm.runInContext(source.slice(source.indexOf("function inactiveRun("), source.indexOf("function requireSchedulerResult(")), c);
   vm.runInContext(source.slice(source.indexOf('function encodeFailure('), source.indexOf('async function dispatchCommand(')), c);
   return { c, state, waits };
 }
@@ -56,7 +57,7 @@ test('durable publication retries pass the old limit and preserve warnings until
     : receipt('repo', 'synced'));
   await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
   assert.equal(calls, 8);
-  assert.deepEqual(waits.slice(0, 4), [5000, 30000, 60000, 60000]);
+  assert.equal(waits.reduce((total, ms) => total + ms, 0), 5000 + 30000 + 5 * 120000);
   assert.equal(state.results.get('repo').status, 'synced');
   assert.ok(state.notifications.some(item => item.status === 'retry_wait' && item.error === 'disk error'));
 });
@@ -140,4 +141,11 @@ test('a late synced receipt cannot suppress a newer queued merge', async () => {
   await c.drainWorkspaceSync();
   assert.equal(calls, 1);
   assert.equal(state.results.get('repo').lastSyncedSha, 'B');
+});
+
+test('cancellation ends a pending publication with no failure retry', async () => {
+  const { c, state } = harness(async () => receipt('repo', 'cancelled', { hasPending: true }));
+  await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
+  assert.equal(state.results.get('repo').status, 'cancelled');
+  assert.equal(state.notifications.length, 0);
 });

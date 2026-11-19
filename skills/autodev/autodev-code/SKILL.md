@@ -23,6 +23,8 @@ python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}"
 
 基线按每个业务 Git 根首次捕获一次，已有有效基线复用，不因后续 Batch 重捕。启动前展示 launcher 的 batchExecutionPlan（Batch、TASK 数、lane、仓库、依赖及 waves）。按 launcher 返回的脚本路径和完整 `workflowArgs` 启动一次固定 Workflow。只接受 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true` 以及 `start_fixed_workflow` / `resume_fixed_workflow`。恢复使用同一 runId，不新建 Run 绕过失败。其他结果按 `requiredAction` 处理；配置与特殊恢复按需读取 `references/batch-workflow-guide.md`。
 
+报告返回 `resume_workspace_sync` 且 Feature 已为 `code_done` 时，读取状态后直接运行 launcher 恢复原 run。跳过 `code_in_progress` 登记和基线捕获，沿用已合并 Batch 的回执。
+
 ## Batch 实现
 
 - 只在插件提供的 Worktree 执行分配的 TASK，按 Runtime 返回的当前派发代次与 lease 身份操作，不自行创建、删除或合并 Worktree。
