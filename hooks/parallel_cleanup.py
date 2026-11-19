@@ -20,6 +20,7 @@ from hooks.evidence_kernel import FileLock
 from hooks.git_runtime import git_command
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.parallel_runtime import load_manifest, run_dir, run_lock, save_manifest, utc_now
+from hooks.repository_snapshot import RUNTIME_EXCLUDES
 
 
 def pending(manifest: dict) -> list[dict]:
@@ -113,10 +114,12 @@ def _remove(manifest: dict, job: dict, deadline: float) -> None:
         if (branch_result.returncode or branch_result.stdout.strip() != branch or common.returncode or root_common.returncode
                 or (path / common.stdout.strip()).resolve() != (repo / root_common.stdout.strip()).resolve()):
             raise ValueError("cleanup_repository_or_branch_changed")
-        clean = _git(path, deadline, "status", "--porcelain", "--untracked-files=all")
+        clean = _git(path, deadline, "status", "--porcelain", "--untracked-files=all", "--", ".", *RUNTIME_EXCLUDES)
         if head.returncode or head.stdout.strip() != job["expectedSha"] or clean.returncode or clean.stdout.strip():
             raise ValueError("cleanup_worktree_changed")
-        removed = _git(repo, deadline, "worktree", "remove", str(path))
+        # Identity and delivery HEAD are verified above, and business changes
+        # still block removal. Only excluded runtime files may remain dirty.
+        removed = _git(repo, deadline, "worktree", "remove", "--force", str(path))
         if removed.returncode:
             raise ValueError("cleanup_worktree_remove_failed:" + removed.stderr.strip())
     found = _git(repo, deadline, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")

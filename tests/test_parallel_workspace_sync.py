@@ -81,6 +81,34 @@ class WorkspaceSyncTest(unittest.TestCase):
         journal = json.loads((Path(result["backupPath"]) / "journal.json").read_text())
         self.assertFalse(any(name.startswith(".cmbdevclaw/") for name in journal["originals"]))
 
+    def test_frontend_intermediates_are_not_published_and_local_analysis_is_preserved(self):
+        local = self.repo / ".frontend/html-analysis/page.json"
+        local.parent.mkdir(parents=True)
+        local.write_text("local analysis\n")
+        git(self.repo, "add", ".frontend/")
+        initial_index = self.source_index()
+        business = {"src/page.vue": "page\n", "public/data.json": "{}", "public/logo.png": "image"}
+        intermediates = {".frontend/html-analysis/page.json": "incoming analysis\n",
+                         "web/.frontend/html-input/original.html": "original"}
+
+        def edit(tree):
+            for name, contents in {**business, **intermediates}.items():
+                target = tree / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(contents)
+
+        # Deliberately include intermediates in a legacy delivery commit to
+        # exercise the publication safeguard independently of the sealer.
+        result = self.publish_extended(edit)
+        self.assertEqual(result["status"], "synced", result)
+        self.assertEqual(local.read_text(), "local analysis\n")
+        self.assertFalse((self.repo / "web/.frontend/html-input/original.html").exists())
+        self.assertEqual(self.source_index(), initial_index)
+        for name, contents in business.items():
+            self.assertEqual((self.repo / name).read_text(), contents)
+        journal = json.loads((Path(result["backupPath"]) / "journal.json").read_text())
+        self.assertTrue(set(intermediates).issubset(journal["skippedIgnoredFiles"]))
+
     def test_staged_addition_removed_from_disk_stays_only_in_the_user_index(self):
         staged_only = self.repo / "staged-only.txt"
         staged_only.write_text("staged content\n")

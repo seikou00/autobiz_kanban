@@ -10,6 +10,7 @@ from hooks.commit_message import CommitMessageError, build_commit_message
 from hooks.parallel_batch_scheduler import create_run, mark_batch
 from hooks.parallel_batch_stage import complete_stage, fail_stage, start_stage
 from hooks.parallel_runtime import acquire_lease, load_manifest, save_manifest
+from hooks.repository_snapshot import capture_file_snapshot, capture_untracked_files, git_status_porcelain, working_tree_changed_files
 from hooks.worktree_manager import main, provision_parallel_worktree, seal_parallel_batch
 from tests.test_task_runner import _read_batch, _workspace, _write_batch
 
@@ -100,6 +101,59 @@ class BatchCommitMessageTest(unittest.TestCase):
                          "TASK T001：deliver behavior\n任务目标：deliver observable behavior")
         self.assertNotIn("update behavior", message)
         self.assertNotIn("REQ-001", message)
+
+    def test_frontend_intermediates_are_unstaged_and_excluded_from_delivery(self) -> None:
+        runtime_paths = [".frontend/html-analysis/分析 [1].json", "web/.frontend/html-input/original.html"]
+        business_paths = ["delivery.txt", "src/page.vue", "public/logo.png", "public/data.json", "README.md"]
+        for name in runtime_paths + business_paths[1:]:
+            target = self.worktree / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(name, encoding="utf-8")
+        self._git("add", "-A")
+
+        result = self._seal(purpose="review", commit_stage="code", commit_summary="实现页面")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(set(result["changedFiles"]), set(business_paths))
+        committed = self._git("show", "--format=", "--name-only", result["commitSha"]).splitlines()
+        self.assertEqual(set(committed), set(business_paths))
+        self.assertEqual(self._git("diff", "--cached", "--name-only"), "")
+        self.assertEqual(git_status_porcelain(self.worktree).stdout, "")
+        for name in runtime_paths:
+            self.assertEqual((self.worktree / name).read_text(encoding="utf-8"), name)
+
+    def test_runtime_only_seal_reuses_head_and_preserves_analysis(self) -> None:
+        (self.worktree / "delivery.txt").unlink()
+        runtime = self.worktree / ".frontend/html-analysis/page.json"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("{}", encoding="utf-8")
+        self._git("add", ".frontend/")
+        before = self._git("rev-parse", "HEAD")
+
+        result = self._seal(purpose="review", commit_stage="code", commit_summary="分析页面")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["commitSha"], before)
+        self.assertEqual(result["changedFiles"], [])
+        self.assertEqual(self._git("diff", "--cached", "--name-only"), "")
+        self.assertTrue(runtime.is_file())
+
+    def test_snapshots_ignore_tracked_staged_and_untracked_frontend_intermediates(self) -> None:
+        tracked = self.worktree / "web/.frontend/html-analysis/tracked.json"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("baseline", encoding="utf-8")
+        self._git("add", "web/.frontend/")
+        self._git("commit", "-m", "legacy analysis fixture")
+        before = capture_file_snapshot(self.worktree)
+        tracked.write_text("updated analysis", encoding="utf-8")
+        runtime = self.worktree / ".frontend/html-input/page.html"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("original", encoding="utf-8")
+        self._git("add", "web/.frontend/")
+
+        self.assertEqual(capture_file_snapshot(self.worktree), before)
+        self.assertEqual(capture_untracked_files(self.worktree), ["delivery.txt"])
+        self.assertEqual(working_tree_changed_files(self.worktree), ["delivery.txt"])
+        self.assertIn("delivery.txt", git_status_porcelain(self.worktree).stdout)
+        self.assertNotIn(".frontend", git_status_porcelain(self.worktree).stdout)
 
     def test_missing_goal_is_rejected_without_staging(self) -> None:
         batch = _read_batch(self.feature_dir)

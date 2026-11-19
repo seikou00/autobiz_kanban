@@ -40,7 +40,8 @@ from hooks.plan_write_ownership import is_test_asset_path
 from hooks.utest_test_environment import validate_worktree_pom
 from hooks.parallel_integration import integration_repo
 from hooks.repository_snapshot import (
-    PLATFORM_RUNTIME_DIRECTORY,
+    RUNTIME_EXCLUDES,
+    RUNTIME_PATHSPECS,
     RepositorySnapshotError,
     current_git_branch,
     resolve_git_root,
@@ -759,28 +760,28 @@ def _parallel_binding(
 
 
 def _unstage_platform_runtime(worktree: Path) -> dict[str, Any] | None:
-    """Keep platform workflow journals out of the delivery commit.
+    """Keep workflow journals and frontend intermediates out of delivery.
 
-    Dynamic Workflow writes its own state under ``.cmbdevclaw`` while the
-    Batch agent runs.  A previous command may already have staged that state,
-    so an exclude pathspec on ``git add`` alone is insufficient.
+    A previous command may already have staged runtime files, so an exclude
+    pathspec on ``git add`` alone is insufficient. Reset only their index
+    entries; preserve working files for subsequent analysis and recovery.
     """
     staged, lock_failure, _ = _git_with_index_lock_retry(
         worktree,
         "diff",
         "--cached",
         "--name-only",
+        "-z",
         "--",
-        PLATFORM_RUNTIME_DIRECTORY,
+        *RUNTIME_PATHSPECS,
     )
     if lock_failure is not None:
         return lock_failure
     if staged.returncode != 0:
         return {"success": False, "error": f"parallel_batch_staged_runtime_check_failed:{staged.stderr.strip()}"}
-    paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
-    if not paths:
+    if not staged.stdout:
         return None
-    reset, lock_failure, _ = _git_with_index_lock_retry(worktree, "reset", "--", *paths)
+    reset, lock_failure, _ = _git_with_index_lock_retry(worktree, "reset", "--", *RUNTIME_PATHSPECS)
     if lock_failure is not None:
         return lock_failure
     if reset.returncode != 0:
@@ -924,7 +925,7 @@ def seal_parallel_batch(
             "--untracked-files=all",
             "--",
             ".",
-            f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
+            *RUNTIME_EXCLUDES,
         )
         if lock_failure is not None:
             return lock_failure
@@ -991,7 +992,7 @@ def seal_parallel_batch(
                 "-A",
                 "--",
                 ".",
-                f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
+                *RUNTIME_EXCLUDES,
             )
             if lock_failure is not None:
                 return lock_failure
@@ -1006,7 +1007,7 @@ def seal_parallel_batch(
                 commit_message,
                 "--",
                 ".",
-                f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
+                *RUNTIME_EXCLUDES,
             )
             if lock_failure is not None:
                 return lock_failure

@@ -607,6 +607,21 @@ class DeliveryTest(unittest.TestCase):
         (tree / "local-change.txt").unlink()
         self.assertEqual(drain(self.workspace, "alpha", self.run)["cleanupPending"], [])
 
+    def test_cleanup_accepts_only_frontend_intermediates_left_after_delivery(self):
+        self.create()
+        args, tree = self.delivery()
+        for name in (".frontend/html-analysis/page.json", "web/.frontend/html-input/page.html"):
+            target = tree / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("analysis")
+        git(tree, "add", ".frontend/")
+        self.assertEqual(settle_delivery(*args)["status"], "merged")
+        cleanup = drain(self.workspace, "alpha", self.run)
+        self.assertEqual(cleanup["cleanupPending"], [], cleanup)
+        self.assertFalse(tree.exists())
+        self.assertTrue(self.repo.is_dir())
+        self.assertTrue(self.integration.is_dir())
+
     def test_each_merged_batch_is_cleaned_while_other_worktrees_remain_usable(self):
         self.create(2)
         binding = self.manifest()["repositories"]["default"]

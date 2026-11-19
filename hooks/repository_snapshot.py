@@ -18,7 +18,11 @@ REQUIRED_IGNORED_RUNTIME_PATHS = (".cmbdevclaw/large_tool_results/",)
 # platform runtime state rather than business-source changes.
 PLATFORM_RUNTIME_DIRECTORY = ".cmbdevclaw/"
 WORKFLOW_RUNTIME_DIRECTORY = f"{PLATFORM_RUNTIME_DIRECTORY}workflows/"
-_PLATFORM_RUNTIME_EXCLUDE = f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**"
+# Frontend tools also write under subprojects, e.g. web/.frontend/.
+# Keep the same directory rules for snapshots, sealing and publication.
+RUNTIME_DIRECTORIES = frozenset({PLATFORM_RUNTIME_DIRECTORY.rstrip("/"), ".frontend"})
+RUNTIME_PATHSPECS = tuple(f":(glob)**/{name}/**" for name in sorted(RUNTIME_DIRECTORIES))
+RUNTIME_EXCLUDES = tuple(f":(exclude,glob)**/{name}/**" for name in sorted(RUNTIME_DIRECTORIES))
 
 
 class RepositorySnapshotError(ValueError):
@@ -55,7 +59,7 @@ def git_status_porcelain(repo: Path) -> subprocess.CompletedProcess[str]:
         "--untracked-files=all",
         "--",
         ".",
-        _PLATFORM_RUNTIME_EXCLUDE,
+        *RUNTIME_EXCLUDES,
     )
 
 
@@ -194,7 +198,7 @@ def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
             "-z",
             "--",
             ".",
-            _PLATFORM_RUNTIME_EXCLUDE,
+            *RUNTIME_EXCLUDES,
         ),
         capture_output=True,
         check=False,
@@ -222,7 +226,7 @@ def capture_untracked_files(repo: Path) -> list[str]:
             "-z",
             "--",
             ".",
-            _PLATFORM_RUNTIME_EXCLUDE,
+            *RUNTIME_EXCLUDES,
         ),
         capture_output=True,
         check=False,
@@ -253,7 +257,7 @@ def working_tree_changed_files(repo: Path) -> list[str]:
         "HEAD",
         "--",
         ".",
-        _PLATFORM_RUNTIME_EXCLUDE,
+        *RUNTIME_EXCLUDES,
     )
     if completed.returncode != 0:
         raise RepositorySnapshotError("git_worktree_status_failed")

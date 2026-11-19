@@ -29,8 +29,9 @@ from hooks.git_runtime import git_command
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import global_worktrees_root, load_manifest, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_repository import coordinates
+from hooks.repository_snapshot import RUNTIME_DIRECTORIES
 
-_RUNTIME_DIRECTORIES = {".cmbdevclaw", ".autobizdevops", ".parallel-runs"}
+_RUNTIME_DIRECTORIES = RUNTIME_DIRECTORIES | {".autobizdevops", ".parallel-runs"}
 
 
 def _git(repo: Path, *args: str, env: dict | None = None, data: bytes | None = None, check: bool = True,
