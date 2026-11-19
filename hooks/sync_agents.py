@@ -28,8 +28,12 @@ board_config.json 注册::
       "supported_deploy_units": [...],
       "systems": [ {"systemId","systemName","agentsReady","agentsPath","deployUnits":[...]} ] }
 
-``--write-board-config``（已写进注册的 pull_knowledge 命令，UI 每次拉取即触发）：同步成功后
-把 ``supported_deploy_units`` 定点写回 board_config.json 顶层同名字段，并把克隆落盘路径写回
+``--write-board-config``（已写进注册的 pull_knowledge 命令，UI 每次拉取即触发）：同步结束后
+若 sys 中有知识内容，再次合并 JS 扫描与 agents.manifest.json 的部署单元并去重。
+本次刷新不安装依赖，JS 最多执行 5 秒，缺依赖时只使用 JSON；两者均不可用则不采用本次刷新。
+即使克隆失败/超时，只要本地刷新可用也会尝试写回，保留 ok:false 和原始同步错误，
+通过 localKnowledgeRefreshed:true 与 boardConfigWritten:true 单独报告刷新及写入成功。
+把 ``supported_deploy_units`` 定点写回 board_config.json 顶层同名字段，并把知识库路径写回
 ``inspectCommands.<当前平台>.knowledge_path``（把预置的 ``${pluginPath}/sys`` 静态模板改写成解析出的
 绝对路径，只改当前 OS 那一处）。两处都正则定点替换、不重排整份文件；写前校验仍为合法 JSON，
 否则放弃写入并在结果里给出 boardConfigWriteError。
@@ -77,6 +81,7 @@ from hooks.render_collected_session_context import (  # noqa: E402
     list_supported_deploy_units,
     prepare_collector_dependencies,
 )
+from hooks.list_supported_deploy_ids import _manifest_deploy_ids  # noqa: E402
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 KNOWLEDGE_COLLECTOR_PATH = ROOT / "hooks" / "collect-knowledge.js"
@@ -423,6 +428,8 @@ def run(
             return _fail(str(exc))
         except OSError as exc:
             return _fail(f"同步 agents 仓库失败: {exc}")
+        except subprocess.TimeoutExpired as exc:
+            return _fail(f"同步 agents 仓库超时: {exc}")
         dependency_error = dependencies.result() if dependencies is not None else None
 
     repo_info = {
@@ -501,6 +508,46 @@ def run(
     result["repo"] = repo_info
     result["knowledge_path"] = str(dest)
     return result
+
+
+def refresh_local_supported_units(result: dict) -> bool:
+    """重新读取 sys 中的 JS + manifest；不安装依赖，不掩盖 Git 同步失败。"""
+    dest = get_agents_root()
+    try:
+        # 仅有 .git 的未完成克隆不算可用知识内容。
+        if not dest.is_dir() or not any(item.name != ".git" for item in dest.iterdir()):
+            return False
+    except OSError as exc:
+        result["localRefreshError"] = str(exc)
+        return False
+
+    units: List[str] = []
+    sources: List[str] = []
+    warnings: List[str] = []
+    try:
+        units.extend(_collector_supported_units(
+            dest, time.monotonic() + SYNC_COLLECTOR_TIMEOUT_SECONDS, "",
+        ))
+        sources.append("collect-knowledge.js")
+    except KnowledgeCollectorError as exc:
+        warnings.append(f"collect-knowledge.js: {exc}")
+    try:
+        units.extend(_manifest_deploy_ids(str(dest)))
+        sources.append("agents.manifest.json")
+    except KnowledgeCollectorError as exc:
+        warnings.append(f"agents.manifest.json: {exc}")
+
+    if warnings:
+        result["localRefreshWarnings"] = warnings
+    if not sources:
+        result["localRefreshError"] = "本地知识库的 JS 和 JSON 均不可用，保留原配置"
+        return False
+    result["supported_deploy_units"] = list(dict.fromkeys(units))
+    result["supported_deploy_units_source"] = " + ".join(sources)
+    result["knowledge_path"] = str(dest)
+    result["localKnowledgeRefreshed"] = True
+    _log(f"从本地知识库刷新 {len(result['supported_deploy_units'])} 个部署单元，来源: {sources}")
+    return True
 
 
 def merge_supported_units_into_board_config(
@@ -600,17 +647,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--write-board-config",
         dest="write_board_config",
         action="store_true",
-        help="同步成功后把 supported_deploy_units 定点写回 board_config.json（pull_knowledge 已带此参数）",
+        help="合并本地 JS/JSON 部署单元并写回配置，克隆失败时也尝试本地兜底（不安装依赖）",
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     result = run(args.repo_url, args.ref, args.ssh_url, prefer_manifest=args.prefer_manifest)
-    if args.write_board_config and result.get("ok") and isinstance(result.get("supported_deploy_units"), list):
+    local_refreshed = refresh_local_supported_units(result) if args.write_board_config else False
+    if args.write_board_config and (result.get("ok") or local_refreshed) and isinstance(result.get("supported_deploy_units"), list):
         try:
-            merge_supported_units_into_board_config(result["supported_deploy_units"])
+            merge_supported_units_into_board_config(result["supported_deploy_units"], BOARD_CONFIG_PATH)
             # 知识库落盘路径写回 inspectCommands.<当前平台>.knowledge_path（把静态模板改写成绝对路径）。
             if isinstance(result.get("knowledge_path"), str) and result["knowledge_path"]:
-                merge_knowledge_path_into_board_config(result["knowledge_path"])
+                merge_knowledge_path_into_board_config(result["knowledge_path"], BOARD_CONFIG_PATH)
             result["boardConfigWritten"] = True
         except (OSError, RuntimeError) as exc:
             result["boardConfigWritten"] = False

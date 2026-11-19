@@ -829,6 +829,91 @@ class WriteBoardConfigTest(unittest.TestCase):
         self.assertIn("supported_deploy_units", before[diffs[0]])
 
 
+class LocalKnowledgeRefreshTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.dest = Path(temporary.name) / "sys"
+        self.dest.mkdir()
+        (self.dest / "agents.manifest.json").write_text(json.dumps({
+            "systems": [{"deployUnits": [
+                {"deployUnitId": "SHARED"}, {"deployUnitId": "JSON-ONLY"},
+            ]}],
+        }), encoding="utf-8")
+        patcher = mock.patch.object(sync_agents, "get_agents_root", return_value=self.dest)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def _invoke(self, collector_error=None, sync_error=None):
+        config = json.dumps({
+            "agentsRepo": {"url": "https://git/x.git", "ref": "main"},
+            "supported_deploy_units": ["OLD"],
+            "inspectCommands": {sync_agents._platform_key(): {"knowledge_path": "old"}},
+        })
+        output = io.StringIO()
+        with _temp_board_config(config) as cfg, mock.patch.object(
+            sync_agents, "sync_repo", side_effect=sync_error,
+            return_value={"commit": "abc", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents, "build_sync_payload", return_value={
+                "ok": True, "supported_deploy_units": ["MANIFEST-INITIAL"],
+            },
+        ), mock.patch.object(
+            sync_agents, "list_supported_deploy_units", side_effect=collector_error,
+            return_value=["JS-ONLY", "SHARED", "JS-ONLY"],
+        ) as collector, mock.patch.object(
+            sync_agents, "prepare_collector_dependencies",
+            side_effect=AssertionError("refresh must not install dependencies"),
+        ), contextlib.redirect_stdout(output):
+            sync_agents.main(["--prefer-manifest", "--write-board-config"])
+            stored = json.loads(cfg.read_text(encoding="utf-8"))
+        return json.loads(output.getvalue()), stored, collector
+
+    def test_timeout_refreshes_and_writes_union_without_hiding_sync_failure(self):
+        result, config, collector = self._invoke(sync_error=RuntimeError("克隆超时"))
+        self.assertFalse(result["ok"])
+        self.assertIn("克隆超时", result["message"])
+        self.assertTrue(result["boardConfigWritten"])
+        self.assertTrue(result["localKnowledgeRefreshed"])
+        self.assertEqual(config["supported_deploy_units"], ["JS-ONLY", "SHARED", "JSON-ONLY"])
+        self.assertEqual(config["inspectCommands"][sync_agents._platform_key()]["knowledge_path"], str(self.dest))
+        self.assertEqual(collector.call_args.kwargs["dependency_error"], "")
+
+    def test_missing_js_dependencies_still_writes_json_after_timeout(self):
+        result, config, _ = self._invoke(
+            collector_error=sync_agents.KnowledgeCollectorError("Cannot find module 'gray-matter'"),
+            sync_error=subprocess.TimeoutExpired("git", 10),
+        )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["boardConfigWritten"])
+        self.assertEqual(config["supported_deploy_units"], ["SHARED", "JSON-ONLY"])
+        self.assertEqual(result["supported_deploy_units_source"], "agents.manifest.json")
+
+    def test_success_also_refreshes_union_despite_prefer_manifest(self):
+        result, config, _ = self._invoke()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["boardConfigWritten"])
+        self.assertEqual(config["supported_deploy_units"], ["JS-ONLY", "SHARED", "JSON-ONLY"])
+
+    def test_both_sources_unavailable_preserves_old_config(self):
+        (self.dest / "agents.manifest.json").write_text("invalid JSON", encoding="utf-8")
+        result, config, _ = self._invoke(
+            collector_error=sync_agents.KnowledgeCollectorError("node unavailable"),
+            sync_error=RuntimeError("克隆失败"),
+        )
+        self.assertNotIn("boardConfigWritten", result)
+        self.assertIn("localRefreshError", result)
+        self.assertEqual(config["supported_deploy_units"], ["OLD"])
+
+    def test_git_metadata_alone_does_not_trigger_refresh(self):
+        (self.dest / "agents.manifest.json").unlink()
+        (self.dest / ".git").mkdir()
+        result, config, collector = self._invoke(sync_error=RuntimeError("克隆失败"))
+        collector.assert_not_called()
+        self.assertNotIn("boardConfigWritten", result)
+        self.assertEqual(config["supported_deploy_units"], ["OLD"])
+
+
 class WriteBoardConfigWiringTest(unittest.TestCase):
     """main() 里 --write-board-config 的触发条件（monkeypatch，不碰真实文件）。"""
 
