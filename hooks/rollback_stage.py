@@ -42,6 +42,7 @@ from board_core.state_store import (  # noqa: E402
 from board_core.workflow import find_effective_current_node  # noqa: E402
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.json_writer_common import atomic_write_json  # noqa: E402
+from hooks.git_runtime import git_command  # noqa: E402
 from hooks.plan_writer import (  # noqa: E402
     PlanWriterInputError,
     _load as load_plan_writer_data,
@@ -259,7 +260,7 @@ def _baseline_entry(session_root: Path, path: Path) -> dict[str, Any]:
 
 def _git_bytes(repository: Path, *args: str) -> bytes:
     completed = subprocess.run(
-        ["git", "-C", str(repository), *args],
+        git_command("-C", str(repository), *args),
         capture_output=True,
         check=False,
     )

@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 from hooks.conflict_types import CandidateStatus, ConflictContext
 from hooks.conflict_resolution_agent import ModelBasedResolver
 from hooks.commit_message import build_commit_message, normalize_task_card_id
+from hooks.git_runtime import git_command
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure, record_e2e_skip
@@ -39,7 +40,7 @@ from hooks.merge_resolution import (
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return subprocess.run(git_command(*args), cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _safe(value: str) -> str:

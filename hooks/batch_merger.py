@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
+from hooks.git_runtime import git_command  # noqa: E402
 from hooks.commit_message import build_commit_message, normalize_task_card_id  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     append_event,
@@ -30,7 +31,7 @@ from hooks.plan_writer import mark_parallel_batch_tasks_merged  # noqa: E402
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        git_command(*args),
         cwd=repo,
         capture_output=True,
         text=True,

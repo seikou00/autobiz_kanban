@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
+from hooks.git_runtime import git_command  # noqa: E402
 from hooks.plan_write_ownership import normalize_owned_path  # noqa: E402
 from hooks.task_run_integrity import task_run_integrity_error  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
@@ -70,7 +71,7 @@ def _git_root(raw_path):
         return None
     try:
         completed = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            git_command("-C", str(path), "rev-parse", "--show-toplevel"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
@@ -92,7 +93,7 @@ def _git_common_dir(raw_path):
         return None
     try:
         completed = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            git_command("-C", str(root), "rev-parse", "--git-common-dir"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
@@ -325,9 +326,9 @@ def _git_changed_paths(repository_root):
     """Return paths changed by the current sealed commit or local UTest edits."""
     root = Path(repository_root).resolve()
     commands = (
-        ["git", "-C", str(root), "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"],
-        ["git", "-C", str(root), "diff", "--name-only", "-z", "HEAD", "--"],
-        ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
+        git_command("-C", str(root), "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"),
+        git_command("-C", str(root), "diff", "--name-only", "-z", "HEAD", "--"),
+        git_command("-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"),
     )
     paths = []
     for command in commands:

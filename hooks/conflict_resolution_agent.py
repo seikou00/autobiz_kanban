@@ -10,6 +10,7 @@ from typing import Any
 
 from hooks.conflict_types import ConflictContext, ConflictType, ResolutionResult
 from hooks.commit_message import CommitMessageError, build_commit_message
+from hooks.git_runtime import git_command
 
 
 class ConflictAnalyzer:
@@ -281,7 +282,7 @@ class ModelBasedResolver:
 
                 # Mark as resolved
                 subprocess.run(
-                    ["git", "add", file_path],
+                    git_command("add", file_path),
                     cwd=worktree_path,
                     check=True,
                     capture_output=True,
@@ -303,13 +304,12 @@ class ModelBasedResolver:
         # Commit resolution
         try:
             result = subprocess.run(
-                [
-                    "git",
+                git_command(
                     "commit",
                     "--no-edit",
                     "-m",
                     commit_message,
-                ],
+                ),
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,
@@ -318,7 +318,7 @@ class ModelBasedResolver:
                 check=True,
             )
             new_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
+                git_command("rev-parse", "HEAD"),
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,

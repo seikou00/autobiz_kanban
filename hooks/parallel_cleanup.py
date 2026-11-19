@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_kernel import FileLock
+from hooks.git_runtime import git_command
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.parallel_runtime import load_manifest, run_dir, run_lock, save_manifest, utc_now
 
@@ -52,7 +53,7 @@ def _git(repo: Path, deadline: float, *args: str) -> subprocess.CompletedProcess
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("cleanup_budget_exhausted")
-    command = ["git", *args]
+    command = git_command(*args)
     process = subprocess.Popen(command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, encoding="utf-8", errors="replace", start_new_session=os.name != "nt")
     try:

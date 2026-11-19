@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
+from hooks.git_runtime import git_command
+
 
 RepositoryMap = Dict[str, Path]
 REQUIRED_IGNORED_RUNTIME_PATHS = (".cmbdevclaw/large_tool_results/",)
@@ -31,7 +33,7 @@ def _run_text(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     CJK path segments fail before the actual Git operation is evaluated.
     """
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
+        git_command("-C", str(repo), *args),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -92,7 +94,7 @@ def git_worktree_records(repo: Path) -> list[dict[str, str]]:
     usage exit 129; only then retry its line-based porcelain format. Capture
     bytes so universal-newline conversion cannot change a NUL-delimited path.
     """
-    args = ["git", "-C", str(repo), "worktree", "list", "--porcelain"]
+    args = git_command("-C", str(repo), "worktree", "list", "--porcelain")
     result = subprocess.run([*args, "-z"], capture_output=True, check=False)
     separator = "\0"
     if result.returncode == 129:
@@ -183,8 +185,7 @@ def hash_file(path: Path) -> str | None:
 
 def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
     completed = subprocess.run(
-        [
-            "git",
+        git_command(
             "-C",
             str(repo),
             "ls-files",
@@ -194,7 +195,7 @@ def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
             "--",
             ".",
             _PLATFORM_RUNTIME_EXCLUDE,
-        ],
+        ),
         capture_output=True,
         check=False,
     )
@@ -212,8 +213,7 @@ def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
 
 def capture_untracked_files(repo: Path) -> list[str]:
     completed = subprocess.run(
-        [
-            "git",
+        git_command(
             "-C",
             str(repo),
             "ls-files",
@@ -223,7 +223,7 @@ def capture_untracked_files(repo: Path) -> list[str]:
             "--",
             ".",
             _PLATFORM_RUNTIME_EXCLUDE,
-        ],
+        ),
         capture_output=True,
         check=False,
     )

@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from hooks.repository_snapshot import PLATFORM_RUNTIME_DIRECTORY
+from hooks.git_runtime import git_command
 
 
 PLATFORM_EXCLUDE = f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**"
@@ -20,7 +21,7 @@ def git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ, GIT_EDITOR="true", GIT_TERMINAL_PROMPT="0")
     try:
         return subprocess.run(
-            ["git", *args], cwd=path, env=env, capture_output=True,
+            git_command(*args), cwd=path, env=env, capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except subprocess.TimeoutExpired as exc:

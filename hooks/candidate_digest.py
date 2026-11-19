@@ -9,10 +9,12 @@ import json
 import subprocess
 from pathlib import Path
 
+from hooks.git_runtime import git_command
+
 
 def _git_bytes(root, args):
     process = subprocess.run(
-        ["git", "-C", str(root)] + list(args),
+        git_command("-C", str(root), *args),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -28,7 +30,7 @@ def _git_bytes(root, args):
 
 def _git_bytes_optional(root, args):
     process = subprocess.run(
-        ["git", "-C", str(root)] + list(args),
+        git_command("-C", str(root), *args),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,

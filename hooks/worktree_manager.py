@@ -32,6 +32,7 @@ from hooks.parallel_runtime import (
     renew_lease, run_dir, run_lock, save_manifest,
 )
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
+from hooks.git_runtime import git_command
 from hooks.runtime_guidance import RuntimeArgumentParser
 from hooks.json_writer_common import feature_dir
 from hooks.plan_json import load_plan_bundle, task_contract_sha256
@@ -58,7 +59,7 @@ _GIT_INDEX_LOCK_ERROR_RE = re.compile(
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        git_command(*args),
         cwd=repo,
         capture_output=True,
         text=True,
@@ -384,7 +385,7 @@ def _archive_stale_worktree_state(
     )
     changed: set[str] = set()
     for args in commands:
-        result = subprocess.run(["git", *args], cwd=worktree, capture_output=True)
+        result = subprocess.run(git_command(*args), cwd=worktree, capture_output=True)
         if result.returncode != 0:
             raise ValueError("parallel_worktree_recovery_archive_scan_failed:" + os.fsdecode(result.stderr))
         changed.update(os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw)
@@ -396,7 +397,7 @@ def _archive_stale_worktree_state(
         ("staged.patch", ("diff", "--binary", "--no-ext-diff", "--cached", "HEAD")),
         ("unstaged.patch", ("diff", "--binary", "--no-ext-diff")),
     ):
-        diff = subprocess.run(["git", *args], cwd=worktree, capture_output=True)
+        diff = subprocess.run(git_command(*args), cwd=worktree, capture_output=True)
         if diff.returncode != 0:
             raise ValueError("parallel_worktree_recovery_archive_diff_failed:" + os.fsdecode(diff.stderr))
         patches[name] = diff.stdout

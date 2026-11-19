@@ -15,13 +15,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.conflict_types import CandidateStatus
+from hooks.git_runtime import git_command
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.parallel_runtime import load_manifest, run_lock, save_manifest, utc_now
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        git_command(*args),
         cwd=repo,
         capture_output=True,
         text=True,

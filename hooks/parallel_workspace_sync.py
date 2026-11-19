@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_kernel import FileLock
+from hooks.git_runtime import git_command
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import global_worktrees_root, load_manifest, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_repository import coordinates
@@ -36,7 +37,7 @@ def _git(repo: Path, *args: str, env: dict | None = None, data: bytes | None = N
          hooks_path: Path | None = None, log_path: Path | None = None):
     environment = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", **(env or {})}
     options = ["-c", "core.hooksPath=" + str(hooks_path)] if hooks_path is not None else []
-    result = subprocess.run(["git", *options, *args], cwd=repo, env=environment, input=data, capture_output=True)
+    result = subprocess.run(git_command(*options, *args), cwd=repo, env=environment, input=data, capture_output=True)
     if log_path is not None:
         log_path.with_suffix(".stdout.log").write_bytes(result.stdout)
         log_path.with_suffix(".stderr.log").write_bytes(result.stderr)

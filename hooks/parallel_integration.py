@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_kernel import FileLock
+from hooks.git_runtime import git_command
 from hooks.json_writer_common import atomic_write_json, feature_dir, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import global_worktrees_root, load_manifest, plan_digest, run_dir, run_lock, save_manifest, utc_now
 from hooks.plan_json import load_plan_bundle
@@ -29,7 +30,7 @@ PROMOTION_STATES = {"awaiting_user_confirmation", "promotion_prepared", "promoti
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(git_command(*args), cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode:
         raise ValueError(f"integration_git_failed:{args[0]}:{result.stderr.strip() or result.stdout.strip()}")
     return result.stdout.strip()
@@ -171,7 +172,7 @@ def _require_ready(manifest: dict) -> None:
             sha = batch.get(field)
             if not isinstance(sha, str) or not sha:
                 raise ValueError(f"integration_delivery_commit_missing:{batch_id}:{field}")
-            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", sha, binding["headSha"]], cwd=repo, capture_output=True)
+            ancestor = subprocess.run(git_command("merge-base", "--is-ancestor", sha, binding["headSha"]), cwd=repo, capture_output=True)
             if ancestor.returncode:
                 raise ValueError(f"integration_delivery_commit_not_integrated:{batch_id}:{field}")
 
@@ -190,7 +191,7 @@ def _snapshot(manifest: dict) -> dict:
         repo = assert_integration(binding)
         target = git(repo, "rev-parse", f"refs/heads/{binding['baseBranch']}^{{commit}}")
         candidate = binding["headSha"]
-        ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", target, candidate], cwd=repo, capture_output=True)
+        ancestor = subprocess.run(git_command("merge-base", "--is-ancestor", target, candidate), cwd=repo, capture_output=True)
         if ancestor.returncode:
             raise ValueError(f"integration_main_sync_required:{ref}")
         target_worktree = _target_worktree(repo, binding["baseBranch"])
@@ -305,7 +306,7 @@ def _promote_main(workspace: Path, feature: str, run_id: str, *, approval_digest
             current = git(repo, "rev-parse", f"refs/heads/{item['targetBranch']}")
             previous = results.get(ref, {})
             if previous.get("status") == "merged":
-                if subprocess.run(["git", "merge-base", "--is-ancestor", item["candidateSha"], current], cwd=repo, capture_output=True).returncode:
+                if subprocess.run(git_command("merge-base", "--is-ancestor", item["candidateSha"], current), cwd=repo, capture_output=True).returncode:
                     raise ValueError(f"integration_promoted_target_rewritten:{ref}")
                 continue
             if current == item["candidateSha"] and previous.get("status") == "promoting":
@@ -430,7 +431,7 @@ def _sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = F
                 continue
             # Reconcile an interruption after Git committed but before JSON.
             if state.get("status") == "merging":
-                merge_head = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=repo,
+                merge_head = subprocess.run(git_command("rev-parse", "-q", "--verify", "MERGE_HEAD"), cwd=repo,
                                             capture_output=True, text=True, encoding="utf-8", errors="replace")
                 if merge_head.returncode:
                     head = git(repo, "rev-parse", "HEAD")
@@ -455,14 +456,14 @@ def _sync_main(workspace: Path, feature: str, run_id: str, *, complete: bool = F
                     continue
             assert_integration(binding)
             target = git(repo, "rev-parse", f"refs/heads/{binding['baseBranch']}")
-            if subprocess.run(["git", "merge-base", "--is-ancestor", target, binding["headSha"]], cwd=repo, capture_output=True).returncode == 0:
+            if subprocess.run(git_command("merge-base", "--is-ancestor", target, binding["headSha"]), cwd=repo, capture_output=True).returncode == 0:
                 continue
             binding["mainSync"] = {"status": "merging", "baseSha": binding["headSha"], "targetSha": target}
             manifest["status"] = "integration_sync_required"
             manifest.pop("finalEvidenceAggregate", None)
             manifest["mainPromotion"] = {"status": "validation_required"}
             save_manifest(workspace, feature, run_id, manifest)
-            result = subprocess.run(["git", "merge", "--no-ff", "-m", build_commit_message(manifest["taskCardId"], f"同步主分支 {binding['baseBranch']}"), target],
+            result = subprocess.run(git_command("merge", "--no-ff", "-m", build_commit_message(manifest["taskCardId"], f"同步主分支 {binding['baseBranch']}"), target),
                                     cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if result.returncode:
                 files = [name for name in git(repo, "diff", "--name-only", "--diff-filter=U", "-z").split("\0") if name]
