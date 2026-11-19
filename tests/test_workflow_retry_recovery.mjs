@@ -281,3 +281,39 @@ test("final recovery continues beyond three drains and returns the successful sn
   assert.equal(c.finalRepairResults.filter(item => item.kind === "resume_retry_pending").length, 5);
   assert.equal(c.finalRepairResults.some(item => item.status === "automatic_retry_budget_exhausted"), false);
 });
+
+test("workflow resumes after local drain/finalization failures until durable deliveries complete", async () => {
+  const c = harness(), waits = [];
+  let drains = 0, finalizations = 0, reads = 0;
+  Object.assign(c, {
+    drainRunnableLifecycles: async () => { drains += 1; },
+    runFinalRepairAndReport: async () => {
+      finalizations += 1;
+      if (finalizations <= 4) throw new Error('transient finalization outage');
+      if (finalizations <= 9) return null;
+      return { manifest: { status: 'running', batches: { B001: { status: 'merged', mergeCommitSha: 'same-commit' } } } };
+    },
+    allWorkflowDeliveriesMerged: state => state?.manifest?.batches?.B001?.mergeCommitSha === 'same-commit',
+    manifestFromScheduler: state => state?.manifest,
+    applySchedulerState: state => { c.lastScheduler = state; return state; },
+    waitWorkspaceSyncRetry: async seconds => waits.push(seconds),
+    readSchedulerState: async () => { reads += 1; return null; },
+  });
+  vm.runInContext(source.slice(source.indexOf('async function runUntilDeliveriesComplete('),
+    source.indexOf('// A resumed run can already contain')), c);
+  const result = await c.runUntilDeliveriesComplete();
+  assert.equal(result.manifest.batches.B001.mergeCommitSha, 'same-commit');
+  assert.equal(drains, 10);
+  assert.equal(reads, 9);
+  assert.equal(waits.length, 9);
+  assert.ok(waits.every(seconds => seconds > 0 && seconds <= 30));
+});
+
+test("explicit run cancellation stops automatic recovery", async () => {
+  const state = { status: "cancelled", manifest: { batches: {} } };
+  const c = vm.createContext({ lastScheduler: state,
+    drainRunnableLifecycles: async () => assert.fail("cancelled runs must not restart") });
+  vm.runInContext(source.slice(source.indexOf('async function runUntilDeliveriesComplete('),
+    source.indexOf('// A resumed run can already contain')), c);
+  assert.equal(await c.runUntilDeliveriesComplete(), state);
+});

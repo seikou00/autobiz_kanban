@@ -237,13 +237,126 @@ class DispatchGrantTest(unittest.TestCase):
     def test_utest_recovery_preserves_progress_and_reacquires_slot(self):
         self._assert_sealed_stage_recovery_reacquires_slot("test")
 
-    def test_deterministic_handoff_failure_is_blocked_without_blind_retry(self):
+    def test_preconditions_are_rechecked_without_a_terminal_retry_limit(self):
         owner = self.claim()
         result = defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "engineering_handoff_identity_mismatch")
-        self.assertEqual("blocked", result["status"])
+        self.assertEqual("retry_pending", result["status"])
         batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
-        self.assertEqual("precondition_blocked", batch["recovery"]["status"])
-        self.assertEqual([], resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"])
+        self.assertEqual("pending_retry", batch["recovery"]["status"])
+        self.assertEqual("precondition", batch["recovery"]["failureClassification"])
+        self.assertEqual(["B001"], resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"])
+
+    def _review_checkpoint(self):
+        owner, worktree, branch = self._single_slot_worktree()
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True,
+                                text=True, check=True).stdout.strip()
+        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed",
+                   worktreePath=str(worktree), branchName=branch, commitSha=commit)
+        for stage in ("prepare", "implement"):
+            start_stage(self.workspace, "alpha", self.run, "B001", stage)
+            complete_stage(self.workspace, "alpha", self.run, "B001", stage, metadata={"batchCommit": commit})
+        start_stage(self.workspace, "alpha", self.run, "B001", "review")
+        return owner, worktree, commit
+
+    def test_repeated_review_interruptions_resume_the_same_unfinished_stage_until_done(self):
+        from hooks.parallel_batch_stage import finish_review
+        owner, worktree, commit = self._review_checkpoint()
+        original = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["stageStates"]
+        for gen in range(1, 7):
+            result = defer(self.workspace, "alpha", self.run, "B001", gen, owner["ownerToken"],
+                           "review_stage_not_finalized:B001:incomplete")
+            self.assertEqual(result["status"], "retry_pending")
+            resumed = resume_run(self.workspace, "alpha", self.run)
+            self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
+            batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+            self.assertEqual(batch["stageStates"], original)
+            self.assertEqual(batch["commitSha"], commit)
+            owner = claim(self.workspace, "alpha", self.run, "B001", gen + 1, "stage_recovery", "review-worker")
+            self.assertEqual(owner["status"], "claimed")
+        self.assertEqual(finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")["status"], "passed")
+        # Simulate a lost return after finish-review persisted its decision.
+        defer(self.workspace, "alpha", self.run, "B001", 7, owner["ownerToken"], "lost_review_response")
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "delivery")
+        self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree,
+            capture_output=True, text=True, check=True).stdout.strip(), commit)
+
+    def test_poll_recovers_a_legacy_blocked_review_without_stealing_a_live_owner(self):
+        owner, _, _ = self._review_checkpoint()
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        batch = manifest["batches"]["B001"]
+        batch.update(status="blocked", error="review_stage_not_finalized:B001")
+        batch["recovery"] = {"status": "precondition_blocked", "failureClassification": "precondition", "retryAttempts": 99}
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["retryPendingBatches"], [])
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["batches"]["B001"]["dispatch"]["status"] = "failed"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["retryPendingBatches"], ["B001"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
+        self.assertEqual(resumed["dispatchGrants"]["B001"], 2)
+        for _ in range(2):
+            self.assertEqual(schedule(self.workspace, "alpha", self.run)["dispatchGrants"]["B001"], 2)
+        self.assertEqual(finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"])["status"], "stale_owner_ignored")
+
+    def test_poll_recovers_a_sealed_review_when_the_worker_never_deferred_it(self):
+        self._review_checkpoint()
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["batches"]["B001"]["dispatch"]["expiresEpoch"] = 0
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["retryPendingBatches"], ["B001"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
+
+    def test_run_lock_contention_times_out_and_can_be_retried_after_release(self):
+        from hooks import parallel_runtime
+        with patch.object(parallel_runtime, "DEFAULT_RUN_LOCK_TIMEOUT_SECONDS", 0.03):
+            with parallel_runtime.run_lock(self.workspace, "alpha", self.run):
+                with self.assertRaisesRegex(TimeoutError, "file_lock_timeout"):
+                    with parallel_runtime.run_lock(self.workspace, "alpha", self.run):
+                        self.fail("must not take a live lock")
+            with parallel_runtime.run_lock(self.workspace, "alpha", self.run):
+                self.assertEqual(load_manifest(self.workspace, "alpha", self.run)["runId"], self.run)
+
+    def test_failed_dispatch_after_lost_defer_cannot_strand_a_rescheduled_review(self):
+        owner, _, _ = self._review_checkpoint()
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["batches"]["B001"]["recovery"] = {"status": "rescheduled", "kind": "stage_resume"}
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "failed")
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["retryPendingBatches"], ["B001"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
+        self.assertEqual(resumed["dispatchGrants"]["B001"], 2)
+
+    def test_lost_delivery_handoff_continues_after_review_without_reopening_it(self):
+        from hooks.parallel_batch_stage import finish_review, gate_batch
+        owner, _, _ = self._review_checkpoint()
+        finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")
+        gate_batch(self.workspace, "alpha", self.run, "B001")
+        finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"])
+        self.assertEqual(schedule(self.workspace, "alpha", self.run)["retryPendingBatches"], ["B001"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(resumed["mergeableBatches"], ["B001"])
+        self.assertEqual(resumed["stageRecoveryBatches"], [])
+
+    def test_missing_review_receipt_reopens_only_review_instead_of_looping_at_delivery(self):
+        from hooks.parallel_batch_stage import finish_review, gate_batch
+        owner, _, _ = self._review_checkpoint()
+        finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")
+        batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        Path(batch["stageStates"]["review"]["evidencePath"]).unlink()
+        rejected = gate_batch(self.workspace, "alpha", self.run, "B001")
+        self.assertEqual(rejected["error"], "parallel_batch_review_not_bound_to_seal")
+        defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], rejected["error"])
+        resumed = resume_run(self.workspace, "alpha", self.run)
+        self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
+        recovered = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
+        for stage in ("prepare", "implement"):
+            self.assertEqual(recovered["stageStates"][stage], batch["stageStates"][stage])
+        start_stage(self.workspace, "alpha", self.run, "B001", "review")
+        self.assertEqual(finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")["status"], "passed")
 
     def test_expired_pending_claim_can_be_taken_over_and_old_finish_is_fenced(self):
         old = self.claim()

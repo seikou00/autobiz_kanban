@@ -15,6 +15,7 @@ async function execute(frontend = false, fault = null) {
   let revision = 1;
   let queuedOnce = false;
   let syncCompletions = 0;
+  let syncFailures = 0, finalizationFailures = 0, snapshotFailures = 0, prepareFailures = 0;
   let workspaceState = fault && fault.startsWith("workspace-") ? {
     success: true, status: fault === "workspace-synced" ? "synced" : "conflicted", repositoryRef: "default",
     sourcePath: "/source", sourceBranch: "main", sourceHead: "original", lastSyncedSha: fault === "workspace-synced" ? "candidate" : null,
@@ -46,6 +47,7 @@ async function execute(frontend = false, fault = null) {
     labels.push(label);
     if (label === "verify-engineering-deployment") return { success: true };
     if (label === "fixed-workflow-prepare") {
+      if (fault === "prepare" && prepareFailures++ < 5) return {};
       const state = snapshot(false);
       if (fault === "sealed-recovery") {
         state.scheduledGroups = [];
@@ -95,7 +97,7 @@ async function execute(frontend = false, fault = null) {
       assert.match(prompt, /仅允许编辑临时 Worktree "\/sync-worktree"/);
       assert.match(prompt, /不得修改用户目录 "\/source"/);
       assert.match(prompt, /无须人工确认/);
-      return fault === "workspace-unresolved" ? { success: false, status: "needs_resolution", error: "unresolved" }
+      return fault === "workspace-unresolved" && syncFailures++ < 2 ? { success: false, status: "needs_resolution", error: "unresolved" }
         : { success: true, status: "resolved" };
     }
     if (label.startsWith("workspace-sync-complete-")) {
@@ -107,34 +109,32 @@ async function execute(frontend = false, fault = null) {
       return workspaceState;
     }
     if (label.startsWith("workspace-sync-warning-")) {
-      workspaceState = { ...workspaceState, success: false, status: "failed", error: "publication failed" };
+      workspaceState = { ...workspaceState, success: false, status: "retry_wait", hasPending: true,
+        retryAfterSeconds: 5, error: "publication failed" };
       return workspaceState;
     }
     if (label.startsWith("workspace-sync-")) {
       if (!workspaceState) return { success: true, status: "skipped", repositoryRef: "default" };
       if (workspaceState.status === "synced") return workspaceState;
       assert.match(prompt, /parallel_workspace_sync\.py" process/);
-      if (fault === "workspace-agent-timeout") throw new Error("workspace sync agent timed out after merge");
-      if (fault === "workspace-command-error") return { success: false, repositoryRef: "default", status: "pending", error: "Git LFS \ufffd\ufffd" };
-      workspaceState = { ...workspaceState, status: "conflicted" };
+      if (fault === "workspace-agent-timeout" && syncFailures++ < 2) throw new Error("workspace sync agent timed out after merge");
+      if (fault === "workspace-command-error" && syncFailures++ < 2) return { success: false, repositoryRef: "default", status: "pending", error: "Git LFS \ufffd\ufffd" };
+      workspaceState = { ...workspaceState, success: true, error: undefined, status: "conflicted" };
       return workspaceState;
     }
-    if (label === "prepare-delivery-finalization") {
-      if (fault === "admission") throw new Error("finalization unavailable");
-      return fault === "blocked"
+    if (label.startsWith("prepare-delivery-finalization")) {
+      if (fault === "admission" && finalizationFailures++ < 2) throw new Error("finalization unavailable");
+      return fault === "blocked" && finalizationFailures++ < 2
         ? { success: true, status: "repair_required", repairRequired: true, batchIds: ["B001"] }
         : { success: true, status: "ready", repairRequired: false, batchIds: [],
           ...(workspaceState ? { workspaceSync: [workspaceState] } : {}) };
     }
-    if (label.startsWith("final-repair-") || label === "final-report-snapshot") {
-      if (fault === "snapshot") return {};
+    if (label.startsWith("final-repair-") || label.startsWith("workflow-resume-snapshot-") || label === "final-report-snapshot") {
+      if (fault === "snapshot" && snapshotFailures++ < 2) return {};
       const current = snapshot(true);
-      if (fault === "blocked") {
+      if (fault === "blocked" && snapshotFailures++ < 2) {
         current.status = "blocked";
-        current.blockedBatches = ["B001"];
-        current.manifest.batches.B001.status = "blocked";
-        current.manifest.batches.B001.mergeCommitSha = null;
-        current.manifest.batches.B001.recovery = { status: "unchanged_failure", lastError: "unresolved finding" };
+        // A stale run-level block cannot erase the durable merge receipt.
       }
       return current;
     }
@@ -174,11 +174,12 @@ async function execute(frontend = false, fault = null) {
     }
     throw new Error(`unexpected control call: ${label}`);
   };
-  const run = new AsyncFunction("args", "agent", "parallel", "phase", source.replace("export const meta =", "const meta ="));
+  const run = new AsyncFunction("args", "agent", "parallel", "phase", "setTimeout", "clearTimeout", source.replace("export const meta =", "const meta ="));
   const result = await run({ feature: "f", pluginPath: "/plugin", artifactWorkspace: "/artifacts",
     codeWorkspaces: { default: "/source" }, taskCardId: "CARD-1", maxParallel: 9,
     workflowInvocationId: "a".repeat(32), runtimeContractDigest: "b".repeat(64) }, agent,
-  callbacks => { pools.push(callbacks.length); return Promise.all(callbacks.map(callback => callback())); }, () => {});
+  callbacks => { pools.push(callbacks.length); return Promise.all(callbacks.map(callback => callback())); }, () => {},
+  fn => setImmediate(fn), handle => clearImmediate(handle));
   assert.equal(pools[0], 3, "the durable run's capacity overrides changed launch hints");
   return { labels, result };
 }
@@ -196,6 +197,16 @@ test("nonblocking Review uncertainty survives in the completed report", async ()
 test("settlement uses Runtime SHA even when the implementation agent transcribed it incorrectly", async () => {
   const { result } = await execute(false, "stale-sha");
   assert.equal(result.finalStatus, "succeeded");
+});
+
+test("lost preparation responses retry ensure and create only one delivery lifecycle", async () => {
+  const { labels, result } = await execute(false, "prepare");
+  assert.equal(result.finalStatus, "succeeded");
+  assert.equal(result.runId, "run");
+  assert.equal(labels.filter(label => label === "fixed-workflow-prepare").length, 6);
+  assert.equal(labels.filter(label => label === "provision-worktree-B001").length, 1);
+  assert.equal(labels.filter(label => label === "fixed-batch-B001").length, 1);
+  assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 1);
 });
 
 test("provision contention preserves the Runtime reason when deferring a Batch", async () => {
@@ -296,11 +307,10 @@ test("sealed delivery recovery goes straight to settlement without reimplementat
 for (const fault of ["workspace-synced", "workspace-conflict", "workspace-refresh", "workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"]) {
   test(`${fault} delivers uncommitted workspace results without failing an already merged Batch`, async () => {
     const { labels, result } = await execute(false, fault);
-    const pending = ["workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"].includes(fault);
-    assert.equal(result.finalStatus, pending ? "succeeded_with_issues" : "succeeded", JSON.stringify({ labels, result }));
-    assert.equal(result.nextAction, pending ? "resume_workspace_sync" : "continue_next_stage");
+    assert.equal(result.finalStatus, "succeeded", JSON.stringify({ labels, result }));
+    assert.equal(result.nextAction, "continue_next_stage");
     assert.equal(result.workspaceSync.length, 1);
-    assert.equal(result.workspaceSyncPending.length, ["workspace-unresolved", "workspace-command-error", "workspace-agent-timeout"].includes(fault) ? 1 : 0);
+    assert.equal(result.workspaceSyncPending.length, 0);
     assert.equal(labels.some(label => /defer-batch|dispatch-finish|fixed-batch.*2/.test(label)), false);
     assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 1);
     if (fault === "workspace-refresh") assert.equal(labels.filter(label => label.startsWith("workspace-sync-complete-")).length, 2);
@@ -370,12 +380,11 @@ for (const fault of ["cleanup-error", "cleanup-pending"]) {
 }
 
 for (const fault of ["admission", "snapshot", "blocked"]) {
-  test(`finalization ${fault} failure reports unresolved work without replaying the drain or asking for confirmation`, async () => {
+  test(`finalization ${fault} failure resumes without reimplementing or delivering the Batch twice`, async () => {
     const { labels, result } = await execute(false, fault);
-    assert.equal(result.finalStatus, "completed_with_unresolved");
-    assert.equal(result.ok, false);
-    assert.ok(fault === "blocked" ? result.unresolved.batches.length : result.unresolved.schedulerFailures.length);
-    assert.equal(labels.filter(label => label === "prepare-delivery-finalization").length, 1);
+    assert.equal(result.finalStatus, "succeeded");
+    assert.equal(result.ok, true);
+    assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 1);
     assert.equal(labels.includes("prepare-user-confirmed-promotion"), false);
     assert.equal(labels.includes("run-e2e-validation"), false);
     assert.equal(labels.filter(label => label === "dispatch-claim-B001-1").length, 1);

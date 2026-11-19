@@ -896,6 +896,7 @@ function retryPendingBatchesOf(scheduler) {
 
 phase("准备");
 let prepared;
+for (let attempt = 1; !prepared; attempt += 1) {
 try {
   requireSuccess(await workflowAgent(
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/engineering_context.py")}" contract --expected-digest "${runtimeContractDigest}"。原样返回 JSON；失败时停止并重新运行 launcher，不创建 Batch、不探索工程、不修改任何文件。`,
@@ -914,29 +915,18 @@ try {
   prepared = requireSchedulerResult(await workflowAgent(
     `确保固定 Code DAG run。执行：${prepareCommand}。` +
     (resumeMode === "manual"
-      ? `这是用户请求的人工恢复：只重排 scheduler 已识别的 retryable Batch，保留既有 Worktree、证据和 runId；不得恢复 needs_resolution、冲突或取消的 Batch。`
+      ? `这是用户请求的人工恢复：依据持久化阶段重排失败 Batch，保留既有 Worktree、证据和 runId，并重新校验前置条件；不得恢复取消的 Batch，不得跳过未完成阶段。`
       : `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。`) +
     `新 run 使用集成 Worktree，禁止提交或修改源 checkout；仅旧 direct run 沿用 bootstrap 规则。` +
     `且不得把 .cmbdevclaw 平台运行文件纳入提交。必须原样返回该命令 stdout 的完整 JSON；不得读取 manifest 后自行概括、重建或省略 batchWorkspaces 的 workspaceRef。`,
     { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), "scheduler ensure");
 } catch (error) {
-  // There is no run identifier to recover when the control plane cannot be
-  // initialized.  Return an observable terminal result instead of exposing a
-  // raw Agent exception to the caller.
-  return {
-    ok: false,
-    feature,
-    runId: null,
-    finalStatus: "scheduler_prepare_failed",
-    unresolved: {
-      batches: [],
-      mergeCandidates: [],
-      deferredIssues: [],
-      schedulerFailures: [{ phase: "prepare", error: String(error) }],
-    },
-    nextAction: "retry_scheduler_prepare",
-  };
+  // Ensure reuses a run even when the original command succeeded but its
+  // model response was lost. Never create a replacement run on transport failure.
+  phase(`准备恢复：${String(error)}`);
+  await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
+}
 }
 
 const runId = prepared.runId;
@@ -1947,7 +1937,7 @@ async function runWorkspaceSyncQueue(initial) {
   // the durable queue; an old callback must never erase a newer demand.
   const script = joinPath(pluginPath, "hooks/parallel_workspace_sync.py");
   const binding = `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${ref}" --resolver-id "${workflowInvocationId}"`;
-  let current = initial, busyPasses = 0, refreshPasses = 0, transportFailures = 0;
+  let current = initial, refreshPasses = 0, transportFailures = 0;
   const call = async (action, extra, label) => {
     const result = unwrap(await workflowAgent(
       (current.error ? `同步提示：仓库 ${ref} 的 Batch 已合并，但工作区同步尚未成功。错误=${JSON.stringify(current.error)}；当前状态=${current.status}；重试等待秒数=${current.retryAfterSeconds || 0}。\n` : "") +
@@ -1983,7 +1973,6 @@ async function runWorkspaceSyncQueue(initial) {
       }
       transportFailures = 0;
       if (current.status !== "refresh_required") refreshPasses = 0;
-      if (current.status !== "busy") busyPasses = 0;
       if (current.status === "refresh_required" && ++refreshPasses > 3) throw new Error("workspace_sync_source_keeps_changing");
       if (current.status === "pending" && current.hasPending !== true) throw new Error(current.error || "workspace_sync_incomplete");
     } catch (error) {
@@ -1997,8 +1986,7 @@ async function runWorkspaceSyncQueue(initial) {
         // A transport outage can prevent even failure persistence. Keep a
         // visible invocation receipt; the durable job remains recoverable.
         current = { ...current, success: false, status: "retry_wait", hasPending: true,
-          error: detail, persistenceError: errorText(persistError), retryAfterSeconds: [5, 30, 120][transportFailures] || 0 };
-        if (++transportFailures > 3) current.status = "failed";
+          error: detail, persistenceError: errorText(persistError), retryAfterSeconds: [5, 30, 120][Math.min(transportFailures++, 2)] };
       }
     }
     workspaceSyncControl.results.set(ref, current);
@@ -2011,10 +1999,12 @@ async function runWorkspaceSyncQueue(initial) {
       workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: current.jobId, status: current.status,
         error: current.error, retryAfterSeconds: current.retryAfterSeconds, pendingBatchIds: current.pendingBatchIds });
     }
-    if (["synced", "skipped", "failed"].includes(current.status)) return current;
-    if (current.status === "busy" && ++busyPasses >= 4) return current;
+    if (["synced", "skipped"].includes(current.status)) return current;
+    if (current.status === "failed") {
+      current = await call("retry", "", `workspace-sync-retry-${ref}-${pass}`);
+    }
     if (current.status === "refresh_required") continue;
-    await waitWorkspaceSyncRetry(Number(current.retryAfterSeconds) || (current.status === "busy" ? 5 : 0));
+    await waitWorkspaceSyncRetry(Number(current.retryAfterSeconds) || 5);
   }
 }
 
@@ -2438,6 +2428,11 @@ function encodeFailure(reason) {
 async function dispatchCommand(action, job, extra, label) {
   const script = schedulerPath.replace(/[^/\\]+$/, "parallel_dispatch.py");
   const owner = job.ownerToken ? ` --owner-token "${job.ownerToken}"` : "";
+  // Claim request IDs and finish/defer owner tokens are replay-safe. Retry
+  // this exact operation after a lost response, rather than abandoning its
+  // live grant until the lease deadline or issuing a different claim.
+  for (let attempt = 1; ; attempt += 1) {
+  try {
   const result = unwrap(await workflowAgent(
     `只执行 python -X utf8 "${script}" ${action} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${job.batchId}" --generation ${job.generation}${owner} ${extra}。` +
     `原样返回命令 JSON，包括 success 字段。not_claimed 是正常拒绝领取，命令 success=true 必须保留；不得将它改成执行失败。not_claimed/stale_owner_ignored 时不得运行 TASK、强制 reclaim 或自行重试，由 Workflow 刷新调度状态。不得读取插件源码。`,
@@ -2448,6 +2443,11 @@ async function dispatchCommand(action, job, extra, label) {
     throw new Error(`parallel_dispatch_command_failed:${action}:${job.batchId}:${JSON.stringify(result)}`);
   }
   return result;
+  } catch (error) {
+    recordSchedulerFailure(`${label}-retry-${attempt}`, error);
+  }
+  await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
+  }
 }
 
 function signalDispatchChange(state) {
@@ -3166,6 +3166,30 @@ async function runFinalRepairAndReport() {
   return final;
 }
 
+async function runUntilDeliveriesComplete() {
+  // Local attempts and idle windows only yield back to this recovery loop.
+  // Durable stage/merge/publication receipts decide what runs next, never an
+  // invocation-wide retry count. Host cancellation can still stop the run.
+  const stopped = state => ["cancelled", "rolled_back", "cleaned"].includes(
+    state && (state.status || (state.manifest && state.manifest.status)));
+  for (let pass = 1; ; pass += 1) {
+    if (stopped(lastScheduler)) return lastScheduler;
+    let final = null;
+    try {
+      await drainRunnableLifecycles(pass === 1 ? "drain" : `resume-drain-${pass}`);
+      final = await runFinalRepairAndReport();
+      if (final) applySchedulerState(final);
+      if (allWorkflowDeliveriesMerged(final)) return final;
+      if (stopped(final || lastScheduler)) return final || lastScheduler;
+    } catch (error) {
+      recordSchedulerFailure(`workflow-resume-${pass}`, error);
+    }
+    await waitWorkspaceSyncRetry(Math.min(30, pass * 5));
+    const refreshed = await readSchedulerState(`workflow-resume-snapshot-${pass}`, "恢复执行");
+    if (refreshed) applySchedulerState(refreshed);
+  }
+}
+
 // A resumed run can already contain merged deliveries from a prior interrupted
 // Workflow. Cleanup is non-blocking: a temporary-worktree error never turns a
 // durable delivery back into a failed Batch.
@@ -3175,23 +3199,22 @@ applySchedulerState(prepared);
 // Drain every currently runnable branch, including retry-pending Batches.
 // Retry candidates stay behind all available non-retry work so independent
 // branches and their newly-ready downstream waves get dispatched first.
-await drainRunnableLifecycles("drain");
-
-const finalScheduler = await runFinalRepairAndReport();
+const finalScheduler = await runUntilDeliveriesComplete();
 if (finalScheduler) applySchedulerState(finalScheduler);
 
 if (!allWorkflowDeliveriesMerged(finalScheduler)) {
-  const snapshotAvailable = Boolean(manifestFromScheduler(finalScheduler));
+  const stopped = finalScheduler && ["cancelled", "rolled_back", "cleaned"].includes(finalScheduler.status);
   return completionReport({
-    finalStatus: "completed_with_unresolved",
+    finalStatus: stopped ? finalScheduler.status : "completed_with_unresolved",
     scheduler: finalScheduler || lastScheduler,
-    nextAction: "inspect_unresolved_batches_then_resume",
+    nextAction: stopped ? "none" : "inspect_unresolved_batches_then_resume",
   });
 }
 
 async function runFinalValidation() {
 phase("最终汇总");
 let verification;
+for (let attempt = 1; ; attempt += 1) {
 try {
   verification = unwrap(await workflowAgent(
     `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --finish-workflow。` +
@@ -3205,25 +3228,23 @@ try {
       || !Array.isArray(verification.workspaceSync) || !verification.repositoryHeads
       || typeof verification.repositoryHeads !== "object" || Array.isArray(verification.repositoryHeads)
       || verification.blockingErrors.length) {
-    recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error: verification });
-    return completionReport({
-      finalStatus: "completed_with_validation_failure",
-      scheduler: finalScheduler || lastScheduler,
-      verification,
-      nextAction: "inspect_evidence_aggregate_failure",
-    });
+    throw new Error(`evidence_aggregate_incomplete:${JSON.stringify(verification)}`);
   }
+  break;
 } catch (error) {
   recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error });
-  return completionReport({
-    finalStatus: "completed_with_validation_failure",
-    scheduler: finalScheduler || lastScheduler,
-    verification: { error: errorText(error) },
-    nextAction: "inspect_evidence_aggregate_failure",
-  });
+  await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
+}
+}
+for (const record of unresolvedRecords) {
+  if (record.kind === "validation" && record.status === "evidence_aggregate_failed") {
+    record.resolved = true;
+    record.resolvedAt = "evidence_aggregate_recovered";
+  }
 }
 
 const hasAuditIssues = verification.hasIssues || verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
+for (let attempt = 1; ; attempt += 1) {
 try {
   verification.codeCheckpoint = requireSuccess(await workflowAgent(
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/update_checkpoint.py")}" --feature "${feature}" --checkpoint code_done --json。` +
@@ -3233,9 +3254,11 @@ try {
   if (verification.codeCheckpoint.ok !== true || verification.codeCheckpoint.new_checkpoint !== "code_done") {
     throw new Error(`code_done_checkpoint_receipt_invalid:${JSON.stringify(verification.codeCheckpoint)}`);
   }
+  break;
 } catch (error) {
-  return completionReport({ finalStatus: "completed_with_checkpoint_failure", scheduler: finalScheduler || lastScheduler,
-    verification: { ...verification, checkpointError: errorText(error) }, nextAction: "retry_code_checkpoint" });
+  phase(`完成登记恢复：${errorText(error)}`);
+  await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
+}
 }
 return completionReport({
   finalStatus: hasAuditIssues ? "succeeded_with_issues" : "succeeded",

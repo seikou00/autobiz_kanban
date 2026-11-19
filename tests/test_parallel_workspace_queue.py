@@ -62,15 +62,15 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(self.fixture.source_index(), original_index)
         self.assertEqual(sync._value(self.repo, "rev-parse", "HEAD"), self.fixture.head)
 
-    def test_exhausted_job_is_covered_by_later_success_without_retry(self):
+    def test_legacy_exhausted_job_is_covered_by_later_success_without_retry(self):
         self.merge("B001")
         epoch = 10000000000
         with patch.object(sync, "sync_workspace", side_effect=OSError("write permission denied")) as calls:
-            for attempt, delay in enumerate((5, 30, 120, 0)):
+            for attempt, delay in enumerate((5, 30, 120, 120)):
                 with patch.object(queue.time, "time", return_value=epoch):
                     result = self.process()
                     self.assertEqual(result["retryAfterSeconds"], delay)
-                    self.assertEqual(result["status"], "retry_wait" if delay else "failed")
+                    self.assertEqual(result["status"], "retry_wait")
                     self.assertFalse(result["success"])
                     if delay:
                         self.assertEqual(self.process()["status"], "retry_wait")
@@ -79,6 +79,9 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(result["queue"][0]["failures"], 4)
         self.assertIn("permission denied", result["error"])
         self.assertEqual(self.manifest()["batches"]["B001"]["status"], "merged")
+        manifest = self.manifest()
+        manifest["workspaceSyncQueue"]["default"][0]["status"] = "failed"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
         self.merge("B002")
         with patch.object(sync, "sync_workspace", wraps=sync.sync_workspace) as calls:
             result = self.process()
@@ -90,6 +93,27 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(result["pendingBatchIds"], [])
         self.assertTrue((self.repo / "B001.txt").exists())
         self.assertTrue((self.repo / "B002.txt").exists())
+
+    def test_publication_retries_beyond_old_limits_and_recovers_a_legacy_failed_job(self):
+        self.merge("B001")
+        epoch = 10000000000
+        with patch.object(sync, "sync_workspace", side_effect=OSError("temporary outage")):
+            for attempt in range(7):
+                with patch.object(queue.time, "time", return_value=epoch):
+                    result = self.process()
+                self.assertEqual(result["status"], "retry_wait")
+                self.assertEqual(result["queue"][0]["failures"], attempt + 1)
+                epoch += result["retryAfterSeconds"] + 1
+        manifest = self.manifest()
+        job_id = manifest["workspaceSyncQueue"]["default"][0]["jobId"]
+        manifest["workspaceSyncQueue"]["default"][0]["status"] = "failed"
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        result = self.process()
+        self.assertEqual(result["status"], "synced", result)
+        self.assertEqual(result["queue"][0]["jobId"], job_id)
+        self.assertEqual(result["queue"][0]["failures"], 7)
+        with patch.object(sync, "sync_workspace", side_effect=AssertionError("must not republish")):
+            self.assertEqual(self.process()["status"], "synced")
 
     def test_write_completed_before_queue_ack_is_recovered_without_reapply(self):
         receipt = self.merge("B001")

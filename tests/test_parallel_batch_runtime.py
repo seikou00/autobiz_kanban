@@ -707,12 +707,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["dispatchGeneration"],
                                  generation + 1)
 
-    def test_resume_preserves_non_retryable_blocks_and_terminal_batches(self) -> None:
+    def test_resume_preserves_resolution_and_cancelled_batches(self) -> None:
         cases = [
-            ("blocked", "precondition_blocked", "precondition"),
-            ("blocked", "unchanged_failure", "precondition"),
-            ("blocked", "retry_exhausted", "precondition"),
-            ("blocked", "unknown", "retryable"),
             ("needs_resolution", "retry_exhausted", "retryable"),
             ("cancelled", "retry_exhausted", "retryable"),
         ]

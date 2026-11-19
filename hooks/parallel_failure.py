@@ -9,9 +9,7 @@ DETERMINISTIC = (
     "engineering_handoff_", "engineering_worktree_", "engineering_task_workspace_",
     "engineering_batch_", "engineering_branch_", "engineering_task_contract_", "engineering_snapshot_", "engineering_dependency_inputs_changed",
     "parallel_batch_stage_out_of_order", "parallel_batch_stage_needs_triage", "parallel_dispatch_stale_stage_owner", "prestart_unattributed_changes_detected",
-    "parallel_scheduler_manifest_view_incomplete", "review_not_passed:needs_triage",
-    "review_not_passed:incomplete", "review_not_passed:failed",
-    "review_stage_not_finalized", "parallel_repair_",
+    "review_not_passed:needs_triage", "review_not_passed:failed", "parallel_repair_",
     "utest_runtime_deployment_changed", "utest_runtime_policy_missing", "workflow_runtime_contract_missing",
 )
 

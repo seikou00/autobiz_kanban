@@ -33,6 +33,7 @@ from hooks.plan_json import (
 RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
 MIN_GUARDED_TTL_SECONDS = 4 * 60 * 60
+DEFAULT_RUN_LOCK_TIMEOUT_SECONDS = 30
 
 
 def batch_occupies_scheduler_slot(batch: object) -> bool:
@@ -553,7 +554,8 @@ def append_event(workspace: Path, feature: str, run_id: str, event: str, **detai
 
 @contextmanager
 def run_lock(workspace: Path, feature: str, run_id: str, *, timeout: float | None = None) -> Iterator[None]:
-    with FileLock(run_dir(workspace, feature, run_id) / ".lock", timeout=timeout):
+    with FileLock(run_dir(workspace, feature, run_id) / ".lock",
+                  timeout=DEFAULT_RUN_LOCK_TIMEOUT_SECONDS if timeout is None else timeout):
         yield
 
 

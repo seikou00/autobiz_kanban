@@ -50,7 +50,12 @@ def reconcile_locked(manifest: dict, ref: str) -> list[dict]:
 
 def next_job(jobs: list[dict]) -> dict | None:
     remaining = [job for job in jobs if job["status"] not in DONE]
-    # Exhausted jobs may be covered by a later cumulative publication.
+    # A newer cumulative target may cover an older publication that is in
+    # backoff; only a verified successful receipt marks that older job covered.
+    ready = next((job for job in remaining if job["status"] != "failed"
+                  and job.get("nextAttemptEpoch", 0) <= time.time()), None)
+    if ready is not None:
+        return ready
     return next((job for job in remaining if job["status"] != "failed"), remaining[-1] if remaining else None)
 
 
@@ -82,11 +87,11 @@ def summary_locked(manifest: dict, ref: str) -> dict:
 
 
 def _failure(manifest: dict, ref: str, job: dict, error: str, failure_id: str) -> dict:
-    if not any(item.get("failureId") == failure_id for item in job["errors"]) and job["status"] not in DONE | {"failed"}:
+    if not any(item.get("failureId") == failure_id for item in job["errors"]) and job["status"] not in DONE:
         count = job.get("failures", 0) + 1
         job.update(failures=count, error=error, lastFailureId=failure_id,
-                   status="retry_wait" if count <= len(RETRY_DELAYS) else "failed",
-                   nextAttemptEpoch=time.time() + RETRY_DELAYS[count - 1] if count <= len(RETRY_DELAYS) else 0)
+                   status="retry_wait",
+                   nextAttemptEpoch=time.time() + RETRY_DELAYS[min(count - 1, len(RETRY_DELAYS) - 1)])
         job["errors"].append({"error": error, "at": utc_now(), "attempt": job["attempts"], "failureId": failure_id})
         job.pop("owner", None)
     return summary_locked(manifest, ref)
@@ -134,7 +139,12 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 result = _failure(manifest, ref, job, error or "workspace_sync_agent_failed", failure_id or resolver)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result
-            if job["status"] == "failed" or job.get("nextAttemptEpoch", 0) > time.time():
+            if job["status"] == "failed":
+                # Older retry limits must not strand a publication forever.
+                # Preserve its identity, failure history and file journal.
+                job.update(status="queued", nextAttemptEpoch=0)
+                job.pop("owner", None)
+            if job.get("nextAttemptEpoch", 0) > time.time():
                 result = summary_locked(manifest, ref)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result

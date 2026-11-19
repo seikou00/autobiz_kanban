@@ -95,6 +95,24 @@ test("agent transport errors propagate without workflow retries", async () => {
   assert.deepEqual(labels, ["task-B001"]);
 });
 
+test("a lost claim response reuses its request identity instead of abandoning a live grant", async () => {
+  const { context: c } = harness(), waits = [];
+  let calls = 0;
+  c.waitWorkspaceSyncRetry = async seconds => { waits.push(seconds); assert.ok(waits.length < 3); };
+  c.agent = async prompt => {
+    calls += 1;
+    assert.match(prompt, /--request-id "same-request"/);
+    if (calls === 1) throw new Error("claim persisted but response lost");
+    return { success: true, status: "claimed", batchId: "B001", generation: 1, ownerToken: "same-owner", reused: true };
+  };
+  const result = await c.dispatchCommand("claim", { batchId: "B001", generation: 1 },
+    '--source "initial" --request-id "same-request"', "claim-B001");
+  assert.equal(result.ownerToken, "same-owner");
+  assert.equal(result.reused, true);
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [5]);
+});
+
 test("child phases limit managed background execution to plugin Python scripts", async () => {
   const { context: c } = harness();
   for (const label of ["fixed-workflow-prepare", "provision-worktree-B001", "fixed-batch-B001",

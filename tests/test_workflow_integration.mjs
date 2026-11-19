@@ -11,12 +11,13 @@ const finalization = source.slice(source.indexOf('async function runFinalValidat
 async function finalize({ isolated = true, missingSnapshot = false,
   aggregateFailure = false, aggregateUnavailable = false, blockingErrors = [], checkpointFailure = false } = {}) {
   const commands = [];
+  let auditAttempts = 0, checkpointAttempts = 0;
   const context = {
     prepared: { integrationMode: isolated ? "isolated" : "direct" },
     finalScheduler: {}, lastScheduler: {}, artifactWorkspace: "/artifacts", feature: "feature", runId: "run",
     pluginPath: "/plugin", mergeTrainPath: "/plugin/merge-train", aggregatePath: "/plugin/aggregate",
     VERIFICATION_SCHEMA: {},
-    phase() {}, recordUnresolved() {},
+    phase() {}, recordUnresolved() {}, unresolvedRecords: [], waitWorkspaceSyncRetry: async () => {},
     completionReport: value => value,
     joinPath: (...parts) => parts.join("/"),
     errorText: error => String(error),
@@ -32,13 +33,14 @@ async function finalize({ isolated = true, missingSnapshot = false,
       switch (options.label) {
         case "complete-code-checkpoint":
           assert.match(prompt, /--checkpoint code_done --json/);
-          return { ok: !checkpointFailure, new_checkpoint: "code_done" };
+          return { ok: !checkpointFailure || ++checkpointAttempts > 5, new_checkpoint: "code_done" };
         case "aggregate-staged-evidence":
-          if (aggregateUnavailable) return { ok: false, error: "report could not be written" };
-          return { ok: true, passed: !aggregateFailure, policy: "report_only", blockingErrors,
+          auditAttempts += 1;
+          if (aggregateUnavailable && auditAttempts <= 5) return { ok: false, error: "report could not be written" };
+          return { ok: true, passed: !aggregateFailure, policy: "report_only", blockingErrors: auditAttempts <= 5 ? blockingErrors : [],
             errors: aggregateFailure ? ["B003.test_batch_commit_stale", "B007.prepare_batch_commit_stale"] : [],
             integrationMode: isolated ? "isolated" : "direct", integrationWorkspaces: { default: "/integration" },
-            ...(!missingSnapshot ? { workspaceSync: [], repositoryHeads: { default: "candidate" } } : {}),
+            ...(!missingSnapshot || auditAttempts > 5 ? { workspaceSync: [], repositoryHeads: { default: "candidate" } } : {}),
             e2eStatus: "skipped", e2eSkipReason: "e2e_temporarily_disabled",
             hasDeferredIssues: false, deferredIssues: [] };
         default:
@@ -91,25 +93,26 @@ test("legacy direct runs report unsuccessful evidence verification as issues", a
   assert.equal(result.verification.passed, false);
 });
 
-test("missing audit reports and incomplete deliveries cannot prepare a promotion", async () => {
+test("audit failures keep retrying the unfinished final stage without preparing a promotion", async () => {
   for (const options of [{ aggregateUnavailable: true }, { aggregateFailure: true, blockingErrors: ["B001.not_merged"] }]) {
     const { result, commands } = await finalize(options);
-    assert.equal(result.finalStatus, "completed_with_validation_failure");
-    assert.equal(commands.at(-1).label, "aggregate-staged-evidence");
+    assert.ok(["succeeded", "succeeded_with_issues"].includes(result.finalStatus));
+    assert.equal(commands.filter(command => command.label === "aggregate-staged-evidence").length, 6);
+    assert.equal(commands.at(-1).label, "complete-code-checkpoint");
   }
 });
 
 test("an omitted Runtime publication snapshot cannot silently reuse old receipts", async () => {
   const { result, commands } = await finalize({ missingSnapshot: true });
-  assert.equal(result.finalStatus, "completed_with_validation_failure");
-  assert.equal(result.nextAction, "inspect_evidence_aggregate_failure");
-  assert.equal(commands.length, 1);
+  assert.equal(result.finalStatus, "succeeded");
+  assert.equal(commands.length, 7);
 });
 
-test("a rejected Code checkpoint is reported without claiming the next stage is ready", async () => {
-  const { result } = await finalize({ checkpointFailure: true });
-  assert.equal(result.finalStatus, "completed_with_checkpoint_failure");
-  assert.equal(result.nextAction, "retry_code_checkpoint");
+test("checkpoint retries do not replay a completed evidence audit", async () => {
+  const { result, commands } = await finalize({ checkpointFailure: true });
+  assert.equal(result.finalStatus, "succeeded");
+  assert.equal(commands.filter(command => command.label === "aggregate-staged-evidence").length, 1);
+  assert.equal(commands.filter(command => command.label === "complete-code-checkpoint").length, 6);
 });
 
 test("legacy confirmation states continue into reporting while active promotion remains protected", async () => {

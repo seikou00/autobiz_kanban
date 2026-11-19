@@ -49,16 +49,29 @@ test('independent repositories publish while another repository is waiting', asy
   await c.drainWorkspaceSync();
 });
 
-test('durable retry deadlines wait without occupying the Batch worker and preserve warnings', async () => {
+test('durable publication retries pass the old limit and preserve warnings until success', async () => {
   let calls = 0;
-  const { c, state, waits } = harness(async () => ++calls < 4
-    ? receipt('repo', 'retry_wait', { success: false, error: 'disk error', retryAfterSeconds: [5, 30, 120][calls - 1] })
-    : receipt('repo', 'failed', { success: false, error: 'disk error' }));
+  const { c, state, waits } = harness(async () => ++calls < 8
+    ? receipt('repo', 'retry_wait', { success: false, error: 'disk error', retryAfterSeconds: [5, 30, 120][Math.min(calls - 1, 2)] })
+    : receipt('repo', 'synced'));
   await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
-  assert.equal(calls, 4);
-  assert.deepEqual(waits, [5000, 30000, 60000, 60000]);
-  assert.equal(state.results.get('repo').success, false);
-  assert.ok(state.notifications.some(item => item.status === 'failed' && item.error === 'disk error'));
+  assert.equal(calls, 8);
+  assert.deepEqual(waits.slice(0, 4), [5000, 30000, 60000, 60000]);
+  assert.equal(state.results.get('repo').status, 'synced');
+  assert.ok(state.notifications.some(item => item.status === 'retry_wait' && item.error === 'disk error'));
+});
+
+test('publication survives repeated model and failure-persistence outages without losing its receipt', async () => {
+  let processCalls = 0;
+  const { c, state, waits } = harness(async (_, options) => {
+    if (options.label.startsWith('workspace-sync-warning-')) throw new Error('failure persistence unavailable');
+    if (++processCalls <= 9) throw new Error('model unavailable');
+    return receipt('repo', 'synced', { lastSyncedSha: 'same-delivery' });
+  });
+  await c.synchronizeUserWorkspace(receipt('repo', 'queued', { targetSha: 'same-delivery' }));
+  assert.equal(processCalls, 10);
+  assert.equal(state.results.get('repo').lastSyncedSha, 'same-delivery');
+  assert.ok(waits.every(ms => ms > 0 && ms <= 60000));
 });
 
 test('agent dispatch errors are persisted with shell-safe diagnostics and retried', async () => {

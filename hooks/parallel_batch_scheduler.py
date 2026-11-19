@@ -114,13 +114,12 @@ def _lease_staleness_reason_locked(
     left and can be deterministically retried by the scheduler.
     """
     path = lease_path(workspace, feature, run_id, batch_id)
-    with FileLock(path.with_suffix(".lock")):
+    with FileLock(path.with_suffix(".lock"), timeout=5):
         if not path.is_file():
             dispatch = batch.get("dispatch") or {}
-            states = batch.get("stageStates") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
-                    and dispatch.get("expiresEpoch", 0) > now and states.get("review", {}).get("status") == "running"):
-                return None  # Review is read-only and intentionally has no business lease.
+                    and dispatch.get("expiresEpoch", 0) > now):
+                return None  # Control/stage handoffs may intentionally have no business lease.
             return "lease_missing"
         try:
             lease = json.loads(path.read_text(encoding="utf-8"))
@@ -173,6 +172,12 @@ def _mark_retry_pending_locked(
     previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
     from hooks.parallel_failure import recovery_failure
     failure = recovery_failure(error, batch, run_dir(workspace, feature, run_id) / "engineering" / batch_id)
+    if "parallel_batch_review_not_bound_to_seal" in error:
+        # A passed flag without the sealed commit's receipt is incomplete.
+        # Reopen only Review; never replay the implementation or invent evidence.
+        review = (batch.get("stageStates") or {}).get("review")
+        if isinstance(review, dict) and review.get("status") in {"passed", "skipped", "deferred"}:
+            review.update(status="pending", latestEvidenceId=None, completedAt=None)
     # Provision has not begun business work. Waiting for another Batch's
     # checkout is contention, even when the same lock stays busy repeatedly.
     provision_wait = (previous == "pending" and not batch.get("commitSha") and not batch.get("lease")
@@ -180,13 +185,9 @@ def _mark_retry_pending_locked(
                       and "parallel_worktree_provision_lock_busy" in error)
     if provision_wait:
         failure["reasonCode"] = "parallel_worktree_provision_lock_busy"
-    if failure["classification"] == "precondition":
-        batch.update(status="blocked", error=error, activeStage=None)
-        batch["recovery"] = {**previous_recovery, "status": "precondition_blocked",
-                             "failureClassification": failure["classification"], "failureFingerprint": failure["fingerprint"],
-                             "reasonCode": failure["reasonCode"], "lastError": error,
-                             "nextAction": "inspect_reported_precondition"}
-        return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+    # Classification remains diagnostic. Every retry revalidates the same
+    # workspace/contracts; a failed precondition must not become a terminal
+    # scheduler state or authorize skipping the unfinished stage.
     retry_attempts = (
         int(previous_recovery.get("retryAttempts", 0))
         if provision_wait
@@ -258,12 +259,22 @@ def _recover_stale_active_batches_locked(
     run_id: str,
     manifest: dict[str, Any],
 ) -> list[dict[str, str]]:
-    """Move orphaned leased/running Batches into durable retry recovery."""
+    """Recover lost workers, including lease-free interrupted Review stages."""
     now = time.time()
     timeout_seconds = max(1, int(manifest.get("timeoutPerBatch", 3600)))
     recovered: list[dict[str, str]] = []
     for raw_batch_id, batch in manifest.get("batches", {}).items():
-        if not isinstance(batch, dict) or batch.get("status") not in {"leased", "running"}:
+        if not isinstance(batch, dict):
+            continue
+        dispatch = batch.get("dispatch") or {}
+        consumed_grant = (dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+                          and dispatch.get("status") in {"completed", "failed", "retry_pending", "expired"})
+        sealed_running = (batch.get("status") == "sealed"
+                          and (batch.get("recovery") or {}).get("status") != "rescheduled"
+                          and any((batch.get("stageStates") or {}).get(stage, {}).get("status") == "running"
+                                  for stage in DELIVERY_STAGES))
+        delivery_handoff_lost = batch.get("status") in {"sealed", "ready_to_candidate"} and consumed_grant
+        if batch.get("status") not in {"leased", "running"} and not sealed_running and not delivery_handoff_lost:
             continue
         batch_id = str(raw_batch_id)
         reason = _lease_staleness_reason_locked(
@@ -287,6 +298,33 @@ def _recover_stale_active_batches_locked(
             error=f"parallel_batch_recovery:{reason}",
         )
         recovered.append({"batchId": batch_id, "reason": reason})
+    return recovered
+
+
+def _recover_blocked_batches_locked(workspace: Path, feature: str, run_id: str,
+                                    manifest: dict[str, Any]) -> list[str]:
+    """Requeue legacy failures without stealing a live worker or delivery."""
+    recovered = []
+    now = time.time()
+    for batch_id, batch in manifest.get("batches", {}).items():
+        if not isinstance(batch, dict) or batch.get("status") not in {"blocked", "failed"}:
+            continue
+        if batch.get("mergeCommitSha"):
+            continue  # Delivery reconciliation owns completed side effects.
+        dispatch = batch.get("dispatch") or {}
+        if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+                and dispatch.get("expiresEpoch", 0) > now):
+            continue
+        if batch.get("lease") is not None or lease_path(workspace, feature, run_id, str(batch_id)).is_file():
+            if _lease_staleness_reason_locked(workspace, feature, run_id, str(batch_id), batch,
+                    now=now, timeout_seconds=max(1, int(manifest.get("timeoutPerBatch", 3600)))) is None:
+                continue
+        recovery = batch.get("recovery") or {}
+        _mark_retry_pending_locked(workspace, feature, run_id, manifest, str(batch_id), batch,
+            error=str(batch.get("error") or recovery.get("lastError") or "batch_execution_failed"),
+            previous_status=str(recovery.get("resumeStatus") or batch.get("status")))
+        batch["recovery"]["retryAttempts"] = int(recovery.get("retryAttempts", 0))
+        recovered.append(str(batch_id))
     return recovered
 
 
@@ -356,7 +394,7 @@ def _clear_retry_lease_locked(
     """
     path = lease_path(workspace, feature, run_id, batch_id)
     had_lease = path.is_file() or batch.get("lease") is not None
-    with FileLock(path.with_suffix(".lock")):
+    with FileLock(path.with_suffix(".lock"), timeout=5):
         if path.exists():
             path.unlink()
     batch["lease"] = None
@@ -965,6 +1003,9 @@ def schedule(
                     "maxParallel": manifest["maxParallel"], **promotion_view(manifest)}
         from hooks.parallel_delivery import reconcile_deliveries_locked
         reconcile_deliveries_locked(workspace, feature, run_id, manifest)
+        if manifest.get("status") not in {"cancelled", "cleaned", "rolled_back", "succeeded", "succeeded_with_issues"}:
+            _recover_blocked_batches_locked(workspace, feature, run_id, manifest)
+            _recover_stale_active_batches_locked(workspace, feature, run_id, manifest)
         for batch_id, batch in manifest.get("batches", {}).items():
             dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
@@ -1585,32 +1626,17 @@ def resume_run(
             }
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") in {"cleaned", "rolled_back"}:
+        if manifest.get("status") in {"cancelled", "cleaned", "rolled_back"}:
             return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
         # Older runs (and an interrupted Workflow cleanup) can have reached
         # ``retry_pending`` before their lease handoff completed.  Repair that
         # invariant before deciding whether the preserved delivery is sealed,
         # mergeable, or ready to be scheduled again.
         retry_leases_cleared: list[str] = []
-        legacy_retries_repaired: list[str] = []
+        legacy_retries_repaired = _recover_blocked_batches_locked(workspace, feature, run_id, manifest)
         for batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict):
                 continue
-            # Runs written with the old retry budget may already be blocked.
-            # Reuse the normal recovery marker, preserving its delivery stage
-            # and counter. Integrity checks below still gate all scheduling.
-            lease_cleared = False
-            if batch.get("status") == "blocked" and can_manually_resume_batch(batch):
-                recovery = batch["recovery"]
-                lease_cleared = _mark_retry_pending_locked(
-                    workspace, feature, run_id, manifest, str(batch_id), batch,
-                    error=str(batch.get("error") or recovery.get("lastError") or "batch_execution_failed"),
-                    previous_status=str(recovery.get("resumeStatus") or "blocked"),
-                )
-                batch["recovery"]["retryAttempts"] = int(recovery.get("retryAttempts", 0))
-                legacy_retries_repaired.append(str(batch_id))
-            if lease_cleared:
-                retry_leases_cleared.append(str(batch_id))
             if batch.get("status") != "retry_pending":
                 continue
             if _clear_retry_lease_locked(workspace, feature, run_id, str(batch_id), batch):
@@ -1890,14 +1916,7 @@ def resume_run(
 
 
 def can_manually_resume_batch(batch: dict[str, Any]) -> bool:
-    recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
-    return batch.get("status") in {"retry_pending", "failed"} or (
-        batch.get("status") == "blocked"
-        and ((recovery.get("status") == "retry_exhausted"
-              and recovery.get("failureClassification") != "precondition")
-             or (recovery.get("status") == "unchanged_failure"
-                 and recovery.get("failureClassification") == "retryable"))
-    )
+    return batch.get("status") in {"retry_pending", "failed", "blocked"}
 
 
 def manual_resume_run(
@@ -1916,7 +1935,7 @@ def manual_resume_run(
     manually_queued: list[str] = []
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") in {"cleaned", "rolled_back"}:
+        if manifest.get("status") in {"cancelled", "cleaned", "rolled_back"}:
             return {
                 "runId": run_id,
                 "status": manifest.get("status"),
