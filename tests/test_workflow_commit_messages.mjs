@@ -4,19 +4,24 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("../workflows/code-batched-execution.workflow.js", import.meta.url), "utf8");
+const protocolPath = "skills/autodev/autodev-code/references/task-execution.md";
+const protocol = readFileSync(new URL(`../${protocolPath}`, import.meta.url), "utf8");
+const frontendProtocol = readFileSync(new URL("../skills/autodev/autodev-code/references/frontend-route.md", import.meta.url), "utf8");
+
+function bindingFromPrompt(prompt) {
+  assert.ok(prompt.includes(`先读取实现协议 "/plugin/${protocolPath}"`));
+  return JSON.parse(prompt.split("\n").find(line => line.startsWith("Batch 绑定：")).slice("Batch 绑定：".length));
+}
 
 function harness() {
   const prompts = [];
   const context = vm.createContext({
-    feature: "orders", runId: "cw-test", artifactWorkspace: "/artifacts",
+    pluginPath: "/plugin", feature: "orders", runId: "cw-test", artifactWorkspace: "/artifacts",
     batchWorkspaces: { B001: { workspaceRef: "default" } },
     batchTaskIds: { B001: ["T001"] },
     timeoutPerBatch: 600, setTimeout, clearTimeout,
     BATCH_RESULT_SCHEMA: {},
-    CODE_STAGE_EXECUTION_BOUNDARY: "", CODE_STAGE_COMPILE_COMMAND_GUIDANCE: "",
-    leasePath: "/plugin/lease.py", stagePath: "/plugin/stage.py",
-    schedulerPath: "/plugin/scheduler.py", worktreeManagerPath: "/plugin/worktree_manager.py",
-    routeResolverPath: "/plugin/route.py",
+    stagePath: "/plugin/stage.py",
     usableString: value => typeof value === "string" && value.trim().length > 0,
     batchTaskWorkspace: (_batchId, worktree) => worktree,
     unwrap: value => value, requireSuccess: value => value,
@@ -35,6 +40,7 @@ function harness() {
   vm.runInContext(source.slice(0, source.indexOf("function normalizeStructuredOutput(")).replace("export const meta =", "const meta ="), context);
   load("function normalizeStructuredOutput(", "const input = unwrap(args);");
   load("function implementationPrompt(", "async function runInitialBatchLifecycle(");
+  load("async function runImplementationRecoveryLifecycle(", "async function runRecoveredBatchLifecycle(");
   load("async function reworkDeliveryImplementation(", "async function recordSingleRepairResolution(");
   return { context, prompts };
 }
@@ -43,32 +49,37 @@ const delivery = { batchId: "B001", worktreePath: "/worktree", branchName: "batc
 
 test("Code draft seal carries a feature summary and Code stage", () => {
   const { context } = harness();
-  const prompt = context.implementationPrompt("B001", "/worktree", "batch", ["T001"], "default", "/worktree");
-  assert.match(prompt, /seal --purpose review --commit-stage code --commit-summary/);
+  const prompt = context.implementationPrompt("B001", "/worktree", "batch", ["T001"], "orders", "/worktree/service");
+  assert.deepEqual(bindingFromPrompt(prompt), {
+    mode: "code", pluginPath: "/plugin", feature: "orders", runId: "cw-test", artifactWorkspace: "/artifacts",
+    batchId: "B001", batchWorktree: "/worktree", batchBranch: "batch", taskIds: ["T001"],
+    batchWorkspaceRef: "orders", taskWorkspace: "/worktree/service", timeoutPerBatch: 600,
+  });
+  assert.match(protocol, /seal --purpose review --commit-stage <rework 时为 rework，其余为 code> --commit-summary/);
 });
 
 test("frontend implementation starts its TASK before HTML analysis and resource writes", () => {
-  const { context } = harness();
-  const prompt = context.implementationPrompt("B001", "/worktree", "batch", ["T001"], "default", "/worktree");
-  const prepare = prompt.indexOf("先在本 agent 内完成 Route 只读准备");
-  const start = prompt.indexOf("按 context 的 startArgv 执行当前 TASK 的 task_runner.py start");
-  const analysis = prompt.indexOf("start 成功后才能执行 prepare_html_analysis.py");
-  const parser = prompt.indexOf("仅当清单推进到转交 parser 后才读取对应 parser");
+  assert.match(protocol, /以 .taskContract.uiRequired. 为唯一条件/);
+  const todos = frontendProtocol.indexOf("--mark route-todos-created");
+  const prepare = frontendProtocol.indexOf("读取原稿和必要项目资料");
+  assert.ok(todos >= 0 && todos < prepare);
+  const start = frontendProtocol.indexOf("只读准备完成后执行当前 TASK");
+  const analysis = frontendProtocol.indexOf("启动成功后才运行 `prepare_html_analysis.py`");
+  const parser = frontendProtocol.indexOf("仅当 Route 清单推进到移交 parser 时读取对应 parser");
   assert.ok(prepare >= 0 && prepare < start && start < analysis && analysis < parser);
-  assert.match(prompt, /确认 start 成功并保存真实 TASK runId/);
-  assert.match(prompt, /Route 清单完成和 parser 读取不是 start 的前置条件/);
-  assert.match(prompt, /start 失败不属于脚本降级，禁止执行分析脚本、写产物或复制资源/);
+  assert.match(frontendProtocol, /确认成功并保存真实 TASK runId/);
+  assert.match(frontendProtocol, /完成 Route 清单和读取 parser 不属于启动前置条件/);
+  assert.match(frontendProtocol, /启动失败时保留原始错误，禁止通过降级路径执行分析、生成产物或写入/);
 });
 
 test("frontend repair establishes an active TASK before HTML analysis and resource writes", async () => {
   const { context, prompts } = harness();
-  await context.reworkDeliveryImplementation(delivery);
-  const prompt = prompts[0].prompt;
-  const repair = prompt.indexOf("执行 task_runner.py start-task-repair");
-  const start = prompt.indexOf("执行普通 task_runner.py start");
-  const analysis = prompt.indexOf("上述 start-task-repair 或 start 成功并保存真实 runId 后，才能执行 prepare_html_analysis.py");
-  assert.ok(repair >= 0 && start >= 0 && repair < analysis && start < analysis);
-  assert.match(prompt, /TASK 启动失败不得走脚本降级继续写入/);
+  await context.reworkDeliveryImplementation({ ...delivery, failureContext: { failedStage: "review", message: "页面缺少筛选器" } });
+  const prompt = prompts.find(item => item.options.label === "rework-implement-B001").prompt;
+  assert.equal(bindingFromPrompt(prompt).mode, "rework");
+  assert.match(prompt, /TASK 启动成功才写入/);
+  assert.match(frontendProtocol, /执行当前 TASK 的 `start` 或 `start-task-repair`，确认成功并保存真实 TASK runId/);
+  assert.match(protocol, /只有当前 TASK 的 start 或 start-task-repair 成功才可写入/);
 });
 
 test("Review production repairs seal as Rework with full binding", async () => {
@@ -77,9 +88,12 @@ test("Review production repairs seal as Rework with full binding", async () => {
     await context.reworkDeliveryImplementation({ ...delivery, failureContext: { failedStage, message: "筛选失效" } });
     assert.equal(prompts[0].options.label, "prepare-repair-B001");
     const prompt = prompts.find(item => item.options.label === "rework-implement-B001").prompt;
-    assert.match(prompt, /seal --purpose review --commit-stage rework --commit-summary/);
+    assert.equal(bindingFromPrompt(prompt).mode, "rework");
+    assert.doesNotMatch(prompt, /筛选失效/);
+    assert.match(protocol, /从 prepare 的 `contextPath` 取 `repair.failure`/);
+    const seal = protocol.split("\n").find(line => line.startsWith("5. 全部指定 TASK"));
     for (const binding of ["--artifact-workspace", "--feature", "--run-id", "--batch-id", "--repo", "--owner-token"]) {
-      assert.ok(prompt.includes(binding), binding);
+      assert.ok(seal.includes(binding), binding);
     }
   }
 });
@@ -87,5 +101,17 @@ test("Review production repairs seal as Rework with full binding", async () => {
 test("ordinary implementation resume keeps the Code stage", async () => {
   const { context, prompts } = harness();
   await context.reworkDeliveryImplementation(delivery);
-  assert.match(prompts[0].prompt, /seal --purpose review --commit-stage code --commit-summary/);
+  assert.equal(bindingFromPrompt(prompts[0].prompt).mode, "resume");
+});
+
+test("an interrupted implementation receives explicit retry mode in its existing worktree", async () => {
+  const { context, prompts } = harness();
+  context.codeWorkspaces = { default: "/repo" };
+  context.batchResults = [];
+  context.runDeliveryWithImplementationRepair = async () => delivery;
+  await context.runImplementationRecoveryLifecycle(delivery);
+  assert.equal(prompts.length, 1);
+  const binding = bindingFromPrompt(prompts[0].prompt);
+  assert.equal(binding.mode, "retry");
+  assert.equal(binding.batchWorktree, delivery.worktreePath);
 });

@@ -2,9 +2,10 @@
 
 仅 taskContract.uiRequired=true 执行。业务来自 Specs，视觉来自可读 HTML；没有高保真、仅部分页面有稿或稿件不可读时正常 spec-driven-ui，记录缺口，不阻止写入，也不声称已对照稿件还原。
 
-1. 执行 resolve_frontend_html_route.py --workspace <artifact> --feature <feature> --task-id <TASK> --start-route-run --json。读取返回 frontendPolicyPath 一次及对应 Route SKILL；standard/absolute 读完登记 route-skill-read-complete，创建 route todos。spec-driven-ui 不读 HTML parser。
-2. 按 Route 完成只读准备，TASK start 成功后才运行分析、复制 assets 或写源码；按顺序转交 parser 并登记 parser-read。原稿优先，分析脚本仅辅助。
-3. Route 实现清单完成登记 route-todos-completed（HTML 路线），随后执行下述统一回检。不能仅登记 reviewStatus 代替回检。
+1. 执行 `resolve_frontend_html_route.py --workspace <artifact> --feature <feature> --task-id <TASK> --start-route-run --json`。先读取返回的 `frontendPolicyPath`。HTML 路线将对应 Route SKILL 读到 EOF，登记 `route-skill-read-complete`，用 write_todos 创建 Route 清单，并用同一 resolver 的 `--mark route-todos-created --json` 登记，再读取原稿和必要项目资料，确认脚本参数。spec-driven-ui 不读 HTML parser。route=none 禁止写前端源码。
+2. 只读准备完成后执行当前 TASK 的 `start` 或 `start-task-repair`，确认成功并保存真实 TASK runId。完成 Route 清单和读取 parser 不属于启动前置条件。
+3. 启动成功后才运行 `prepare_html_analysis.py`、写入 `.frontend/html-analysis` / `.frontend/html-input`、复制或覆盖 assets、修改业务源码。仅当 Route 清单推进到移交 parser 时读取对应 parser，并登记 `parser-read`。启动失败时保留原始错误，禁止通过降级路径执行分析、生成产物或写入。
+4. Route 实现清单完成后登记 `route-todos-completed`（HTML 路线），再对当前源码执行统一回检。由 `frontend_verification.py` 登记回检状态。返回 passed 或 has-suggestions 后继续 finish-implementation，保留 Runtime 管理的 `FRONTEND_ROUTE.json`。返修也须检查当前实现，仅当绑定的新旧源码和输入一致时才复用报告。
 
 上述每次 `--mark` 调用均携带同一 `--workspace`、`--feature` 和 `--task-id`。并行任务各自更新自己的 Route 记录。
 

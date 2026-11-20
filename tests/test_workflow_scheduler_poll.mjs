@@ -122,15 +122,11 @@ test("child phases limit managed background execution to plugin Python scripts",
     const result = { success: true };
     c.agent = async (instruction, received) => {
       assert.equal(received, options);
-      assert.match(instruction, /仅本 Workflow 提示中明确调用的插件 Python 脚本/);
-      assert.match(instruction, /execute\(\{command:<原来的完整 Python 脚本命令>,run_in_background:true\}\)/);
-      assert.match(instruction, /task_output\(\{task_id:<同一 ID>,timeout:60000\}\)/);
-      assert.match(instruction, /每次脚本调用只启动一次/);
-      assert.match(instruction, /轮询等待超时或任务仍在运行只继续等待同一任务/);
-      assert.match(instruction, /lease release 和子 Agent 返回均须等待脚本终态/);
-      assert.match(instruction, /原阶段预算、Runtime deadline 和显式子 Agent 超时继续生效/);
-      assert.match(instruction, /不适用于业务命令、Bash 编译\/测试\/环境查询、Git 命令或 Runtime 返回的 bashCommand/);
-      assert.match(instruction, /禁止把它们合并进插件脚本的后台调用/);
+      assert.match(instruction, /仅明确授权的插件 Python 脚本用 execute\(\{command:<完整命令>,run_in_background:true\}\) 启动一次/);
+      assert.match(instruction, /在同一 Agent 用 task_output\(\{task_id:<同一ID>,timeout:60000\}\) 等待终态/);
+      assert.match(instruction, /轮询超时只续等/);
+      assert.match(instruction, /阶段预算照旧，取得退出码及完整输出后才依赖、释放 lease 或返回/);
+      assert.match(instruction, /Git、业务命令及 bashCommand 保持前台，禁止自启 heartbeat 或脱管/);
       assert.match(instruction, /原始阶段指令$/);
       return result;
     };
@@ -139,14 +135,11 @@ test("child phases limit managed background execution to plugin Python scripts",
 });
 
 test("Bash compilation keeps its foreground execution and exit-code recording", () => {
-  const { context: c } = harness();
-  vm.runInContext(source.slice(source.indexOf("const CODE_STAGE_COMPILE_COMMAND_GUIDANCE ="),
-    source.indexOf("function taskWorkspacePath(")), c);
-  const guidance = vm.runInContext("CODE_STAGE_COMPILE_COMMAND_GUIDANCE", c);
-  assert.match(guidance, /^编译和环境查询使用前台 Bash。/);
+  const protocol = readFileSync(new URL("../skills/autodev/autodev-code/references/task-execution.md", import.meta.url), "utf8");
+  const guidance = protocol.split("## 后端纯编译\n")[1];
+  assert.match(guidance, /在前台 Bash 执行同一 argv/);
   assert.match(guidance, /PIPESTATUS/);
   assert.match(guidance, /record-compile/);
-  assert.match(guidance, /动态执行和后台进程/);
   assert.doesNotMatch(guidance, /run_in_background|task_output/);
 });
 

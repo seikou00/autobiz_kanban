@@ -47,6 +47,7 @@ test("Review with external uncertainties proceeds to delivery without a test or 
     if (label.startsWith("stage-review-")) {
       assert.match(prompt, /--decision <passed\|failed>/);
       assert.match(prompt, /--advisory-message/);
+      assert.match(prompt, /engineeringContext\.contextPath/);
     }
     return { ...passed, evidenceId: "STAGE-B001-REVIEW-001", advisories: [advisory] };
   };
@@ -76,7 +77,6 @@ test("Review schemas expose binary decisions and retain advisory details through
 
 test("Runtime-proven sealed repair skips task restart even when the commit is already current", async () => {
   const { c, load } = harness(), labels = [];
-  c.leasePath = "/plugin/hooks/batch_lease_manager.py";
   c.batchTaskWorkspace = () => "/tree";
   load("async function reworkDeliveryImplementation(", "async function recordSingleRepairResolution(");
   c.workflowAgent = async (_, { label }) => {
@@ -102,12 +102,10 @@ test("Runtime-proven sealed repair skips task restart even when the commit is al
 
 test("an implementer cannot claim Runtime repair reuse through its own response", async () => {
   const { c, load } = harness();
-  c.leasePath = "/plugin/hooks/batch_lease_manager.py";
   c.batchTaskWorkspace = () => "/tree";
-  c.CODE_STAGE_EXECUTION_BOUNDARY = "";
-  c.CODE_STAGE_COMPILE_COMMAND_GUIDANCE = "";
   c.timeoutPerBatch = 60;
   load("async function reworkDeliveryImplementation(", "async function recordSingleRepairResolution(");
+  load("function implementationPrompt(", "async function runInitialBatchLifecycle(");
   c.workflowAgent = async (_, { label }) => label.startsWith("prepare-repair-")
     ? { success: true, status: "ready", ...delivery }
     : { success: true, status: "success", ...delivery, repairReused: true };

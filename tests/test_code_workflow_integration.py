@@ -79,7 +79,6 @@ def test_fixed_workflow_entrypoint():
         "runDeliveryReviewAndGate",
         "review-checkpoint",
         "finish-review",
-        "本 Workflow 对前后端均移除 UTest 和 E2E",
         "worktree_manager.py",
         "parallel_merge_train.py",
         "parallel_batch_lifecycle.py",
@@ -92,7 +91,6 @@ def test_fixed_workflow_entrypoint():
         "parallel_evidence_aggregate.py",
         "ready_to_candidate",
         "batchTaskIds",
-        "不要用 read_file 读取 artifact 目录",
         "function usableString",
         "function requireSchedulerResult",
         "parallel_scheduler_result_invalid",
@@ -102,11 +100,7 @@ def test_fixed_workflow_entrypoint():
         "function taskWorkspacePath",
         "function batchTaskWorkspace",
         "batch_component_root_invalid",
-        '--code-workspace "${taskWorkspace}"',
-        "taskContract.uiRequired",
-        "Route resolver",
         "invalid_code_workspace_path",
-        "不得创建任何 workflow",
         "required: [\"batchId\", \"status\", \"worktreePath\", \"branchName\", \"commitSha\"]",
         "drainRunnableLifecycles",
         "takeNextRunnableLifecycle",
@@ -117,20 +111,10 @@ def test_fixed_workflow_entrypoint():
         "immediate_candidate_resolution_failed",
         "runFinalRepairAndReport",
         "errorMessage",
-        "--ttl-seconds ${timeoutPerBatch}",
         "heartbeat",
-        "--lease-guard",
-        "--require-lease-guard",
-        "命令边界续租",
-        "独立 shell 子进程存活与否不再作为 Batch 失败条件",
-        "禁止自行运行 batch_lease_manager.py heartbeat",
-        "仅 valid=true 才可继续",
-        "git symbolic-ref --quiet --short HEAD",
-        "LEASE_TOKEN",
         "parallel_dispatch.py",
         "--dispatch-generation",
         "--dispatch-token",
-        "禁止检查/修改插件源码",
         "runDeliveryWithImplementationRepair",
         "implementation_rework_required",
         "function isFailedVerdict",
@@ -148,14 +132,8 @@ def test_fixed_workflow_entrypoint():
         "runInitialBatchLifecycle",
         "runRecoveredBatchLifecycle",
         "promoteReadyBatch",
-        "--batch-worktree",
-        "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
         "生产代码修复和封存",
         "failureContext",
-        "本次打回的精确问题如下",
-        "--purpose review",
-        "parallel_git_index_lock_busy",
-        "parallel_git_index_lock_recovery_failed",
         "SINGLE_REPAIRABLE_STAGES",
         "recordSingleRepairResolution",
         "single_repair_accepted",
@@ -165,18 +143,12 @@ def test_fixed_workflow_entrypoint():
         "task_output",
         "drain_recovered_batches",
         "Review execution mode=fixed_code_workflow",
-        "Code Workflow 已获自主执行授权",
         "const WORKFLOW_AUTONOMY_PREFIX",
-        "const CODE_STAGE_EXECUTION_BOUNDARY",
-        "禁止创建、修改或删除测试源码",
-        "除这项后端 compile-only 门槛外，Code/修复阶段禁止自行执行构建、打包、typecheck、lint、测试、E2E",
-        "CODE_STAGE_COMPILE_COMMAND_GUIDANCE",
-        "prepare-compile",
-        "record-compile",
-        "GUARD_DIAGNOSTICS.failures",
-        "compile_status",
-        "--log-exit-code",
         "function workflowAgent",
+        "function implementationPrompt",
+        "references/task-execution.md",
+        "agents/reviewer.md",
+        'failureContext ? "rework" : "resume"',
     ]
     missing = [check for check in checks if check not in content]
     if missing:
@@ -200,29 +172,41 @@ def test_fixed_workflow_entrypoint():
     if "compileAlreadyPassed" in content:
         print("✗ rework 仍保留已废弃的批次编译状态")
         return False
-    if content.count("CODE_STAGE_EXECUTION_BOUNDARY") < 3:
-        print("✗ 初始实现和修复实现未同时注入 Code 执行边界")
-        return False
     if "actual compile/seal" in content:
         print("✗ 修复流程仍将编译描述为实现阶段动作")
         return False
     if "batch-compile" in content or "skip-batch-compile" in content or "compileStatus" in content:
         print("✗ 固定 Workflow 仍保留 Batch compile 路径或状态")
         return False
-    rework_start = content.find("async function reworkDeliveryImplementation(")
-    rework_end = content.find("async function recordSingleRepairResolution(", rework_start)
-    rework_protocol = content[rework_start:rework_end]
-    rework_checks = [
+    references = ROOT / "skills" / "autodev" / "autodev-code" / "references"
+    protocol = (references / "task-execution.md").read_text(encoding="utf-8")
+    protocol_checks = [
+        "禁止创建、修改或删除测试源码",
+        "禁止额外构建、打包、typecheck、lint、测试、E2E",
+        "git symbolic-ref --quiet --short HEAD",
+        "--ttl-seconds <timeoutPerBatch> --lease-guard",
+        "--require-lease-guard",
+        "--batch-worktree <batchWorktree>",
+        "--code-workspace <taskWorkspace>",
+        "仅 valid=true",
+        "seal --purpose review",
+        "parallel_git_index_lock_busy",
+        "parallel_git_index_lock_recovery_failed",
         "先清理陈旧 run，再开始任何修复",
         "implementation_rework_stale_run",
-        "必须先完成全部陈旧 run 清理",
-        "严格按依赖拓扑逐个修复",
-        "当前 TASK 为 todo 时执行普通 task_runner.py start",
-        "只有 start-task-repair 启动的任务携带 --repair-mode",
+        "依赖须为 implemented/done",
+        "当前 TASK 为 todo 时执行普通",
+        "携带 `--repair-mode`",
+        "`repair.failure`",
+        "prepare-compile",
+        "record-compile",
+        "GUARD_DIAGNOSTICS.failures",
+        "compile_status",
+        "--log-exit-code",
     ]
-    missing_rework = [check for check in rework_checks if check not in rework_protocol]
-    if missing_rework:
-        print(f"✗ rework 恢复协议缺少: {', '.join(missing_rework)}")
+    missing_protocol = [check for check in protocol_checks if check not in protocol]
+    if missing_protocol:
+        print(f"✗ Batch 文件协议缺少: {', '.join(missing_protocol)}")
         return False
     if "repository_coordinator" in launcher or "coordinatorManaged" in content:
         print("✗ 多仓库路径仍会拆分为 coordinator 子 Workflow")
@@ -230,9 +214,8 @@ def test_fixed_workflow_entrypoint():
     if "await parallel(Array.from({ length: poolSize }" not in content:
         print("✗ 固定 Workflow 未在内部并行启动 Batch agent")
         return False
-    route_start = content.find("start-route-run")
-    task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")
-    if route_start < 0 or task_prompt < 0 or route_start < task_prompt:
+    frontend_protocol = (references / "frontend-route.md").read_text(encoding="utf-8")
+    if "以 `taskContract.uiRequired` 为唯一条件" not in protocol or "--start-route-run" not in frontend_protocol:
         print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
     review_prompt = content.find("对已草稿封存的 Batch")
@@ -242,7 +225,7 @@ def test_fixed_workflow_entrypoint():
     candidate_start = content.find("构建 Batch ${batchId} 的独立 Merge Train 候选")
     candidate_end = content.find("let built = builtRaw;", candidate_start)
     candidate_protocol = content[candidate_start:candidate_end]
-    if "run_in_background" not in candidate_protocol or "task_output" not in candidate_protocol:
+    if "按公共后台协议执行" not in candidate_protocol:
         print("✗ 候选构建未使用平台异步执行协议")
         return False
     if "禁止后台运行" in candidate_protocol:
