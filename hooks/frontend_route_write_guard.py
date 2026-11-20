@@ -24,7 +24,7 @@ from resolve_frontend_html_route import (  # noqa: E402
     ROUTE_NONE,
     ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
-    evidence_path,
+    existing_evidence_path,
     feature_dir,
     read_json,
     resolve_frontend_route,
@@ -194,23 +194,24 @@ def missing_protocol_flags(evidence: dict) -> list[str]:
     return [flag for flag in required if evidence.get(flag) is not True]
 
 
-def protocol_next_step(feature: str, missing: list[str]) -> str:
+def protocol_next_step(feature: str, missing: list[str], task_id: str | None = None) -> str:
+    task_option = f" --task-id {task_id}" if task_id else ""
     if "routeSkillReadComplete" in missing:
         return (
             "read route SKILL.md to EOF, then run "
-            f"`python hooks/resolve_frontend_html_route.py --feature {feature} "
+            f"`python hooks/resolve_frontend_html_route.py --feature {feature}{task_option} "
             "--mark route-skill-read-complete --json`"
         )
     if "routeTodosCreated" in missing:
         return (
             "create route write_todos, then run "
-            f"`python hooks/resolve_frontend_html_route.py --feature {feature} "
+            f"`python hooks/resolve_frontend_html_route.py --feature {feature}{task_option} "
             "--mark route-todos-created --json`"
         )
     if "parserRead" in missing:
         return (
             "read delegated parser, then run "
-            f"`python hooks/resolve_frontend_html_route.py --feature {feature} "
+            f"`python hooks/resolve_frontend_html_route.py --feature {feature}{task_option} "
             "--mark parser-read --json`"
         )
     return "rerun frontend route protocol"
@@ -224,10 +225,13 @@ def validate_frontend_write(workspace: Path, feature: str, *, target_path: Path 
     if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
         return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
 
-    evidence_file = evidence_path(workspace, feature)
+    batch_id, task_id = _frontend_route_scope(workspace, feature, target_path)
+    try:
+        evidence_file = existing_evidence_path(workspace, feature, task_id)
+    except FrontendRouteError as exc:
+        return block(f"活动 TASK 的前端 route 身份无效: {exc}")
     evidence = read_json(evidence_file)
     if not evidence:
-        batch_id, task_id = _frontend_route_scope(workspace, feature, target_path)
         try:
             resolved = resolve_frontend_route(
                 workspace,
@@ -263,7 +267,7 @@ def validate_frontend_write(workspace: Path, feature: str, *, target_path: Path 
     if missing:
         return block(
             "frontend route protocol incomplete: "
-            f"missing={','.join(missing)}; next={protocol_next_step(feature, missing)}"
+            f"missing={','.join(missing)}; next={protocol_next_step(feature, missing, task_id)}"
         )
     if evidence.get("routeSkillReadComplete") is not True:
         return block("写前端代码前必须完整读取对应 route SKILL.md")

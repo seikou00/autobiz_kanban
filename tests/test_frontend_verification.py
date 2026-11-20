@@ -24,6 +24,96 @@ class FrontendVerificationTest(unittest.TestCase):
         page.write_text('export default function Page() { return <div>Ready</div>; }')
         return workspace, fd, code, state
 
+    def test_default_targets_use_changed_files_in_react_and_vue_projects(self):
+        from tests.test_task_runner import _git
+        for page_name, content in (
+            ('Page.tsx', 'export default () => <p>Ready</p>'),
+            ('Page.vue', '<template><p class="field">Ready</p></template>'),
+        ):
+            with self.subTest(page=page_name), tempfile.TemporaryDirectory() as tmp:
+                workspace, fd, code = _workspace(Path(tmp))
+                _configure_frontend_without_batch_compile(fd)
+                (code / 'app').mkdir()
+                (code / 'app/Unrelated.tsx').write_text('import "./missing";')
+                _git(code, 'add', 'app/Unrelated.tsx')
+                _git(code, 'commit', '-m', 'existing page')
+                state = _start(workspace, code)
+                (code / 'app' / page_name).write_text(content)
+                (code / 'app/theme.sass').write_text('.field\n  display: block\n')
+                (code / 'index.html').write_text('<div id="app"></div>')
+                checked = _verify_frontend(workspace, code, state['runId'], None)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                self.assertEqual(json.loads(checked.stdout)['binding']['targets'],
+                                 [f'app/{page_name}', 'app/theme.sass', 'index.html'])
+                finished = _run('finish-implementation', '--workspace', str(workspace), '--feature', 'alpha',
+                                '--task-id', 'T001', '--code-workspace', str(code), '--run-id', state['runId'])
+                self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+    def test_standard_html_route_accepts_both_frameworks_without_an_asset_mapping(self):
+        from tests.test_frontend_route_gate import base_ui_context, gate_context, validate_frontend_route_gate, write_ui_context
+        from tests.test_task_runner import _read_batch, _refresh_parallel_pipeline, _write_batch
+        from hooks.resolve_frontend_html_route import mark_evidence
+
+        for extension, page in (
+            ('tsx', 'import icon from "./icon.svg";\nexport default () => <img src={icon} alt="Logo" />;'),
+            ('vue', '<script setup>\nimport icon from "./icon.svg";\n</script>\n<template><img :src="icon" alt="Logo" /></template>'),
+        ):
+            with self.subTest(extension=extension), tempfile.TemporaryDirectory() as tmp:
+                workspace, fd, code = _workspace(Path(tmp))
+                _configure_frontend_without_batch_compile(fd)
+                original = fd / 'frontend-html' / 'design.html'
+                original.parent.mkdir()
+                original.write_text('<main><img src="./icon.svg" alt="Logo"></main>')
+                original.with_name('icon.svg').write_text('<svg/>')
+                ui_context = base_ui_context()
+                ui_context['visualSources'] = [{'sourceId': 'VIS-001', 'type': 'other', 'path': str(original),
+                                                'route': 'standard-html', 'required': True}]
+                ui_context['capabilities'][0]['visualSourceRefs'] = ['VIS-001']
+                write_ui_context(workspace, ui_context)
+                batch = _read_batch(fd)
+                batch['tasks'][0]['uiRefs'].update(frontendRoute='standard-html', visualSourceRefs=['VIS-001'])
+                _write_batch(fd, batch)
+                _refresh_parallel_pipeline(fd)
+                fv.resolve_frontend_route(workspace, 'alpha', task_id='T001', start_route_run=True, write_evidence=True)
+                state = _start(workspace, code)
+                for mark in ('route-skill-read-complete', 'route-todos-created', 'parser-read', 'route-todos-completed'):
+                    mark_evidence(workspace, 'alpha', task_id='T001', mark=mark)
+                (code / 'src').mkdir()
+                (code / 'src' / f'Page.{extension}').write_text(page)
+                (code / 'src/icon.svg').write_text('<svg/>')
+                proc = _verify_frontend(workspace, code, state['runId'], None)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn('frontend_assets_unverified', {item['type'] for item in json.loads(proc.stdout)['advisories']})
+                finished = _run('finish-implementation', '--workspace', str(workspace), '--feature', 'alpha',
+                                '--task-id', 'T001', '--code-workspace', str(code), '--run-id', state['runId'])
+                self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+                self.assertEqual(validate_frontend_route_gate(gate_context(workspace)), 0)
+
+    def test_performance_hook_allows_vue_lifecycle_and_warns_about_scroll_handlers(self):
+        from tests.test_task_runner import ROOT, _git
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, code = _workspace(Path(tmp))
+            page = code / 'Page.vue'
+            page.write_text('<template><p>Ready</p></template>')
+            _git(code, 'add', 'Page.vue')
+            _git(code, 'commit', '-m', 'existing page')
+            page.write_text(
+                '<script setup>\nimport { onMounted, ref, watchEffect } from "vue";\n'
+                'const title = ref("");\n'
+                'onMounted(() => { title.value = "Ready"; });\n'
+                'watchEffect(() => { document.title = title.value; });\n'
+                'function onScroll() {}\n</script>\n<template><p @scroll="onScroll">{{ title }}</p></template>'
+            )
+            payload = {'tool_input': {'command': 'python hooks/update_checkpoint.py --checkpoint code_done'}}
+            hook = subprocess.run([sys.executable, '-B', str(ROOT / 'hooks/performance_checker.py')],
+                                  input=json.dumps(payload), capture_output=True, text=True,
+                                  env={**os.environ, 'WORKSPACE_PATH': str(code)})
+            result = json.loads(hook.stdout)
+            self.assertNotEqual(result.get('decision'), 'block')
+            self.assertIn('FRONT-RULE004', result['additionalContext'])
+            self.assertNotIn('FRONT-RULE005', result['additionalContext'])
+
     def test_missing_report_blocks_finish_and_same_revision_reuses_static(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, fd, code, state = self.setup_task(Path(tmp))
@@ -221,7 +311,7 @@ class FrontendVerificationTest(unittest.TestCase):
     def test_static_must_fix_cannot_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, fd, code, state = self.setup_task(Path(tmp))
-            (code / 'src/Page.tsx').write_text('export default function Page(){return <div class="bad">TODO</div>}')
+            (code / 'src/Page.tsx').write_text('import "./missing";\nexport default function Page(){return <div>Ready</div>}')
             proc = _verify_frontend(workspace, code, state['runId'], 'src/Page.tsx')
             self.assertEqual(proc.returncode, 1, proc.stdout)
             self.assertEqual(json.loads(proc.stdout)['status'], 'failed')
@@ -399,7 +489,7 @@ class FrontendVerificationTest(unittest.TestCase):
     def test_an_unrelated_target_does_not_skip_changed_task_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, fd, code, state = self.setup_task(Path(tmp))
-            (code / 'src/Missed.tsx').write_text('export default function Missed(){return <div class="bad">TODO</div>}')
+            (code / 'src/Missed.tsx').write_text('import "./missing";\nexport default function Missed(){return <div>Ready</div>}')
             result = _verify_frontend(workspace, code, state['runId'], 'src/Page.tsx')
             self.assertEqual(result.returncode, 1, result.stdout)
             report = fv.read(fv.report_path(fd, 'T001', state['runId']))
@@ -413,7 +503,7 @@ class FrontendVerificationTest(unittest.TestCase):
             checked = _verify_frontend(workspace, code, state['runId'], 'src/Page.tsx')
             self.assertEqual(checked.returncode, 0, checked.stdout)
             self.assertIn(fv.read(evidence_path(workspace, 'alpha'))['reviewStatus'], {'passed', 'has-suggestions'})
-            (code / 'src/Page.tsx').write_text('export const Page = () => <div class="bad">TODO</div>')
+            (code / 'src/Page.tsx').write_text('import "./missing";\nexport const Page = () => <div>Ready</div>')
             checked = _verify_frontend(workspace, code, state['runId'], 'src/Page.tsx')
             self.assertEqual(checked.returncode, 1, checked.stdout)
             self.assertEqual(fv.read(evidence_path(workspace, 'alpha'))['reviewStatus'], 'failed')

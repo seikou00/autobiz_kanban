@@ -48,7 +48,7 @@ def source_snapshot(snapshot: dict, root: Path | None = None, targets: list[str]
     if root is not None:
         root = root.resolve()
     files = {p: sha for p, sha in snapshot.items() if not set(Path(p).parts) & IGNORED}
-    if root is None or not targets:
+    if root is None or not targets or '.' in targets:
         return files
     # Follow local imports once; shared CSS/config always invalidate. Unknown aliases
     # fall back to the module snapshot rather than silently missing dependencies.
@@ -85,7 +85,9 @@ def source_snapshot(snapshot: dict, root: Path | None = None, targets: list[str]
                 return files
             else:
                 continue
-            base = Path(str(base).split('?', 1)[0].split('#', 1)[0]).resolve()
+            if not base.is_file():
+                base = Path(re.split(r'[?#]', str(base), maxsplit=1)[0])
+            base = base.resolve()
             candidates = [base, *[Path(str(base) + ext) for ext in SUFFIXES], *[base / ('index' + ext) for ext in SUFFIXES]]
             for candidate in candidates:
                 if candidate.is_relative_to(root):
@@ -121,6 +123,10 @@ def asset_inventory(root: Path, route: dict):
     public_root = Path(next(iter(roots))) if roots else None
     inventory = asset_module().generate_mapping_table('verify', sources, root, public_root)['mappings']
     expected = {(m.get('resolvedSource'), m.get('sourceDigest')) for m in inventory if m.get('sourceDigest')}
+    registered = {m['resolvedSource'] for m in mappings if m.get('resolvedSource') and m.get('copyStatus') == 'verified'}
+    for item in inventory:
+        if item.get('resolvedSource') in registered:
+            item['previouslyVerified'] = True
     mappings = list({(m.get('resolvedSource'), m.get('sourceDigest'), m.get('targetPath')): m
                      for m in mappings if (m.get('resolvedSource'), m.get('sourceDigest')) in expected}.values())
     return inventory, mappings, str(public_root) if public_root else None
@@ -334,18 +340,23 @@ def asset_status(root: Path, route: dict) -> dict:
         return {'status': 'not-applicable'}
     inventory, mappings, public_root = asset_inventory(root, route)
     errors = []
+    unverified = []
     for asset in inventory:
         if asset.get('decision') != 'copyToProject':
             continue
         found = next((item for item in mappings if item.get('resolvedSource') == asset.get('resolvedSource')
                       and item.get('sourceDigest') == asset.get('sourceDigest') and item.get('copyStatus') == 'verified'), None)
+        if not found and not asset.get('previouslyVerified') and route.get('route') == 'standard-html':
+            unverified.append({'source': asset['originalFile'], 'reason': asset.get('error', 'current_asset_mapping_missing')})
+            continue
         if asset.get('copyStatus') == 'failed' or not found:
             errors.append({'source': asset['originalFile'], 'reason': asset.get('error', 'current_asset_mapping_missing')})
             continue
         target = (root / found['targetPath']).resolve()
         if not target.is_relative_to(root) or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != found.get('targetDigest', found.get('sourceDigest')):
             errors.append({'source': asset['originalFile'], 'reason': 'copied_asset_missing_or_changed'})
-    return {'status': 'failed' if errors else 'passed', 'errors': errors,
+    return {'status': 'failed' if errors else 'unverified' if unverified else 'passed',
+            'errors': errors, 'unverified': unverified,
             'verifiedMappings': mappings, 'publicRoot': public_root}
 
 
@@ -355,23 +366,24 @@ def publish_route_summary(args, result: dict) -> None:
         from hooks.parallel_runtime import load_manifest, run_lock, save_manifest
         with run_lock(args.workspace, args.feature, args.parallel_run_id):
             manifest = load_manifest(args.workspace, args.feature, args.parallel_run_id)
-            issue_id = f'FRONTEND-VISUAL-{args.task_id}'
-            issues = [issue for issue in manifest.get('deferredIssues', []) if issue.get('issueId') != issue_id]
+            issue_ids = {'frontend_visual_unverified': f'FRONTEND-VISUAL-{args.task_id}',
+                         'frontend_assets_unverified': f'FRONTEND-ASSETS-{args.task_id}'}
+            issues = [issue for issue in manifest.get('deferredIssues', []) if issue.get('issueId') not in issue_ids.values()]
             for advisory in result.get('advisories', []):
-                issues.append({'issueId': issue_id, 'kind': advisory['type'], 'batchId': args._frontend_batch_id,
+                issues.append({'issueId': issue_ids[advisory['type']], 'kind': advisory['type'], 'batchId': args._frontend_batch_id,
                                'stage': 'implement', 'message': f"{args.task_id}: {advisory['message']}",
                                'disposition': 'recorded_advisory', 'blocksWorkflow': False, 'status': 'open'})
             manifest['deferredIssues'] = issues
             save_manifest(args.workspace, args.feature, args.parallel_run_id, manifest)
-    from hooks.resolve_frontend_html_route import evidence_path, mark_evidence
-    route = read(evidence_path(args.workspace, args.feature))
-    if not route or route.get('route') != result['binding']['route']:
+    from hooks.resolve_frontend_html_route import existing_evidence_path, mark_evidence
+    route = read(existing_evidence_path(args.workspace, args.feature, args.task_id))
+    if not route or route.get('route') != result['binding']['route'] or route.get('htmlSourcePaths', []) != result['binding'].get('htmlSourcePaths', []):
         return
     owners = route.get('taskSourceBindings', {})
     if owners and args.task_id not in owners:
         return
     status = result['status'] if result['status'] in {'passed', 'has-suggestions'} else 'failed'
-    mark_evidence(args.workspace, args.feature, review_status=status)
+    mark_evidence(args.workspace, args.feature, task_id=args.task_id, review_status=status)
 
 
 def _verify(args) -> dict:
@@ -401,13 +413,17 @@ def _verify(args) -> dict:
     route['_assetMappings'] = previous.get('assets', {}).get('verifiedMappings', [])
     route['_publicRoot'] = previous.get('assets', {}).get('publicRoot')
     snapshot = capture_file_snapshot(root)
-    targets = sorted({(root / t).resolve().relative_to(root).as_posix() for t in (args.target or ['src'])} | owned_code_targets(root, state, snapshot))
+    targets = {(root / t).resolve().relative_to(root).as_posix() for t in (args.target or [])}
+    targets.update(owned_code_targets(root, state, snapshot))
+    if not targets:
+        targets.add('src' if (root / 'src').is_dir() else '.')
+    targets = sorted(targets)
     for target in targets:
         target_path = (root / target).resolve()
         if not target_path.is_relative_to(root) or not target_path.exists():
             raise ValueError(f'frontend_target_invalid:{target}')
     current = binding(root, route, targets, snapshot)
-    result = {'schemaVersion': 1, 'taskId': args.task_id, 'taskRunId': args.run_id,
+    result = {'schemaVersion': 2, 'taskId': args.task_id, 'taskRunId': args.run_id,
               'taskContractSha256': state.get('taskContractSha256'), 'binding': current,
               'reportPath': str(path), 'bindingDigest': digest(current), 'status': 'failed', 'visual': {'status': 'not-run'},
               'fidelityStatus': 'not-run' if route.get('htmlSourcePaths') else 'not-applicable',
@@ -503,6 +519,10 @@ def _verify(args) -> dict:
     if result.get('visual', {}).get('status') == 'failed' or result.get('capture', {}).get('errors'):
         must_fix = True
     result['advisories'] = []
+    if result['assets'].get('unverified'):
+        result['advisories'].append({'type': 'frontend_assets_unverified',
+                                     'message': '标准 HTML 原稿的部分资源没有可核对的资产映射',
+                                     'blocksWorkflow': False})
     if (needs_visual and result['visual']['status'] == 'not-run') or result.get('capture', {}).get('status') == 'unavailable':
         reason = result.get('capture', {}).get('error') or '未提供实际页面与原始 HTML 的视觉核对结果'
         result['advisories'].append({'type': 'frontend_visual_unverified', 'message': reason, 'blocksWorkflow': False})

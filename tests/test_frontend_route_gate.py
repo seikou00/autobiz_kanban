@@ -1885,16 +1885,17 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
             worktree = root / "worktrees" / "B009"
             worktree.mkdir(parents=True)
             context = base_ui_context(ui_required=True)
+            html = write_feature_file(workspace, "frontend-html/design.html", "<label>Name</label><input>")
             context["visualSources"] = [{
                 "sourceId": "VIS-001",
-                "type": "high_fidelity_html",
-                "path": "frontend-html/missing.html",
-                "route": ROUTE_ABSOLUTE,
+                "type": "other",
+                "path": str(html),
+                "route": ROUTE_STANDARD,
                 "required": True,
             }]
             write_ui_context(workspace, context)
             write_parallel_plan(workspace, [
-                {"batchId": "B008", "status": "in_progress", "taskId": "T104", "route": ROUTE_ABSOLUTE, "visualSourceRefs": ["VIS-001"]},
+                {"batchId": "B008", "status": "in_progress", "taskId": "T104", "route": ROUTE_STANDARD, "visualSourceRefs": ["VIS-001"]},
                 {"batchId": "B009", "status": "in_progress", "taskId": "T105", "route": ROUTE_SPEC_DRIVEN, "visualSourceRefs": []},
             ])
             run = sealed_task_run()
@@ -1921,14 +1922,22 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
                 write_evidence=True,
                 start_route_run=True,
             )
-            result = frontend_route_write_guard.validate_frontend_write(
+            other = resolve_frontend_route(
                 workspace,
                 "alpha",
-                target_path=target,
+                task_id="T104",
+                write_evidence=True,
+                start_route_run=True,
             )
+            self.assertEqual(other["route"], ROUTE_STANDARD)
+            for path in (target, target.with_suffix(".vue")):
+                self.assertEqual(frontend_route_write_guard.validate_frontend_write(workspace, "alpha", target_path=path), 0)
+            mark_evidence(workspace, "alpha", task_id="T104", mark="route-skill-read-complete")
+            mark_evidence(workspace, "alpha", task_id="T105", review_status="passed")
+            self.assertEqual(read_json(evidence_path(workspace, "alpha", "T104"))["routeSkillReadComplete"], True)
+            self.assertEqual(read_json(evidence_path(workspace, "alpha", "T105"))["route"], ROUTE_SPEC_DRIVEN)
 
         self.assertEqual(scope, ("B009", "T105"))
-        self.assertEqual(result, 0)
 
 
 if __name__ == "__main__":

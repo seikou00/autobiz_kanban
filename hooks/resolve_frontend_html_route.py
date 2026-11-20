@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa: E402
+from hooks.json_writer_common import atomic_write_json  # noqa: E402
 from hooks.ui_context import (  # noqa: E402
     visual_source_bundle_sha256,
     visual_source_content_sha256,
@@ -83,8 +84,25 @@ def feature_dir(workspace: Path, feature: str) -> Path:
     return workspace / ".autobizdevops" / "features" / feature
 
 
-def evidence_path(workspace: Path, feature: str) -> Path:
-    return feature_dir(workspace, feature) / EVIDENCE_NAME
+def evidence_path(workspace: Path, feature: str, task_id: str | None = None) -> Path:
+    directory = feature_dir(workspace, feature)
+    if task_id is not None:
+        if not re.fullmatch(r"T\d{3}", task_id):
+            raise FrontendRouteError(f"task_scope_unknown:{task_id}")
+        directory = directory / "frontend-route" / task_id
+    return directory / EVIDENCE_NAME
+
+
+def existing_evidence_path(workspace: Path, feature: str, task_id: str | None = None) -> Path:
+    path = evidence_path(workspace, feature, task_id)
+    if task_id is None or path.is_file():
+        return path
+    legacy = evidence_path(workspace, feature)
+    evidence = read_json(legacy)
+    owners = evidence.get("taskSourceBindings", {})
+    if evidence.get("routeTaskId") not in {None, task_id} or (owners and task_id not in owners):
+        return path
+    return legacy
 
 
 def read_text(path: Path, *, limit: int = 2_000_000) -> str:
@@ -106,8 +124,16 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload)
+
+
+def write_route_evidence(workspace: Path, feature: str, path: Path, payload: dict[str, Any]) -> None:
+    write_json(path, payload)
+    legacy = evidence_path(workspace, feature)
+    if path != legacy:
+        previous = read_json(legacy)
+        if not previous or previous.get("routeTaskId") == payload.get("routeTaskId"):
+            write_json(legacy, payload)
 
 
 def new_route_run_id() -> str:
@@ -1108,12 +1134,15 @@ def resolve_frontend_route(
     if start_route_run:
         payload["frontendPolicyVersion"] = FRONTEND_POLICY_VERSION
     if write_evidence:
-        path = evidence_path(workspace, feature)
+        path = evidence_path(workspace, feature, task_id)
+        previous = existing_evidence_path(workspace, feature, task_id)
+        if task_id is not None:
+            payload["routeTaskId"] = task_id
         if start_route_run:
             payload = reset_route_run_state(payload)
         else:
-            payload = merge_existing_flags(payload, read_json(path))
-        write_json(path, payload)
+            payload = merge_existing_flags(payload, read_json(previous))
+        write_route_evidence(workspace, feature, path, payload)
     return payload
 
 
@@ -1123,11 +1152,14 @@ def mark_evidence(
     *,
     mark: str | None = None,
     review_status: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
-    path = evidence_path(workspace, feature)
+    path = existing_evidence_path(workspace, feature, task_id)
     payload = read_json(path)
     if not payload:
         raise ValueError(f"FRONTEND_ROUTE.json not found: {path}")
+    if task_id is None and payload.get("routeTaskId"):
+        raise ValueError("task-scoped frontend route evidence requires --task-id")
     if payload.get("route") not in VALID_ROUTES:
         raise ValueError(f"invalid frontend route evidence: {payload.get('route')}")
 
@@ -1168,7 +1200,7 @@ def mark_evidence(
         payload["reviewStatus"] = review_status
         payload["reviewRouteRunId"] = payload["routeRunId"]
 
-    write_json(path, payload)
+    write_route_evidence(workspace, feature, path, payload)
     return payload
 
 
@@ -1217,6 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
                 feature,
                 mark=args.mark,
                 review_status=args.review_status,
+                task_id=args.task_id,
             )
         else:
             payload = resolve_frontend_route(

@@ -24,6 +24,7 @@ from typing import Any
 
 ACTIVE_CODE_RUN_STATUSES = frozenset({"started", "in_progress", "implementation_recording"})
 GUARD_VERSION = "code-stage-v3"
+FRONTEND_VALIDATION_TOOLS = {"vite", "webpack", "tsc", "vue-tsc", "eslint", "jest", "vitest", "pytest"}
 
 try:
     from hooks.code_shell_analysis import analyze_script, normalize_path, absolute_path, executable, Invocation
@@ -240,12 +241,30 @@ def _is_environment_query(argv: list[str]) -> bool:
         lookup_args = lookup_args[1:]
     if executable in {"which", "where", "command", "type"}:
         return bool(lookup_args) and all(
-            _executable(arg) in {"mvn", "mvnw", "gradle", "gradlew", "go", "cargo"}
+            _executable(arg) in {"mvn", "mvnw", "gradle", "gradlew", "go", "cargo"} | FRONTEND_VALIDATION_TOOLS
             for arg in lookup_args
         )
-    if executable in {"mvn", "mvnw", "gradle", "gradlew", "cargo"}:
+    if executable in {"mvn", "mvnw", "gradle", "gradlew", "cargo"} | FRONTEND_VALIDATION_TOOLS:
         return len(argv) == 2 and argv[1] in {"-v", "-V", "--version", "-version", "-h", "--help"}
     return executable == "go" and argv[1:] == ["version"]
+
+
+def _is_validation_invocation(argv: list[str]) -> bool:
+    name = _executable(argv[0])
+    if name in {"mvn", "mvnw", "gradle", "gradlew"} | FRONTEND_VALIDATION_TOOLS:
+        return True
+    if name in {"python", "python3", "python.exe", "python3.exe"}:
+        args = argv[3:] if argv[1:3] == ["-X", "utf8"] else argv[1:]
+        if len(args) < 2:
+            return False
+        if args[0] == "-c":
+            return bool(FORBIDDEN_COMMAND_RE.search(args[1]))
+        return _executable(args[0]) == "task_runner.py" and args[1] in {"prepare-compile", "record-compile"}
+    if name in {"npm", "pnpm", "yarn", "npx", "go", "cargo", "node", "bun", "pnpx",
+                "command", "nohup", "time", "bash", "sh", "zsh", "eval", "xargs",
+                "sudo", "nice", "stdbuf", "timeout", "cmd", "powershell", "pwsh", "uv", "uvx", "poetry", "pipenv"}:
+        return bool(FORBIDDEN_COMMAND_RE.search(" ".join([name, *argv[1:]])))
+    return False
 
 
 def _is_backend_production_compile(command: str) -> bool:
@@ -367,7 +386,8 @@ def guard(payload: dict[str, Any]) -> str | None:
         return None
     base = _execution_directory(payload, tool_input)
     analysis = analyze_script(command, base)
-    if not FORBIDDEN_COMMAND_RE.search(command) and not any(FORBIDDEN_COMMAND_RE.search(" ".join(inv.argv)) for inv in analysis.invocations):
+    has_validation = any(_is_validation_invocation(inv.argv) for inv in analysis.invocations)
+    if not has_validation and not (analysis.issues and FORBIDDEN_COMMAND_RE.search(command)):
         return None
     active = _active_code_workspaces()
     batches = _parallel_batch_workspaces()

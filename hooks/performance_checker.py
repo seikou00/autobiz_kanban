@@ -24,7 +24,7 @@ import json
 import os
 import shlex
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from dataclasses import dataclass
 from typing import Any
 from paths import (
@@ -100,15 +100,6 @@ class CheckpointCommand:
 # ============================================================
 # 工具函数
 # ============================================================
-
-def _find_lines(code: str, pattern: str, flags: int = 0) -> List[Tuple[int, str]]:
-    """在代码中搜索匹配的行，返回 (行号, 行内容) 列表"""
-    results = []
-    for i, line in enumerate(code.splitlines(), 1):
-        if re.search(pattern, line, flags):
-            results.append((i, line.strip()))
-    return results
-
 
 def _get_line_snippet(lines: str, line_no: int, max_len: int = 120) -> str:
     """获取指定行的代码片段"""
@@ -416,9 +407,8 @@ def _check_throttle_debounce(lines: str) -> List[Dict]:
 
 def _check_component_cleanup(lines: str) -> List[Dict]:
     """
-    检测 React useEffect / Vue onMounted 中有副作用
-    但缺少对应的 cleanup 函数。
-    覆盖 React useEffect 和 Vue Composition API 两种框架。
+    检测 React useEffect 中直接创建资源但缺少 cleanup 的情况。
+    Vue 生命周期中的显式资源由资源清理规则检查，组件内同步 watcher 由 Vue 清理。
     """
     findings = []
 
@@ -468,26 +458,6 @@ def _check_component_cleanup(lines: str) -> List[Dict]:
                 "snippet": snippet,
                 "detail": f"第 {line_no} 行的 useEffect 有副作用（定时器/事件/订阅）但缺少 cleanup 函数"
             })
-
-    # ---- 5.2 Vue onMounted/onUnmounted 不配对 ----
-    on_mounted = _find_lines(lines, r'onMounted\s*\(')
-    on_unmounted = _find_lines(lines, r'onUnmounted\s*\(')
-    if on_mounted and not on_unmounted:
-        for ln, txt in on_mounted:
-            findings.append({
-                "line": ln,
-                "snippet": txt,
-                "detail": f"第 {ln} 行使用了 onMounted 但未找到对应的 onUnmounted 清理"
-            })
-
-    # ---- 5.3 Vue watchEffect 未停止 ----
-    watch_effects = _find_lines(lines, r'watchEffect\s*\(')
-    for ln, txt in watch_effects:
-        findings.append({
-            "line": ln,
-            "snippet": txt,
-            "detail": f"第 {ln} 行使用了 watchEffect，组件卸载后可能继续执行，建议在 onUnmounted 中停止"
-        })
 
     return findings
 
@@ -794,18 +764,18 @@ def main():
         # json.dump({}, sys.stdout, ensure_ascii=False)
         sys.exit(0)
 
-    # # 有问题 → 阻断，输出 JSON 决策
+    # 仅凭事件附近的文本无法确定处理器是否已节流。
     summary_lines = []
     for r in all_results:
-        risk_tag = "[HIGH]" if r["risk"] == "高风险" else "[MED]"
+        risk_tag = "[建议]" if r["rule_id"] == "FRONT-RULE004" else "[HIGH]" if r["risk"] == "高风险" else "[MED]"
         summary_lines.append(f"{risk_tag} [{r['rule_id']}] {r['risk']} - {r['title']} ({r['file']}:{r['line']})")
 
-    reason = (
-    f"性能检测发现 {len(all_results)} 个问题（涉及 {len(changed_files)} 个变动文件）:\n"
-    + "\n".join(summary_lines)
-    + "\n请把以上问题展示给用户，修复后重试。不管当前feature，检测出的代码问题全都需要修复。"
-    )
+    blocks = any(item["rule_id"] != "FRONT-RULE004" for item in all_results)
+    reason = f"性能检测发现 {len(all_results)} 项（涉及 {len(changed_files)} 个变动文件）:\n" + "\n".join(summary_lines)
 
+    if not blocks:
+        json.dump({"additionalContext": reason}, sys.stdout, ensure_ascii=False)
+        return 0
     json.dump({
         "decision": "block",
         "reason": reason,

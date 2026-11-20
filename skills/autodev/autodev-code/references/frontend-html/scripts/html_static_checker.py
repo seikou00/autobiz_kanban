@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
-SOURCE_SUFFIXES = {".tsx", ".jsx", ".ts", ".js", ".vue", ".css", ".less", ".scss"}
-CODE_SUFFIXES = {".tsx", ".jsx", ".ts", ".js", ".vue"}
+SOURCE_SUFFIXES = {".tsx", ".jsx", ".ts", ".js", ".vue", ".css", ".less", ".scss", ".sass", ".html"}
+JSX_CHECK_SUFFIXES = {".tsx", ".jsx", ".ts", ".js"}
+CODE_SUFFIXES = JSX_CHECK_SUFFIXES | {".vue"}
 SKIP_DIRS = {
     ".git",
     ".next",
@@ -172,16 +173,21 @@ def make_finding(
 
 
 def resolve_import(base: Path, import_path: str) -> bool:
-    candidate = (base.parent / import_path).resolve()
-    if candidate.exists():
+    if (base.parent / import_path).is_file():
         return True
-    suffixes = ["", ".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".less", ".scss", ".json"]
+    candidate = (base.parent / re.split(r"[?#]", import_path, maxsplit=1)[0]).resolve()
+    if candidate.is_file():
+        return True
+    suffixes = (".ts", ".tsx", ".js", ".jsx", ".vue", ".mjs", ".cjs", ".mts", ".cts", ".css", ".less", ".scss", ".sass", ".json")
     for suffix in suffixes:
-        if suffix and candidate.with_suffix(suffix).exists():
+        if Path(str(candidate) + suffix).is_file() or (candidate / f"index{suffix}").is_file():
             return True
-    for suffix in suffixes[1:]:
-        if (candidate / f"index{suffix}").exists():
-            return True
+    # TypeScript can resolve published JavaScript extension names to source files.
+    ts_suffixes = {".js": (".ts", ".tsx"), ".jsx": (".tsx",), ".mjs": (".mts",), ".cjs": (".cts",)}
+    if any(candidate.with_suffix(suffix).is_file() for suffix in ts_suffixes.get(candidate.suffix, ())):
+        return True
+    if (candidate / "package.json").is_file():
+        return True  # Project-specific package entry resolution belongs to the compiler.
     return False
 
 
@@ -193,7 +199,7 @@ def basic_code_findings(files: list[Path]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for path in files:
         text = read_text(path)
-        if path.suffix in CODE_SUFFIXES:
+        if path.suffix in JSX_CHECK_SUFFIXES:
             for regex, message in [
                 (re.compile(r"<!--"), "JSX / TSX 中疑似残留 HTML 注释"),
                 (re.compile(r"<[A-Za-z][^>\n]*\sclass="), "JSX 中疑似使用了 class，应改为 className"),
@@ -202,13 +208,14 @@ def basic_code_findings(files: list[Path]) -> list[dict[str, Any]]:
             ]:
                 for match in regex.finditer(text):
                     findings.append(make_finding(
-                        "must-fix",
+                        "suggestion",
                         "syntax",
                         str(path),
                         line_number(text, match.start()),
                         message,
                         match.group(0)[:120],
                     ))
+        if path.suffix in CODE_SUFFIXES:
             for regex, message in [
                 (re.compile(r"\bTODO\b|待实现|占位|placeholder", re.IGNORECASE), "代码中仍有待办或占位内容"),
                 (re.compile(r"lorem ipsum|示例文案|示例数据", re.IGNORECASE), "代码中仍有模板示例内容"),

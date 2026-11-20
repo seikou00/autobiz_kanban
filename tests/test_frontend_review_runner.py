@@ -95,6 +95,47 @@ class FrontendReviewRunnerTests(unittest.TestCase):
         self.assertEqual(result["summary"]["mustFix"], 0)
         self.assertEqual(result["summary"]["suggestion"], 0)
 
+    def test_vue_template_passes_and_missing_relative_import_still_fails(self) -> None:
+        template = (
+            '<template>\n'
+            '  <!-- Form label -->\n'
+            '  <label class="field" for="name">Name</label>\n'
+            '  <input id="name" />\n'
+            '</template>\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self.write(Path(tmp), "Page.vue", template)
+            args = ("--target", str(target), "--format", "json")
+            clean = self.run_runner(*args)
+            self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+
+            target.write_text(
+                template + '<script setup>\nimport "./missing";\n</script>\n',
+                encoding="utf-8",
+            )
+            broken = self.run_runner(*args)
+            findings = self.json_result(broken)["findings"]
+            self.assertEqual(broken.returncode, 1)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["severity"], "must-fix")
+            self.assertEqual(findings[0]["evidence"], "./missing")
+
+    def test_vite_imports_and_jsx_heuristics_do_not_block_either_framework(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(root, "icon.svg", "<svg/>")
+            self.write(root, "form.utils.ts", "export {}")
+            for name, source in {
+                "Vue.tsx": '/* @jsxImportSource vue */\nimport "./form.utils";\n'
+                           'export default () => <label class="field" for="name">Name</label>;',
+                "React.tsx": 'import icon from "./icon.svg?url";\nconst example = \'<label class="field">Name</label>\';\n'
+                             'export default () => <img src={icon} alt={example} />;',
+            }.items():
+                with self.subTest(name=name):
+                    target = self.write(root, name, source)
+                    proc = self.run_runner("--target", str(target), "--format", "json")
+                    self.assertEqual(self.json_result(proc)["summary"]["mustFix"], 0)
+
     def test_cli_emits_utf8_even_when_stdio_is_configured_as_gbk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = self.write(Path(tmp), "静态示例.tsx", "export default function Page() { return <div>示例</div>; }\n")
@@ -146,7 +187,7 @@ class FrontendReviewRunnerTests(unittest.TestCase):
             result = self.json_result(proc)
 
         self.assertEqual(proc.returncode, 1)
-        self.assertGreaterEqual(result["summary"]["mustFix"], 1)
+        self.assertEqual(result["summary"]["mustFix"], 1)
         self.assertGreaterEqual(result["summary"]["suggestion"], 1)
 
     def test_missing_optional_inputs_return_execution_error(self) -> None:

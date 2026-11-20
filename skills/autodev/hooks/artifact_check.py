@@ -76,6 +76,7 @@ from hooks.resolve_frontend_html_route import (  # noqa: E402
     ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
     evidence_path as frontend_evidence_path,
+    existing_evidence_path as existing_frontend_evidence_path,
     read_json as read_frontend_json,
     resolve_frontend_route,
 )
@@ -2589,6 +2590,23 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
         return 0
 
     evidence_file = frontend_evidence_path(ctx.root, ctx.slug)
+    if (ctx.feature_dir / "frontend-route").is_dir():
+        try:
+            tasks = load_plan_bundle(ctx.feature_dir).tasks
+        except ValueError as exc:
+            return fail_line(ctx, "invalid_frontend_route_plan", f" detail={exc}")
+        failures = 0
+        for task in tasks:
+            if task.get("uiRequired") is not True:
+                continue
+            task_evidence = existing_frontend_evidence_path(ctx.root, ctx.slug, task["id"])
+            record = read_frontend_json(task_evidence)
+            if not record:
+                if not _completed_before_scoped_routes(ctx.feature_dir, task):
+                    failures += fail_line(ctx, "missing_frontend_route_evidence", f" task={task['id']} evidence={task_evidence}")
+            else:
+                failures += _validate_frontend_route_record(ctx, task_evidence, record)
+        return failures
     evidence = read_frontend_json(evidence_file)
 
     if not evidence:
@@ -2604,6 +2622,27 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
             )
         return 0
 
+    return _validate_frontend_route_record(ctx, evidence_file, evidence)
+
+
+def _completed_before_scoped_routes(feature_dir: Path, task: dict) -> bool:
+    evidence_id = task.get("latestImplementationEvidenceId")
+    if task.get("status") not in {"implemented", "done"} or not evidence_id:
+        return False
+    task_id = task["id"]
+    for path in (feature_dir / ".task-runs" / task_id).glob("*.json"):
+        state = read_frontend_json(path)
+        if state.get("implementationEvidenceId") != evidence_id or state.get("success") is not True:
+            continue
+        if not state.get("frontendVerificationVersion"):
+            return True
+        report = read_frontend_json(feature_dir / "frontend-verification" / task_id / path.name)
+        return (report.get("schemaVersion") == 1 and report.get("taskId") == task_id
+                and report.get("taskRunId") == path.stem and report.get("status") in {"passed", "has-suggestions"})
+    return False
+
+
+def _validate_frontend_route_record(ctx: HookContext, evidence_file: Path, evidence: dict) -> int:
     route = evidence.get("route")
     if route == ROUTE_NONE and evidence.get("triggered") is not True:
         return 0

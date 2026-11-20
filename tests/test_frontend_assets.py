@@ -47,15 +47,17 @@ class FrontendAssetsTest(unittest.TestCase):
                 self.assertEqual(item['urlSuffix'], '')
                 self.assertEqual(item['sourceDigest'], hashlib.sha256(originals[name]).hexdigest())
                 self.assertEqual((project / item['targetPath']).read_bytes(), originals[name])
-            route = {'route': 'absolute-html', 'htmlSourcePaths': [str(html)]}
-            for _ in range(3):
+            routes = [{'route': route, 'htmlSourcePaths': [str(html)]} for route in ('absolute-html', 'standard-html')]
+            for route in routes:
                 self.assertEqual(fv.asset_status(project, route)['status'], 'passed')
             target = project / mapping['mappings'][0]['targetPath']
             target.write_bytes(b'changed')
-            self.assertEqual(fv.asset_status(project, route)['status'], 'failed')
+            for route in routes:
+                self.assertEqual(fv.asset_status(project, route)['status'], 'failed')
             (root / names[0]).unlink()
-            self.assertTrue(any(error['reason'] == 'source_asset_missing'
-                                for error in fv.asset_status(project, route)['errors']))
+            for route in routes:
+                self.assertTrue(any(error['reason'] == 'source_asset_missing'
+                                    for error in fv.asset_status(project, route)['errors']))
 
     def test_hash_filenames_and_url_suffixes_survive_css_and_svg_rewriting(self):
         with tempfile.TemporaryDirectory() as tmp:

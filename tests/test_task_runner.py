@@ -244,10 +244,11 @@ def _start(workspace: Path, code: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def _verify_frontend(workspace: Path, code: Path, run_id: str, target: str, *identity: str) -> subprocess.CompletedProcess[str]:
+def _verify_frontend(workspace: Path, code: Path, run_id: str, target: str | None, *identity: str) -> subprocess.CompletedProcess[str]:
+    targets = ["--target", target] if target else []
     return subprocess.run([sys.executable, "-B", str(ROOT / "hooks/frontend_verification.py"),
         "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001", "--run-id", run_id,
-        "--code-workspace", str(code), "--target", target, *identity], cwd=ROOT, capture_output=True, text=True)
+        "--code-workspace", str(code), *targets, *identity], cwd=ROOT, capture_output=True, text=True)
 
 
 def _configure_review_only(feature_dir: Path) -> None:

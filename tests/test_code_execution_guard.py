@@ -85,6 +85,14 @@ class CodeExecutionGuardTest(unittest.TestCase):
             reason = self._execute('cd "{}" && mvn compile -DskipTests'.format(self.code_worktree / "module"))
         self.assertIsNone(reason)
 
+    def test_allows_frontend_read_only_commands_in_active_batch(self) -> None:
+        self._write_parallel_batch(review_status="pending", test_status="pending", active_stage="implement")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            for command in ("rg -n vue-tsc package.json", "cat src/vite/Page.vue", "vite --version", "vue-tsc --help"):
+                with self.subTest(command=command):
+                    self.assertIsNone(self._execute(command, cwd=str(self.code_worktree)))
+            self.assertIn("VALIDATION_GOALS_NOT_ALLOWED_IN_CODE", self._execute("pnpm exec vue-tsc --noEmit", cwd=str(self.code_worktree)))
+
     def test_allows_windows_worktree_command_used_by_batch_agents(self) -> None:
         windows_worktree = r"D:\autobiz-test\simply\.autobizdevops\worktrees\cw-1\B005"
         run_path = self.feature_dir / ".task-runs" / "T007" / "run-007.json"

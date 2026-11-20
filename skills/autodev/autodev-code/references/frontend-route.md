@@ -6,6 +6,8 @@
 2. 按 Route 完成只读准备，TASK start 成功后才运行分析、复制 assets 或写源码；按顺序转交 parser 并登记 parser-read。原稿优先，分析脚本仅辅助。
 3. Route 实现清单完成登记 route-todos-completed（HTML 路线），随后执行下述统一回检。不能仅登记 reviewStatus 代替回检。
 
+上述每次 `--mark` 调用均携带同一 `--workspace`、`--feature` 和 `--task-id`。并行任务各自更新自己的 Route 记录。
+
 ## 统一回检（初次实现与返修共用）
 
 ```bash
@@ -13,6 +15,8 @@ python -X utf8 <pluginPath>/hooks/frontend_verification.py --workspace <artifact
 ```
 
 非并行任务省略 parallel-run-id/lease-token；target 可重复，务必包含本任务页面及相关组件，路径为工作区内相对路径。工具绑定当前源码/输入/检查器，未变化时复用静态回检和已有截图，不重复分析。报告在返回 reportPath；只在有 findings/未验证时读取完整报告。读取 html-post-review.md 做必要专业复核，不把静态脚本当最终视觉判断。
+
+省略 target 时优先检查当前 TASK 改动的前端文件。标准 HTML 的原稿资源缺少映射时记录未验证，已登记的资源仍按映射核对文件和内容。
 
 每个 TASK/run 使用一份实现回检报告。首次 finish-implementation 核对当前源码并登记 Evidence，重复 finish 复用已登记的结果。
 

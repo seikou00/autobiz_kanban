@@ -1,6 +1,6 @@
 ---
 name: standard-html-parser
-description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的参考。该参考以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；专业规则遵循 frontend-policy.md，调度和收尾遵循 code 根技能。
+description: 处理 `/autodev-code` 中结构明确的 HTML，按目标项目的 React 或 Vue 框架转换为可维护的页面或组件。专业规则遵循 frontend-policy.md，调度和收尾遵循 code 根技能。
 ---
 
 # 标准 HTML 解析器
@@ -34,13 +34,15 @@ auditRequired=<true|false>
 
 ## 2. 核心定位
 
-本参考的目标不是把 `class` 简单替换成 `className`，而是把原始 HTML 转成真实工程中可维护、可运行、可复用的 React 代码。
+先以用户要求及目标模块的依赖、配置和相邻页面确认框架，再把原始 HTML 转成可维护、可运行的工程代码。React 项目使用现有 JSX 和组件约定。Vue 项目使用现有 Vue 版本和项目约定，转换为 `.vue` 模板、脚本和样式，优先复用项目中的 Vue 组件。
+
+Vue 分支按项目模式使用 `:class`、`:style`、`@event`、`v-model`、`v-for` 和 `v-if` 表达绑定、交互和状态，保留原生 `class`、`for` 及合法模板注释。下文的 React 属性改写、React 新工程示例和桌面 Ant Design 审计适用于 React 分支。Vue 分支在交接中沿用 `uiLibraryTarget=project|native`、`antdMode=notApplicable`、`auditRequired=false`。
 
 必须同时做到：
 
 - 保留源 HTML 的业务语义、内容完整度、视觉结构和交互意图。
 - 按 frontend-policy.md 的优先级复用项目公共组件、本地组件和已安装且真实使用的组件库。
-- 对产品 UI 中的表单、表格、筛选、导航、反馈、上传、弹窗等结构，优先映射到真实项目组件、桌面 Ant Design 或 Ant Design Mobile。
+- 对产品 UI 中的表单、表格、筛选、导航、反馈、上传、弹窗等结构，优先映射到真实项目组件或当前框架已有组件库。
 - 对品牌化、文章化、营销化、异形视觉和高度自定义布局，保留原始语义 HTML / CSS，不强行 AntD 化。
 - 在主线阶段完成组件、数据、常量、类型、helper、hook、图标和图表配置抽取，不把维护性工作留到后续 `/autodev-reviewer` 阶段。
 
@@ -52,21 +54,7 @@ auditRequired=<true|false>
 
 ### 3.1 Assets 资源检查与处理
 
-执行 `../../references/assets-processing-guide.md` 中定义的完整流程。
-
-若 HTML 压缩包包含 `assets/` 目录：
-1. 检查并扫描 assets 目录
-2. 提取 HTML 中所有 assets 引用（仅处理被引用的文件）
-3. 对每个被引用的 asset 执行四级优先级判定
-4. 创建 assets 使用映射表并写入 `.frontend/html-analysis/<task-stem>-assets-mapping.json`
-5. 复制必要的 assets 到项目目录
-6. 输出 assets 处理总结
-
-**映射表位置：** `.frontend/html-analysis/<task-stem>-assets-mapping.json`
-
-若上层路线已生成映射表，直接读取并消费；若未生成，在编码前简报阶段执行一次完整 assets 处理。
-
-Assets 处理总结将作为编码前简报的输入材料。
+按 `../../references/assets-processing-guide.md` 检查原稿实际引用的资源。复用项目中已确认匹配的资源，需要复制时按项目现有目录和引用方式落盘。已有映射表时沿用 `.frontend/html-analysis/<task-stem>-assets-mapping.json`。在编码简报中记录实际使用的资源和缺口。
 
 ### 3.2 项目上下文读取
 
@@ -74,7 +62,7 @@ Assets 处理总结将作为编码前简报的输入材料。
 2. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
 3. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
 4. 对照页面模块清单确认入口、分区、局部组件、复用逻辑、样式文件和资产范围。
-5. 对照转换清单确认项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略，并消费 `uiLibraryTarget`。
+5. 对照转换清单确认项目组件、当前框架的现有组件库和原生实现的映射策略，并消费 `uiLibraryTarget`。
 6. 当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
 7. 当 `uiLibraryTarget=antd-mobile` 时，不读取桌面 Ant Design 转换参考，不运行桌面 Ant Design 覆盖审计；按项目移动端组件规则及 frontend-policy.md 的技术栈兜底继续。
 8. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户本轮提供的接口材料。
@@ -102,11 +90,11 @@ Assets 处理总结将作为编码前简报的输入材料。
 主线实现顺序固定为：
 
 1. 先按页面模块清单逐区实现页面壳层、路由入口、状态编排、数据获取和分区装配。
-2. 再按转换清单逐项替换项目组件、桌面 Ant Design 或 Ant Design Mobile；品牌化、高自定义视觉和保真区域保留原生 React + CSS。
+2. 再按转换清单逐项接入项目组件或当前框架的组件库。品牌化和高保真区域保留当前框架的标记与样式。
 3. 当 `antdMode=candidate` 但映射矩阵未选择桌面 Ant Design 时，将 `antdMode` 更新为 `notApplicable` 且 `auditRequired=false`；实际选择桌面 Ant Design 时，将 `antdMode` 更新为 `selected` 且 `auditRequired=true`。
-4. 最后按 Ant Design 审计清单处理残留 native 产品控件；审计脚本退出码 `1` 是待处理候选清单，不是脚本故障。
+4. 启用桌面 Ant Design 审计时，按审计清单处理剩余候选控件。审计脚本退出码 `1` 表示有候选项待处理。
 
-标准 HTML 转换的默认原则是“语义优先，组件替换有证据”：后台产品 UI 优先项目组件 / 桌面 Ant Design，移动端产品 UI 优先项目移动端组件 / Ant Design Mobile，品牌化或高度自定义视觉保留原生 React + CSS。没有源码、导出或真实用例证据时，不要强行使用某个项目组件。
+标准 HTML 转换优先保留语义，组件替换以现有源码、导出和真实用法为依据。
 
 ### 4.1 Ant Design 映射矩阵
 
@@ -127,7 +115,7 @@ Assets 处理总结将作为编码前简报的输入材料。
 
 优先用结构化解析、DOM 观察和项目上下文理解 HTML，不要只靠正则替换。
 
-转换时必须处理：
+React 分支转换时处理以下框架语法。Vue 分支使用上文的模板规范，两边都保留交互、布局及状态。
 
 - `class` -> `className`
 - `for` -> `htmlFor`
@@ -339,7 +327,7 @@ python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_co
 
 ### 10.2 新 React 工程
 
-只有在用户要求新建工程或当前没有可用 React 工程时才创建。默认 Vite + React + TypeScript，除非用户指定 JavaScript、Next.js 或其它框架。
+确认任务需要新建 React 工程时，可采用 Vite + React + TypeScript，用户显式指定的工程要求优先。新建 Vue 工程时按用户要求和项目规范选型，入口使用对应 Vue 工程惯例。
 
 新工程基础要求：
 
@@ -385,7 +373,7 @@ python -X utf8 references/frontend-html/with-standard-html/scripts/audit_antd_co
 
 ## 13. 禁止事项
 
-- 不要停留在 JSX 语法转换，必须交付工程化 React 代码。
+- 交付符合目标 React 或 Vue 项目结构的工程代码。
 - 不要把绝对定位 / Figma 导出稿误走本参考；命中强信号时返回 `../../with-absolute-html/SKILL.md`。
 - 不要新增依赖；缺少组件库、图标库或图表库时复用已有能力或原生实现，并记录降级原因，不得请求用户确认。
 - 不要保留明显可转为项目组件 / AntD / Ant Design Mobile 的后台或移动端产品控件为裸 HTML，除非保真或项目规则要求。

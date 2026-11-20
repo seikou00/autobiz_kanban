@@ -21,7 +21,7 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
 - 存在 `<style>` 或清晰 class 规则
 - `form` / `input` / `button` / `label` / `textarea` / `select` / `flex` 布局明显
 - 页面不是靠绝对定位碎片容器拼装主结构
-- 目标是优先映射 React + AntD / 真实项目组件，同时保留需要的视觉还原度
+- 目标是按项目的 React 或 Vue 实现，优先复用真实项目组件，同时保留需要的视觉还原度
 
 如果 HTML 主要由坐标、绝对定位、碎片 div 或 Figma/MasterGo 导出结构驱动，不使用本路线，应回到 `../with-absolute-html/SKILL.md`。
 
@@ -60,10 +60,10 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
   - [ ] 将以上证据与原始 HTML 交叉核对，再继续后续实现。
   - [ ] 记录交接状态：`moduleTodosReady=true`。
 - [ ] 写出转换清单（write_todos）。
-  - [ ] 按区域明确项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略。
+  - [ ] 按目标模块的依赖、配置与相邻页面确认 React 或 Vue。按区域明确项目组件、现有组件库或当前框架原生模板与样式的映射策略。
   - [ ] 覆盖表单、表格、筛选、导航、反馈、弹窗、上传、分页、图表、图标、默认值、禁用态、选中态、空态、错误态、loading、hover / focus、responsive 和可识别交互。
   - [ ] 判断 `uiLibraryTarget=project|antd|antd-mobile|native`：项目自有组件体系优先记为 `project`；桌面 Ant Design 记为 `antd`；移动端 Ant Design Mobile 记为 `antd-mobile`；品牌化、文章化、营销化、异形视觉和高度自定义布局优先记为 `native`。
-  - [ ] 后台产品 UI 优先项目组件或桌面 Ant Design；移动端标准 HTML 按项目证据及 frontend-policy.md 选择已有移动端组件；品牌化、文章化、营销化、异形视觉和高度自定义布局优先保留原生 React + CSS。
+  - [ ] 后台与移动端优先项目组件。React 项目按实际证据评估 Ant Design 或 Ant Design Mobile。Vue 项目将已有 Vue 组件库归为 `project`，使用原生 Vue 模板时记为 `native`，并使用 `antdMode=notApplicable`、`auditRequired=false`。品牌化和自定义布局保留当前框架的标记与样式。
   - [ ] 遵循“语义优先，组件替换有证据”：没有源码、导出或真实用例证据时，不强行使用某个项目组件。
   - [ ] 判断 `antdMode=required|candidate|selected|notApplicable`：用户明确要求桌面 Ant Design 时为 `required`；桌面 Ant Design 可能适用但尚未决定时为 `candidate`；映射矩阵决策后实际使用桌面 Ant Design 时为 `selected`；不使用桌面 Ant Design 时为 `notApplicable`。
   - [ ] 当 `antdMode=required` 或 `antdMode=candidate` 时，读取 `references/ant-design-conversion.md` 并建立映射矩阵；`candidate` 只表示必须评估，不等于最终使用。
@@ -79,7 +79,7 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
   - [ ] 对每个审计候选项执行转换，或保留原生实现并添加 `antd-audit-ignore` 注释说明原因。
 - [ ] 转交 `references/standard-html-parser.md`。
   - [ ] 交接状态必须包含：`routeType=standard-html`、`absoluteSignalsCleared=true`、`moduleTodosReady=true`、`conversionTodosReady=true`、`uiLibraryTarget=<project|antd|antd-mobile|native>`、`antdMode=<required|candidate|selected|notApplicable>`、`auditRequired=<true|false>`。
-  - [ ] 该参考文件已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口。
+  - [ ] 按已确认的框架使用 `standard-html-parser` 生成项目代码。
 - [ ] 主线完成后返回 `/autodev-code` 主流程。
   - [ ] `standard-html-parser` 主线完成后先输出交付总结，并带回统一前端回检输入：目标源码路径、原始 HTML 路径、analysis JSON 路径（标准 HTML 路线通常为 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`。
   - [ ] 随后控制权必须返回 `/autodev-code`，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进。
