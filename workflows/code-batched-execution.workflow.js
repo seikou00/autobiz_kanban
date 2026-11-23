@@ -3170,6 +3170,13 @@ async function runUntilDeliveriesComplete() {
       if (final) final = applySchedulerState(final);
       if (inactiveRun(lastScheduler)) return lastScheduler;
       if (allWorkflowDeliveriesMerged(final)) return final;
+      const batches = Object.values(final && final.manifest && final.manifest.batches || {});
+      const requiresOperator = batches.some(batch => batch.status === "blocked"
+        && batch.recovery && (batch.recovery.status === "blocked_non_retryable"
+          || batch.recovery.failureClassification === "non_retryable"));
+      const runnable = ["readyBatches", "mergeableBatches", "implementationRecoveryBatches",
+        "stageRecoveryBatches", "retryPendingBatches"].some(key => Array.isArray(final && final[key]) && final[key].length);
+      if (requiresOperator && !runnable && final.activeWorkers === 0) return final;
     } catch (error) {
       recordSchedulerFailure(`workflow-resume-${pass}`, error);
     }

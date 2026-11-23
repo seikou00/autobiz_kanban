@@ -34,6 +34,7 @@ from hooks.parallel_runtime import (
 from hooks.worktree_manager import remove_parallel_worktree
 from hooks.repository_snapshot import git_status_porcelain
 from hooks.parallel_integration import isolated
+from hooks.worktree_target import resolve_worktree_target_arg
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -162,7 +163,8 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
             continue
         repo = Path(binding["gitRoot"])
         if Path(path).exists():
-            removed_validation = _git(repo, "worktree", "remove", "--force", path)
+            target_arg = resolve_worktree_target_arg(repo, Path(path), allow_fail_fast=False).git_arg
+            removed_validation = _git(repo, "worktree", "remove", "--force", target_arg)
             if removed_validation.returncode != 0:
                 errors.append(f"validation:{ref}:worktree_remove_failed:{removed_validation.stderr.strip()}")
             else:
@@ -189,7 +191,8 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
             continue
         repo = Path(binding["gitRoot"])
         if path and Path(path).exists():
-            removed_candidate = _git(repo, "worktree", "remove", "--force", path)
+            target_arg = resolve_worktree_target_arg(repo, Path(path), allow_fail_fast=False).git_arg
+            removed_candidate = _git(repo, "worktree", "remove", "--force", target_arg)
             if removed_candidate.returncode != 0:
                 errors.append(f"candidate:{ref}:worktree_remove_failed:{removed_candidate.stderr.strip()}")
             else:

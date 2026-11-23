@@ -309,6 +309,37 @@ test("workflow resumes after local drain/finalization failures until durable del
   assert.ok(waits.every(seconds => seconds > 0 && seconds <= 30));
 });
 
+test("non-retryable blocks return after independent work drains", async () => {
+  for (const busy of [null, "readyBatches", "mergeableBatches", "implementationRecoveryBatches",
+    "stageRecoveryBatches", "retryPendingBatches", "activeWorkers"]) {
+    const state = { status: "blocked", activeWorkers: 0,
+      readyBatches: [], mergeableBatches: [], implementationRecoveryBatches: [],
+      stageRecoveryBatches: [], retryPendingBatches: [],
+      manifest: { batches: { B001: { status: "blocked",
+        recovery: { status: "blocked_non_retryable", failureClassification: "non_retryable" } } } } };
+    if (busy) state[busy] = busy === "activeWorkers" ? 1 : ["B002"];
+    let waits = 0;
+    const c = vm.createContext({ lastScheduler: state,
+      inactiveRun: () => false,
+      drainRunnableLifecycles: async () => {},
+      runFinalRepairAndReport: async () => state,
+      allWorkflowDeliveriesMerged: () => false,
+      applySchedulerState: value => value,
+      recordSchedulerFailure: (_label, error) => { throw error; },
+      waitWorkspaceSyncRetry: async () => {
+        waits += 1;
+        assert.equal(waits, 1, "blocked runs must return without repeated polling");
+        state[busy] = busy === "activeWorkers" ? 0 : [];
+      },
+      readSchedulerState: async () => state,
+    });
+    vm.runInContext(source.slice(source.indexOf('async function runUntilDeliveriesComplete('),
+      source.indexOf('// A resumed run can already contain')), c);
+    assert.equal(await c.runUntilDeliveriesComplete(), state);
+    assert.equal(waits, busy ? 1 : 0);
+  }
+});
+
 test("explicit run cancellation stops automatic recovery", async () => {
   const state = { status: "cancelled", manifest: { batches: {} } };
   const c = vm.createContext({ lastScheduler: state,

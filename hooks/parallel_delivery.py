@@ -259,6 +259,15 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
                             not in {"discarded", "failed", "stale"}]
                 if retained:
                     operation["wave"] = max(retained)
+            # A retained reservation must keep its original place in the queue.
+            # Otherwise an earlier waiter can wait on the wave that is behind it.
+            prior_tickets = [item["ticket"] for item in manifest["deliveryOperations"].values()
+                             if item.get("batchId") == batch_id
+                             and item.get("deliverySha") == expected_commit
+                             and item.get("wave") == operation.get("wave")
+                             and "wave" in operation]
+            if prior_tickets:
+                operation["ticket"] = min(prior_tickets)
             manifest["deliveryOperations"][key] = operation
         operation["executionTokenSha256"] = batch["dispatch"]["tokenSha256"]
         if operation.get("status") in DELIVERY_CONTINUATION_STATES:
@@ -319,6 +328,15 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
         else:
             saved = reservation(binding)
             previous = train._record(manifest, ref, saved.get("wave")) if saved else None
+            # Recover a crash between persisting a blocked creation and releasing
+            # its reservation. Candidate records continue to own their effects.
+            blocked_creation = saved and not previous and any(
+                item.get("repositoryRef") == ref and item.get("wave") == saved.get("wave")
+                and item.get("status") == "blocked"
+                for item in manifest["deliveryOperations"].values()
+            )
+            if blocked_creation:
+                release_if_owned(binding, workspace, feature, run_id, saved["wave"])
             if (previous and (previous.get("status") in {"discarded", "failed", "stale"}
                               or (previous.get("status") == "promoted"
                                   and all(manifest["batches"][key].get("status") == "merged"
@@ -348,7 +366,34 @@ def _settle_delivery(workspace: Path, feature: str, run_id: str, batch_id: str,
                     built = {"success": False, **record}
                 else:
                     build_started = time.monotonic()
-                    built = train._build_candidate(workspace, feature, run_id, wave=wave, batch_ids=[batch_id])
+                    try:
+                        built = train._build_candidate(workspace, feature, run_id, wave=wave, batch_ids=[batch_id])
+                    except ValueError as exc:
+                        from hooks.parallel_failure import recovery_failure
+                        from hooks.parallel_batch_scheduler import _mark_retry_pending_locked
+
+                        error = str(exc)
+                        context = run_dir(workspace, feature, run_id) / "engineering" / batch_id
+                        if not recovery_failure(error, batch, context)["nonRetryable"]:
+                            raise
+                        # Both execution and repository locks remain held until
+                        # the failure is durable. Scheduler polling cannot reclaim
+                        # this generation before its non-retryable state is saved.
+                        with run_lock(workspace, feature, run_id):
+                            failed = load_manifest(workspace, feature, run_id)
+                            failed_batch = _owner(failed, batch_id, generation, token, expected_commit)
+                            _mark_retry_pending_locked(workspace, feature, run_id, failed,
+                                                       batch_id, failed_batch, error=error)
+                            failed_batch["dispatch"].update(status="failed", completedEpoch=time.time())
+                            failed["deliveryOperations"][key].update(status="blocked", error=error)
+                            save_manifest(workspace, feature, run_id, failed)
+                            (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
+                        # No candidate exists yet on a failed worktree add. Keep
+                        # reservations for retained candidates with real effects.
+                        retained_record = train._record(failed, ref, wave)
+                        if not retained_record or retained_record.get("status") in {"failed", "stale", "discarded"}:
+                            release_if_owned(binding, workspace, feature, run_id, wave)
+                        raise
                     build_ms = round((time.monotonic() - build_started) * 1000)
                 if built.get("status") in {"candidate_conflicted", "needs_resolution"}:
                     reserve(binding, workspace, feature, run_id, wave, built["baseSha"] if "baseSha" in built

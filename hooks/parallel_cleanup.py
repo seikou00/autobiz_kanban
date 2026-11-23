@@ -21,6 +21,7 @@ from hooks.git_runtime import git_command
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.parallel_runtime import load_manifest, run_dir, run_lock, save_manifest, utc_now
 from hooks.repository_snapshot import RUNTIME_EXCLUDES
+from hooks.worktree_target import resolve_worktree_target_arg
 
 
 def pending(manifest: dict) -> list[dict]:
@@ -119,7 +120,8 @@ def _remove(manifest: dict, job: dict, deadline: float) -> None:
             raise ValueError("cleanup_worktree_changed")
         # Identity and delivery HEAD are verified above, and business changes
         # still block removal. Only excluded runtime files may remain dirty.
-        removed = _git(repo, deadline, "worktree", "remove", "--force", str(path))
+        target_arg = resolve_worktree_target_arg(repo, path, allow_fail_fast=False).git_arg
+        removed = _git(repo, deadline, "worktree", "remove", "--force", target_arg)
         if removed.returncode:
             raise ValueError("cleanup_worktree_remove_failed:" + removed.stderr.strip())
     found = _git(repo, deadline, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")

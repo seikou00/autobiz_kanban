@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import subprocess
 import sys
@@ -28,10 +29,15 @@ from hooks.git_runtime import git_command
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_batch_stage import complete_stage, gate_batch, reset_validation_batch, start_stage, record_e2e_failure, record_e2e_skip
-from hooks.parallel_runtime import INACTIVE_RUN_STATES, append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
+from hooks.parallel_runtime import INACTIVE_RUN_STATES, append_event, global_worktrees_root, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_integration import integration_repo, assert_integration, isolated, record_integration_head
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
+from hooks.worktree_target import (
+    WORKTREE_GIT_DIR_TOO_LONG,
+    is_git_dir_too_big_output,
+    resolve_worktree_target_arg,
+)
 from hooks.merge_resolution_context import prepare_context
 from hooks.merge_resolution import (
     PLATFORM_EXCLUDE, business_status, candidate_binding, git as resolution_git,
@@ -158,8 +164,20 @@ def _conflict_context_from_record(
     ), None
 
 
+def _repo_slot_token(repository_ref: str) -> str:
+    return hashlib.sha256(repository_ref.encode("utf-8")).hexdigest()[:8]
+
+
+def _legacy_candidate_path(workspace: Path, feature: str, run_id: str, repository_ref: str, wave: int) -> Path:
+    return run_dir(workspace, feature, run_id) / "merge-trains" / _safe(repository_ref) / f"wave-{wave:03d}"
+
+
+def _candidate_lock_path(workspace: Path, feature: str, run_id: str, repository_ref: str) -> Path:
+    return run_dir(workspace, feature, run_id) / "merge-trains" / _safe(repository_ref) / ".candidate.lock"
+
+
 def _candidate_paths(workspace: Path, feature: str, run_id: str, repository_ref: str, wave: int) -> tuple[Path, str]:
-    path = run_dir(workspace, feature, run_id) / "merge-trains" / _safe(repository_ref) / f"wave-{wave:03d}"
+    path = global_worktrees_root(workspace) / _safe(run_id) / "c" / f"{_repo_slot_token(repository_ref)}-w{wave}"
     branch = f"autodev-candidate/{_safe(feature)}/{_safe(run_id)}/{_safe(repository_ref)}/wave-{wave:03d}"
     return path, branch
 
@@ -181,7 +199,8 @@ def _remove_candidate(
 ) -> list[str]:
     errors: list[str] = []
     if path.exists():
-        removed = _git(repo, "worktree", "remove", "--force", str(path))
+        target_arg = resolve_worktree_target_arg(repo, path, allow_fail_fast=False).git_arg
+        removed = _git(repo, "worktree", "remove", "--force", target_arg)
         if (
             removed.returncode != 0
             and recover_interrupted_initialization
@@ -192,17 +211,18 @@ def _remove_candidate(
             # be residue from an interrupted earlier build, not another plugin
             # candidate construction in progress. Git explicitly requires a
             # second force flag to remove this incomplete worktree.
-            removed = _git(repo, "worktree", "remove", "--force", "--force", str(path))
+            removed = _git(repo, "worktree", "remove", "--force", "--force", target_arg)
         if removed.returncode != 0:
             errors.append("worktree_remove_failed:" + (removed.stderr.strip() or removed.stdout.strip()))
     pruned = _git(repo, "worktree", "prune")
     if pruned.returncode != 0:
         errors.append("worktree_prune_failed:" + (pruned.stderr.strip() or pruned.stdout.strip()))
-    exists = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
-    if exists.returncode == 0:
-        deleted = _git(repo, "branch", "-D", branch)
-        if deleted.returncode != 0:
-            errors.append("branch_remove_failed:" + (deleted.stderr.strip() or deleted.stdout.strip()))
+    if branch:
+        exists = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        if exists.returncode == 0:
+            deleted = _git(repo, "branch", "-D", branch)
+            if deleted.returncode != 0:
+                errors.append("branch_remove_failed:" + (deleted.stderr.strip() or deleted.stdout.strip()))
     return errors
 
 
@@ -273,13 +293,34 @@ def _build_candidate(
         current_head = _head(repo)
         if not expected_head or current_head != expected_head:
             raise ValueError(f"parallel_merge_train_main_head_changed:{repository_ref}:{expected_head}:{current_head}")
+        raw_prev = existing.get("worktreePath") if isinstance(existing, dict) else None
+        previous_path = Path(raw_prev) if isinstance(raw_prev, str) and raw_prev.strip() else None
+        legacy_path = _legacy_candidate_path(workspace, feature, run_id, repository_ref, wave)
         path, branch = _candidate_paths(workspace, feature, run_id, repository_ref, wave)
-        lock_path = path.parent / ".candidate.lock"
+        lock_path = _candidate_lock_path(workspace, feature, run_id, repository_ref)
 
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(lock_path):
         # Repeat no shared-state mutations under the candidate-specific lock;
         # it serializes concurrent Workflow instances for this repository.
+        resolved_target = path.resolve()
+        seen_stale: set[Path] = set()
+        for stale_candidate in (previous_path, legacy_path):
+            if stale_candidate is None:
+                continue
+            resolved_stale = stale_candidate.resolve()
+            if resolved_stale == resolved_target or resolved_stale in seen_stale or not stale_candidate.exists():
+                continue
+            seen_stale.add(resolved_stale)
+            stale_errors = _remove_candidate(
+                repo,
+                stale_candidate,
+                "",
+                recover_interrupted_initialization=True,
+            )
+            if stale_errors:
+                raise ValueError("parallel_merge_train_stale_candidate_cleanup_failed:" + ";".join(stale_errors))
         if path.exists() or _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
             cleanup_errors = _remove_candidate(
                 repo,
@@ -289,9 +330,13 @@ def _build_candidate(
             )
             if cleanup_errors:
                 raise ValueError("parallel_merge_train_stale_candidate_cleanup_failed:" + ";".join(cleanup_errors))
-        created = _git(repo, "worktree", "add", "-b", branch, str(path), current_head)
+        target_plan = resolve_worktree_target_arg(repo, path)
+        created = _git(repo, "worktree", "add", "-b", branch, target_plan.git_arg, current_head)
         if created.returncode != 0:
-            raise ValueError("parallel_merge_train_create_failed:" + (created.stderr.strip() or created.stdout.strip()))
+            detail = created.stderr.strip() or created.stdout.strip()
+            if is_git_dir_too_big_output(detail):
+                raise ValueError(f"{WORKTREE_GIT_DIR_TOO_LONG}:parallel_merge_train_create_failed:{detail}")
+            raise ValueError("parallel_merge_train_create_failed:" + detail)
         merged: list[dict[str, str]] = []
         failure: str | None = None
         conflicted_files: list[str] = []
@@ -771,12 +816,16 @@ def begin_e2e(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
             target = run_dir(workspace, feature, run_id) / "validation-worktrees" / "e2e" / _safe(ref)
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
-                removed = _git(repo, "worktree", "remove", "--force", str(target))
+                remove_arg = resolve_worktree_target_arg(repo, target, allow_fail_fast=False).git_arg
+                removed = _git(repo, "worktree", "remove", "--force", remove_arg)
                 if removed.returncode != 0:
                     raise ValueError(f"parallel_e2e_stale_worktree_remove_failed:{ref}")
-            added = _git(repo, "worktree", "add", "--detach", str(target), str(heads[ref]))
+            target_arg = resolve_worktree_target_arg(repo, target).git_arg
+            added = _git(repo, "worktree", "add", "--detach", target_arg, str(heads[ref]))
             if added.returncode != 0:
-                raise ValueError(f"parallel_e2e_worktree_create_failed:{ref}:{added.stderr.strip() or added.stdout.strip()}")
+                detail = added.stderr.strip() or added.stdout.strip()
+                prefix = f"{WORKTREE_GIT_DIR_TOO_LONG}:" if is_git_dir_too_big_output(detail) else ""
+                raise ValueError(f"{prefix}parallel_e2e_worktree_create_failed:{ref}:{detail}")
             worktrees[ref] = str(target)
     except ValueError:
         for ref, path in worktrees.items():
@@ -832,7 +881,7 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
 def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str,
                        attempt_id: str = "", *, workflow_retry: bool = False) -> dict[str, Any]:
     """Give the model a durable, candidate-specific permission to edit conflicts."""
-    lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
+    lock = _candidate_lock_path(workspace, feature, run_id, repository_ref)
     with FileLock(lock), run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in INACTIVE_RUN_STATES:
@@ -920,7 +969,7 @@ def complete_resolution(workspace: Path, feature: str, run_id: str, wave: int, r
 
 def _complete_resolution(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
     """Stage model-resolved files and create the merge commit inside the plugin."""
-    lock = _candidate_paths(workspace, feature, run_id, repository_ref, wave)[0].parent / ".candidate.lock"
+    lock = _candidate_lock_path(workspace, feature, run_id, repository_ref)
     with FileLock(lock), run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in INACTIVE_RUN_STATES:

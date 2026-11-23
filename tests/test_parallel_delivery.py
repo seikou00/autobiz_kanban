@@ -26,6 +26,78 @@ from tests.test_task_runner import _workspace, _refresh_parallel_pipeline
 
 
 class DeliveryTest(unittest.TestCase):
+    def test_candidate_length_failure_is_durable_before_scheduler_poll(self):
+        from hooks.parallel_repository import reservation
+
+        self.create()
+        args, tree = self.delivery()
+        error = "worktree_git_dir_too_long:bytes=225"
+        with patch.object(train, "resolve_worktree_target_arg", side_effect=ValueError(error)):
+            with self.assertRaisesRegex(ValueError, error):
+                settle_delivery(*args)
+        state = schedule(*args[:3])
+        batch = self.manifest()["batches"]["B001"]
+        self.assertEqual(batch["status"], "blocked")
+        self.assertEqual(batch["dispatchGeneration"], 1)
+        self.assertEqual(batch["dispatch"]["status"], "failed")
+        self.assertEqual(state["mergeableBatches"], [])
+        self.assertEqual(defer(*args[:6], error)["status"], "blocked")
+        self.assertEqual(reservation(self.manifest()["repositories"]["default"]), {})
+        self.assertTrue(tree.exists())
+        resumed = manual_resume_run(*args[:3])
+        generation = resumed["dispatchGrants"]["B001"]
+        owner = claim(*args[:4], generation, "merge_candidate", "resume")
+        result = settle_delivery(*args[:4], generation, owner["ownerToken"])
+        self.assertEqual(result["status"], "merged")
+        self.assertEqual(result["deliverySha"], args[6])
+
+    def test_failed_creation_releases_reservation_for_independent_delivery(self):
+        self.create(2)
+        first, _ = self.delivery("B001")
+        second, _ = self.delivery("B002")
+        error = "parallel_merge_train_create_failed:fatal: '$GIT_DIR' too big"
+        with patch.object(train, "_build_candidate", side_effect=ValueError(error)):
+            with self.assertRaises(ValueError):
+                settle_delivery(*first)
+        self.assertEqual(settle_delivery(*second)["status"], "merged")
+        resumed = manual_resume_run(*first[:3])
+        generation = resumed["dispatchGrants"]["B001"]
+        owner = claim(*first[:4], generation, "merge_candidate", "resume")
+        self.assertEqual(settle_delivery(*first[:4], generation, owner["ownerToken"])["status"], "merged")
+
+    def test_legacy_retained_reservation_keeps_queue_ticket_on_manual_resume(self):
+        self.create(2)
+        first, _ = self.delivery("B001")
+        second, _ = self.delivery("B002")
+        # Reproduce an older runtime that exited without recording its failure.
+        with patch.object(train, "_build_candidate", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(RuntimeError):
+                settle_delivery(*first)
+        defer(*first[:6], "worktree_git_dir_too_long:legacy")
+        queued = settle_delivery(*second)
+        self.assertEqual(queued["reasonCode"], "target_reserved")
+        resumed = manual_resume_run(*first[:3])
+        generation = resumed["dispatchGrants"]["B001"]
+        owner = claim(*first[:4], generation, "merge_candidate", "resume")
+        self.assertEqual(settle_delivery(*first[:4], generation, owner["ownerToken"])["status"], "merged")
+        after_queue_delay = time.time() + 31
+        with patch("hooks.parallel_dispatch.time.time", return_value=after_queue_delay):
+            owner = claim(*second[:5], "merge_candidate", "resume")
+        self.assertEqual(owner["status"], "claimed")
+        self.assertEqual(settle_delivery(*second[:5], owner["ownerToken"])["status"], "merged")
+
+    def test_blocked_creation_reservation_release_can_recover_after_interruption(self):
+        self.create(2)
+        first, _ = self.delivery("B001")
+        second, _ = self.delivery("B002")
+        with patch.object(train, "resolve_worktree_target_arg",
+                          side_effect=ValueError("worktree_git_dir_too_long:probe")), \
+                patch("hooks.parallel_delivery.release_if_owned", side_effect=OSError("interrupted release")):
+            with self.assertRaisesRegex(OSError, "interrupted release"):
+                settle_delivery(*first)
+        self.assertEqual(self.manifest()["batches"]["B001"]["status"], "blocked")
+        self.assertEqual(settle_delivery(*second)["status"], "merged")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="delivery-control-")
         self.addCleanup(temporary.cleanup)
