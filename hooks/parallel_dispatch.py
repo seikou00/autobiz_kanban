@@ -32,6 +32,22 @@ def active_claim(batch: dict, now: float | None = None) -> bool:
             and claim.get("expiresEpoch", 0) > (time.time() if now is None else now))
 
 
+def _valid_invocation_id(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 32 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def invocation_id_of(dispatch: dict | None, request_id: str | None = None) -> str | None:
+    explicit = (dispatch or {}).get("invocationId") if isinstance(dispatch, dict) else None
+    if _valid_invocation_id(explicit):
+        return str(explicit)
+    raw = request_id if request_id is not None else ((dispatch or {}).get("requestId") if isinstance(dispatch, dict) else None)
+    if isinstance(raw, str):
+        prefix = raw.split(":", 1)[0]
+        if _valid_invocation_id(prefix):
+            return prefix
+    return None
+
+
 def read(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -76,7 +92,11 @@ def _repository_delivery_running(manifest: dict, batch_id: str) -> bool:
 
 
 def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: int,
-          source: str, worker: str, ttl: int = 14400, request_id: str | None = None) -> dict:
+          source: str, worker: str, ttl: int = 14400, request_id: str | None = None,
+          invocation_id: str | None = None) -> dict:
+    if invocation_id is not None and not _valid_invocation_id(invocation_id):
+        raise ValueError("workflow_invocation_id_invalid")
+    resolved_invocation_id = invocation_id or invocation_id_of(None, request_id)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batches = manifest.get("batches", {})
@@ -88,6 +108,9 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
                     "generation": generation(batch), "reasonCode": reason}
         if manifest.get("status") in INACTIVE_RUN_STATES:
             return denied("parallel_dispatch_run_inactive")
+        invocation_ids = manifest.get("workflowInvocationIds") or []
+        if invocation_ids and resolved_invocation_id != invocation_ids[-1]:
+            return denied("workflow_invocation_superseded")
         if expected != generation(batch):
             return denied("stale_generation")
         queue = batch.get("deliveryQueue") or {}
@@ -108,7 +131,7 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             from hooks.parallel_delivery import execution_running
             if execution_running(workspace, feature, run_id, batch_id):
                 return denied("running")
-        if previous.get("generation") == expected and previous.get("status") in {"completed", "failed", "retry_pending"}:
+        if previous.get("generation") == expected and previous.get("status") in {"completed", "failed", "retry_pending", "revoked"}:
             return denied("grant_consumed")
         business_lease = read(lease_path(workspace, feature, run_id, batch_id))
         if business_lease.get("expiresEpoch", 0) > time.time():
@@ -142,13 +165,17 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
         token = uuid.uuid4().hex
         metadata = {"generation": expected, "status": "running", "worker": worker,
                     "claimedEpoch": time.time(),
-                    "requestId": request_id, "tokenSha256": hashlib.sha256(token.encode()).hexdigest(),
+                    "requestId": request_id, "invocationId": resolved_invocation_id,
+                    "tokenSha256": hashlib.sha256(token.encode()).hexdigest(),
                     "expiresEpoch": time.time() + max(60, ttl), "ttlSeconds": max(60, ttl), "source": source}
         path = run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")
         atomic_write_json(path, {**metadata, "ownerToken": token})
+        if resolved_invocation_id and not invocation_ids:
+            manifest["workflowInvocationIds"] = [resolved_invocation_id]
         batch["dispatch"] = metadata
         save_manifest(workspace, feature, run_id, manifest)
-    append_event(workspace, feature, run_id, "dispatch_claimed", batchId=batch_id, generation=expected, worker=worker)
+    append_event(workspace, feature, run_id, "dispatch_claimed", batchId=batch_id, generation=expected,
+                 worker=worker, invocationId=resolved_invocation_id)
     return {"success": True, "status": "claimed", "batchId": batch_id, "generation": expected, "ownerToken": token}
 
 
@@ -230,6 +257,7 @@ def build_parser():
             cmd.add_argument("--source", required=True)
             cmd.add_argument("--worker", required=True)
             cmd.add_argument("--request-id")
+            cmd.add_argument("--invocation-id")
             cmd.add_argument("--ttl-seconds", type=int, default=14400)
         else:
             cmd.add_argument("--owner-token", required=True)
@@ -245,7 +273,8 @@ def main(argv=None):
     try:
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
         if args.action == "claim":
-            result = claim(workspace, feature, args.run_id, args.batch_id, args.generation, args.source, args.worker, args.ttl_seconds, args.request_id)
+            result = claim(workspace, feature, args.run_id, args.batch_id, args.generation, args.source,
+                           args.worker, args.ttl_seconds, args.request_id, args.invocation_id)
         elif args.action == "finish":
             result = finish(workspace, feature, args.run_id, args.batch_id, args.generation, args.owner_token, args.outcome)
         else:

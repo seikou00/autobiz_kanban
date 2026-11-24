@@ -306,6 +306,7 @@ const SCHEDULER_RESULT_SCHEMA = {
       "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",
       "maxParallel", "dispatchGrants", "batchTaskIds", "batchWorkspaces"
     ], properties: { ok: { const: true }, success: { const: true } } },
+    { required: ["runId", "status"], properties: { status: { const: "superseded" }, ok: { const: true } } },
     { required: ["ok", "error"], properties: { ok: { const: false } } }
   ],
   additionalProperties: true
@@ -617,7 +618,7 @@ function usableString(value) {
 }
 
 function inactiveRun(state) {
-  return ["cancelled", "rolled_back", "cleaned"].includes(state && state.status);
+  return ["cancelled", "rolled_back", "cleaned", "superseded"].includes(state && state.status);
 }
 
 function requireSchedulerResult(value, label) {
@@ -837,7 +838,7 @@ async function workflowAgent(instruction, options = {}) {
   const label = usableString(options.label) ? options.label : "workflow-agent";
   const batchMatch = label.match(/(?:^|-)(B\d{3,})(?:-|$)/);
   const grant = batchMatch && typeof activeDispatchGrants !== "undefined" ? activeDispatchGrants.get(batchMatch[1]) : null;
-  if (grant) instruction += `\n仅 parallel_batch_stage.py 和 batch_lease_manager.py acquire 追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。业务凭证取 acquire 的 businessLeaseToken（旧版 lease.ownerToken）；优先使用绑定正确的 operations.argv。stale_stage_owner 立即停止，禁止强制 reclaim。`;
+  if (grant) instruction += `\nparallel_batch_stage.py、batch_lease_manager.py acquire 和 parallel_batch_scheduler.py mark-batch 均追加 --dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"。业务凭证取 acquire 的 businessLeaseToken（旧版 lease.ownerToken）；优先使用绑定正确的 operations.argv。派发凭证失效时立即停止，禁止强制 reclaim。`;
   workflowControlMetrics.agentCalls += 1;
   workflowControlMetrics.promptCharacters += (WORKFLOW_AUTONOMY_PREFIX + instruction).length;
   workflowControlMetrics.labels[label] = (workflowControlMetrics.labels[label] || 0) + 1;
@@ -899,7 +900,7 @@ try {
     { label: "verify-engineering-deployment", phase: "准备" }
   ), "engineering deployment");
   const prepareCommand = resumeRunId
-    ? `python -X utf8 "${schedulerPath}" ${resumeMode === "manual" ? "manual-resume" : "resume"} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}"`
+    ? `python -X utf8 "${schedulerPath}" ${resumeMode === "manual" ? "manual-resume" : "resume"} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}" --workflow-invocation-id "${workflowInvocationId}"`
     : `python -X utf8 "${schedulerPath}" ensure ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
       `--task-card-id "${taskCardId.trim()}" --workflow-invocation-id "${workflowInvocationId}" ` +
@@ -945,8 +946,11 @@ async function recoverPendingRetries(scheduler, label, phaseName = "准备") {
   // explicit retry makes the Workflow resilient to an interrupted lease
   // handoff while still letting the scheduler remain the sole state owner.
   const recovery = (async () => {
+    const invocationArg = typeof workflowInvocationId !== "undefined" && usableString(workflowInvocationId)
+      ? ` --workflow-invocation-id "${workflowInvocationId}"`
+      : "";
     const result = await workflowAgent(
-      `执行 python -X utf8 "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+      `执行 python -X utf8 "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"${invocationArg}。` +
       `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；必须原样返回该命令 stdout 的完整 JSON，不得自行概括或重建 batchWorkspaces。`,
       { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
     );
@@ -963,6 +967,9 @@ async function recoverPendingRetries(scheduler, label, phaseName = "准备") {
 let initialRetryRecoveryFailure = null;
 try {
   prepared = await recoverPendingRetries(prepared, "recover-pending-retries-after-ensure");
+  if (prepared.status === "superseded") {
+    return { ok: false, feature, runId, finalStatus: prepared.status, nextAction: "none" };
+  }
 } catch (error) {
   // An interrupted control-plane model call must not prevent the already
   // schedulable, independent portion of this durable run from draining. The
@@ -1204,15 +1211,16 @@ async function readSchedulerState(label, phaseName = "准备") {
     const startedRevision = lastScheduler && lastScheduler.controlRevision;
     try {
       const state = requireSchedulerResult(await workflowAgent(
-        `执行 python -X utf8 "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+        `执行 python -X utf8 "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --workflow-invocation-id "${workflowInvocationId}"。` +
         `这是调度器输出的固定工作流字段视图；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只原样返回该命令 stdout 的 JSON；不得读取完整 manifest 后手工汇总、推断 scheduledGroups，或重建/省略 batchWorkspaces 的 workspaceRef。` +
         `本读取器供准备、调度、Batch、候选验证、最终修复和最终报告的所有阶段共用（包括 final-repair-initial、final-repair-before-retry、final-repair-after-drain-* 与 final-report-snapshot）。状态必须通过此 status --workflow-view 命令取得；若需单独检查视图未包含的清单字段，另用 python -X utf8 "${pluginPath}/hooks/query_json_fields.py" --file "${artifactWorkspace}/.autobizdevops/features/${feature}/.parallel-runs/${runId}/manifest.json" --field "batches.<BATCH_ID>.status" 查询，不得读取完整 manifest，也不得用查询结果重建或替换 status 命令的工作流状态。`,
         { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
       ), label);
       const view = state.manifest;
+      const batchIds = Object.keys(state.batchTaskIds || {});
       const missingBatches = view && view.batches && typeof view.batches === "object"
-        ? Object.keys(state.batchTaskIds).filter(batchId => !view.batches[batchId])
-        : Object.keys(state.batchTaskIds);
+        ? batchIds.filter(batchId => !view.batches[batchId])
+        : batchIds;
       if (!inactiveRun(state) && (!view || !view.batches || !view.mergeTrains || !Array.isArray(view.deferredIssues) || missingBatches.length)) {
         throw new Error(`parallel_scheduler_manifest_view_incomplete:${missingBatches.join(",")}`);
       }
@@ -2614,7 +2622,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       let outcome = "failed";
       try {
         const acquired = await dispatchCommand("claim", job,
-          `--source "${job.source}" --worker "${drainLabel}-${workerIndex}" --request-id "${job.requestId}" --ttl-seconds ${Math.max(14400, timeoutPerBatch + 300)}`,
+          `--source "${job.source}" --worker "${drainLabel}-${workerIndex}" --request-id "${job.requestId}" --invocation-id "${workflowInvocationId}" --ttl-seconds ${Math.max(14400, timeoutPerBatch + 300)}`,
           `dispatch-claim-${job.batchId}-${job.generation}`);
         if (acquired.status === "claimed" && usableString(acquired.ownerToken)) {
           grant = { generation: job.generation, ownerToken: acquired.ownerToken };
@@ -3197,6 +3205,9 @@ applySchedulerState(prepared);
 // branches and their newly-ready downstream waves get dispatched first.
 const finalScheduler = await runUntilDeliveriesComplete();
 if (finalScheduler) applySchedulerState(finalScheduler);
+if (finalScheduler && finalScheduler.status === "superseded") {
+  return { ok: false, feature, runId, finalStatus: "superseded", nextAction: "none" };
+}
 await drainWorkspaceSync();
 
 if (inactiveRun(finalScheduler) || !allWorkflowDeliveriesMerged(finalScheduler)) {

@@ -568,6 +568,46 @@ def lease_path(workspace: Path, feature: str, run_id: str, batch_id: str) -> Pat
     return run_dir(workspace, feature, run_id) / "leases" / f"{batch_id}.json"
 
 
+def validate_cli_dispatch(manifest: dict, batch: dict, batch_id: str, auth: dict | None, owner: str) -> bool:
+    """Validate a CLI worker's grant. Internal calls and standalone work have no grant."""
+    if auth is None:
+        return False
+    dispatch = batch.get("dispatch") or {}
+    workflow_batch = manifest.get("workflowInvocationIds") and batch_id in manifest["batches"]
+    if not (dispatch or batch.get("dispatchManaged") or workflow_batch
+            or auth.get("generation") is not None or auth.get("token") is not None):
+        return False
+    token = auth.get("token")
+    if (not isinstance(token, str) or not token
+            or auth.get("generation") != batch.get("dispatchGeneration", 1)
+            or dispatch.get("generation") != auth.get("generation")
+            or dispatch.get("status") != "running" or dispatch.get("expiresEpoch", 0) <= time.time()
+            or dispatch.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
+        raise ValueError(f"parallel_dispatch_stale_{owner}_owner:{batch_id}")
+    return True
+
+
+def advance_dispatch_generation(batch: dict) -> int:
+    # A standalone retry can also advance the generation without a dispatch.
+    if batch.pop("dispatch", None):
+        batch["dispatchManaged"] = True
+    batch["dispatchGeneration"] = int(batch.get("dispatchGeneration", 1)) + 1
+    return batch["dispatchGeneration"]
+
+
+def _implementation_repair_open(states: dict[str, Any]) -> bool:
+    rework_stage = (states.get("implement") or {}).get("status")
+    if rework_stage == "pending":
+        return True
+    if rework_stage != "running":
+        return False
+    return any(
+        isinstance((states.get(stage) or {}).get("failure"), dict)
+        and (states.get(stage) or {})["failure"].get("nextStage") == "implement"
+        for stage in ("review", "test")
+    )
+
+
 def acquire_lease(
     workspace: Path,
     feature: str,
@@ -592,17 +632,12 @@ def acquire_lease(
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
         dispatch = batch.get("dispatch") or {}
-        if dispatch_auth is not None and dispatch:
-            if (dispatch_auth.get("generation") != batch.get("dispatchGeneration", 1)
-                    or dispatch.get("generation") != dispatch_auth.get("generation")
-                    or dispatch.get("status") != "running" or dispatch.get("expiresEpoch", 0) <= time.time()
-                    or dispatch.get("tokenSha256") != hashlib.sha256((dispatch_auth.get("token") or "").encode()).hexdigest()):
-                raise ValueError(f"parallel_dispatch_stale_lease_owner:{batch_id}")
+        if validate_cli_dispatch(manifest, batch, batch_id, dispatch_auth, "lease"):
             dispatch["expiresEpoch"] = time.time() + max(60, int(dispatch.get("ttlSeconds", 14400)))
             # A lost acquire response may be retried by the same fenced worker.
             # Reuse its business capability; never replace a live owner's token.
             states = batch.get("stageStates") or {}
-            mutable_seal = ((states.get("implement") or {}).get("status") == "pending"
+            mutable_seal = (_implementation_repair_open(states)
                             or ((states.get("review") or {}).get("status") == "passed"
                                 and (states.get("test") or {}).get("status") in {"pending", "running", "failed"}))
             if batch.get("status") in {"leased", "running"} or (batch.get("status") == "sealed" and mutable_seal):
@@ -623,10 +658,9 @@ def acquire_lease(
                     save_manifest(workspace, feature, run_id, manifest)
                     return lease
         states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
-        rework_stage = (states.get("implement") or {}).get("status")
         review_stage = (states.get("review") or {}).get("status")
         test_stage = (states.get("test") or {}).get("status")
-        repair_pending = rework_stage == "pending"
+        repair_pending = _implementation_repair_open(states)
         utest_pending = (
             review_stage == "passed"
             and test_stage in {"pending", "running", "failed"}

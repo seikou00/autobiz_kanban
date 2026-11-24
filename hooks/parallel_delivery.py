@@ -15,7 +15,10 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.evidence_kernel import FileLock
-from hooks.parallel_runtime import DELIVERY_STAGES, INACTIVE_RUN_STATES, append_event, load_manifest, run_lock, run_dir, save_manifest, utc_now, plan_digest
+from hooks.parallel_runtime import (
+    DELIVERY_STAGES, INACTIVE_RUN_STATES, advance_dispatch_generation, append_event,
+    load_manifest, plan_digest, run_dir, run_lock, save_manifest, utc_now,
+)
 from hooks.parallel_repository import repository_lock, assert_reservation, reserve, reservation, release_if_owned, coordinates
 
 DELIVERY_RETRY_SECONDS = 30
@@ -149,7 +152,7 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
                 repository_guard.__exit__(None, None, None)
             # An OS lock disappears when its process dies; a four-hour grant
             # alone is not evidence that the settlement is still executing.
-            generation = int(batch.get("dispatchGeneration", 1)) + 1
+            generation = advance_dispatch_generation(batch)
             key = hashlib.sha256(f"{run_id}:{batch_id}:{generation}:{batch['commitSha']}".encode()).hexdigest()
             if current:
                 retained = {**current, "operationId": key, "dispatchGeneration": generation, "status": "queued"}
@@ -157,8 +160,6 @@ def reconcile_deliveries_locked(workspace: Path, feature: str, run_id: str, mani
                 retained.pop("frontendRecheck", None)
                 current.update(status="superseded", supersededBy=key)
                 manifest["deliveryOperations"][key] = retained
-            batch["dispatchGeneration"] = generation
-            batch.pop("dispatch", None)
             reason = "delivery_grant_consumed" if consumed else "delivery_interrupted"
             batch["deliveryQueue"] = {"retryAfterEpoch": 0, "blockingBatchIds": [], "reasonCode": reason}
             if current:

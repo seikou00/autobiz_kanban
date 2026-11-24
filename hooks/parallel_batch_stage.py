@@ -27,6 +27,7 @@ from hooks.parallel_runtime import (
     run_dir,
     run_lock,
     save_manifest,
+    validate_cli_dispatch,
 )
 
 
@@ -116,12 +117,7 @@ def _batch(manifest: dict[str, Any], batch_id: str) -> dict[str, Any]:
         raise ValueError(f"parallel_batch_not_found:{batch_id}")
     auth = _CLI_DISPATCH_AUTH.get()
     dispatch = batch.get("dispatch") or {}
-    if auth is not None and dispatch:
-        if (auth.get("generation") != batch.get("dispatchGeneration", 1)
-                or dispatch.get("generation") != auth.get("generation")
-                or dispatch.get("status") != "running" or dispatch.get("expiresEpoch", 0) <= time.time()
-                or dispatch.get("tokenSha256") != hashlib.sha256((auth.get("token") or "").encode()).hexdigest()):
-            raise ValueError(f"parallel_dispatch_stale_stage_owner:{batch_id}")
+    if validate_cli_dispatch(manifest, batch, batch_id, auth, "stage"):
         # Stage transitions renew lifecycle ownership; UTest's independent
         # first-command and total execution deadlines remain unchanged.
         dispatch["expiresEpoch"] = time.time() + max(60, int(dispatch.get("ttlSeconds", 14400)))

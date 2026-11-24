@@ -17,7 +17,7 @@ function harness() {
   };
   const context = vm.createContext({
     pluginPath: "/plugin", schedulerPath: "/plugin/hooks/parallel_batch_scheduler.py",
-    artifactWorkspace: "/artifacts", feature: "feature", runId: "run",
+    artifactWorkspace: "/artifacts", feature: "feature", runId: "run", workflowInvocationId: "a".repeat(32),
     SCHEDULER_RESULT_SCHEMA: {}, schedulerReadInFlight: null, lastScheduler: state,
     maxParallel: 2, timeoutPerBatch: 3600, schedulerCycles: 1,
     activeDispatchGrants: new Map(), dispatchGrants: {}, retryPriorityBatchIds: new Set(),
@@ -72,6 +72,17 @@ for (const capacityPoll of [false, true]) {
     });
   }
 }
+
+test("a superseded workflow stops polling on its invocation-specific status", async () => {
+  const { context: c, failures } = harness();
+  c.agent = async prompt => {
+    assert.ok(prompt.includes(`--workflow-invocation-id "${c.workflowInvocationId}"`));
+    return { ok: true, runId: "run", status: "superseded" };
+  };
+  const state = await c.readSchedulerState("superseded-poll");
+  assert.equal(c.inactiveRun(state), true);
+  assert.deepEqual(failures, []);
+});
 
 test("agent calls delegate transport recovery to the platform and preserve dispatch identity", async () => {
   for (const result of [null, { value: " " }, { batchId: "B001", status: "failed" }]) {

@@ -491,3 +491,250 @@ class DispatchGrantTest(unittest.TestCase):
         self.assertEqual(first_defer["status"], second_defer["status"])
         self.assertTrue(second_defer["reused"])
         self.assertEqual(1, load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["recovery"]["retryAttempts"])
+
+    def test_unclaimed_retry_requires_a_grant_only_after_dispatched_work(self):
+        from hooks.batch_lease_manager import main as lease_main
+
+        common = ["acquire", "--workspace", str(self.workspace), "--feature", "alpha",
+                  "--run-id", self.run, "--batch-id", "B001"]
+        mark_batch(self.workspace, "alpha", self.run, "B001", "retry_pending")
+        resume_run(self.workspace, "alpha", self.run)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(0, lease_main(common))
+        mark_batch(self.workspace, "alpha", self.run, "B001", "retry_pending")
+        resume_run(self.workspace, "alpha", self.run)
+        owner = self.claim(3)
+        defer(self.workspace, "alpha", self.run, "B001", 3, owner["ownerToken"], "interrupted")
+        resume_run(self.workspace, "alpha", self.run)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(1, lease_main(common))
+        self.assertFalse(lease_path(self.workspace, "alpha", self.run, "B001").exists())
+
+    def test_cancelled_invocation_review_is_superseded_on_relaunch_and_fences_late_writes(self):
+        from hooks.batch_lease_manager import main as lease_main
+        from hooks.parallel_batch_scheduler import main as scheduler_main, manual_resume_run
+        from hooks.parallel_batch_stage import main as stage_main
+
+        inv_a, inv_b = "a" * 32, "b" * 32
+        # Deliberately pass invocation via legacy requestId prefix to cover pre-existing manifests.
+        owner = claim(self.workspace, "alpha", self.run, "B001", 1, "initial", "drain-1",
+                      request_id=f"{inv_a}:drain:1:1")
+        provisioned = provision_parallel_worktree(self.workspace, "alpha", self.run, "B001")
+        worktree, branch = Path(provisioned["worktreePath"]), provisioned["branchName"]
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, check=True).stdout.strip()
+        mark_batch(self.workspace, "alpha", self.run, "B001", "sealed",
+                   worktreePath=str(worktree), branchName=branch, commitSha=commit)
+        for completed in ("prepare", "implement"):
+            start_stage(self.workspace, "alpha", self.run, "B001", completed)
+            complete_stage(self.workspace, "alpha", self.run, "B001", completed, metadata={"batchCommit": commit})
+        start_stage(self.workspace, "alpha", self.run, "B001", "review")
+
+        # Without a new invocation ID (or with the same invocation ID), live Review is never stolen.
+        same_resume = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_a)
+        self.assertEqual(1, same_resume["activeWorkers"])
+        self.assertEqual("running", claim(self.workspace, "alpha", self.run, "B001", 1, "stage_recovery", "other", invocation_id=inv_a)["reasonCode"])
+
+        # Simulate cancel + relaunch with fresh workflowInvocationId while TTL is still valid.
+        resumed = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_b)
+        self.assertEqual(0, resumed["activeWorkers"])
+        self.assertEqual(2, resumed["dispatchGrants"]["B001"])
+        self.assertEqual("review", resumed["stageRecoveryBatches"][0]["nextStage"])
+        self.assertEqual([{"batchId": "B001", "reason": "workflow_invocation_superseded"}], resumed["reclaimedStaleBatches"])
+        for caller in (inv_a, None):
+            rejected = claim(self.workspace, "alpha", self.run, "B001", 2, "stage_recovery", "old", invocation_id=caller)
+            self.assertEqual("workflow_invocation_superseded", rejected["reasonCode"])
+        batch_after_resume = load_manifest(self.workspace, "alpha", self.run)
+        self.assertNotIn("dispatch", batch_after_resume["batches"]["B001"])
+        self.assertEqual("running", batch_after_resume["batches"]["B001"]["stageStates"]["review"]["status"])
+
+        # Pre-claim gap: old generation CLI calls must be fenced even when `dispatch` was popped.
+        common = ["--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run, "--batch-id", "B001"]
+        for cli_main, argv, expected_error in (
+            (stage_main, ["finish-review", *common, "--decision", "passed",
+                          "--dispatch-generation", "1", "--dispatch-token", owner["ownerToken"]],
+             "parallel_dispatch_stale_stage_owner"),
+            (lease_main, ["acquire", *common, "--dispatch-generation", "1", "--dispatch-token", owner["ownerToken"]],
+             "parallel_dispatch_stale_lease_owner"),
+            (scheduler_main, ["mark-batch", *common, "--status", "running",
+                              "--worktree-path", str(worktree), "--branch-name", branch],
+             "parallel_dispatch_stale_batch_owner"),
+            (stage_main, ["finish-review", *common, "--decision", "passed"], "parallel_dispatch_stale_stage_owner"),
+            (lease_main, ["acquire", *common], "parallel_dispatch_stale_lease_owner"),
+            (scheduler_main, ["mark-batch", *common, "--status", "running",
+                              "--worktree-path", str(worktree), "--branch-name", branch,
+                              "--dispatch-generation", "1", "--dispatch-token", owner["ownerToken"]],
+             "parallel_dispatch_stale_batch_owner"),
+        ):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(1, cli_main(argv), out.getvalue())
+            self.assertIn(expected_error, out.getvalue())
+        self.assertEqual("stale_owner_ignored", defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "late")["status"])
+        self.assertEqual("stale_owner_ignored", finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"])["status"])
+        self.assertEqual(batch_after_resume, load_manifest(self.workspace, "alpha", self.run))
+
+        next_owner = claim(self.workspace, "alpha", self.run, "B001", 2, "stage_recovery", "drain-1",
+                           request_id=f"{inv_b}:drain:1:1", invocation_id=inv_b)
+        self.assertEqual("claimed", next_owner["status"])
+        before = load_manifest(self.workspace, "alpha", self.run)
+        for command in (resume_run, manual_resume_run):
+            self.assertEqual("superseded", command(self.workspace, "alpha", self.run, workflow_invocation_id=inv_a)["status"])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(0, scheduler_main(["status", "--workflow-view", "--workspace", str(self.workspace),
+                                              "--feature", "alpha", "--run-id", self.run, "--workflow-invocation-id", inv_a]))
+        self.assertEqual("superseded", json.loads(out.getvalue())["status"])
+        self.assertEqual(before, load_manifest(self.workspace, "alpha", self.run))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(0, stage_main([
+                "finish-review", *common, "--decision", "passed",
+                "--dispatch-generation", "2", "--dispatch-token", next_owner["ownerToken"],
+            ]), out.getvalue())
+        self.assertEqual("passed", json.loads(out.getvalue())["status"])
+
+    def test_cancelled_invocation_dirty_fix_resumes_end_to_end_across_repeated_resumes(self):
+        from hooks.batch_lease_manager import main as lease_main
+        from hooks.parallel_batch_scheduler import manual_resume_run
+        from hooks.parallel_batch_stage import finalize_implementation, finish_review, prepare_implementation_repair, record_single_repair_resolution
+        from hooks.parallel_runtime import release_lease
+        from hooks.task_runner import finish_implementation, prepare_compile, record_compile, start_task_repair
+        from hooks.worktree_manager import seal_parallel_batch
+
+        inv_a, inv_b = "1" * 32, "2" * 32
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["taskCardId"] = "Z990692-294"
+        manifest["maxParallel"] = 1
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+
+        owner1 = claim(self.workspace, "alpha", self.run, "B001", 1, "initial", "drain-1", invocation_id=inv_a)
+        provisioned = provision_parallel_worktree(self.workspace, "alpha", self.run, "B001")
+        worktree, branch = Path(provisioned["worktreePath"]), provisioned["branchName"]
+        lease1 = acquire_lease(self.workspace, "alpha", self.run, "B001", ttl_seconds=3600,
+                               lease_guard=True, dispatch_auth={"generation": 1, "token": owner1["ownerToken"]})
+        mark_batch(self.workspace, "alpha", self.run, "B001", "running", worktreePath=str(worktree), branchName=branch)
+
+        def finish_task(state, *, repair=False, lease_token):
+            attempt = prepare_compile(
+                self.workspace, "alpha", "T001", worktree, state["runId"],
+                argv=["mvn", "compile"], execution_cwd=worktree,
+                parallel_run_id=self.run, lease_token=lease_token, workspace_ref="default",
+            )
+            log = self.workspace.parent / f"compile-{state['runId']}.log"
+            log.write_text("BUILD SUCCESS\n", encoding="utf-8")
+            record_compile(
+                self.workspace, "alpha", "T001", worktree, state["runId"],
+                attempt_id=attempt["attemptId"], exit_code=0, log_exit_code=0, output_file=log,
+                parallel_run_id=self.run, lease_token=lease_token, workspace_ref="default",
+            )
+            ok, done = finish_implementation(
+                self.workspace, "alpha", "T001", worktree, state["runId"],
+                no_code_change_why=None, supporting_files=[], repair_mode=repair,
+                parallel_run_id=self.run, lease_token=lease_token, workspace_ref="default",
+            )
+            self.assertTrue(ok, done)
+            return done
+
+        initial_task = start_task(self.workspace, "alpha", "T001", worktree,
+                                  parallel_run_id=self.run, lease_token=lease1["ownerToken"], workspace_ref="default")
+        (worktree / "service.py").write_text("value = None\n", encoding="utf-8")
+        finished_initial = finish_task(initial_task, lease_token=lease1["ownerToken"])
+        prior_evidence_id = finished_initial["implementationEvidenceId"]
+        sealed_initial = seal_parallel_batch(self.workspace, "alpha", self.run, "B001", worktree, lease1["ownerToken"],
+                                             purpose="review", commit_stage="code", commit_summary="初次实现")
+        self.assertTrue(sealed_initial["success"], sealed_initial)
+        release_lease(self.workspace, "alpha", self.run, "B001", lease1["ownerToken"], final_status="sealed")
+        finalize_implementation(self.workspace, "alpha", self.run, "B001")
+        start_stage(self.workspace, "alpha", self.run, "B001", "review")
+        self.assertEqual("failed", finish_review(self.workspace, "alpha", self.run, "B001",
+                                                 decision="failed", message="service.py:1 unexpected None")["status"])
+
+        # Start Fix under inv_a, leave uncommitted changes + running implement stage + valid lease, then kill inv_a.
+        self.assertEqual("ready", prepare_implementation_repair(self.workspace, "alpha", self.run, "B001", "review")["status"])
+        fix_lease1 = acquire_lease(self.workspace, "alpha", self.run, "B001", ttl_seconds=3600,
+                                   lease_guard=True, dispatch_auth={"generation": 1, "token": owner1["ownerToken"]})
+        mark_batch(self.workspace, "alpha", self.run, "B001", "running", worktreePath=str(worktree), branchName=branch)
+        start_task_repair(self.workspace, "alpha", "T001", worktree, prior_evidence_id,
+                          parallel_run_id=self.run, lease_token=fix_lease1["ownerToken"], workspace_ref="default")
+        (worktree / "service.py").write_text("value = 42\n", encoding="utf-8")
+        self.assertEqual("running", load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["stageStates"]["implement"]["status"])
+
+        # Relaunch with inv_b; run both manual_resume_run and a second resume_run while worktree is dirty.
+        resumed1 = manual_resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_b)
+        self.assertEqual(0, resumed1["activeWorkers"])
+        self.assertEqual("implement", resumed1["stageRecoveryBatches"][0]["nextStage"])
+        resumed2 = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_b)
+        self.assertEqual("running", resumed2["status"])
+        self.assertEqual([], resumed2["blockedBatches"])
+        self.assertEqual("implement", resumed2["stageRecoveryBatches"][0]["nextStage"])
+        self.assertEqual("value = 42\n", (worktree / "service.py").read_text(encoding="utf-8"))
+
+        # New worker claims Fix, runs prepare-repair, acquires business lease via CLI, finishes and seals rework.
+        owner2 = claim(self.workspace, "alpha", self.run, "B001", 2, "stage_recovery", "drain-1", invocation_id=inv_b)
+        self.assertEqual("claimed", owner2["status"])
+        self.assertEqual("ready", prepare_implementation_repair(self.workspace, "alpha", self.run, "B001", "review")["status"])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = lease_main([
+                "acquire", "--workspace", str(self.workspace), "--feature", "alpha",
+                "--run-id", self.run, "--batch-id", "B001", "--lease-guard",
+                "--dispatch-generation", "2", "--dispatch-token", owner2["ownerToken"],
+            ])
+        self.assertEqual(0, code, out.getvalue())
+        fix_lease2_token = json.loads(out.getvalue())["businessLeaseToken"]
+        from hooks.parallel_batch_scheduler import main as scheduler_main
+        mark = ["mark-batch", "--workspace", str(self.workspace), "--feature", "alpha", "--run-id", self.run,
+                "--batch-id", "B001"]
+        before = load_manifest(self.workspace, "alpha", self.run)
+        for status in ("running", "retry_pending"):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(1, scheduler_main([*mark, "--status", status]))
+        self.assertEqual(before, load_manifest(self.workspace, "alpha", self.run))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(0, scheduler_main([*mark, "--status", "running", "--dispatch-generation", "2",
+                                               "--dispatch-token", owner2["ownerToken"]]))
+        restarted_fix = start_task_repair(self.workspace, "alpha", "T001", worktree, prior_evidence_id,
+                                          parallel_run_id=self.run, lease_token=fix_lease2_token, workspace_ref="default")
+        self.assertEqual("value = 42\n", (worktree / "service.py").read_text(encoding="utf-8"))
+        finish_task(restarted_fix, repair=True, lease_token=fix_lease2_token)
+        sealed_rework = seal_parallel_batch(self.workspace, "alpha", self.run, "B001", worktree, fix_lease2_token,
+                                            purpose="review", commit_stage="rework", commit_summary="修复空值返回")
+        self.assertTrue(sealed_rework["success"], sealed_rework)
+        release_lease(self.workspace, "alpha", self.run, "B001", fix_lease2_token, final_status="sealed")
+        recorded = record_single_repair_resolution(
+            self.workspace, "alpha", self.run, "B001", failed_stage="review",
+            metadata={"batchCommit": sealed_rework["commitSha"], "worktreePath": str(worktree), "branchName": branch},
+        )
+        self.assertEqual("success", recorded["status"])
+
+    def test_intra_invocation_resume_keeps_siblings_and_respects_delivery_lock_and_failed_pending_grant(self):
+        from hooks.parallel_delivery import _execution_lock
+
+        inv_a, inv_b = "3" * 32, "4" * 32
+        owner = claim(self.workspace, "alpha", self.run, "B001", 1, "initial", "drain-1", invocation_id=inv_a)
+        self.assertEqual("claimed", owner["status"])
+        # Same invocation resume leaves running B001 untouched.
+        same = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_a)
+        self.assertEqual(1, same["activeWorkers"])
+        self.assertEqual(1, same["dispatchGrants"]["B001"])
+
+        # Held delivery OS lock prevents a newer invocation from revoking an in-flight Git settlement.
+        manifest = load_manifest(self.workspace, "alpha", self.run)
+        manifest["controlProtocolVersion"] = 2
+        save_manifest(self.workspace, "alpha", self.run, manifest)
+        with _execution_lock(self.workspace, "alpha", self.run, "B001"):
+            locked_resume = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_b)
+            self.assertEqual(1, locked_resume["activeWorkers"])
+            self.assertEqual(1, locked_resume["dispatchGrants"]["B001"])
+
+        # Once unlocked, inv_b supersedes inv_a; and if a pending claim later closes via finish(failed),
+        # poll + resume advances the generation instead of stranding on grant_consumed.
+        unlocked = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_b)
+        self.assertEqual(2, unlocked["dispatchGrants"]["B001"])
+        owner2 = claim(self.workspace, "alpha", self.run, "B001", 2, "initial", "drain-1", invocation_id=inv_b)
+        finish(self.workspace, "alpha", self.run, "B001", 2, owner2["ownerToken"], outcome="failed")
+        self.assertEqual("grant_consumed", claim(self.workspace, "alpha", self.run, "B001", 2, "initial", "drain-1", invocation_id=inv_b)["reasonCode"])
+        self.assertEqual(["B001"], schedule(self.workspace, "alpha", self.run)["retryPendingBatches"])
+        resumed3 = resume_run(self.workspace, "alpha", self.run, workflow_invocation_id=inv_b)
+        self.assertEqual(3, resumed3["dispatchGrants"]["B001"])
+        self.assertEqual("claimed", claim(self.workspace, "alpha", self.run, "B001", 3, "initial", "drain-1", invocation_id=inv_b)["status"])

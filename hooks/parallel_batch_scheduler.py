@@ -27,6 +27,7 @@ from hooks.git_runtime import git_command
 from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
+    advance_dispatch_generation,
     batch_occupies_scheduler_slot,
     batch_write_sets_conflict,
     create_manifest,
@@ -46,6 +47,7 @@ from hooks.parallel_runtime import (
     run_lock,
     run_dir,
     save_manifest,
+    validate_cli_dispatch,
 )
 from hooks.plan_json import load_plan_bundle
 from hooks.parallel_integration import (
@@ -117,8 +119,14 @@ def _lease_staleness_reason_locked(
     """
     path = lease_path(workspace, feature, run_id, batch_id)
     with FileLock(path.with_suffix(".lock"), timeout=5):
+        dispatch = batch.get("dispatch") or {}
+        if (dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+                and (dispatch.get("status") in {"failed", "retry_pending", "expired", "revoked"}
+                     or (dispatch.get("status") == "running" and dispatch.get("expiresEpoch", 0) <= now))):
+            if path.exists():
+                path.unlink()
+            return "dispatch_terminated"
         if not path.is_file():
-            dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
                     and dispatch.get("expiresEpoch", 0) > now):
                 return None  # Control/stage handoffs may intentionally have no business lease.
@@ -295,13 +303,17 @@ def _recover_stale_active_batches_locked(
             continue
         dispatch = batch.get("dispatch") or {}
         consumed_grant = (dispatch.get("generation") == batch.get("dispatchGeneration", 1)
-                          and dispatch.get("status") in {"completed", "failed", "retry_pending", "expired"})
+                          and dispatch.get("status") in {"completed", "failed", "retry_pending", "expired", "revoked"})
+        failed_pending_grant = (batch.get("status") == "pending"
+                                and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
+                                and dispatch.get("status") in {"failed", "retry_pending", "expired", "revoked"})
         sealed_running = (batch.get("status") == "sealed"
                           and (batch.get("recovery") or {}).get("status") != "rescheduled"
                           and any((batch.get("stageStates") or {}).get(stage, {}).get("status") == "running"
                                   for stage in DELIVERY_STAGES))
         delivery_handoff_lost = batch.get("status") in {"sealed", "ready_to_candidate"} and consumed_grant
-        if batch.get("status") not in {"leased", "running"} and not sealed_running and not delivery_handoff_lost:
+        if (batch.get("status") not in {"leased", "running"}
+                and not sealed_running and not delivery_handoff_lost and not failed_pending_grant):
             continue
         batch_id = str(raw_batch_id)
         reason = _lease_staleness_reason_locked(
@@ -896,7 +908,18 @@ def create_run(
         return schedule(workspace, feature, str(manifest["runId"]))
 
 
-def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str) -> str | None:
+def _has_unsealed_implementation_repair(workspace: Path, feature: str, batch: dict[str, Any]) -> bool:
+    if _stage_recovery_failure_context(batch, test_log_path=feature_dir(workspace, feature) / "test-output.log") is None:
+        return False
+    last_seal = batch.get("lastSeal") if isinstance(batch.get("lastSeal"), dict) else {}
+    return not (
+        last_seal.get("commitStage") == "rework"
+        and last_seal.get("commitSha") == batch.get("commitSha")
+        and last_seal.get("previousCommitSha") not in {None, batch.get("commitSha")}
+    )
+
+
+def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str, *, allow_dirty: bool = False) -> str | None:
     """Validate a plugin-managed native Worktree before resuming a run."""
     batch = manifest.get("batches", {}).get(batch_id)
     if not isinstance(batch, dict):
@@ -923,7 +946,7 @@ def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str) -> str | Non
     status = git_status_porcelain(worktree)
     if status.returncode != 0:
         return f"native_worktree_delivery_status_unavailable:{batch_id}"
-    if status.stdout.strip():
+    if status.stdout.strip() and not allow_dirty:
         return f"native_worktree_delivery_dirty:{batch_id}"
     return None
 
@@ -1020,9 +1043,12 @@ def schedule(
     workspace_refs: list[str] | None = None,
     *,
     workflow_view: bool = False,
+    workflow_invocation_id: str | None = None,
 ) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        if _invocation_superseded(manifest, workflow_invocation_id):
+            return {"runId": run_id, "status": "superseded"}
         if manifest.get("status") in INACTIVE_RUN_STATES | PROMOTION_STATES | {"integration_sync_conflicted", "integration_sync_required"}:
             return {"runId": run_id, "status": manifest["status"], "scheduledGroups": [],
                     "controlProtocolVersion": manifest.get("controlProtocolVersion", 1),
@@ -1420,7 +1446,17 @@ def schedule(
         return _workflow_status_view(result, manifest) if workflow_view else result
 
 
-def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status: str, **details: Any) -> dict[str, Any]:
+def mark_batch(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    status: str,
+    *,
+    dispatch_auth: dict[str, Any] | None = None,
+    enforce_cli_authority: bool = False,
+    **details: Any,
+) -> dict[str, Any]:
     # ``merged`` is written only by the Merge Train after exact candidate promotion and
     # plan-state update. Worker-facing status changes may never unlock deps.
     if status == "merged":
@@ -1436,6 +1472,9 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         batch = manifest.get("batches", {}).get(batch_id)
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
+        if enforce_cli_authority and dispatch_auth is None:
+            dispatch_auth = {}
+        validate_cli_dispatch(manifest, batch, batch_id, dispatch_auth, "batch")
         previous = batch.get("status")
         terminal = {"merged", "failed", "blocked", "cancelled"}
         # `failed` was emitted by older workers before retry_pending existed.
@@ -1496,14 +1535,118 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         return manifest
 
 
+def _invocation_superseded(manifest: dict, invocation_id: str | None) -> bool:
+    # The last admitted invocation owns the run. Earlier IDs remain for replay detection.
+    history = manifest.get("workflowInvocationIds") or []
+    return invocation_id is not None and invocation_id in history[:-1]
+
+
+def _revoke_superseded_dispatches(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    workflow_invocation_id: str,
+) -> list[dict[str, Any]]:
+    """Revoke live dispatches from an older Workflow invocation before resume."""
+    from hooks.parallel_delivery import execution_running
+    from hooks.parallel_dispatch import active_claim, invocation_id_of
+
+    superseded: list[dict[str, Any]] = []
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return superseded
+        changed = False
+        invocation_ids = manifest.setdefault("workflowInvocationIds", [])
+        if workflow_invocation_id not in invocation_ids:
+            invocation_ids.append(workflow_invocation_id)
+            changed = True
+        now = time.time()
+        for raw_batch_id, batch in manifest.get("batches", {}).items():
+            if not isinstance(batch, dict):
+                continue
+            batch_id = str(raw_batch_id)
+            dispatch = batch.get("dispatch") or {}
+            owner_invocation = invocation_id_of(dispatch)
+            # Older runs may only record the owner in the dispatch request ID.
+            if owner_invocation and owner_invocation not in invocation_ids:
+                invocation_ids.insert(0, owner_invocation)
+                changed = True
+            if not active_claim(batch, now=now) or owner_invocation == workflow_invocation_id:
+                continue
+            if manifest.get("controlProtocolVersion", 1) >= 2 and execution_running(workspace, feature, run_id, batch_id):
+                continue
+            prior_gen = int(batch.get("dispatchGeneration", 1))
+            _mark_retry_pending_locked(
+                workspace,
+                feature,
+                run_id,
+                manifest,
+                batch_id,
+                batch,
+                error=f"workflow_invocation_superseded:{owner_invocation or 'unknown'}->{workflow_invocation_id}",
+            )
+            dispatch.update(status="revoked", revokedAtEpoch=now, supersededByInvocationId=workflow_invocation_id)
+            (run_dir(workspace, feature, run_id) / "dispatch" / f"{batch_id}.json").unlink(missing_ok=True)
+            superseded.append({
+                "batchId": batch_id,
+                "previousInvocationId": owner_invocation,
+                "generation": prior_gen,
+            })
+            changed = True
+        if changed:
+            save_manifest(workspace, feature, run_id, manifest)
+    for item in superseded:
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "dispatch_superseded_by_invocation",
+            workflowInvocationId=workflow_invocation_id,
+            **item,
+        )
+    return superseded
+
+
 def resume_run(
     workspace: Path,
     feature: str,
     run_id: str,
     workspace_refs: list[str] | None = None,
+    *,
+    workflow_invocation_id: str | None = None,
+    manual: bool = False,
 ) -> dict[str, Any]:
     """Idempotently resume only batches that do not already own a result."""
-    stale_recovered: list[dict[str, str]] = []
+    if workflow_invocation_id is not None and not re.fullmatch(r"[a-f0-9]{32}", workflow_invocation_id):
+        raise ValueError("workflow_invocation_id_invalid")
+    # TASK and Git recovery span multiple run-lock sections. Serialize the whole
+    # resume so the next invocation cannot take over midway through that work.
+    with FileLock(run_dir(workspace, feature, run_id) / ".resume.lock"):
+        manifest = load_manifest(workspace, feature, run_id)
+        if _invocation_superseded(manifest, workflow_invocation_id):
+            result = {"runId": run_id, "status": "superseded"}
+            if manual:
+                result["manualRetryBatches"] = []
+            return result
+        queued = _queue_manual_retries(workspace, feature, run_id) if manual else []
+        result = _resume_run(workspace, feature, run_id, workspace_refs, workflow_invocation_id)
+        if manual:
+            result["manualRetryBatches"] = queued
+        return result
+
+
+def _resume_run(workspace: Path, feature: str, run_id: str, workspace_refs: list[str] | None,
+                workflow_invocation_id: str | None) -> dict[str, Any]:
+    superseded_dispatches = (
+        _revoke_superseded_dispatches(workspace, feature, run_id, workflow_invocation_id)
+        if workflow_invocation_id is not None
+        else []
+    )
+    superseded_batches = [
+        {"batchId": str(item["batchId"]), "reason": "workflow_invocation_superseded"}
+        for item in superseded_dispatches
+    ]
     # A Git merge may have committed successfully immediately before the Plan
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
@@ -1833,7 +1976,11 @@ def resume_run(
                     invalid_deliveries.append(delivery_error)
                 continue
             if batch.get("commitSha"):
-                delivery_error = _sealed_delivery_error(manifest, str(batch_id))
+                delivery_error = _sealed_delivery_error(
+                    manifest,
+                    str(batch_id),
+                    allow_dirty=_has_unsealed_implementation_repair(workspace, feature, batch),
+                )
                 if delivery_error:
                     batch.update({"status": "blocked", "error": delivery_error})
                     invalid_deliveries.append(delivery_error)
@@ -1919,8 +2066,7 @@ def resume_run(
             }
             if implementation_resume is None:
                 batch["recovery"].pop("implementationResume", None)
-            batch["dispatchGeneration"] = int(batch.get("dispatchGeneration", 1)) + 1
-            batch.pop("dispatch", None)
+            advance_dispatch_generation(batch)
             retry_resumed.append(str(batch_id))
         # Persist the recovery contract for every sealed delivery that still
         # has a stage to finish.  This is intentionally distinct from a
@@ -1957,7 +2103,7 @@ def resume_run(
     for batch_id in retry_resumed:
         append_event(workspace, feature, run_id, "batch_retry_rescheduled", batchId=batch_id)
     result = schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
-    result["reclaimedStaleBatches"] = stale_recovered
+    result["reclaimedStaleBatches"] = superseded_batches + stale_recovered
     result["rescheduledRetryBatches"] = retry_resumed
     result["retryExhaustedBatches"] = []  # Compatibility with older workflow consumers.
     return result
@@ -1972,6 +2118,8 @@ def manual_resume_run(
     feature: str,
     run_id: str,
     workspace_refs: list[str] | None = None,
+    *,
+    workflow_invocation_id: str | None = None,
 ) -> dict[str, Any]:
     """Explicitly re-admit retryable Batches after an operator intervention.
 
@@ -1980,16 +2128,16 @@ def manual_resume_run(
     This never revives merge conflicts, cancellation,
     or generic blocked states because those need a more specific repair path.
     """
+    return resume_run(workspace, feature, run_id, workspace_refs, workflow_invocation_id=workflow_invocation_id,
+                      manual=True)
+
+
+def _queue_manual_retries(workspace: Path, feature: str, run_id: str) -> list[str]:
     manually_queued: list[str] = []
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") in {"cancelled", "cleaned", "rolled_back"}:
-            return {
-                "runId": run_id,
-                "status": manifest.get("status"),
-                "manualRetryBatches": [],
-                "skipped": "terminal_run",
-            }
+        if manifest.get("status") in INACTIVE_RUN_STATES:
+            return manually_queued
         for raw_batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict):
                 continue
@@ -2020,9 +2168,7 @@ def manual_resume_run(
             save_manifest(workspace, feature, run_id, manifest)
     for batch_id in manually_queued:
         append_event(workspace, feature, run_id, "batch_manual_retry_queued", batchId=batch_id)
-    result = resume_run(workspace, feature, run_id, workspace_refs=workspace_refs)
-    result["manualRetryBatches"] = manually_queued
-    return result
+    return manually_queued
 
 
 def _invocation_run_id(workspace: Path, feature: str, invocation_id: str | None) -> str | None:
@@ -2077,14 +2223,13 @@ def ensure_run(
     # per-Batch conflicts.  It preserves their worktrees and excludes their
     # Batches from output, but must still release independent DAG branches.
     # `resume_run` retains the stricter global plan/source-integrity gates.
-    if workflow_invocation_id:
-        with run_lock(workspace, feature, active_run_id):
-            manifest = load_manifest(workspace, feature, active_run_id)
-            invocation_ids = manifest.setdefault("workflowInvocationIds", [])
-            if workflow_invocation_id not in invocation_ids:
-                invocation_ids.append(workflow_invocation_id)
-                save_manifest(workspace, feature, active_run_id, manifest)
-    result = resume_run(workspace, feature, active_run_id, workspace_refs=workspace_refs)
+    result = resume_run(
+        workspace,
+        feature,
+        active_run_id,
+        workspace_refs=workspace_refs,
+        workflow_invocation_id=workflow_invocation_id,
+    )
     result["reused"] = True
     return result
 
@@ -2192,7 +2337,7 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
         if name == "status":
             item.add_argument("--workflow-view", action="store_true", help="emit only fields consumed by the fixed Code Workflow")
-        if name == "ensure":
+        if name in {"ensure", "resume", "manual-resume", "status"}:
             item.add_argument("--workflow-invocation-id")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
@@ -2205,6 +2350,8 @@ def main(argv: list[str] | None = None) -> int:
     mark.add_argument("--worktree-path")
     mark.add_argument("--branch-name")
     mark.add_argument("--error")
+    mark.add_argument("--dispatch-generation", type=int)
+    mark.add_argument("--dispatch-token")
     args = parser.parse_args(argv)
     try:
         workspace = resolve_workspace(args.workspace)
@@ -2240,13 +2387,33 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
         if args.command == "status":
-            if args.workflow_view:
-                return _emit(True, **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs, workflow_view=True))
-            return _emit(True, manifest=load_manifest(workspace, feature, args.run_id), **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
+            result = schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs,
+                              workflow_view=args.workflow_view, workflow_invocation_id=args.workflow_invocation_id)
+            if not args.workflow_view and result["status"] != "superseded":
+                result["manifest"] = load_manifest(workspace, feature, args.run_id)
+            return _emit(True, **result)
         if args.command == "resume":
-            return _emit(True, **resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
+            return _emit(
+                True,
+                **resume_run(
+                    workspace,
+                    feature,
+                    args.run_id,
+                    workspace_refs=args.workspace_refs,
+                    workflow_invocation_id=args.workflow_invocation_id,
+                ),
+            )
         if args.command == "manual-resume":
-            return _emit(True, **manual_resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
+            return _emit(
+                True,
+                **manual_resume_run(
+                    workspace,
+                    feature,
+                    args.run_id,
+                    workspace_refs=args.workspace_refs,
+                    workflow_invocation_id=args.workflow_invocation_id,
+                ),
+            )
         if args.command == "list":
             return _emit(True, runs=list_runs(workspace, feature))
         details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "error"} and value is not None}
@@ -2258,7 +2425,18 @@ def main(argv: list[str] | None = None) -> int:
             "error": "error",
         }
         details = {detail_names[key]: value for key, value in details.items()}
-        return _emit(True, manifest=mark_batch(workspace, feature, args.run_id, args.batch_id, args.status, **details))
+        return _emit(
+            True,
+            manifest=mark_batch(
+                workspace,
+                feature,
+                args.run_id,
+                args.batch_id,
+                args.status,
+                dispatch_auth={"generation": args.dispatch_generation, "token": args.dispatch_token},
+                **details,
+            ),
+        )
     except (ValueError, OSError) as exc:
         return _emit(False, error=str(exc))
 

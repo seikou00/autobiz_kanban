@@ -27,6 +27,7 @@ from hooks.workflow_sandbox_contract import validate_workflow_source
 from hooks.engineering_contract import runtime_contract
 from hooks.commit_message import normalize_task_card_id  # noqa: E402
 from hooks.parallel_batch_scheduler import can_manually_resume_batch, validate_plan_for_parallel  # noqa: E402
+from hooks.parallel_dispatch import active_claim  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     batch_workspace_ref,
     batch_write_set,
@@ -541,11 +542,18 @@ def analyze_batches(
             str(batch_id) for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
             if isinstance(batch, dict) and batch.get("status") == "ready_to_candidate" and batch.get("commitSha")
         }
+        active_execution_batch_ids = {
+            str(batch_id)
+            for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
+            if isinstance(batch, dict)
+            and (batch.get("status") in {"leased", "running"} or active_claim(batch))
+        }
         recovery_batch_ids = (
             retry_recovery_batch_ids
             | implementation_recovery_batch_ids
             | stage_recovery_batch_ids
             | delivery_recovery_batch_ids
+            | active_execution_batch_ids
         )
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
         manual_resume = bool(active_run_id and retry_recovery_batch_ids)

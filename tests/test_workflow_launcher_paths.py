@@ -552,6 +552,60 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["retryRecoveryBatchIds"], [])
         self.assertEqual(result["reason"], "fixed_workflow_for_implementation_recovery:cw-implementation-008:B008")
 
+    def test_launcher_keeps_can_start_workflow_true_when_prior_invocation_dispatch_is_still_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_path = root / "plugin"
+            artifact_workspace = root / "artifacts"
+            code_workspace = root / "business-code"
+            feature_dir = artifact_workspace / ".autobizdevops" / "features" / "cancelled-relaunch"
+            (plugin_path / "workflows").mkdir(parents=True)
+            (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text(
+                "export const meta = {};", encoding="utf-8"
+            )
+            code_workspace.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
+            feature_dir.mkdir(parents=True)
+            (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
+            (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
+            bundle = PlanBundle(
+                root={
+                    "codeWorkspaces": {"api": str(code_workspace)},
+                    "batches": [{"id": "B001", "status": "failed", "workspaceRef": "api", "deps": []}],
+                },
+                batches={"B001": {"tasks": [{"workspaceRef": "api"}]}},
+                tasks=[],
+                task_batches={},
+            )
+            with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), mock.patch(
+                "hooks.workflow_launcher.validate_plan_for_parallel",
+                return_value={"canParallel": False, "reason": "no_pending_batches", "errors": []},
+            ), mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-active-001"), mock.patch(
+                "hooks.workflow_launcher.load_manifest",
+                return_value={
+                    "runId": "cw-active-001",
+                    "batches": {
+                        "B001": {
+                            "status": "running",
+                            "dispatchGeneration": 1,
+                            "dispatch": {
+                                "generation": 1,
+                                "status": "running",
+                                "invocationId": "a" * 32,
+                                "expiresEpoch": 9999999999,
+                            },
+                        },
+                    },
+                },
+            ):
+                result = analyze_batches("cancelled-relaunch", plugin_path, artifact_workspace, "Z990692-294")
+
+        self.assertTrue(result["useWorkflow"])
+        self.assertTrue(result["canStartWorkflow"])
+        self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
+        self.assertEqual(result["workflowArgs"]["resumeRunId"], "cw-active-001")
+        self.assertNotEqual(result["workflowArgs"]["workflowInvocationId"], "a" * 32)
+
     def test_launcher_blocks_when_static_workflow_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
