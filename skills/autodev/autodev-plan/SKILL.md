@@ -24,6 +24,7 @@ python -X utf8 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_p
 使用 `templates/plan-input.json`（`schemaVersion=autodev.plan`）：
 
 - 一个 Task 是同一仓库、单一执行 lane 内可独立验收、独立返工的交付切片。独立功能分别建任务，共享页面、仓库或接口不构成合并理由；同一行为的正常、边界、权限和失败分支放一起。不按文件、方法、断言或场景数量机械拆分；边界难判断时再读 `references/task-planning.md`。
+- 如果暂缓一项行为后其余行为仍能独立交付，把可分别验收、返工的行为各写成一个顶层 `tasks[]` 条目，省略 `atomic`，由 writer 为每项生成独立 Batch。每项只引用本批需要的场景和契约。共享逻辑由一个 Task 实现，使用方写明复用点，需要前一批交付时才填 `dependsOn`。
 - `id` 为稳定 `TNNN`，`outcome` 写可观察交付结果，`workspace` 写仓库逻辑 ID，`dependsOn` 只写真实前置交付。可选 `components` 仅记录粗粒度组件归属（相对 Git 根），投影为 `scope.modules` 参考；具体编译、测试目录由后续阶段按实际代码确定，无需预测子模块。数组顺序不代表依赖。
 - `implementationPoints` 写关键改动与边界，`testPoints` 写需证明的行为及失败路径，`verification.intent` 写一句验收目标；避免重复描述，不预测实现文件、方法、测试命令或 Batch。
 - `refs.requirements` / `refs.scenarios` 引用真实 `specs/<capability>/spec.md#REQ-NNN` / `#SCN-NNN`，逐条覆盖本期场景。`refs.api` / `refs.data` 按需填写；每个本期 `D-NNN` 在 `refs.decisions` 中只有一个主交付 Task。其他协作任务引用 API/Data/Scenario，既有范围不得为通过校验而缩小。
@@ -50,6 +51,8 @@ python -X utf8 "${pluginPath}/hooks/plan_writer.py" prepare-plan \
 ```
 
 `--code-workspace` 必须是实际 Git 根，多仓库重复传入；单仓库可用逻辑 ID `default`。writer 校验引用、覆盖、设计归属、仓库绑定及 DAG，生成 `reviewing` 的完整计划；失败按结构化问题修正输入，重新 prepare，不手改机器产物。
+
+用本次返回的 `materialized.batches[].taskIds` 确认拆出的每个 Task 各占一个 Batch。若仍同批，只修正这些 Task 的分组再 prepare。
 
 按 `${pluginPath}/skills/references/review-protocol-plan.md` 做一次 Plan Critic 语义回检：只查交付边界、仓库职责、UI/lane 归属和真实依赖，不重做设计探索。修复后根据 `reviewChanges` 复核受影响任务与依赖；共享需求/设计/范围变化时全量复核。输入与上下文未变且已有通过结论时复用结论，不重复生成或回检。
 
