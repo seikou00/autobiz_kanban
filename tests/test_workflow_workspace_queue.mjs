@@ -149,3 +149,89 @@ test('cancellation ends a pending publication with no failure retry', async () =
   assert.equal(state.results.get('repo').status, 'cancelled');
   assert.equal(state.notifications.length, 0);
 });
+
+test('publication stops after 20 attempts in one workflow launch and returns failure reason', async () => {
+  let processCalls = 0;
+  const { c, state, waits } = harness(async (_, options) => {
+    if (options.label.startsWith('workspace-sync-warning-')) {
+      return receipt('repo', processCalls >= 20 ? 'failed' : 'retry_wait', {
+        success: false, error: `sync write error ${processCalls}`, retryAfterSeconds: 5,
+      });
+    }
+    processCalls += 1;
+    throw new Error(`sync write error ${processCalls}`);
+  });
+  const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
+  assert.equal(processCalls, 20);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.success, false);
+  assert.match(result.error, /sync write error 20/);
+  assert.equal(waits.length, 19);
+  assert.equal(state.results.get('repo').status, 'failed');
+});
+
+test('busy responses do not consume failure budget and re-enqueue shares exhausted quota', async () => {
+  // Part 1: 25 busy polls followed by synced succeed without failing at 20.
+  {
+    let calls = 0;
+    const { c, state } = harness(async () => ++calls <= 25
+      ? receipt('repo', 'busy', { retryAfterSeconds: 5 })
+      : receipt('repo', 'synced', { lastSyncedSha: 'done' }));
+    const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
+    assert.equal(calls, 26);
+    assert.equal(result.status, 'synced');
+    assert.equal(state.results.get('repo').lastSyncedSha, 'done');
+  }
+
+  // Part 2: When both process and fail stay unavailable, re-enqueuing in the same
+  // resolver reuses the exhausted 20-attempt budget instead of running 40 calls.
+  {
+    let processCalls = 0;
+    const { c } = harness(async (_, options) => {
+      if (options.label.startsWith('workspace-sync-warning-')) {
+        throw new Error('persist unavailable');
+      }
+      processCalls += 1;
+      throw new Error(`process unavailable ${processCalls}`);
+    });
+    const first = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
+    assert.equal(first.status, 'failed');
+    assert.equal(processCalls, 20);
+
+    const second = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
+    assert.equal(second.status, 'failed');
+    assert.equal(processCalls, 20);
+  }
+});
+
+test('a new resolver does not inherit backoff failures from an earlier launch', async () => {
+  let calls = 0;
+  const { c } = harness(async (_, { label }) => {
+    if (label.startsWith('workspace-sync-warning-')) throw new Error('persistence unavailable');
+    calls += 1;
+    if (calls === 1) return receipt('repo', 'retry_wait', {
+      success: false, jobId: 'A', retryAfterSeconds: 5,
+      queue: [{ jobId: 'A', status: 'retry_wait', failureResolver: 'previous-owner', invocationFailures: 19 }],
+    });
+    if (calls === 2) throw new Error('first failure this launch');
+    return receipt('repo', 'synced');
+  });
+  const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued', { jobId: 'A' }));
+  assert.equal(calls, 3);
+  assert.equal(result.status, 'synced');
+});
+
+test('a late failure for an older job does not consume the next job budget', async () => {
+  let calls = 0;
+  const { c } = harness(async (_, { label }) => {
+    if (label.startsWith('workspace-sync-warning-')) {
+      if (calls === 20) return receipt('repo', 'queued', { jobId: 'B', reasonCode: 'workspace_sync_stale_job' });
+      return receipt('repo', 'retry_wait', { success: false, jobId: 'A', error: 'job A failed', retryAfterSeconds: 5 });
+    }
+    if (++calls <= 20) throw new Error('job A process unavailable');
+    return receipt('repo', 'synced', { lastSyncedSha: 'B' });
+  });
+  const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued', { jobId: 'A' }));
+  assert.equal(calls, 21);
+  assert.equal(result.status, 'synced');
+});

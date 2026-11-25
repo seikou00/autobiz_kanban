@@ -325,7 +325,9 @@ class DispatchGrantTest(unittest.TestCase):
         manifest["batches"]["B001"]["recovery"] = {"status": "rescheduled", "kind": "stage_resume"}
         save_manifest(self.workspace, "alpha", self.run, manifest)
         finish(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "failed")
-        self.assertEqual(schedule(self.workspace, "alpha", self.run)["retryPendingBatches"], ["B001"])
+        scheduled = schedule(self.workspace, "alpha", self.run)
+        self.assertEqual(scheduled["activeWorkers"], 0)
+        self.assertEqual(scheduled["retryPendingBatches"], ["B001"])
         resumed = resume_run(self.workspace, "alpha", self.run)
         self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "review")
         self.assertEqual(resumed["dispatchGrants"]["B001"], 2)

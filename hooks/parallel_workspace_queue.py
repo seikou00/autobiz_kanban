@@ -14,6 +14,7 @@ from hooks.parallel_repository import coordinates
 from hooks.parallel_runtime import INACTIVE_RUN_STATES, load_manifest, run_lock, save_manifest, utc_now
 
 RETRY_DELAYS = (5, 30, 120)
+MAX_WORKSPACE_SYNC_ATTEMPTS = 20
 OWNER_TTL = 15 * 60
 DONE = {"synced", "covered"}
 
@@ -90,12 +91,80 @@ def summary_locked(manifest: dict, ref: str) -> dict:
     return result
 
 
-def _failure(manifest: dict, ref: str, job: dict, error: str, failure_id: str) -> dict:
-    if not any(item.get("failureId") == failure_id for item in job["errors"]) and job["status"] not in DONE:
+def _is_stale_resolver(manifest: dict, job: dict, resolver: str) -> bool:
+    inv_ids = manifest.get("workflowInvocationIds") or []
+    if inv_ids and resolver in inv_ids[:-1] and resolver != inv_ids[-1]:
+        return True
+    history = job.get("resolverHistory") or []
+    if history and resolver in history[:-1] and resolver != history[-1]:
+        return True
+    return False
+
+
+def _is_resolver_exhausted(job: dict, resolver: str) -> bool:
+    exhausted_resolvers = job.get("exhaustedResolvers")
+    if isinstance(exhausted_resolvers, list) and resolver in exhausted_resolvers:
+        return True
+    resolver_failures = job.get("resolverFailures")
+    if isinstance(resolver_failures, dict) and int(resolver_failures.get(resolver, 0)) >= MAX_WORKSPACE_SYNC_ATTEMPTS:
+        return True
+    return (
+        "exhaustedResolver" in job
+        and job.get("exhaustedResolver") == resolver
+        and int(job.get("invocationFailures", 0)) >= MAX_WORKSPACE_SYNC_ATTEMPTS
+    )
+
+
+def _record_resolver(job: dict, resolver: str) -> None:
+    history = list(job.get("resolverHistory") or [])
+    if not history or history[-1] != resolver:
+        history.append(resolver)
+    job["resolverHistory"] = history
+
+
+def _failure(
+    manifest: dict,
+    ref: str,
+    job: dict,
+    error: str,
+    failure_id: str,
+    resolver: str | None = None,
+) -> dict:
+    if job["status"] in DONE or job["status"] == "failed":
+        return summary_locked(manifest, ref)
+    if not any(item.get("failureId") == failure_id for item in job["errors"]):
         count = job.get("failures", 0) + 1
-        job.update(failures=count, error=error, lastFailureId=failure_id,
-                   status="retry_wait",
-                   nextAttemptEpoch=time.time() + RETRY_DELAYS[min(count - 1, len(RETRY_DELAYS) - 1)])
+        resolver_failures = dict(job.get("resolverFailures") or {})
+        if resolver is not None:
+            prior = resolver_failures.get(
+                resolver,
+                job.get("invocationFailures", 0) if job.get("failureResolver") == resolver else 0,
+            )
+            inv_count = int(prior) + 1
+            resolver_failures[resolver] = inv_count
+        else:
+            inv_count = 1
+        exhausted = inv_count >= MAX_WORKSPACE_SYNC_ATTEMPTS
+        job.update(
+            failures=count,
+            invocationFailures=inv_count,
+            failureResolver=resolver,
+            resolverFailures=resolver_failures,
+            error=error,
+            lastFailureId=failure_id,
+            status="failed" if exhausted else "retry_wait",
+            nextAttemptEpoch=0 if exhausted else time.time() + RETRY_DELAYS[min(inv_count - 1, len(RETRY_DELAYS) - 1)],
+        )
+        if exhausted:
+            exhausted_list = list(job.get("exhaustedResolvers") or [])
+            if resolver is not None and resolver not in exhausted_list:
+                exhausted_list.append(resolver)
+            job["exhaustedResolvers"] = exhausted_list
+            job["exhaustedResolver"] = resolver
+            job["maxAttempts"] = MAX_WORKSPACE_SYNC_ATTEMPTS
+        else:
+            job.pop("exhaustedResolver", None)
+            job.pop("maxAttempts", None)
         job["errors"].append({"error": error, "at": utc_now(), "attempt": job["attempts"], "failureId": failure_id})
         job.pop("owner", None)
     return summary_locked(manifest, ref)
@@ -134,24 +203,49 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 return result
             if job_id and job_id != job["jobId"]:
                 return {**summary_locked(manifest, ref), "reasonCode": "workspace_sync_stale_job"}
+            if _is_stale_resolver(manifest, job, resolver):
+                return {**summary_locked(manifest, ref), "reasonCode": "workspace_sync_stale_resolver"}
             if (job.get("owner") not in {None, resolver} and job.get("ownerExpiresEpoch", 0) > time.time()
                     and manifest.get("workspaceSync", {}).get(ref, {}).get("status") == "conflicted"):
                 return {**summary_locked(manifest, ref), "status": "busy", "retryAfterSeconds": 5}
             if action == "retry":
-                if job["status"] == "failed":
-                    job.update(status="queued", failures=0, nextAttemptEpoch=0)
+                if job["status"] == "failed" and not _is_resolver_exhausted(job, resolver):
+                    _record_resolver(job, resolver)
+                    prior_inv = int((job.get("resolverFailures") or {}).get(resolver, 0))
+                    job.update(status="queued", invocationFailures=prior_inv, failureResolver=resolver, nextAttemptEpoch=0)
+                    job.pop("exhaustedResolver", None)
+                    job.pop("maxAttempts", None)
                     job.pop("owner", None)
                 result = summary_locked(manifest, ref)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result
             if action == "fail":
-                result = _failure(manifest, ref, job, error or "workspace_sync_agent_failed", failure_id or resolver)
+                if (
+                    job["status"] == "failed"
+                    or _is_resolver_exhausted(job, resolver)
+                    or (job.get("owner") is not None and job.get("owner") != resolver)
+                    or (job.get("owner") is None and job.get("failureResolver") not in {None, resolver})
+                ):
+                    return {**summary_locked(manifest, ref), "reasonCode": "workspace_sync_stale_resolver"}
+                _record_resolver(job, resolver)
+                result = _failure(manifest, ref, job, error or "workspace_sync_agent_failed", failure_id or resolver, resolver=resolver)
+                save_manifest(workspace, feature, run_id, manifest)
+                return result
+            if _is_resolver_exhausted(job, resolver):
+                if job["status"] not in DONE:
+                    job["status"] = "failed"
+                    job["nextAttemptEpoch"] = 0
+                result = summary_locked(manifest, ref)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result
             if job["status"] == "failed":
-                # Older retry limits must not strand a publication forever.
-                # Preserve its identity, failure history and file journal.
-                job.update(status="queued", nextAttemptEpoch=0)
+                # A new workflow launch (new resolver) or legacy failed record
+                # re-admits the publication with a fresh 20-attempt budget.
+                _record_resolver(job, resolver)
+                prior_inv = int((job.get("resolverFailures") or {}).get(resolver, 0))
+                job.update(status="queued", invocationFailures=prior_inv, failureResolver=resolver, nextAttemptEpoch=0)
+                job.pop("exhaustedResolver", None)
+                job.pop("maxAttempts", None)
                 job.pop("owner", None)
             if job.get("nextAttemptEpoch", 0) > time.time():
                 result = summary_locked(manifest, ref)
@@ -159,7 +253,15 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 return result
             if action == "complete" and (job.get("owner") != resolver or not attempt_id or not job_id):
                 raise ValueError("workspace_sync_stale_resolution")
-            job.update(status="running", owner=resolver, ownerExpiresEpoch=time.time() + OWNER_TTL)
+            _record_resolver(job, resolver)
+            prior_inv = int((job.get("resolverFailures") or {}).get(resolver, 0))
+            job.update(
+                status="running",
+                owner=resolver,
+                ownerExpiresEpoch=time.time() + OWNER_TTL,
+                failureResolver=resolver,
+                invocationFailures=prior_inv,
+            )
             if action != "complete":
                 job["attempts"] += 1
             result = summary_locked(manifest, ref)
@@ -204,7 +306,7 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                     manifest["workspaceSync"][ref] = result
                 else:
                     result = _failure(manifest, ref, current, receipt.get("error") or receipt.get("reasonCode")
-                                      or "workspace_sync_incomplete", f"attempt:{current['attempts']}")
+                                      or "workspace_sync_incomplete", f"attempt:{current['attempts']}", resolver=resolver)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result
         except Exception as exc:
@@ -213,7 +315,7 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 if manifest.get("status") in INACTIVE_RUN_STATES:
                     return inactive_receipt(manifest)
                 current = next(item for item in manifest["workspaceSyncQueue"][ref] if item["jobId"] == job["jobId"])
-                result = _failure(manifest, ref, current, str(exc), f"attempt:{current['attempts']}")
+                result = _failure(manifest, ref, current, str(exc), f"attempt:{current['attempts']}", resolver=resolver)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result
     finally:

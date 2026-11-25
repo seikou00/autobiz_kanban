@@ -124,6 +124,27 @@ test("a lost claim response reuses its request identity instead of abandoning a 
   assert.deepEqual(waits, [5]);
 });
 
+test("dispatchCommand stops retrying after 20 attempts and throws failure reason", async () => {
+  const { context: c, failures } = harness(), waits = [];
+  let calls = 0;
+  c.waitWorkspaceSyncRetry = async seconds => { waits.push(seconds); };
+  c.agent = async () => {
+    calls += 1;
+    throw new Error(`dispatch_agent_error_${calls}`);
+  };
+  await assert.rejects(
+    c.dispatchCommand("claim", { batchId: "B001", generation: 1 }, '--source "initial"', "claim-B001"),
+    error => {
+      assert.equal(error.retryExhausted, true);
+      assert.match(error.message, /parallel_dispatch_retry_limit_exceeded:claim:B001:.*dispatch_agent_error_20/);
+      return true;
+    }
+  );
+  assert.equal(calls, 20);
+  assert.equal(waits.length, 19);
+  assert.equal(failures.length, 20);
+});
+
 test("child phases limit managed background execution to plugin Python scripts", async () => {
   const { context: c } = harness();
   for (const label of ["fixed-workflow-prepare", "provision-worktree-B001", "fixed-batch-B001",

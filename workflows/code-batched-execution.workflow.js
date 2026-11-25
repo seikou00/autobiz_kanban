@@ -13,6 +13,7 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 5;
 const DEFAULT_BATCH_TIMEOUT_SECONDS = 4 * 60 * 60;
+const MAX_WORKFLOW_RETRY_ATTEMPTS = 20;
 // Idle dispatch workers keep checking the durable scheduler snapshot while
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
@@ -21,7 +22,8 @@ const DISPATCH_POLL_INTERVAL_MS = 30 * 60 * 1000;
 const schedulerControlState = { available: true, failures: 0 };
 const deliveryControl = { deliveries: new Map(), finalized: new Map(), waiting: new Map(),
   inFlight: new Map(), repositoryTails: new Map() };
-const workspaceSyncControl = { inFlight: new Map(), pending: new Map(), results: new Map(), notifications: [], failureSequence: 0 };
+const workspaceSyncControl = { inFlight: new Map(), pending: new Map(), results: new Map(), notifications: [], failureSequence: 0, failureCounts: new Map() };
+const batchInvocationRetryControl = { failures: new Map(), exhausted: new Set() };
 // Review findings receive one targeted production repair.
 const SINGLE_REPAIRABLE_STAGES = new Set(["review"]);
 const BATCH_RESULT_SCHEMA = {
@@ -229,6 +231,7 @@ const WORKSPACE_SYNC_SCHEMA = {
       jobId: { type: "string" }, repositoryRef: { type: "string" }, targetSha: { type: "string" },
       batchIds: { type: "array", items: { type: "string" } }, sequence: { type: "integer" },
       status: { type: "string" }, attempts: { type: "integer" }, failures: { type: "integer" },
+      invocationFailures: { type: "integer" }, failureResolver: { type: ["string", "null"] },
       error: { type: "string" }, coveredBy: { type: "string" }, nextAttemptEpoch: { type: "number" },
       errors: { type: "array", items: { type: "object", properties: {
         error: { type: "string" }, at: { type: "string" }, attempt: { type: "integer" }, failureId: { type: "string" }
@@ -893,7 +896,7 @@ function retryPendingBatchesOf(scheduler) {
 
 phase("准备");
 let prepared;
-for (let attempt = 1; !prepared; attempt += 1) {
+for (let attempt = 1; !prepared && attempt <= MAX_WORKFLOW_RETRY_ATTEMPTS; attempt += 1) {
 try {
   requireSuccess(await workflowAgent(
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/engineering_context.py")}" contract --expected-digest "${runtimeContractDigest}"。原样返回 JSON；失败时停止并重新运行 launcher，不创建 Batch、不探索工程、不修改任何文件。`,
@@ -916,6 +919,23 @@ try {
     { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), "scheduler ensure");
 } catch (error) {
+  if (attempt >= MAX_WORKFLOW_RETRY_ATTEMPTS) {
+    return {
+      ok: false,
+      feature,
+      runId: resumeRunId || null,
+      finalStatus: "scheduler_prepare_failed",
+      error: String(error),
+      retryAttempts: attempt,
+      unresolved: {
+        batches: [],
+        mergeCandidates: [],
+        deferredIssues: [],
+        schedulerFailures: [{ phase: "prepare", attempt, error: String(error) }],
+      },
+      nextAction: "retry_scheduler_prepare",
+    };
+  }
   // Ensure reuses a run even when the original command succeeded but its
   // model response was lost. Never create a replacement run on transport failure.
   phase(`准备恢复：${String(error)}`);
@@ -939,9 +959,25 @@ if (["promoting_main", "integration_sync_required", "integration_sync_conflicted
 }
 
 let retryRecoveryInFlight = null;
+let retryRecoveryAttempts = 0;
+
+function exhaustRetryPendingBatches(batchIds) {
+  for (const batchId of batchIds) {
+    batchInvocationRetryControl.exhausted.add(batchId);
+    recordUnresolved({ kind: "batch", batchId, status: "blocked", recoveryStatus: "retry_exhausted",
+      durable: false, error: "automatic_retry_budget_exhausted" });
+  }
+}
+
 async function recoverPendingRetries(scheduler, label, phaseName = "准备") {
-  if (!retryPendingBatchesOf(scheduler).length) return scheduler;
+  const pending = retryPendingBatchesOf(scheduler).filter(batchId => !batchInvocationRetryControl.exhausted.has(batchId));
+  if (!pending.length) return scheduler;
   if (retryRecoveryInFlight) return retryRecoveryInFlight;
+  if (retryRecoveryAttempts >= MAX_WORKFLOW_RETRY_ATTEMPTS) {
+    exhaustRetryPendingBatches(pending);
+    return scheduler;
+  }
+  retryRecoveryAttempts += 1;
   // A normal ensure/resume already performs this transition.  One immediate,
   // explicit retry makes the Workflow resilient to an interrupted lease
   // handoff while still letting the scheduler remain the sole state owner.
@@ -1010,6 +1046,9 @@ let lastScheduler = prepared;
 
 function errorText(value) {
   if (value instanceof Error) return value.message || String(value);
+  if (value && typeof value === "object" && typeof value.message === "string" && value.message.length > 0) {
+    return value.message;
+  }
   if (typeof value === "string") return value;
   try {
     return JSON.stringify(value);
@@ -1071,6 +1110,10 @@ function markBatchResolved(batchId) {
   if (!usableString(batchId)) return;
   quarantinedBatchIds.delete(batchId);
   quarantinedBatchGenerations.delete(batchId);
+  if (typeof batchInvocationRetryControl !== "undefined") {
+    batchInvocationRetryControl.failures.delete(batchId);
+    batchInvocationRetryControl.exhausted.delete(batchId);
+  }
   for (const record of unresolvedRecords) {
     if (record && record.batchId === batchId && record.kind !== "cleanup") {
       record.resolved = true;
@@ -1115,10 +1158,25 @@ function observeLifecycleResult(batchId, source, value, generation) {
     || ["retry_pending", "failed", "timeout", "blocked", "needs_resolution"].includes(status)
     || hasFailureSignal(result)
   ) {
+    const isCurrentGeneration = !Number.isInteger(dispatchGrants[batchId])
+      || !Number.isInteger(generation)
+      || generation >= dispatchGrants[batchId];
+    let exhausted = false;
+    if (isCurrentGeneration && typeof batchInvocationRetryControl !== "undefined") {
+      const maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
+      const count = (batchInvocationRetryControl.failures.get(batchId) || 0) + 1;
+      batchInvocationRetryControl.failures.set(batchId, count);
+      if (count >= maxAttempts) {
+        batchInvocationRetryControl.exhausted.add(batchId);
+        quarantinedBatchIds.add(batchId);
+        exhausted = true;
+      }
+    }
     recordUnresolved({
       kind: "batch",
       batchId,
-      status: observation.status,
+      status: exhausted ? "blocked" : observation.status,
+      recoveryStatus: exhausted ? "retry_exhausted" : undefined,
       durable: observation.durable,
       error: observation.error || result,
       source,
@@ -1168,9 +1226,21 @@ function applySchedulerState(scheduler) {
   }
   lastScheduler = scheduler;
   dispatchGrants = scheduler.dispatchGrants || {};
+  if (typeof batchInvocationRetryControl !== "undefined" && scheduler.manifest && scheduler.manifest.batches) {
+    for (const [batchId, batch] of Object.entries(scheduler.manifest.batches)) {
+      if (batch && batch.status === "blocked" && batch.recovery && batch.recovery.status === "retry_exhausted") {
+        batchInvocationRetryControl.exhausted.add(batchId);
+        quarantinedBatchIds.add(batchId);
+      }
+    }
+  }
   // Quarantine belongs to a failed generation, not to the Batch forever. A
   // normal status read must also admit a retry resumed by another worker.
   for (const [batchId, failedGeneration] of quarantinedBatchGenerations) {
+    if (typeof batchInvocationRetryControl !== "undefined" && batchInvocationRetryControl.exhausted.has(batchId)) {
+      quarantinedBatchIds.add(batchId);
+      continue;
+    }
     if (dispatchGrants[batchId] <= failedGeneration || !Number.isInteger(dispatchGrants[batchId])) continue;
     quarantinedBatchIds.delete(batchId);
     quarantinedBatchGenerations.delete(batchId);
@@ -1649,8 +1719,8 @@ async function runDeliveryWithImplementationRepair(batchResult, initialOptions =
       throw new Error(`unexpected_delivery_stage_result:${JSON.stringify(staged)}`);
     }
     if (!SINGLE_REPAIRABLE_STAGES.has(staged.failedStage) || repairedStages.has(staged.failedStage)) {
-      await blockImplementationFinding(delivery, staged, "single_repair_already_used");
-      return { batchId: delivery.batchId, status: "retry_pending", failedStage: staged.failedStage };
+      const deferred = await blockImplementationFinding(delivery, staged, "single_repair_already_used");
+      return { ...deferred, batchId: delivery.batchId, status: (deferred && deferred.status) || "retry_pending", failedStage: staged.failedStage };
     }
     repairedStages.add(staged.failedStage);
     // Review -> one production repair -> seal -> next
@@ -1659,8 +1729,8 @@ async function runDeliveryWithImplementationRepair(batchResult, initialOptions =
     const priorCommitSha = delivery.commitSha;
     const repaired = await reworkDeliveryImplementation(staged.recovery);
     if (!usableString(repaired.commitSha) || (repaired.commitSha === priorCommitSha && repaired.repairReused !== true)) {
-      await blockImplementationFinding(delivery, staged, "no_new_commit");
-      return { batchId: delivery.batchId, status: "retry_pending", failedStage: staged.failedStage };
+      const deferred = await blockImplementationFinding(delivery, staged, "no_new_commit");
+      return { ...deferred, batchId: delivery.batchId, status: (deferred && deferred.status) || "retry_pending", failedStage: staged.failedStage };
     }
     delivery = repaired;
     await recordSingleRepairResolution(staged.recovery, repaired);
@@ -1948,10 +2018,37 @@ async function runWorkspaceSyncQueue(initial) {
     }
     return result;
   };
+  const maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
+  const failureCounts = workspaceSyncControl.failureCounts || (workspaceSyncControl.failureCounts = new Map());
+  const resolverKey = typeof workflowInvocationId === "string" && workflowInvocationId ? workflowInvocationId : "default";
+  const repoFailKey = `${resolverKey}:repo:${ref}`;
+  const jobFailKey = jobId => `${resolverKey}:job:${jobId}`;
+  const activeKeyOf = state => usableString(state && state.jobId) ? jobFailKey(state.jobId) : repoFailKey;
+  const previousResult = workspaceSyncControl.results.get(ref);
+  const hasNewerTarget = Boolean(
+    previousResult
+    && ((usableString(initial && initial.jobId) && initial.jobId !== previousResult.jobId)
+      || (usableString(initial && initial.targetSha) && initial.targetSha !== previousResult.targetSha && initial.targetSha !== previousResult.desiredSha)
+      || (usableString(initial && initial.desiredSha) && initial.desiredSha !== previousResult.desiredSha && initial.desiredSha !== previousResult.targetSha))
+  );
+  if ((usableString(initial && initial.jobId) && (failureCounts.get(jobFailKey(initial.jobId)) || 0) >= maxAttempts)
+      || (!usableString(initial && initial.jobId) && (failureCounts.get(repoFailKey) || 0) >= maxAttempts)
+      || (previousResult && previousResult.status === "failed" && previousResult.exhaustedResolver === resolverKey && !hasNewerTarget)) {
+    const previous = previousResult || initial;
+    const exhaustedReceipt = { ...previous, ...initial, success: false, status: "failed", hasPending: true,
+      exhaustedResolver: resolverKey,
+      retryAttempts: maxAttempts, error: previous.error || initial.error || "workspace_sync_retry_limit_exceeded", retryAfterSeconds: 0 };
+    workspaceSyncControl.results.set(ref, exhaustedReceipt);
+    return exhaustedReceipt;
+  }
   for (let pass = 1; ; pass += 1) {
     const previousSyncedSha = current.lastSyncedSha;
+    let failedThisPass = false;
     try {
       current = await call("process", "", `workspace-sync-${ref}-${pass}`);
+      if (usableString(current && current.jobId)) {
+        failureCounts.delete(repoFailKey);
+      }
       if (current.status === "conflicted") {
         if (!/^[a-f0-9]{32}$/.test(current.attemptId || "") || !absolutePath(current.worktreePath)
             || !absolutePath(current.contextPath) || !absolutePath(current.backupPath)
@@ -1972,18 +2069,60 @@ async function runWorkspaceSyncQueue(initial) {
       if (current.status === "refresh_required" && ++refreshPasses > 3) throw new Error("workspace_sync_source_keeps_changing");
       if (current.status === "pending" && current.hasPending !== true) throw new Error(current.error || "workspace_sync_incomplete");
     } catch (error) {
+      failedThisPass = true;
       const detail = errorText(error);
       refreshPasses = 0;
+      const priorKey = activeKeyOf(current);
+      const nextFailures = (failureCounts.get(priorKey) || 0) + 1;
+      failureCounts.set(priorKey, nextFailures);
       workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: current.jobId, status: "error", error: detail });
       try {
-        current = await call("fail", `${current.jobId ? `--job-id "${current.jobId}" ` : ""}--failure-id "${workflowInvocationId}-${++workspaceSyncControl.failureSequence}" --error-base64 "${encodeFailure(detail)}"`,
+        const failureId = `${workflowInvocationId}-${++workspaceSyncControl.failureSequence}`;
+        current = await call("fail", `${current.jobId ? `--job-id "${current.jobId}" ` : ""}--failure-id "${failureId}" --error-base64 "${encodeFailure(detail)}"`,
           `workspace-sync-warning-${ref}-${pass}`);
+        const failedJob = priorKey === repoFailKey && Array.isArray(current.queue)
+          ? current.queue.find(job => job && usableString(job.jobId)
+              && Array.isArray(job.errors) && job.errors.some(item => item && item.failureId === failureId))
+          : null;
+        if (failedJob) {
+          const failedJobKey = jobFailKey(failedJob.jobId);
+          failureCounts.set(failedJobKey, Math.max(nextFailures, failureCounts.get(failedJobKey) || 0));
+          failureCounts.delete(repoFailKey);
+        }
       } catch (persistError) {
         // A transport outage can prevent even failure persistence. Keep a
         // visible invocation receipt; the durable job remains recoverable.
-        current = { ...current, success: false, status: "retry_wait", hasPending: true,
-          error: detail, persistenceError: errorText(persistError), retryAfterSeconds: [5, 30, 120][Math.min(transportFailures++, 2)] };
+        const exhausted = nextFailures >= maxAttempts;
+        current = { ...current, success: false, status: exhausted ? "failed" : "retry_wait", hasPending: true,
+          error: detail, persistenceError: errorText(persistError),
+          retryAfterSeconds: exhausted ? 0 : [5, 30, 120][Math.min(transportFailures++, 2)] };
       }
+    }
+    const key = activeKeyOf(current);
+    if (!failedThisPass && !inactiveRun(current)) {
+      if (["synced", "skipped"].includes(current.status)) {
+        failureCounts.delete(repoFailKey);
+        if (usableString(current.jobId)) failureCounts.delete(jobFailKey(current.jobId));
+      } else if (current.status === "retry_wait") {
+        const queueJob = Array.isArray(current.queue) && usableString(current.jobId)
+          ? current.queue.find(item => item && item.jobId === current.jobId)
+          : null;
+        if (queueJob && queueJob.failureResolver === resolverKey && Number.isInteger(queueJob.invocationFailures)) {
+          failureCounts.set(key, Math.max(failureCounts.get(key) || 0, queueJob.invocationFailures));
+        } else if (!queueJob) {
+          failureCounts.set(key, (failureCounts.get(key) || 0) + 1);
+        }
+      } else if (current.status === "failed") {
+        failureCounts.set(key, maxAttempts);
+      }
+    }
+    const currentFailures = failureCounts.get(key) || 0;
+    if (currentFailures >= maxAttempts && !["synced", "skipped"].includes(current.status) && !inactiveRun(current)) {
+      current = { ...current, success: false, status: "failed", hasPending: true,
+        exhaustedResolver: resolverKey,
+        retryAttempts: currentFailures, error: current.error || "workspace_sync_retry_limit_exceeded", retryAfterSeconds: 0 };
+    } else if (current.status === "failed" && !current.exhaustedResolver) {
+      current = { ...current, exhaustedResolver: resolverKey };
     }
     workspaceSyncControl.results.set(ref, current);
     if (inactiveRun(current)) return current;
@@ -1996,11 +2135,7 @@ async function runWorkspaceSyncQueue(initial) {
       workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: current.jobId, status: current.status,
         error: current.error, retryAfterSeconds: current.retryAfterSeconds, pendingBatchIds: current.pendingBatchIds });
     }
-    if (["synced", "skipped"].includes(current.status)) return current;
-    if (current.status === "failed") {
-      current = await call("retry", "", `workspace-sync-retry-${ref}-${pass}`);
-    }
-    if (inactiveRun(current)) return current;
+    if (["synced", "skipped", "failed"].includes(current.status)) return current;
     if (workspaceSyncControl.finishing) {
       if (current.lastSyncedSha && current.lastSyncedSha !== previousSyncedSha) finalPasses = 0;
       else if (++finalPasses >= 3) return current;
@@ -2008,6 +2143,7 @@ async function runWorkspaceSyncQueue(initial) {
     if (current.status === "refresh_required") continue;
     if (!await waitWorkspaceSyncRetry(Number(current.retryAfterSeconds) || 5, true)) return current;
   }
+  return current;
 }
 
 async function settleReadyBatch(batchId) {
@@ -2154,9 +2290,20 @@ async function promoteReadyBatch(batchId) {
 }
 
 async function safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, reason) {
+  if (reason && typeof reason === "object" && reason.retryExhausted === true) {
+    throw reason;
+  }
+  if (typeof batchInvocationRetryControl !== "undefined" && batchInvocationRetryControl.exhausted.has(batchId)) {
+    const exhausted = new Error(`parallel_batch_retry_already_exhausted:${batchId}:${errorText(reason)}`);
+    exhausted.retryExhausted = true;
+    throw exhausted;
+  }
   try {
     return await deferBatchForRetry(batchId, batchWorktree, batchBranch, reason);
   } catch (cleanupError) {
+    if (cleanupError && cleanupError.retryExhausted === true) {
+      throw cleanupError;
+    }
     // A retry marker must never turn one Batch's cleanup issue into a global
     // failure.  The next scheduler resume can still inspect the retained
     // Worktree/lease and surface the exact cleanup error.
@@ -2223,6 +2370,7 @@ async function runInitialBatchLifecycle(batchId) {
     if (delivery.status === "ready_to_candidate") return promoteReadyBatch(batchId);
     return delivery;
   } catch (error) {
+    if (error && error.retryExhausted === true) throw error;
     return safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, String(error));
   }
 }
@@ -2263,6 +2411,7 @@ async function runImplementationRecoveryLifecycle(recovery) {
     if (delivery.status === "ready_to_candidate") return promoteReadyBatch(batchId);
     return delivery;
   } catch (error) {
+    if (error && error.retryExhausted === true) throw error;
     return safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, String(error));
   }
 }
@@ -2274,6 +2423,7 @@ async function runRecoveredBatchLifecycle(recovery) {
     if (delivery.status === "ready_to_candidate") return promoteReadyBatch(batchId);
     return delivery;
   } catch (error) {
+    if (error && error.retryExhausted === true) throw error;
     return safelyDeferBatchForRetry(batchId, recovery.worktreePath, recovery.branchName, String(error));
   }
 }
@@ -2283,6 +2433,7 @@ async function runMergeableBatchLifecycle(batchId) {
   try {
     return await promoteReadyBatch(batchId);
   } catch (error) {
+    if (error && error.retryExhausted === true) throw error;
     return safelyDeferBatchForRetry(batchId, existing.worktreePath, existing.branchName, String(error));
   }
 }
@@ -2292,6 +2443,7 @@ async function runLifecycleSafely(batchId, source, execute, fallback = {}, gener
     const result = await execute();
     return observeLifecycleResult(batchId, source, result, generation);
   } catch (error) {
+    if (error && error.retryExhausted === true) throw error;
     // `parallel()` must only receive resolving jobs.  If an unexpected Agent
     // exception escaped a lifecycle helper, retain the worktree and turn it
     // into the same retry contract used by expected Batch failures.
@@ -2420,13 +2572,14 @@ function encodeFailure(reason) {
   return result;
 }
 
-async function dispatchCommand(action, job, extra, label) {
+async function dispatchCommand(action, job, extra, label,
+  maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20) {
   const script = schedulerPath.replace(/[^/\\]+$/, "parallel_dispatch.py");
   const owner = job.ownerToken ? ` --owner-token "${job.ownerToken}"` : "";
+  let lastError = null;
   // Claim request IDs and finish/defer owner tokens are replay-safe. Retry
-  // this exact operation after a lost response, rather than abandoning its
-  // live grant until the lease deadline or issuing a different claim.
-  for (let attempt = 1; ; attempt += 1) {
+  // this exact operation up to maxAttempts after a lost response.
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
   try {
   const result = unwrap(await workflowAgent(
     `只执行 python -X utf8 "${script}" ${action} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${job.batchId}" --generation ${job.generation}${owner} ${extra}。` +
@@ -2439,10 +2592,15 @@ async function dispatchCommand(action, job, extra, label) {
   }
   return result;
   } catch (error) {
+    lastError = error;
     recordSchedulerFailure(`${label}-retry-${attempt}`, error);
+    if (attempt >= maxAttempts) break;
   }
   await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
   }
+  const exhausted = new Error(`parallel_dispatch_retry_limit_exceeded:${action}:${job.batchId}:${errorText(lastError)}`);
+  exhausted.retryExhausted = true;
+  throw exhausted;
 }
 
 function signalDispatchChange(state) {
@@ -2493,12 +2651,14 @@ function nextDispatchRequestId(state, invocationId, drainLabel, workerIndex) {
 
 function dispatchHasPotentialWork(state) {
   if (!state || typeof state !== "object") return false;
+  const unexhausted = batchId => !(typeof batchInvocationRetryControl !== "undefined"
+    && batchInvocationRetryControl.exhausted.has(batchId));
   return Boolean(
-    (Array.isArray(state.readyBatches) && state.readyBatches.length)
-    || (Array.isArray(state.mergeableBatches) && state.mergeableBatches.length)
-    || (Array.isArray(state.implementationRecoveryBatches) && state.implementationRecoveryBatches.length)
-    || (Array.isArray(state.stageRecoveryBatches) && state.stageRecoveryBatches.length)
-    || (Array.isArray(state.retryPendingBatches) && state.retryPendingBatches.length)
+    (Array.isArray(state.readyBatches) && state.readyBatches.some(unexhausted))
+    || (Array.isArray(state.mergeableBatches) && state.mergeableBatches.some(unexhausted))
+    || (Array.isArray(state.implementationRecoveryBatches) && state.implementationRecoveryBatches.some(item => item && unexhausted(item.batchId)))
+    || (Array.isArray(state.stageRecoveryBatches) && state.stageRecoveryBatches.some(item => item && unexhausted(item.batchId)))
+    || (Array.isArray(state.retryPendingBatches) && state.retryPendingBatches.some(unexhausted))
     || (Number.isInteger(state.activeWorkers) && state.activeWorkers > 0)
   );
 }
@@ -2525,8 +2685,9 @@ async function refreshSchedulerForDispatch(label) {
       : []
   );
 
+  const maxResumePasses = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
   let resumePass = 0;
-  while (pendingRetriesOf(state).length) {
+  while (pendingRetriesOf(state).length && resumePass < maxResumePasses) {
     const pendingBefore = pendingRetriesOf(state);
     let resumed;
     try {
@@ -2580,7 +2741,8 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
     // candidate selector keeps these retries behind every available non-retry
     // lifecycle, so recovery does not delay independent work.
     const pendingRetryIds = lastScheduler && Array.isArray(lastScheduler.retryPendingBatches)
-      ? lastScheduler.retryPendingBatches.filter(isValidBatchId)
+      ? lastScheduler.retryPendingBatches.filter(batchId => isValidBatchId(batchId)
+          && !(typeof batchInvocationRetryControl !== "undefined" && batchInvocationRetryControl.exhausted.has(batchId)))
       : [];
     if (pendingRetryIds.length) {
       const refreshed = await refreshSchedulerForDispatch(
@@ -2617,6 +2779,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
       dispatcherState.runningBatchIds.add(job.batchId);
       job.requestId = nextDispatchRequestId(dispatcherState, workflowInvocationId, drainLabel, workerIndex);
       let grant = null;
+      let dispatchExhausted = false;
       let claimDeferred = false;
       let claimRetryDelay = 15000;
       let outcome = "failed";
@@ -2644,12 +2807,20 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
             durable: false, error: acquired.reasonCode || "invalid_dispatch_claim", source: job.source });
         }
       } catch (error) {
+        if (error && error.retryExhausted === true) {
+          dispatchExhausted = true;
+          if (typeof batchInvocationRetryControl !== "undefined") {
+            batchInvocationRetryControl.exhausted.add(job.batchId);
+          }
+          quarantinedBatchIds.add(job.batchId);
+        }
         // A failure to persist this Batch's retry marker must be visible, but
         // must not terminate the worker and strand unrelated ready Batches.
         recordUnresolved({
           kind: "batch",
           batchId: job.batchId,
-          status: "dispatch_worker_failed",
+          status: dispatchExhausted ? "blocked" : "dispatch_worker_failed",
+          recoveryStatus: dispatchExhausted ? "retry_exhausted" : undefined,
           durable: false,
           error: errorText(error),
           source: job.source,
@@ -2660,7 +2831,9 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
             if (!(typeof controlProtocolVersion !== "undefined" && controlProtocolVersion >= 2
                 && (deliveryControl.finalized.get(job.batchId) === job.generation
                     || deliveryControl.waiting.get(job.batchId) === job.generation))) {
-              await dispatchCommand("finish", { ...job, ...grant }, `--outcome "${outcome}"`, `dispatch-finish-${job.batchId}-${job.generation}`);
+              // Close a stranded grant once after defer exhaustion so it stops occupying a slot.
+              await dispatchCommand("finish", { ...job, ...grant }, `--outcome "${outcome}"`,
+                `dispatch-finish-${job.batchId}-${job.generation}`, dispatchExhausted ? 1 : undefined);
             }
           } catch (error) {
             recordUnresolved({ kind: "scheduler", batchId: job.batchId, status: "dispatch_finish_failed", durable: false, error: errorText(error) });
@@ -2813,8 +2986,9 @@ function unresolvedBatchDetails(scheduler = lastScheduler) {
     const existing = byId.get(record.batchId) || { batchId: record.batchId, dependencies: [], blockedBy: [], blocks: [] };
     byId.set(record.batchId, {
       ...existing,
-      status: existing.status || record.status || "unresolved",
-      error: existing.error || record.error,
+      status: record.recoveryStatus === "retry_exhausted" ? "blocked" : (existing.status || record.status || "unresolved"),
+      recoveryStatus: record.recoveryStatus || existing.recoveryStatus,
+      error: (record.recoveryStatus === "retry_exhausted" && record.error) || existing.error || record.error,
       worktreePath: existing.worktreePath || record.worktreePath,
       branchName: existing.branchName || record.branchName,
       durable: record.durable === true,
@@ -2922,8 +3096,19 @@ function completionReport({
     finalStatus = "succeeded_with_issues";
     nextAction = "resume_workspace_sync";
   }
+  const ok = ["succeeded", "succeeded_with_issues"].includes(finalStatus);
+  const failureReasons = [
+    ...batches.filter(batch => usableString(batch.error)).map(batch => `${batch.batchId}: ${batch.error}`),
+    ...mergeCandidates.filter(item => item.error).map(item => `${item.repositoryRef}|${item.wave}: ${typeof errorText === "function" ? errorText(item.error) : String(item.error)}`),
+    ...workspaceSyncPending.filter(item => usableString(item.error)).map(item => `workspaceSync(${item.repositoryRef}): ${item.error}`),
+    ...(verification && usableString(verification.error) ? [verification.error] : []),
+    ...(verification && usableString(verification.checkpointError) ? [verification.checkpointError] : []),
+    ...activeSchedulerFailures.filter(item => usableString(item.error)).map(item => `${item.phase || "scheduler"}: ${item.error}`),
+  ];
   return {
-    ok: ["succeeded", "succeeded_with_issues"].includes(finalStatus),
+    ok,
+    ...(ok || !failureReasons.length ? {} : { error: failureReasons[0], failureReasons }),
+    ...(ok && workspaceSyncPending.some(item => usableString(item.error)) ? { failureReasons } : {}),
     feature,
     runId,
     batchResults,
@@ -2976,16 +3161,32 @@ async function persistUndurableBatchFailures() {
   for (const record of active) {
     if (
       record.durable === true
+      || record.recoveryStatus === "retry_exhausted"
+      || (typeof batchInvocationRetryControl !== "undefined" && batchInvocationRetryControl.exhausted.has(record.batchId))
       || !isValidBatchId(record.batchId)
       || !["batch", "merge_candidate"].includes(record.kind)
       || durableBatchIds.has(record.batchId)
     ) continue;
-    const result = await safelyDeferBatchForRetry(
-      record.batchId,
-      record.worktreePath || (batchWorkspaces[record.batchId] || {}).worktreePath,
-      record.branchName || (batchWorkspaces[record.batchId] || {}).branchName,
-      record.error || record.status
-    );
+    let result;
+    try {
+      result = await safelyDeferBatchForRetry(
+        record.batchId,
+        record.worktreePath || (batchWorkspaces[record.batchId] || {}).worktreePath,
+        record.branchName || (batchWorkspaces[record.batchId] || {}).branchName,
+        record.error || record.status
+      );
+    } catch (error) {
+      if (error && error.retryExhausted === true) {
+        if (typeof batchInvocationRetryControl !== "undefined") batchInvocationRetryControl.exhausted.add(record.batchId);
+        if (typeof quarantinedBatchIds !== "undefined") quarantinedBatchIds.add(record.batchId);
+        record.status = "blocked";
+        record.recoveryStatus = "retry_exhausted";
+        record.finalRepairError = errorText(error);
+        finalRepairResults.push({ kind: "persist_retry_marker", batchId: record.batchId, durable: false, status: "blocked", error: errorText(error) });
+        continue;
+      }
+      throw error;
+    }
     finalRepairResults.push({
       kind: "persist_retry_marker",
       batchId: record.batchId,
@@ -3104,6 +3305,11 @@ async function runFinalRepairAndReport() {
   if (inactiveRun(initial)) return initial;
   if (admission && admission.status === "ready") return initial;
   await persistUndurableBatchFailures();
+  for (const batch of (typeof unresolvedBatchDetails === "function" ? unresolvedBatchDetails() : [])) {
+    if (batch.status !== "blocked" || batch.recoveryStatus !== "retry_exhausted") continue;
+    finalRepairResults.push({ kind: "retry_budget_exhausted", batchId: batch.batchId,
+      status: "blocked", durable: true, error: batch.error });
+  }
 
   // Candidate conflicts are retried only after independent work has drained.
   // One attempt per candidate prevents a permanently conflicted candidate from
@@ -3117,11 +3323,22 @@ async function runFinalRepairAndReport() {
     await attemptFinalCandidateRepair(candidate);
   }
 
-  let repairState = await readSchedulerState("final-repair-before-retry", "最终修复与报告");
+  const unexhaustedRetryPendingOf = state => retryPendingBatchesOf(state).filter(
+    batchId => !batchInvocationRetryControl.exhausted.has(batchId)
+  );
   let retryDrain = 0;
+  let repairState = await readSchedulerState("final-repair-before-retry", "最终修复与报告");
   while (repairState) {
-    const retryPending = retryPendingBatchesOf(repairState);
-    if (retryPending.length) {
+    const retryPending = unexhaustedRetryPendingOf(repairState);
+    if (retryPending.length && retryRecoveryAttempts >= MAX_WORKFLOW_RETRY_ATTEMPTS) {
+      exhaustRetryPendingBatches(retryPending);
+      finalRepairResults.push({
+        kind: "resume_retry_pending",
+        status: "automatic_retry_budget_exhausted",
+        retryDrain,
+        retryPendingBatchIds: retryPending,
+      });
+    } else if (retryPending.length) {
       retryDrain += 1;
       try {
         repairState = await recoverPendingRetries(repairState, `final-repair-resume-retry-pending-${retryDrain}`);
@@ -3152,7 +3369,7 @@ async function runFinalRepairAndReport() {
     const drain = await drainRunnableLifecycles(`final-repair-${retryDrain || "initial"}`);
     finalRepairResults.push({ kind: "drain_recovered_batches", retryDrain, ...drain });
     repairState = await readSchedulerState(`final-repair-after-drain-${retryDrain}`, "最终修复与报告");
-    if (!repairState || !retryPendingBatchesOf(repairState).length) break;
+    if (!repairState || !unexhaustedRetryPendingOf(repairState).length) break;
   }
   const final = await readSchedulerState("final-report-snapshot", "最终修复与报告");
   if (v2 && final && allWorkflowDeliveriesMerged(final)) {
@@ -3165,10 +3382,11 @@ async function runFinalRepairAndReport() {
 }
 
 async function runUntilDeliveriesComplete() {
-  // Local attempts and idle windows only yield back to this recovery loop.
-  // Durable stage/merge/publication receipts decide what runs next, never an
-  // invocation-wide retry count. Host cancellation can still stop the run.
-  for (let pass = 1; ; pass += 1) {
+  // Retryable failures recover up to MAX_WORKFLOW_RETRY_ATTEMPTS per Workflow
+  // launch; exhausted or operator-blocked Batches return failure diagnostics
+  // once independent work has drained, and only retry on the next launch.
+  const maxPasses = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
+  for (let pass = 1; pass <= maxPasses; pass += 1) {
     if (inactiveRun(lastScheduler)) return lastScheduler;
     let final = null;
     try {
@@ -3179,19 +3397,27 @@ async function runUntilDeliveriesComplete() {
       if (inactiveRun(lastScheduler)) return lastScheduler;
       if (allWorkflowDeliveriesMerged(final)) return final;
       const batches = Object.values(final && final.manifest && final.manifest.batches || {});
-      const requiresOperator = batches.some(batch => batch.status === "blocked"
+      const requiresOperator = batches.some(batch => (batch.status === "blocked"
         && batch.recovery && (batch.recovery.status === "blocked_non_retryable"
-          || batch.recovery.failureClassification === "non_retryable"));
-      const runnable = ["readyBatches", "mergeableBatches", "implementationRecoveryBatches",
-        "stageRecoveryBatches", "retryPendingBatches"].some(key => Array.isArray(final && final[key]) && final[key].length);
-      if (requiresOperator && !runnable && final.activeWorkers === 0) return final;
+          || batch.recovery.status === "retry_exhausted"
+          || batch.recovery.failureClassification === "non_retryable"))
+        || batch.status === "needs_resolution")
+        || batchInvocationRetryControl.exhausted.size > 0;
+      const isUnexhausted = batchId => !batchInvocationRetryControl.exhausted.has(batchId);
+      const runnable = ["readyBatches", "mergeableBatches", "retryPendingBatches"].some(
+          key => Array.isArray(final && final[key]) && final[key].some(isUnexhausted))
+        || ["implementationRecoveryBatches", "stageRecoveryBatches"].some(
+          key => Array.isArray(final && final[key]) && final[key].some(item => item && isUnexhausted(item.batchId)));
+      if (requiresOperator && !runnable && final && final.activeWorkers === 0) return final;
     } catch (error) {
       recordSchedulerFailure(`workflow-resume-${pass}`, error);
     }
+    if (pass >= maxPasses) break;
     await waitWorkspaceSyncRetry(Math.min(30, pass * 5));
     const refreshed = await readSchedulerState(`workflow-resume-snapshot-${pass}`, "恢复执行");
     if (refreshed) applySchedulerState(refreshed);
   }
+  return lastScheduler;
 }
 
 // A resumed run can already contain merged deliveries from a prior interrupted
@@ -3221,8 +3447,9 @@ if (inactiveRun(finalScheduler) || !allWorkflowDeliveriesMerged(finalScheduler))
 
 async function runFinalValidation() {
 phase("最终汇总");
+const maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
 let verification;
-for (let attempt = 1; ; attempt += 1) {
+for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
 try {
   verification = unwrap(await workflowAgent(
     `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --finish-workflow。` +
@@ -3244,6 +3471,16 @@ try {
   break;
 } catch (error) {
   recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error });
+  if (attempt >= maxAttempts) {
+    return completionReport({
+      finalStatus: "completed_with_validation_failure",
+      scheduler: finalScheduler || lastScheduler,
+      verification: verification && typeof verification === "object"
+        ? { ...verification, error: errorText(error), retryAttempts: attempt }
+        : { error: errorText(error), retryAttempts: attempt },
+      nextAction: "inspect_evidence_aggregate_failure",
+    });
+  }
   await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
 }
 }
@@ -3255,7 +3492,7 @@ for (const record of unresolvedRecords) {
 }
 
 const hasAuditIssues = verification.hasIssues || verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
-for (let attempt = 1; ; attempt += 1) {
+for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
 try {
   const checkpoint = unwrap(await workflowAgent(
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/update_checkpoint.py")}" --feature "${feature}" --checkpoint code_done --json --code-run-id "${runId}"。` +
@@ -3271,6 +3508,15 @@ try {
   }
   break;
 } catch (error) {
+  if (attempt >= maxAttempts) {
+    recordUnresolved({ kind: "validation", status: "code_checkpoint_failed", durable: false, error });
+    return completionReport({
+      finalStatus: "completed_with_checkpoint_failure",
+      scheduler: finalScheduler || lastScheduler,
+      verification: { ...verification, checkpointError: errorText(error), retryAttempts: attempt },
+      nextAction: "retry_code_checkpoint",
+    });
+  }
   phase(`完成登记恢复：${errorText(error)}`);
   await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
 }

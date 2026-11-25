@@ -231,6 +231,50 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(result["error"], detail)
         self.assertEqual(self.manifest()["batches"]["B001"]["status"], "merged")
 
+    def test_publication_stops_after_20_failures_and_retries_only_on_next_workflow_start(self):
+        self.merge("B001")
+        epoch = 10000000000
+        with patch.object(sync, "sync_workspace", side_effect=OSError("disk full 20")) as calls:
+            for attempt in range(1, 21):
+                with patch.object(queue.time, "time", return_value=epoch):
+                    result = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
+                if attempt < 20:
+                    self.assertEqual(result["status"], "retry_wait")
+                    epoch += result["retryAfterSeconds"] + 1
+                else:
+                    self.assertEqual(result["status"], "failed")
+                    self.assertFalse(result["success"])
+                    self.assertIn("disk full 20", result["error"])
+            self.assertEqual(calls.call_count, 20)
+            # Same workflow invocation must NOT retry anymore after 20 failures.
+            with patch.object(queue.time, "time", return_value=epoch + 1000):
+                same_inv = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
+                self.assertEqual(same_inv["status"], "failed")
+                self.assertIn("disk full 20", same_inv["error"])
+                same_retry = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1", action="retry")
+                self.assertEqual(same_retry["status"], "failed")
+                # A late fail receipt from another resolver must not clear exhausted state
+                # or let inv-1 perform a 21st sync.
+                late_fail = queue.operate(
+                    self.workspace, "alpha", self.run, "default", "other-resolver",
+                    action="fail", error="late error", failure_id="late-1",
+                )
+                self.assertEqual(late_fail["status"], "failed")
+                self.assertEqual(late_fail["reasonCode"], "workspace_sync_stale_resolver")
+                after_late = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
+                self.assertEqual(after_late["status"], "failed")
+            self.assertEqual(calls.call_count, 20)
+            with patch.object(queue.time, "time", return_value=epoch):
+                new_launch = queue.operate(self.workspace, "alpha", self.run, "default", "inv-2")
+                self.assertEqual(new_launch["status"], "retry_wait")
+                stale = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
+                self.assertEqual(stale["reasonCode"], "workspace_sync_stale_resolver")
+                self.assertEqual(stale["queue"], new_launch["queue"])
+            self.assertEqual(calls.call_count, 21)
+        with patch.object(queue.time, "time", return_value=epoch + new_launch["retryAfterSeconds"] + 1):
+            recovered = queue.operate(self.workspace, "alpha", self.run, "default", "inv-2")
+        self.assertEqual(recovered["status"], "synced")
+
 
 if __name__ == "__main__":
     unittest.main()

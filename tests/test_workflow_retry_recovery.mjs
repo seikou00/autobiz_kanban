@@ -217,41 +217,95 @@ test("B002 reaches implementation despite a late old failure while B001 is still
   assert.deepEqual(events, ["resume:B002:2", "claim:B002:2", "implement:B002:T004", "finish:B002:2"]);
 });
 
-test("repeated model failures pass 100 lifecycles and the recovered Batch finishes", async () => {
-  const c = harness();
-  let attempts = 0, generation = 1, epoch = 0;
-  const state = status => {
-    const value = snapshot(generation, status, ++epoch * 1000);
-    value.activeWorkers = 0;
-    value.dispatchDiagnostics.activeBatchIds = [];
-    return value;
-  };
-  let current = state("pending");
-  c.applySchedulerState(current);
-  c.agent = async (_, options) => {
-    if (options.label.endsWith("resume-retry-pending")) {
-      generation += 1;
-      current = state("pending");
-      return { ...current, rescheduledRetryBatches: ["B002"] };
-    }
-    return current;
-  };
-  c.dispatchCommand = async (action, job) => ({ success: true,
-    status: action === "claim" ? "claimed" : "finished", batchId: job.batchId, ownerToken: "owner" });
-  c.runInitialBatchLifecycle = async batchId => {
-    attempts += 1;
-    assert.ok(attempts <= 106, "the successful generation must stop retrying");
-    current = state(attempts <= 105 ? "retry_pending" : "merged");
-    return { batchId, status: attempts <= 105 ? "retry_pending" : "merged", durable: true,
-      reason: attempts <= 105 ? "empty_agent_output" : undefined };
-  };
-  c.waitForDispatchChange = async () => assert.fail("ready retries must continue dispatching");
-  await c.runDispatchWorker(1, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
-  assert.equal(attempts, 106);
-  assert.equal(c.schedulerCycles, 106);
-  assert.equal(c.lastScheduler.manifest.batches.B002.status, "merged");
-  assert.equal(c.activeUnresolvedRecords().length, 0);
-  assert.equal(c.activeDispatchGrants.size, 0);
+test("repeated model failures recover within 20 attempts and stop at 20 with failure reason", async () => {
+  // Case 1: 19 failures followed by success on attempt 20 still merges.
+  {
+    const c = harness();
+    let attempts = 0, generation = 1, epoch = 0;
+    const state = status => {
+      const value = snapshot(generation, status, ++epoch * 1000);
+      value.activeWorkers = 0;
+      value.dispatchDiagnostics.activeBatchIds = [];
+      return value;
+    };
+    let current = state("pending");
+    c.applySchedulerState(current);
+    c.agent = async (_, options) => {
+      if (options.label.endsWith("resume-retry-pending")) {
+        generation += 1;
+        current = state("pending");
+        return { ...current, rescheduledRetryBatches: ["B002"] };
+      }
+      return current;
+    };
+    c.dispatchCommand = async (action, job) => ({ success: true,
+      status: action === "claim" ? "claimed" : "finished", batchId: job.batchId, ownerToken: "owner" });
+    c.runInitialBatchLifecycle = async batchId => {
+      attempts += 1;
+      current = state(attempts < 20 ? "retry_pending" : "merged");
+      return { batchId, status: attempts < 20 ? "retry_pending" : "merged", durable: true,
+        reason: attempts < 20 ? "empty_agent_output" : undefined };
+    };
+    c.waitForDispatchChange = async () => assert.fail("ready retries must continue dispatching");
+    await c.runDispatchWorker(1, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
+    assert.equal(attempts, 20);
+    assert.equal(c.lastScheduler.manifest.batches.B002.status, "merged");
+    assert.equal(c.activeUnresolvedRecords().length, 0);
+  }
+
+  // Case 2: 20 failures stop retrying immediately and surface the failure reason.
+  {
+    const c = harness();
+    vm.runInContext(source.slice(source.indexOf("function manifestFromScheduler("),
+      source.indexOf("async function persistUndurableBatchFailures(")), c);
+    c.feature = "feature";
+    c.batchResults = [];
+    c.mergeResults = [];
+    c.cleanupResults = [];
+    c.finalRepairResults = [];
+    c.workspaceSyncControl = { results: new Map(), notifications: [] };
+    let attempts = 0, generation = 1, epoch = 0;
+    const state = status => {
+      const value = snapshot(generation, status, ++epoch * 1000);
+      value.activeWorkers = 0;
+      value.dispatchDiagnostics.activeBatchIds = [];
+      value.manifest.batches.B001 = { status: "merged", mergeCommitSha: "upstream", dependencies: [],
+        worktreePath: "/worktrees/B001", branchName: "b1", commitSha: "c1", recovery: {} };
+      return value;
+    };
+    let current = state("pending");
+    c.applySchedulerState(current);
+    c.agent = async (_, options) => {
+      if (options.label.endsWith("resume-retry-pending")) {
+        if (attempts >= 20) {
+          current = state("blocked");
+          current.manifest.batches.B002.error = "empty_agent_output_20";
+          current.manifest.batches.B002.recovery = { status: "retry_exhausted", retryAttempts: 20, lastError: "empty_agent_output_20" };
+          return { ...current, retryExhaustedBatches: ["B002"], rescheduledRetryBatches: [] };
+        }
+        generation += 1;
+        current = state("pending");
+        return { ...current, rescheduledRetryBatches: ["B002"] };
+      }
+      return current;
+    };
+    c.dispatchCommand = async (action, job) => ({ success: true,
+      status: action === "claim" ? "claimed" : "finished", batchId: job.batchId, ownerToken: "owner" });
+    c.runInitialBatchLifecycle = async batchId => {
+      attempts += 1;
+      assert.ok(attempts <= 20, "must not retry beyond 20 attempts in a single workflow launch");
+      current = state("retry_pending");
+      return { batchId, status: "retry_pending", durable: true, reason: `empty_agent_output_${attempts}` };
+    };
+    c.waitForDispatchChange = async () => assert.fail("exhausted batch must stop without idle polling");
+    await c.runDispatchWorker(1, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
+    assert.equal(attempts, 20);
+    assert.equal(c.schedulerCycles, 20);
+    const report = c.completionReport({ finalStatus: "completed_with_unresolved", scheduler: c.lastScheduler });
+    assert.equal(report.ok, false);
+    assert.deepEqual(Array.from(report.blockedBatches), ["B002"]);
+    assert.match(report.error, /empty_agent_output_20/);
+  }
 });
 
 test("final recovery continues beyond three drains and returns the successful snapshot", async () => {
@@ -320,6 +374,7 @@ test("non-retryable blocks return after independent work drains", async () => {
     if (busy) state[busy] = busy === "activeWorkers" ? 1 : ["B002"];
     let waits = 0;
     const c = vm.createContext({ lastScheduler: state,
+      batchInvocationRetryControl: { exhausted: new Set() },
       inactiveRun: () => false,
       drainRunnableLifecycles: async () => {},
       runFinalRepairAndReport: async () => state,
@@ -362,4 +417,154 @@ test("a durable merge supersedes in-memory batch and candidate errors", () => {
   vm.runInContext(source.slice(source.indexOf("function manifestFromScheduler("),
     source.indexOf("function completionReport(")), c);
   assert.equal(c.allWorkflowDeliveriesMerged(state), true);
+});
+
+test("defer exhaustion releases its grant once so an independent Batch can run", async () => {
+  const c = harness();
+  c.maxParallel = 1;
+  c.waitWorkspaceSyncRetry = async () => {};
+  c.codeWorkspaces = { default: "/source" };
+  c.worktreeManagerPath = "/plugin/hooks/worktree_manager.py";
+  c.batchResults = [];
+  c.finalRepairResults = [];
+  vm.runInContext(source.slice(source.indexOf("async function deferBatchForRetry("),
+    source.indexOf("function mergedBatchIds(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function blockImplementationFinding("),
+    source.indexOf("async function resolveMergeCandidate(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function safelyDeferBatchForRetry("),
+    source.indexOf("async function runLifecycleSafely(")), c);
+  vm.runInContext(source.slice(source.indexOf("function manifestFromScheduler("),
+    source.indexOf("async function attemptFinalCandidateRepair(")), c);
+
+  c.runDeliveryReviewAndGate = async () => ({
+    status: "implementation_rework_required",
+    failedStage: "review",
+    recovery: { batchId: "B002", worktreePath: "/worktrees/B002", branchName: "batch", commitSha: "same-sha" },
+  });
+  c.reworkDeliveryImplementation = async () => ({
+    batchId: "B002", status: "success", worktreePath: "/worktrees/B002", branchName: "batch", commitSha: "same-sha",
+  });
+
+  let current = snapshot(1, "pending", 1000);
+  current.activeWorkers = 0;
+  current.dispatchDiagnostics.activeBatchIds = [];
+  current.manifest.batches.B001 = { status: "pending", dependencies: [], recovery: {} };
+  current.readyBatches = ["B002", "B001"];
+  c.applySchedulerState(current);
+
+  let deferCalls = 0, finishCalls = 0, independentCalls = 0;
+  const runInitialBatchLifecycle = c.runInitialBatchLifecycle;
+  c.runInitialBatchLifecycle = async batchId => {
+    if (batchId === "B002") return runInitialBatchLifecycle(batchId);
+    independentCalls += 1;
+    current = snapshot(1, "retry_pending", 4000);
+    current.activeWorkers = 0;
+    current.dispatchDiagnostics.activeBatchIds = [];
+    current.manifest.batches.B001 = { status: "merged", mergeCommitSha: "upstream", dependencies: [] };
+    current.manifest.batches.B002.error = "parallel_batch_recovery:dispatch_terminated";
+    return { batchId, status: "merged" };
+  };
+  c.agent = async (prompt, options) => {
+    if (options.label === "provision-worktree-B002") {
+      return { success: true, batchId: "B002", repositoryRef: "default", worktreePath: "/worktrees/B002", branchName: "batch" };
+    }
+    if (options.label === "fixed-batch-B002") {
+      return { batchId: "B002", status: "success", worktreePath: "/worktrees/B002", branchName: "batch", commitSha: "same-sha" };
+    }
+    if (options.label === "dispatch-claim-B002-1") {
+      current = { ...current, activeWorkers: 1, dispatchDiagnostics: { activeBatchIds: ["B002"] },
+        scheduledGroups: [], observedEpochMs: 2000 };
+      return { success: true, status: "claimed", batchId: "B002", generation: 1, ownerToken: "owner-1" };
+    }
+    if (options.label === "dispatch-claim-B001-1") {
+      return { success: true, status: "claimed", batchId: "B001", generation: 1, ownerToken: "owner-2" };
+    }
+    if (options.label.startsWith("defer-batch-retry-")) {
+      deferCalls += 1;
+      throw new Error(`defer_failed_${deferCalls}`);
+    }
+    if (options.label === "dispatch-finish-B002-1") {
+      finishCalls += 1;
+      assert.match(prompt, /--owner-token "owner-1".*--outcome "failed"/);
+      current = snapshot(1, "retry_pending", 3000);
+      current.activeWorkers = 0;
+      current.dispatchDiagnostics.activeBatchIds = [];
+      current.readyBatches = ["B001"];
+      current.scheduledGroups = [["B001"]];
+      current.manifest.batches.B001 = { status: "pending", dependencies: [], recovery: {} };
+      current.manifest.batches.B002.error = "parallel_batch_recovery:dispatch_terminated";
+      return { success: true, status: "finished", batchId: "B002" };
+    }
+    if (options.label === "dispatch-finish-B001-1") return { success: true, status: "finished", batchId: "B001" };
+    return current;
+  };
+  c.waitForDispatchChange = async () => assert.fail("the released grant must not hold up the independent Batch");
+  c.batchWorkspaces.B002 = { workspaceRef: "default", componentRoots: ["."] };
+
+  await c.runDispatchWorker(1, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
+  await c.persistUndurableBatchFailures();
+
+  assert.equal(deferCalls, 20);
+  assert.equal(finishCalls, 1);
+  assert.equal(independentCalls, 1);
+  assert.equal(vm.runInContext('batchInvocationRetryControl.exhausted.has("B002")', c), true);
+  assert.equal(c.quarantinedBatchIds.has("B002"), true);
+  const details = c.unresolvedBatchDetails(current);
+  assert.equal(details.length, 1);
+  assert.equal(details[0].batchId, "B002");
+  assert.equal(details[0].status, "blocked");
+  assert.equal(details[0].recoveryStatus, "retry_exhausted");
+  assert.match(details[0].error, /defer_failed_20/);
+});
+
+test("final repair shares the 20-attempt resume budget across dispatch and outer passes", async () => {
+  const c = harness();
+  let resumeCalls = 0, waits = 0;
+  let current = snapshot(1, "retry_pending", 1000);
+  current.activeWorkers = 0;
+  current.dispatchDiagnostics.activeBatchIds = [];
+  current.manifest.batches.B001 = { status: "merged", mergeCommitSha: "upstream", dependencies: [],
+    worktreePath: "/worktrees/B001", branchName: "b1", commitSha: "c1", recovery: {} };
+  c.applySchedulerState(current);
+
+  Object.assign(c, {
+    controlProtocolVersion: 1, finalRepairResults: [], phase: () => {},
+    persistUndurableBatchFailures: async () => {}, unresolvedMergeCandidateDetails: () => [],
+    allWorkflowDeliveriesMerged: () => false,
+    readSchedulerState: async () => current,
+    drainRunnableLifecycles: async () => ({ ranAny: false }),
+    waitWorkspaceSyncRetry: async () => { waits += 1; },
+    agent: async (_prompt, options) => {
+      if (options.label.includes("resume-retry-pending")) {
+        resumeCalls += 1;
+        return current;
+      }
+      return current;
+    },
+  });
+  vm.runInContext(source.slice(source.indexOf("function manifestFromScheduler("),
+    source.indexOf("function completionReport(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function runFinalRepairAndReport("),
+    source.indexOf("// A resumed run can already contain")), c);
+
+  // Use another Batch in the dispatch phase to verify that the budget follows the invocation.
+  const repairState = current;
+  current = { ...current, retryPendingBatches: ["B001"] };
+  for (let i = 1; i <= 5; i += 1) {
+    await c.recoverPendingRetries(current, `dispatch-resume-retry-pending-${i}`);
+  }
+  assert.equal(resumeCalls, 5);
+  current = repairState;
+
+  // Outer loop + final repair must consume only the remaining 15 attempts (total = 20, never 21+)
+  // and must exit without resetting on subsequent outer passes.
+  await c.runUntilDeliveriesComplete();
+  assert.equal(resumeCalls, 20);
+  assert.equal(waits, 0);
+  assert.equal(vm.runInContext('batchInvocationRetryControl.exhausted.has("B002")', c), true);
+  assert.equal(c.finalRepairResults.some(item => item.status === "automatic_retry_budget_exhausted"), true);
+
+  // Calling runFinalRepairAndReport again in the same invocation makes 0 additional resume calls.
+  await c.runFinalRepairAndReport();
+  assert.equal(resumeCalls, 20);
 });

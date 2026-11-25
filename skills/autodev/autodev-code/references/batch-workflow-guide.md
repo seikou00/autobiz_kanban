@@ -320,9 +320,11 @@ while unrelated ready work fills available slots immediately.
 An execution-stage failure is recorded as `retry_pending`, not terminal
 `failed`. Scheduler `resume` reclaims its lease and reschedules the Batch in
 its existing Worktree while unrelated Batches continue. Retryable execution
-failures have no attempt limit, including repeated identical failures;
-`retryAttempts` records history without blocking recovery. Scheduler `resume`
-also recovers legacy `retry_exhausted` and retryable `unchanged_failure` blocks.
+failures are bounded to 20 attempts per Workflow launch (`MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 20`);
+once a Batch fails 20 times in the same launch, it becomes `blocked` (`retry_exhausted`),
+stops retrying in the current launch, and returns its failure reason in the Workflow report.
+Only the next Workflow launch (`manual-resume` or a fresh `workflowInvocationId`) resets
+the per-launch budget and retries the Batch while `retryAttempts` preserves cumulative history.
 Precondition errors, cancellation and merge conflicts retain their specific
 repair paths. Successful recovery continues normal delivery and finalization.
 

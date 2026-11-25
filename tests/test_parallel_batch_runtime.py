@@ -502,13 +502,9 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(first_manifest["status"], "running")
             self.assertEqual(first_resume["scheduledGroups"], [["B001", "B002"]])
 
-            # Both changing failures and an identical failure fingerprint may
-            # exceed the old two-attempt budget without blocking either peer.
-            for attempt, error in enumerate([
-                "second_worker_failure", "third_worker_failure",
-                "repeated_worker_failure", "repeated_worker_failure", "repeated_worker_failure",
-            ], start=2):
-                mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error=error)
+            # Failures 2..19 continue rescheduling within the 20-attempt budget.
+            for attempt in range(2, 20):
+                mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error=f"worker_failure_{attempt}")
                 resumed = resume_run(workspace, "alpha", run_id)
                 manifest = load_manifest(workspace, "alpha", run_id)
                 self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
@@ -518,6 +514,71 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 self.assertEqual(manifest["batches"]["B001"]["status"], "pending")
                 self.assertEqual(manifest["batches"]["B002"]["status"], "pending")
                 self.assertEqual(manifest["batches"]["B001"]["recovery"]["retryAttempts"], attempt)
+
+            # Attempt 20 exhausts the per-launch budget, blocks B001 with its error,
+            # and does not retry again until the next Workflow launch.
+            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="worker_failure_20")
+            exhausted = resume_run(workspace, "alpha", run_id)
+            manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(exhausted["retryExhaustedBatches"], ["B001"])
+            self.assertEqual(exhausted["rescheduledRetryBatches"], [])
+            self.assertEqual(exhausted["blockedBatches"], ["B001"])
+            self.assertEqual(exhausted["scheduledGroups"], [["B002"]])
+            self.assertEqual(manifest["batches"]["B001"]["status"], "blocked")
+            self.assertEqual(manifest["batches"]["B001"]["error"], "worker_failure_20")
+            self.assertEqual(manifest["batches"]["B001"]["recovery"]["status"], "retry_exhausted")
+            self.assertEqual(manifest["batches"]["B001"]["recovery"]["maxAutomaticAttempts"], 20)
+
+            # Same Workflow invocation polls and resumes must NOT reopen B001.
+            self.assertEqual(schedule(workspace, "alpha", run_id)["retryPendingBatches"], [])
+            same_launch = resume_run(workspace, "alpha", run_id)
+            self.assertEqual(same_launch["rescheduledRetryBatches"], [])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "blocked")
+
+            # Next Workflow launch (new workflowInvocationId or manual_resume_run) resets
+            # the per-launch budget and retries B001.
+            next_launch = resume_run(workspace, "alpha", run_id, workflow_invocation_id="b" * 32)
+            reopened = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(next_launch["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(reopened["status"], "pending")
+            self.assertEqual(reopened["recovery"]["invocationRetryAttempts"], 0)
+            self.assertEqual(reopened["recovery"]["retryAttempts"], 20)
+
+            # Even if the previous Workflow exited right after recording its 20th failure
+            # (without running resume in inv_b) or left retry_pending with invocationRetryAttempts=20,
+            # a fresh launch inv_c must immediately reschedule B001 rather than blocking inv_c.
+            for attempt in range(1, 21):
+                mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error=f"inv_b_fail_{attempt}")
+                if attempt < 20:
+                    resume_run(workspace, "alpha", run_id, workflow_invocation_id="b" * 32)
+            after_20th_write = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(after_20th_write["status"], "blocked")
+            self.assertEqual(after_20th_write["recovery"]["status"], "retry_exhausted")
+            self.assertEqual(after_20th_write["recovery"]["exhaustedInvocationId"], "b" * 32)
+
+            inv_c = resume_run(workspace, "alpha", run_id, workflow_invocation_id="c" * 32)
+            self.assertEqual(inv_c["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(inv_c["retryExhaustedBatches"], [])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
+
+            # Also verify an un-transitioned retry_pending marker from an older invocation
+            # cannot poison the next invocation.
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["batches"]["B001"].update({
+                "status": "retry_pending",
+                "error": "stale_20th_pending",
+                "recovery": {
+                    **manifest["batches"]["B001"]["recovery"],
+                    "status": "pending_retry",
+                    "invocationRetryAttempts": 20,
+                    "retryInvocationId": "c" * 32,
+                },
+            })
+            save_manifest(workspace, "alpha", run_id, manifest)
+            inv_d = resume_run(workspace, "alpha", run_id, workflow_invocation_id="d" * 32)
+            self.assertEqual(inv_d["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(inv_d["retryExhaustedBatches"], [])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
 
     def test_retry_pending_transition_clears_lease_before_reschedule(self) -> None:
         """A retry marker must take lease authority away from a failed worker."""

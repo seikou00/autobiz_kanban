@@ -118,6 +118,51 @@ test("checkpoint retries do not replay a completed evidence audit", async () => 
   assert.equal(commands.filter(command => command.label === "complete-code-checkpoint").length, 6);
 });
 
+test("finalization audit and checkpoint each stop after 20 attempts and return failure reason", async () => {
+  const runPersistentFailure = async failTarget => {
+    const commands = [];
+    const context = {
+      prepared: { integrationMode: "isolated" },
+      finalScheduler: {}, lastScheduler: {}, artifactWorkspace: "/artifacts", feature: "feature", runId: "run",
+      pluginPath: "/plugin", mergeTrainPath: "/plugin/merge-train", aggregatePath: "/plugin/aggregate",
+      VERIFICATION_SCHEMA: {},
+      phase() {}, recordUnresolved() {}, unresolvedRecords: [], waitWorkspaceSyncRetry: async () => {}, inactiveRun,
+      completionReport: value => value,
+      joinPath: (...parts) => parts.join("/"),
+      errorText: error => (error instanceof Error ? error.message : String(error)),
+      encodeFailure: value => Buffer.from(value, "utf8").toString("base64"),
+      unwrap: value => value,
+      hasFailureSignal: value => value.success === false || value.passed === false,
+      requireSuccess(value) {
+        if (value.ok === false || value.success === false) throw new Error(value.error || "command failed");
+        return value;
+      },
+      async workflowAgent(_prompt, options) {
+        commands.push(options.label);
+        if (options.label === failTarget) return { ok: false, error: `${failTarget}_persistent_failure` };
+        return { ok: true, passed: true, policy: "report_only", blockingErrors: [], errors: [],
+          integrationMode: "isolated", integrationWorkspaces: { default: "/integration" },
+          workspaceSync: [], repositoryHeads: { default: "candidate" },
+          hasDeferredIssues: false, deferredIssues: [], new_checkpoint: "code_done" };
+      },
+    };
+    const result = await vm.runInNewContext(`(async () => { ${finalization} })()`, context);
+    return { result, commands };
+  };
+
+  const auditFailed = await runPersistentFailure("aggregate-staged-evidence");
+  assert.equal(auditFailed.result.finalStatus, "completed_with_validation_failure");
+  assert.equal(auditFailed.result.verification.retryAttempts, 20);
+  assert.match(auditFailed.result.verification.error, /aggregate-staged-evidence_persistent_failure/);
+  assert.equal(auditFailed.commands.filter(label => label === "aggregate-staged-evidence").length, 20);
+
+  const checkpointFailed = await runPersistentFailure("complete-code-checkpoint");
+  assert.equal(checkpointFailed.result.finalStatus, "completed_with_checkpoint_failure");
+  assert.equal(checkpointFailed.result.verification.retryAttempts, 20);
+  assert.match(checkpointFailed.result.verification.checkpointError, /complete-code-checkpoint_persistent_failure/);
+  assert.equal(checkpointFailed.commands.filter(label => label === "complete-code-checkpoint").length, 20);
+});
+
 test("a rollback during finalization stops audit or checkpoint retries", async () => {
   for (const stoppedAt of ["aggregate-staged-evidence", "complete-code-checkpoint"]) {
     const { result, commands } = await finalize({ stoppedAt });

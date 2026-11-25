@@ -187,9 +187,8 @@ Review 业务结论只有 passed/failed，只有持久化 passed 才放行候选
 documentation 记录转换为带 advisory 的 passed，不增加分类 Agent，不以信息缺口阻塞。
 可证实的实现缺陷仍 failed；未完成评审的执行中断按持久化状态恢复，不冒充通过。
 handoff/路径/契约/阶段顺序类执行错误记录 precondition_blocked，
-可重试的执行错误即使重复出现也保持 retry_pending，retryAttempts 仅记录累计次数；
-旧 retry_exhausted 和可重试的 unchanged_failure 阻塞在 scheduler resume 时恢复。
-暂时失败没有次数上限；final-repair 和新建 drain 继续恢复，保留累计重试次数。
+可重试的执行错误保持 retry_pending，retryAttempts 记录历史累计次数，invocationRetryAttempts 记录当次启动内的失败次数；
+单次 Workflow 启动内达到 20 次失败后转为 blocked（retry_exhausted）并返回失败原因，不再继续重跑，只有下次启动 Workflow 时才重新放行重试。
 本交付不新增旧运行 handoff 重建、路径迁移或批量修复入口。
 
 ## 查看缓存与只读诊断
