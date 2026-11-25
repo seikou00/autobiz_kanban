@@ -23,11 +23,13 @@ from hooks.parallel_runtime import (
     INACTIVE_RUN_STATES,
     append_event,
     DELIVERY_STAGES,
+    lease_path,
     load_manifest,
     run_dir,
     run_lock,
     save_manifest,
     validate_cli_dispatch,
+    worktree_lock,
 )
 
 
@@ -490,7 +492,13 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
             raise ValueError(f"parallel_batch_stage_out_of_order:{batch_id}:expected={expected}:actual={stage}")
         if state.get("status") == "needs_triage":
             raise ValueError(f"parallel_batch_stage_needs_triage:{batch_id}:{stage}")
-        if stage == "review" and (state.get("failure") or {}).get("type") == "environment":
+        if stage == "review" and (
+            (state.get("failure") or {}).get("type") == "environment"
+            or (
+                (state.get("repairPolicy") or {}).get("requireActualReview") is True
+                and batch.get("commitSha") != (state.get("repairPolicy") or {}).get("baseFailedCommit")
+            )
+        ):
             state["failure"] = None
         state.update({"status": "running", "attempt": int(state.get("attempt", 0)) + 1, "startedAt": _utc_now(), "completedAt": None})
         if stage == "test":
@@ -538,6 +546,153 @@ def begin_implementation(workspace: Path, feature: str, run_id: str, batch_id: s
     return start_stage(workspace, feature, run_id, batch_id, "implement")
 
 
+def open_second_review_repair(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
+    """Durably open the bounded Round-2 implementation repair from REPAIR_CONTEXT.json."""
+    from hooks.engineering_context import context_base, read_json
+    from hooks.parallel_batch_scheduler import _clear_retry_lease_locked, assert_batch_worktree_isolated
+    from hooks.parallel_delivery import execution_running
+    from hooks.workflow_remediation import _assert_no_live_writers_or_git_locks
+
+    with worktree_lock(workspace, feature, run_id, batch_id, timeout=5), run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        if batch.get("status") not in {"pending", "sealed", "running", "leased"} or any(
+            states.get(name, {}).get("status") == "running" for name in ("review", "test")
+        ):
+            raise ValueError(f"parallel_repair_not_open:{batch_id}")
+        recovery = batch.setdefault("recovery", {})
+        existing_policy = states["review"].get("repairPolicy") or {}
+        path = lease_path(workspace, feature, run_id, batch_id)
+        has_lease = bool(batch.get("lease")) or path.is_file()
+        if existing_policy.get("round") == 2 and existing_policy.get("requireActualReview") is True:
+            if states["review"].get("failure"):
+                if has_lease:
+                    raise ValueError(f"review_repair_lease_unconfirmed:{batch_id}")
+                return {
+                    "success": True,
+                    "status": "ready",
+                    "batchId": batch_id,
+                    "worktreePath": batch.get("worktreePath"),
+                    "branchName": batch.get("branchName"),
+                    "commitSha": batch.get("commitSha"),
+                    "repairPolicy": dict(existing_policy),
+                    "reused": True,
+                }
+        if int(recovery.get("reviewRepairRounds", 0)) >= 2:
+            raise ValueError(f"parallel_second_repair_budget_exhausted:{batch_id}")
+        root = Path(batch.get("worktreePath") or "").resolve()
+        assert_batch_worktree_isolated(manifest, batch_id, root)
+        repair = read_json(context_base(workspace, feature, run_id, batch_id) / "REPAIR_CONTEXT.json")
+        failure = repair.get("failure") or {}
+        if (
+            repair.get("runId") != run_id
+            or repair.get("batchId") != batch_id
+            or repair.get("worktreePath") != str(root)
+            or repair.get("failedStage") != "review"
+            or failure.get("type") != "implementation"
+            or not str(failure.get("message") or "").strip()
+            or not batch.get("commitSha")
+            or repair.get("commitSha") != batch["commitSha"]
+            or (states["review"].get("failure") or (states["review"].get("repairResolution") or {}).get("failure")) != failure
+        ):
+            raise ValueError(f"parallel_second_repair_context_invalid:{batch_id}")
+        if has_lease:
+            dispatch = batch.get("dispatch") or {}
+            lease = read_json(path) if path.is_file() else (batch.get("lease") or {})
+            auth = _CLI_DISPATCH_AUTH.get()
+            if (
+                not validate_cli_dispatch(manifest, batch, batch_id, auth, "review_repair")
+                or lease.get("dispatchGeneration") != dispatch.get("generation")
+                or lease.get("dispatchTokenSha256") != dispatch.get("tokenSha256")
+                or execution_running(workspace, feature, run_id, batch_id)
+            ):
+                raise ValueError(f"review_repair_lease_unconfirmed:{batch_id}")
+            try:
+                _assert_no_live_writers_or_git_locks(workspace, feature, run_id, batch_id, root)
+            except ValueError as exc:
+                raise ValueError(f"review_repair_lease_unconfirmed:{batch_id}") from exc
+            _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+            batch["status"] = "pending"
+        base_failed_commit = str(batch.get("commitSha") or repair["commitSha"])
+        policy = {
+            "round": 2,
+            "requireActualReview": True,
+            "priorReviewAttempt": int(states["review"].get("attempt", 0)),
+            "baseFailedCommit": base_failed_commit,
+        }
+        recovery["reviewRepairRounds"] = 2
+        states["review"]["repairPolicy"] = policy
+        for name in stage_names(batch):
+            states[name].update(status="pending", latestEvidenceId=None, completedAt=None)
+        states["review"]["failure"] = dict(failure)
+        batch["activeStage"] = None
+        save_manifest(workspace, feature, run_id, manifest)
+    append_event(workspace, feature, run_id, "second_review_repair_opened", batchId=batch_id, baseFailedCommit=base_failed_commit)
+    return {
+        "success": True,
+        "status": "ready",
+        "batchId": batch_id,
+        "worktreePath": str(root),
+        "branchName": batch.get("branchName"),
+        "commitSha": base_failed_commit,
+        "repairPolicy": policy,
+    }
+
+
+def _actual_review_proof_error(batch: dict[str, Any], review_state: dict[str, Any]) -> str | None:
+    """Verify the 5 positive provenance assertions when requireActualReview is active."""
+    policy = review_state.get("repairPolicy")
+    if not isinstance(policy, dict) or policy.get("requireActualReview") is not True:
+        return None
+    raw_path = review_state.get("evidencePath")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return "evidence_path_missing"
+    ev_path = Path(raw_path)
+    if not ev_path.is_file():
+        return "evidence_file_missing"
+    try:
+        evidence = json.loads(ev_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "evidence_unreadable"
+    if not isinstance(evidence, dict):
+        return "evidence_invalid"
+    # 1. Digest self-check & latestEvidenceId match.
+    body = {k: v for k, v in evidence.items() if k != "digest"}
+    if not evidence.get("evidenceId") or evidence.get("evidenceId") != review_state.get("latestEvidenceId"):
+        return "evidence_id_mismatch"
+    if evidence.get("digest") != _digest(body):
+        return "evidence_digest_mismatch"
+    # 2. Controlled finish_review provenance signature.
+    meta = evidence.get("metadata") if isinstance(evidence.get("metadata"), dict) else {}
+    if meta.get("completionSource") != "finish_review" or meta.get("reviewDecision") != "passed":
+        return "completion_source_not_finish_review"
+    if meta.get("repairDisposition") == "single_repair_accepted":
+        return "single_repair_bypass_forbidden"
+    # 3. Exact repairRound match.
+    if meta.get("repairRound") != policy.get("round"):
+        return "repair_round_mismatch"
+    # 4. Strictly newer Review attempt than priorReviewAttempt.
+    attempt = evidence.get("attempt")
+    if not isinstance(attempt, int) or attempt <= int(policy.get("priorReviewAttempt", 0)):
+        return "review_attempt_not_advanced"
+    # 5. Bound to current sealed commitSha != baseFailedCommit and descended from baseFailedCommit.
+    commit = batch.get("commitSha")
+    base_failed = policy.get("baseFailedCommit")
+    if not isinstance(commit, str) or not commit or (evidence.get("inputs") or {}).get("batchCommit") != commit:
+        return "batch_commit_not_bound"
+    if base_failed and commit == base_failed:
+        return "batch_commit_unchanged_from_failed_seal"
+    raw_wt = batch.get("worktreePath")
+    if base_failed and isinstance(raw_wt, str) and raw_wt.strip() and Path(raw_wt).is_dir():
+        from hooks.parallel_integration import git
+        try:
+            git(Path(raw_wt), "merge-base", "--is-ancestor", str(base_failed), commit)
+        except Exception:
+            return "batch_commit_not_descendant_of_failed_seal"
+    return None
+
+
 def prepare_implementation_repair(workspace: Path, feature: str, run_id: str,
                                   batch_id: str, failed_stage: str) -> dict[str, Any]:
     """Open only a recorded production finding, or reconcile its sealed repair."""
@@ -551,7 +706,7 @@ def prepare_implementation_repair(workspace: Path, feature: str, run_id: str,
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
-        if batch.get("status") not in {"sealed", "running", "leased"} or any(
+        if batch.get("status") not in {"pending", "sealed", "running", "leased"} or any(
             states.get(name, {}).get("status") == "running" for name in ("review", "test")
         ):
             raise ValueError(f"parallel_repair_not_open:{batch_id}")
@@ -581,11 +736,26 @@ def prepare_implementation_repair(workspace: Path, feature: str, run_id: str,
         if commit != repair["commitSha"] and not sealed:
             raise ValueError(f"parallel_repair_commit_unproven:{batch_id}")
         resolution = states["review"].get("repairResolution") or {}
-        recorded_repair = (sealed and resolution.get("failure") == failure
-                           and resolution.get("disposition") == "single_repair_accepted"
-                           and all(states[name].get("status") == "passed" for name in ("prepare", "implement", "review"))
-                           and read_json(Path(states["review"].get("evidencePath") or ""))
-                           .get("inputs", {}).get("batchCommit") == commit)
+        policy = states["review"].get("repairPolicy") or {}
+        require_actual = bool(
+            policy.get("requireActualReview") is True
+            or int((batch.get("recovery") or {}).get("reviewRepairRounds", 0)) >= 2
+        )
+        actual_review_passed = (
+            sealed
+            and require_actual
+            and all(states[name].get("status") == "passed" for name in ("prepare", "implement", "review"))
+            and _actual_review_proof_error(batch, states["review"]) is None
+        )
+        recorded_repair = actual_review_passed or (
+            sealed
+            and not require_actual
+            and resolution.get("failure") == failure
+            and resolution.get("disposition") == "single_repair_accepted"
+            and all(states[name].get("status") == "passed" for name in ("prepare", "implement", "review"))
+            and read_json(Path(states["review"].get("evidencePath") or ""))
+            .get("inputs", {}).get("batchCommit") == commit
+        )
         if not recorded_repair and (sealed or states["implement"].get("status") in {"passed", "skipped", "deferred"}):
             for name in stage_names(batch):
                 inputs = read_json(Path(states[name].get("evidencePath") or "")).get("inputs", {})
@@ -601,10 +771,13 @@ def prepare_implementation_repair(workspace: Path, feature: str, run_id: str,
                     "branchName": batch.get("branchName"), "commitSha": commit}
     if sealed and not recorded_repair:
         finalize_implementation(workspace, feature, run_id, batch_id)
+        if require_actual:
+            append_event(workspace, feature, run_id, "implementation_repair_review_required", batchId=batch_id, commitSha=commit)
+            return {"success": True, "status": "review_required", "requireActualReview": True, **delivery}
         record_single_repair_resolution(workspace, feature, run_id, batch_id, failed_stage=failed_stage,
                                        metadata={"batchCommit": commit, **delivery})
     append_event(workspace, feature, run_id, "implementation_repair_prepared", batchId=batch_id, reused=sealed)
-    return {"success": True, "status": "reused" if sealed else "ready", **delivery}
+    return {"success": True, "status": "reused" if sealed else "ready", "requireActualReview": require_actual, **delivery}
 
 
 def finalize_implementation(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
@@ -652,6 +825,7 @@ def complete_stage(
     stage: str,
     *,
     metadata: dict[str, Any] | None = None,
+    _review_authority: str | None = None,
 ) -> dict[str, Any]:
     metadata = dict(metadata or {})
     with run_lock(workspace, feature, run_id):
@@ -659,6 +833,10 @@ def complete_stage(
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
         state = states.get(stage)
+        if stage == "review" and isinstance(state, dict):
+            policy = state.get("repairPolicy") or {}
+            if policy.get("requireActualReview") is True and _review_authority not in {"finish_review", "defer"}:
+                raise ValueError("parallel_review_requires_finish_review_entrypoint")
         if isinstance(state, dict) and state.get("status") in {"passed", "skipped", "deferred"}:
             return {
                 "batchId": batch_id,
@@ -762,6 +940,17 @@ def validate_review_result(workspace: Path, feature: str, run_id: str, batch_id:
         state_status = str(state.get("status") or "pending")
         failure = state.get("failure") if isinstance(state.get("failure"), dict) else None
         if state_status in {"passed", "skipped", "deferred"}:
+            if state_status == "passed":
+                proof_err = _actual_review_proof_error(batch, state)
+                if proof_err is not None:
+                    return {
+                        "success": False,
+                        "batchId": batch_id,
+                        "stage": "review",
+                        "status": "incomplete",
+                        "durableState": state_status,
+                        "error": f"parallel_batch_actual_review_proof_invalid:{proof_err}",
+                    }
             return {
                 "success": True,
                 "batchId": batch_id,
@@ -827,6 +1016,12 @@ def record_single_repair_resolution(
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
+        review_policy = (states.get("review") or {}).get("repairPolicy") or {}
+        if (
+            review_policy.get("requireActualReview") is True
+            or int((batch.get("recovery") or {}).get("reviewRepairRounds", 0)) >= 2
+        ):
+            raise ValueError(f"parallel_repair_requires_actual_review:{batch_id}")
         failed_state = states.get(failed_stage)
         repaired_failure = (
             dict(failed_state.get("failure"))
@@ -853,6 +1048,7 @@ def record_single_repair_resolution(
             batch_id,
             stage,
             metadata=stage_metadata,
+            _review_authority="single_repair" if stage == "review" else None,
         ))
     final = completed[-1]
     with run_lock(workspace, feature, run_id):
@@ -1225,6 +1421,7 @@ def defer_stage(
         batch_id,
         stage,
         metadata={"deferredIssueId": issue_id, "deferredDisposition": disposition, "failure": failure},
+        _review_authority="defer" if stage == "review" else None,
     )
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
@@ -1305,6 +1502,13 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
             # TASK checks closed at implementation. Review names the sealed Git commit.
             from hooks.engineering_context import read_json
             review = states["review"]
+            proof_err = _actual_review_proof_error(batch, review)
+            if proof_err is not None:
+                return {
+                    "success": False,
+                    "batchId": batch_id,
+                    "error": f"parallel_batch_actual_review_proof_invalid:{proof_err}",
+                }
             evidence = read_json(Path(review.get("evidencePath") or ""))
             reviewed = evidence.get("inputs", {}).get("batchCommit")
             if (not evidence.get("evidenceId") or evidence["evidenceId"] != review.get("latestEvidenceId")
@@ -1415,11 +1619,35 @@ def finish_review(workspace: Path, feature: str, run_id: str, batch_id: str, *,
         if decision == "passed":
             with run_lock(workspace, feature, run_id):
                 batch = _batch(load_manifest(workspace, feature, run_id), batch_id)
+                states_inner = _ensure_stage_states(batch)
+                policy = states_inner["review"].get("repairPolicy") or {}
+                current_round = int(
+                    policy.get("round")
+                    or (1 if states_inner["review"].get("repairResolution") else 0)
+                )
                 metadata = {key: batch.get(key) for key in ("worktreePath", "branchName")}
                 metadata["batchCommit"] = batch.get("commitSha")
-            complete_stage(workspace, feature, run_id, batch_id, "review", metadata=metadata)
+                metadata["completionSource"] = "finish_review"
+                metadata["reviewDecision"] = "passed"
+                metadata["repairRound"] = current_round
+            complete_stage(workspace, feature, run_id, batch_id, "review", metadata=metadata, _review_authority="finish_review")
         else:
             fail_stage(workspace, feature, run_id, batch_id, "review", failure_type="implementation", message=message)
+            with run_lock(workspace, feature, run_id):
+                manifest = load_manifest(workspace, feature, run_id)
+                batch = _batch(manifest, batch_id)
+                states_inner = _ensure_stage_states(batch)
+                policy = states_inner["review"].get("repairPolicy") or {}
+                if policy.get("requireActualReview") is True or int((batch.get("recovery") or {}).get("reviewRepairRounds", 0)) >= 2:
+                    from hooks.parallel_batch_scheduler import _escalate_batch_locked
+                    _escalate_batch_locked(
+                        workspace, feature, run_id, manifest, batch_id, batch,
+                        error=f"second_review_repair_failed:{message}",
+                        reason_code="second_review_repair_failed",
+                        category="review_repair_exhausted",
+                        classification="precondition",
+                    )
+                    save_manifest(workspace, feature, run_id, manifest)
     return validate_review_result(workspace, feature, run_id, batch_id)
 
 
@@ -1604,7 +1832,7 @@ def close_test(workspace: Path, feature: str, run_id: str, batch_id: str, *,
 def build_parser() -> argparse.ArgumentParser:
     parser = RuntimeArgumentParser(description="Advance a staged parallel Batch")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("next", "start", "complete", "finalize-implementation", "prepare-repair", "prepare-test", "check-test-budget", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair", "prepare-review", "finish-review", "review-checkpoint", "close-test"):
+    for name in ("next", "start", "complete", "finalize-implementation", "prepare-repair", "reopen-second-repair", "prepare-test", "check-test-budget", "fail", "record-test-failure", "defer", "gate", "triage-failure", "reset-validation", "validate-review-result", "record-single-repair", "prepare-review", "finish-review", "review-checkpoint", "close-test"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -1671,6 +1899,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = {"success": True, **request_stop_locked(workspace, feature, args.run_id, args.batch_id, manifest, batch)}
                 save_manifest(workspace, feature, args.run_id, manifest)
         elif args.command == "complete":
+            if args.stage == "review":
+                raise ValueError("parallel_review_requires_finish_review_entrypoint")
             metadata = json.loads(args.metadata_json)
             if not isinstance(metadata, dict):
                 raise ValueError("parallel_batch_stage_metadata_must_be_object")
@@ -1722,6 +1952,8 @@ def main(argv: list[str] | None = None) -> int:
                 commit_summary=args.commit_summary, failure_type=args.failure_type, message=args.message, metadata=metadata)
         elif args.command == "prepare-repair":
             result = prepare_implementation_repair(workspace, feature, args.run_id, args.batch_id, args.failed_stage)
+        elif args.command == "reopen-second-repair":
+            result = open_second_review_repair(workspace, feature, args.run_id, args.batch_id)
         elif args.command == "record-single-repair":
             metadata = json.loads(args.metadata_json)
             result = record_single_repair_resolution(

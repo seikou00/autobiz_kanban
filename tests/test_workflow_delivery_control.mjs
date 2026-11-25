@@ -16,6 +16,8 @@ async function execute(frontend = false, fault = null) {
   let queuedOnce = false;
   let syncCompletions = 0;
   let syncFailures = 0, finalizationFailures = 0, snapshotFailures = 0, prepareFailures = 0;
+  const durableLedger = fault === "durable-ledger";
+  let savedAggregate, checkpointAttempts = 0;
   let workspaceState = fault && fault.startsWith("workspace-") ? {
     success: true, status: fault === "workspace-synced" ? "synced" : "conflicted", repositoryRef: "default",
     sourcePath: "/source", sourceBranch: "main", sourceHead: "original", lastSyncedSha: fault === "workspace-synced" ? "candidate" : null,
@@ -45,9 +47,13 @@ async function execute(frontend = false, fault = null) {
   const agent = async (prompt, options) => {
     const label = options.label;
     labels.push(label);
+    if (label === "reserve-prepare-attempt" || label === "record-prepare-failure") {
+      assert.match(prompt, /--attempt [123]/);
+      return { ok: true, escalated: false };
+    }
     if (label === "verify-engineering-deployment") return { success: true };
     if (label === "fixed-workflow-prepare") {
-      if (fault === "prepare" && prepareFailures++ < 5) return {};
+      if ((fault === "prepare" || durableLedger) && prepareFailures++ < 2) return {};
       const state = snapshot(false);
       if (fault === "sealed-recovery") {
         state.scheduledGroups = [];
@@ -128,11 +134,26 @@ async function execute(frontend = false, fault = null) {
       return workspaceState;
     }
     if (label.startsWith("prepare-delivery-finalization")) {
+      if (fault === "finalization-escalated" || fault === "finalization-escalated-after-repair") {
+        if (fault.endsWith("after-repair") && finalizationFailures++ === 0) {
+          return { success: true, status: "repair_required", repairRequired: true, batchIds: ["B001"] };
+        }
+        releaseCleanup();
+        return { success: true, status: "escalated_to_operator", repairRequired: false, batchIds: [],
+          finalization: { status: "escalated_to_operator", lastError: "budget exhausted" } };
+      }
       if (fault === "admission" && finalizationFailures++ < 2) throw new Error("finalization unavailable");
       return fault === "blocked" && finalizationFailures++ < 2
         ? { success: true, status: "repair_required", repairRequired: true, batchIds: ["B001"] }
         : { success: true, status: "ready", repairRequired: false, batchIds: [],
+          ...(durableLedger ? { finalization: { status: "pending" } } : {}),
           ...(workspaceState ? { workspaceSync: [workspaceState] } : {}) };
+    }
+    if (label.startsWith("finalization-") && durableLedger) {
+      const [, step, attempt] = label.split("-");
+      assert.ok(prompt.includes(`--request-id "${"a".repeat(32)}:${step}:${attempt}" --step ${step}`));
+      return { success: true, status: "ready", repairRequired: false, batchIds: [],
+        finalization: { status: "running" }, aggregateReceipt: savedAggregate };
     }
     if (label.startsWith("final-repair-") || label.startsWith("workflow-resume-snapshot-") || label === "final-report-snapshot") {
       if (fault === "snapshot" && snapshotFailures++ < 2) return {};
@@ -152,12 +173,21 @@ async function execute(frontend = false, fault = null) {
       await Promise.resolve();
       assert.equal(cleanupStarted, true);
       releaseCleanup();
-      return { ok: true, policy: "report_only", passed: true, hasIssues: fault === "advisory",
+      const receipt = { ok: true, policy: "report_only", passed: true, hasIssues: fault === "advisory",
         errors: [], blockingErrors: [], integrationMode: "isolated",
         workspaceSync: workspaceState ? [workspaceState] : [], repositoryHeads: { default: "candidate" },
         e2eStatus: "skipped", e2eSkipReason: "e2e_temporarily_disabled",
         skippedUtests: [{ batchId: "B001", executionLane: frontend ? "frontend" : "backend",
           status: "skipped", reason: "utest_temporarily_disabled" }] };
+      if (fault === "aggregate-escalated") {
+        assert.equal(options.schema.properties.escalated.type, "boolean");
+        return { ...receipt, passed: false, escalated: true, blockingErrors: ["invalid evidence"] };
+      }
+      if (durableLedger) {
+        savedAggregate = receipt;
+        throw new Error("lost aggregate response");
+      }
+      return receipt;
     }
     if (label === "cleanup-delivered-B001") {
       assert.match(prompt, /--budget-seconds 20/);
@@ -168,6 +198,7 @@ async function execute(frontend = false, fault = null) {
     if (label === "complete-code-checkpoint") {
       assert.match(prompt, /update_checkpoint\.py" --feature "f" --checkpoint code_done --json/);
       assert.ok(labels.includes("aggregate-staged-evidence"));
+      if (durableLedger && checkpointAttempts++ === 0) throw new Error("checkpoint transport timeout");
       return { ok: true, new_checkpoint: "code_done" };
     }
     if (label === "drain-delivery-cleanup") {
@@ -182,7 +213,8 @@ async function execute(frontend = false, fault = null) {
   const run = new AsyncFunction("args", "agent", "parallel", "phase", "setTimeout", "clearTimeout", source.replace("export const meta =", "const meta ="));
   const result = await run({ feature: "f", pluginPath: "/plugin", artifactWorkspace: "/artifacts",
     codeWorkspaces: { default: "/source" }, taskCardId: "CARD-1", maxParallel: 9,
-    workflowInvocationId: "a".repeat(32), runtimeContractDigest: "b".repeat(64) }, agent,
+    workflowInvocationId: "a".repeat(32), runtimeContractDigest: "b".repeat(64),
+    ...(durableLedger ? { planDigest: "d".repeat(64) } : {}) }, agent,
   callbacks => { pools.push(callbacks.length); return Promise.all(callbacks.map(callback => callback())); }, () => {},
   fn => setImmediate(fn), handle => clearImmediate(handle));
   assert.equal(pools[0], 3, "the durable run's capacity overrides changed launch hints");
@@ -208,7 +240,7 @@ test("lost preparation responses retry ensure and create only one delivery lifec
   const { labels, result } = await execute(false, "prepare");
   assert.equal(result.finalStatus, "succeeded");
   assert.equal(result.runId, "run");
-  assert.equal(labels.filter(label => label === "fixed-workflow-prepare").length, 6);
+  assert.equal(labels.filter(label => label === "fixed-workflow-prepare").length, 3);
   assert.equal(labels.filter(label => label === "provision-worktree-B001").length, 1);
   assert.equal(labels.filter(label => label === "fixed-batch-B001").length, 1);
   assert.equal(labels.filter(label => label === "settle-delivery-B001-1").length, 1);
@@ -402,6 +434,29 @@ for (const fault of ["admission", "snapshot", "blocked"]) {
     assert.equal(labels.includes("prepare-user-confirmed-promotion"), false);
     assert.equal(labels.includes("run-e2e-validation"), false);
     assert.equal(labels.filter(label => label === "dispatch-claim-B001-1").length, 1);
+  });
+}
+
+test("fixed Workflow reserves each control attempt and adopts a lost aggregate receipt", async () => {
+  const { labels, result } = await execute(false, "durable-ledger");
+  assert.equal(result.finalStatus, "succeeded");
+  assert.equal(labels.filter(label => label === "reserve-prepare-attempt").length, 3);
+  assert.equal(labels.filter(label => label === "record-prepare-failure").length, 2);
+  assert.equal(labels.filter(label => label === "aggregate-staged-evidence").length, 1);
+  assert.deepEqual(labels.filter(label => label.startsWith("finalization-")), [
+    "finalization-aggregate-1", "finalization-aggregate-2", "finalization-code_done-1", "finalization-code_done-2",
+  ]);
+});
+
+for (const fault of ["finalization-escalated", "finalization-escalated-after-repair", "aggregate-escalated"]) {
+  test(`${fault} reports the reopen command without resume polling`, async () => {
+    const { labels, result } = await execute(false, fault);
+    assert.equal(result.finalStatus, "blocked_escalated");
+    assert.equal(result.nextAction, "resolve_finalization_blocker_then_reopen");
+    assert.equal(result.escalations.find(item => item.scope === "finalization")?.reopenCommand, "--reopen-finalization");
+    assert.equal(labels.filter(label => label === "prepare-delivery-finalization").length, 1);
+    assert.equal(labels.some(label => label.startsWith("workflow-resume-snapshot-")), false);
+    assert.equal(labels.includes("complete-code-checkpoint"), false);
   });
 }
 

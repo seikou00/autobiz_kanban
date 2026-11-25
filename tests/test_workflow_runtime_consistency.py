@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hooks.engineering_contract import runtime_contract
-from hooks.parallel_batch_scheduler import _workflow_status_view, load_manifest, resume_run, main as scheduler_main
+from hooks.parallel_batch_scheduler import _workflow_status_view, load_manifest, resume_run, schedule, main as scheduler_main
 from hooks.parallel_batch_stage import main as stage_main
 from hooks.parallel_dispatch import claim, defer, main as dispatch_main
 from hooks.parallel_runtime import run_dir
@@ -118,12 +118,21 @@ process.stdout.write(JSON.stringify(context.schemas));
         self.assertEqual(self.created["implementationRecoveryBatches"], [])
         self.assertEqual(self.created["stageRecoveryBatches"], [])
         self.assert_schema("SCHEDULER_RESULT_SCHEMA", self.created)
-        for field in ("implementationRecoveryBatches", "stageRecoveryBatches"):
+        for field in ("implementationRecoveryBatches", "stageRecoveryBatches", "remediationBatches"):
             missing = {key: value for key, value in self.created.items() if key != field}
             self.assertTrue(schema_errors(schema, missing))
             for invalid in (None, "[]", {}):
                 self.assertTrue(schema_errors(schema, {**self.created, field: invalid}))
         self.assert_schema("SCHEDULER_RESULT_SCHEMA", {"ok": False, "error": "scheduler_read_failed"})
+
+    def test_scheduler_schema_accepts_real_nonempty_remediation_queue(self):
+        owner = claim(self.workspace, "alpha", self.run, "B001", 1, "initial", "worker")
+        worktree = provision_parallel_worktree(self.workspace, "alpha", self.run, "B001")
+        (Path(worktree["worktreePath"]) / "scratch.txt").write_text("unattributed", encoding="utf-8")
+        defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "prestart_unattributed_changes_detected:scratch.txt")
+        result = schedule(self.workspace, "alpha", self.run, workflow_view=True)
+        self.assertEqual([entry["batchId"] for entry in result["remediationBatches"]], ["B001"])
+        self.assert_schema("SCHEDULER_RESULT_SCHEMA", result)
 
     def test_worktree_success_and_failure_are_both_valid_transport_results(self):
         self.assert_schema("WORKTREE_SCHEMA", provision_parallel_worktree(self.workspace, "alpha", self.run, "B001"))

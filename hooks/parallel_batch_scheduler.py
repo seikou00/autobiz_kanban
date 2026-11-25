@@ -8,6 +8,7 @@ run manifest consumed by the workflow runtime and Task Runner entrypoints.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import subprocess
@@ -189,24 +190,87 @@ def _is_non_retryable_blocked(batch: dict[str, Any]) -> bool:
     )
 
 
+def _is_escalated_blocked(batch: dict[str, Any]) -> bool:
+    recovery = batch.get("recovery")
+    return isinstance(recovery, dict) and recovery.get("status") == "escalated_to_operator"
+
+
+def _is_terminal_operator_blocked(batch: dict[str, Any]) -> bool:
+    return _is_non_retryable_blocked(batch) or _is_escalated_blocked(batch)
+
+
 def _is_retry_exhausted_blocked(
     batch: dict[str, Any],
     current_invocation_id: str | None,
     *,
     allow_new_invocation_retry: bool = False,
 ) -> bool:
+    _ = current_invocation_id, allow_new_invocation_retry
     recovery = batch.get("recovery")
-    if not isinstance(recovery, dict) or recovery.get("status") != "retry_exhausted":
+    if not isinstance(recovery, dict):
         return False
-    if not allow_new_invocation_retry:
-        return True
-    exhausted_inv = recovery.get("exhaustedInvocationId")
-    inv_attempts = int(recovery.get("invocationRetryAttempts", recovery.get("retryAttempts", 0)))
-    if current_invocation_id is not None and current_invocation_id != exhausted_inv:
-        return False
-    if "exhaustedInvocationId" not in recovery and inv_attempts < MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS:
-        return False
-    return True
+    return recovery.get("status") in {"retry_exhausted", "escalated_to_operator"}
+
+
+def _escalate_batch_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    manifest: dict[str, Any],
+    batch_id: str,
+    batch: dict[str, Any],
+    *,
+    error: str,
+    reason_code: str,
+    category: str,
+    classification: str = "precondition",
+    fingerprint: str | None = None,
+    generation: int | None = None,
+    hook_block_code: str | None = None,
+    non_retryable: bool = False,
+    recovery_overrides: dict[str, Any] | None = None,
+) -> bool:
+    """Atomically transition a Batch to an operator-owned terminal block and revoke credentials."""
+    previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+    effective_gen = generation if generation is not None else int(batch.get("dispatchGeneration", 1))
+    dispatch = batch.get("dispatch")
+    if isinstance(dispatch, dict):
+        dispatch.update(status="revoked", revokedAtEpoch=time.time(), completedEpoch=time.time())
+    else:
+        batch["dispatchManaged"] = True
+    (run_dir(workspace, feature, run_id) / "dispatch" / f"{batch_id}.json").unlink(missing_ok=True)
+    status_name = "blocked_non_retryable" if non_retryable else "escalated_to_operator"
+    recovery_state = {
+        **previous_recovery,
+        **(recovery_overrides or {}),
+        "status": status_name,
+        "escalatedAt": manifest.get("updatedAt"),
+        "escalationCategory": category,
+        "reasonCode": reason_code,
+        "rootCause": error,
+        "lastFailureAt": manifest.get("updatedAt"),
+        "lastError": error,
+        "failureClassification": "non_retryable" if non_retryable else classification,
+        "failureFingerprint": fingerprint or previous_recovery.get("failureFingerprint"),
+        "lastChargedGeneration": effective_gen,
+        "hookBlockCode": hook_block_code,
+        "nextAction": "resolve_escalated_batches_then_reopen",
+    }
+    recovery_state.pop("pendingAttempt", None)
+    if non_retryable:
+        recovery_state["nonRetryable"] = True
+    else:
+        recovery_state.pop("nonRetryable", None)
+    batch.update({
+        "status": "blocked",
+        "error": error,
+        "activeStage": None,
+        "startedAt": None,
+        "completedAt": manifest.get("updatedAt"),
+        "recovery": recovery_state,
+    })
+    manifest["status"] = "blocked"
+    return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
 
 
 def _mark_retry_pending_locked(
@@ -222,49 +286,120 @@ def _mark_retry_pending_locked(
     allow_manual_override: bool = False,
     reset_invocation_budget: bool = False,
     invocation_id: str | None = None,
+    generation: int | None = None,
+    charge_failure: bool = True,
 ) -> bool:
-    """Persist one task-scoped recovery marker without delegating to a worker."""
+    """Persist one task-scoped recovery or escalation transition under P0-P4 precedence."""
+    if not allow_manual_override and _is_terminal_operator_blocked(batch):
+        return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+    if batch.get("mergeCommitSha"):
+        batch["status"] = "merged"
+        if isinstance(batch.get("recovery"), dict):
+            batch["recovery"].pop("pendingAttempt", None)
+        return False
+
     previous = previous_status if previous_status is not None else str(batch.get("status") or "")
     previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
     if previous == "blocked" and previous_recovery.get("resumeStatus"):
         previous = str(previous_recovery["resumeStatus"])
-    from hooks.parallel_failure import recovery_failure
-    failure = recovery_failure(error, batch, run_dir(workspace, feature, run_id) / "engineering" / batch_id)
+
+    effective_gen = generation if generation is not None else int(batch.get("dispatchGeneration", 1))
+    from hooks.parallel_failure import (
+        MAX_TRANSIENT_EXTRA_RETRIES,
+        MAX_UNCLASSIFIED_RETRIES,
+        find_verified_hook_block,
+        recovery_failure,
+    )
+    verified_hook = (
+        None
+        if allow_manual_override
+        else find_verified_hook_block(workspace, feature, run_id, batch_id, effective_gen)
+    )
+    verified_hook_code = str(verified_hook["errorCode"]) if isinstance(verified_hook, dict) and verified_hook.get("errorCode") else None
+
+    reopened_missing_review_receipt = False
     if "parallel_batch_review_not_bound_to_seal" in error:
         # A passed flag without the sealed commit's receipt is incomplete.
         # Reopen only Review; never replay the implementation or invent evidence.
         review = (batch.get("stageStates") or {}).get("review")
         if isinstance(review, dict) and review.get("status") in {"passed", "skipped", "deferred"}:
             review.update(status="pending", latestEvidenceId=None, completedAt=None)
+            reopened_missing_review_receipt = True
         if previous == "ready_to_candidate":
             previous = "sealed"
-    # Provision has not begun business work. Waiting for another Batch's
-    # checkout is contention, even when the same lock stays busy repeatedly.
-    provision_wait = (previous == "pending" and not batch.get("commitSha") and not batch.get("lease")
-                      and failure["classification"] == "retryable"
-                      and "parallel_worktree_provision_lock_busy" in error)
-    if provision_wait:
-        failure["reasonCode"] = "parallel_worktree_provision_lock_busy"
-    # Classification remains diagnostic except explicit non-retryable bounds
-    # such as Windows GIT_DIR length overflow, which wait for operator action.
+
+    failure = recovery_failure(
+        error,
+        batch,
+        run_dir(workspace, feature, run_id) / "engineering" / batch_id,
+        verified_hook_code=verified_hook_code,
+    )
+    bucket = failure["bucket"]
+    is_contention = bucket == "contention"
+    superseded_reclaim = error.startswith("workflow_invocation_superseded:")
+
+    # P0: Check whether an interrupted/transient worker actually persisted its target stage receipt.
+    pending_attempt = previous_recovery.get("pendingAttempt") if isinstance(previous_recovery.get("pendingAttempt"), dict) else {}
+    can_adopt_stage_receipt = (
+        not allow_manual_override
+        and not failure.get("nonRetryable")
+        and bucket != "precondition"
+        and previous != "ready_to_candidate"
+        and pending_attempt.get("source") != "merge_candidate"
+        and previous_recovery.get("kind") != "integration_resume"
+    )
+    sealed_progress = (
+        can_adopt_stage_receipt
+        and previous not in {"sealed", "ready_to_candidate"}
+        and pending_attempt.get("source") in {"initial", "implementation_recovery"}
+        and not pending_attempt.get("targetCommitSha")
+        and bool(batch.get("commitSha"))
+        and _sealed_delivery_error(manifest, batch_id) is None
+    )
+    review_state = ((batch.get("stageStates") or {}).get("review") or {}) if isinstance(batch.get("stageStates"), dict) else {}
+    review_progress = (
+        can_adopt_stage_receipt
+        and not reopened_missing_review_receipt
+        and bool(batch.get("commitSha"))
+        and review_state.get("status") == "passed"
+        and bool(review_state.get("evidencePath"))
+        and Path(str(review_state.get("evidencePath"))).is_file()
+        and _sealed_delivery_error(manifest, batch_id) is None
+    )
+    receipt_adopted = sealed_progress or review_progress
+
     dispatch_inv = (batch.get("dispatch") or {}).get("invocationId") if isinstance(batch.get("dispatch"), dict) else None
     current_inv = _current_invocation_id(
         manifest,
         invocation_id or (dispatch_inv if isinstance(dispatch_inv, str) and dispatch_inv else None),
     )
-    superseded_reclaim = error.startswith("workflow_invocation_superseded:")
+
+    already_charged = (
+        not allow_manual_override
+        and not reset_invocation_budget
+        and previous_recovery.get("lastChargedGeneration") == effective_gen
+    )
+    charge_this_attempt = not (
+        not charge_failure or is_contention or receipt_adopted or superseded_reclaim
+        or allow_manual_override or reset_invocation_budget or already_charged
+    )
+
     retry_attempts = (
         int(previous_recovery.get("retryAttempts", 0))
-        if provision_wait
+        if not charge_this_attempt
         else int(previous_recovery.get("retryAttempts", 0)) + 1
     )
-    if reset_invocation_budget or allow_manual_override or superseded_reclaim:
-        invocation_retry_attempts = 0
-    elif "retryInvocationId" in previous_recovery and previous_recovery.get("retryInvocationId") != current_inv:
-        invocation_retry_attempts = 0 if provision_wait else 1
-    else:
-        prior_inv_attempts = int(previous_recovery.get("invocationRetryAttempts", 0))
-        invocation_retry_attempts = prior_inv_attempts if provision_wait else prior_inv_attempts + 1
+    transient_attempts = (
+        0
+        if allow_manual_override
+        else int(previous_recovery.get("transientRetryAttempts", 0)) + (1 if (charge_this_attempt and bucket == "transient") else 0)
+    )
+    unclassified_attempts = (
+        0
+        if allow_manual_override
+        else int(previous_recovery.get("unclassifiedRetryAttempts", 0)) + (1 if (charge_this_attempt and bucket == "unclassified") else 0)
+    )
+
     resume_status = (
         "ready_to_candidate"
         if previous == "ready_to_candidate"
@@ -278,7 +413,9 @@ def _mark_retry_pending_locked(
         else None
     )
     recovery_kind = (
-        "integration_resume"
+        "remediation"
+        if previous == "remediation_pending"
+        else "integration_resume"
         if resume_status == "ready_to_candidate"
         else "stage_resume"
         if resume_status == "sealed"
@@ -286,21 +423,107 @@ def _mark_retry_pending_locked(
         if implementation_resume is not None
         else "retry_dispatch"
     )
-    non_retryable = bool(failure.get("nonRetryable")) and not allow_manual_override
-    retry_exhausted = (
-        not provision_wait
-        and not allow_manual_override
-        and not reset_invocation_budget
-        and not superseded_reclaim
-        and not non_retryable
-        and invocation_retry_attempts >= MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS
-    )
-    target_status = "blocked" if (non_retryable or retry_exhausted) else "retry_pending"
+
+    # P2: Non-retryable or deterministic precondition / verified same-generation Hook block.
+    if charge_failure and not allow_manual_override and not receipt_adopted and not reopened_missing_review_receipt:
+        if failure.get("nonRetryable"):
+            return _escalate_batch_locked(
+                workspace, feature, run_id, manifest, batch_id, batch,
+                error=error, reason_code=failure["reasonCode"], category="non_retryable",
+                classification="non_retryable", fingerprint=failure["fingerprint"],
+                generation=effective_gen, non_retryable=True,
+                recovery_overrides={"retryAttempts": retry_attempts, "resumeStatus": resume_status, "kind": recovery_kind},
+            )
+        if bucket == "precondition":
+            # Phase 2 narrow remediation path for unattributed changes in a verified isolated worktree.
+            remediation_enabled = bool((manifest.get("runtimeConfig") or {}).get("enableUnattributedRemediation", True))
+            if (
+                remediation_enabled
+                and "prestart_unattributed_changes_detected" in error
+                and implementation_resume is not None
+                and int(previous_recovery.get("remediationAttempts", 0)) == 0
+            ):
+                recovery_state = {
+                    **previous_recovery,
+                    "retryAttempts": retry_attempts,
+                    "lastChargedGeneration": effective_gen,
+                    "lastFailureAt": manifest.get("updatedAt"),
+                    "lastError": error,
+                    "failureClassification": "precondition",
+                    "failureFingerprint": failure["fingerprint"],
+                    "reasonCode": "prestart_unattributed_changes_detected",
+                    "resumeStatus": "pending",
+                    "kind": "remediation",
+                    "remediationKind": "unattributed_changes",
+                    "preserveWorktree": True,
+                    "reprovision": False,
+                    "implementationResume": implementation_resume,
+                    "status": "remediation_required",
+                }
+                recovery_state.pop("pendingAttempt", None)
+                batch.update({
+                    "status": "remediation_pending",
+                    "error": error,
+                    "activeStage": None,
+                    "startedAt": None,
+                    "completedAt": None,
+                    "recovery": recovery_state,
+                })
+                advance_dispatch_generation(batch)
+                (run_dir(workspace, feature, run_id) / "dispatch" / f"{batch_id}.json").unlink(missing_ok=True)
+                return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+            category = "hook_blocked" if verified_hook_code else "precondition"
+            return _escalate_batch_locked(
+                workspace, feature, run_id, manifest, batch_id, batch,
+                error=error, reason_code=failure["reasonCode"], category=category,
+                classification="precondition", fingerprint=failure["fingerprint"],
+                generation=effective_gen, hook_block_code=verified_hook_code,
+                recovery_overrides={"retryAttempts": retry_attempts, "resumeStatus": resume_status, "kind": recovery_kind},
+            )
+        # P3: Explicit transient budget (1 initial + 2 extra retries = max 3 failed attempts).
+        if bucket == "transient" and transient_attempts > MAX_TRANSIENT_EXTRA_RETRIES:
+            return _escalate_batch_locked(
+                workspace, feature, run_id, manifest, batch_id, batch,
+                error=error, reason_code="transient_retry_budget_exhausted",
+                category="transient_exhausted", classification="transient",
+                fingerprint=failure["fingerprint"], generation=effective_gen,
+                recovery_overrides={
+                    "retryAttempts": retry_attempts,
+                    "transientRetryAttempts": transient_attempts,
+                    "resumeStatus": resume_status,
+                    "kind": recovery_kind,
+                },
+            )
+        # P4: Unclassified fallback — fingerprint repetition or >1 retry escalates immediately.
+        if bucket == "unclassified":
+            same_fingerprint = (
+                charge_this_attempt
+                and previous_recovery.get("failureFingerprint") == failure["fingerprint"]
+                and int(previous_recovery.get("unclassifiedRetryAttempts", 0)) >= 1
+            )
+            if same_fingerprint or unclassified_attempts > MAX_UNCLASSIFIED_RETRIES:
+                reason_code = "repeated_failure_fingerprint" if same_fingerprint else "unclassified_retry_budget_exhausted"
+                return _escalate_batch_locked(
+                    workspace, feature, run_id, manifest, batch_id, batch,
+                    error=error, reason_code=reason_code, category="repeated_failure",
+                    classification="retryable", fingerprint=failure["fingerprint"],
+                    generation=effective_gen,
+                    recovery_overrides={
+                        "retryAttempts": retry_attempts,
+                        "unclassifiedRetryAttempts": unclassified_attempts,
+                        "resumeStatus": resume_status,
+                        "kind": recovery_kind,
+                    },
+                )
+
     recovery_state = {
         **previous_recovery,
         "retryAttempts": retry_attempts,
-        "invocationRetryAttempts": invocation_retry_attempts,
+        "transientRetryAttempts": transient_attempts,
+        "unclassifiedRetryAttempts": unclassified_attempts,
+        "invocationRetryAttempts": transient_attempts + unclassified_attempts,
         "retryInvocationId": current_inv,
+        **({"lastChargedGeneration": effective_gen} if charge_this_attempt else {}),
         "lastFailureAt": manifest.get("updatedAt"),
         "lastError": error,
         "failureClassification": failure["classification"],
@@ -315,46 +538,31 @@ def _mark_retry_pending_locked(
             if recovery_kind == "implementation_resume"
             else None
         ),
-        # A sealed delivery or a verified dirty implementation
-        # Worktree must resume in place.  Only a clean/unbound
-        # unsealed retry is safe to provision again.
-        "preserveWorktree": recovery_kind in {"stage_resume", "implementation_resume"},
+        "preserveWorktree": recovery_kind in {"stage_resume", "implementation_resume", "remediation"},
         "reprovision": recovery_kind == "retry_dispatch",
         **({"implementationResume": implementation_resume} if implementation_resume is not None else {}),
-        "status": (
-            "blocked_non_retryable"
-            if non_retryable
-            else "retry_exhausted"
-            if retry_exhausted
-            else "pending_retry"
-        ),
+        "status": "remediation_required" if recovery_kind == "remediation" else "pending_retry",
     }
-    if non_retryable:
-        recovery_state["nonRetryable"] = True
-    else:
-        recovery_state.pop("nonRetryable", None)
-    if retry_exhausted:
-        recovery_state["exhaustedInvocationId"] = current_inv
-        recovery_state["maxAutomaticAttempts"] = MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS
-        recovery_state["nextAction"] = "inspect_unresolved_batches_then_resume"
-        recovery_state["exhaustedReported"] = False
-    else:
-        recovery_state.pop("exhaustedInvocationId", None)
-        recovery_state.pop("maxAutomaticAttempts", None)
-        recovery_state.pop("nextAction", None)
-        recovery_state.pop("exhaustedReported", None)
+    for stale_key in (
+        "pendingAttempt", "nonRetryable", "exhaustedInvocationId", "maxAutomaticAttempts",
+        "nextAction", "exhaustedReported", "escalatedAt", "escalationCategory", "rootCause", "hookBlockCode",
+    ):
+        recovery_state.pop(stale_key, None)
+    if allow_manual_override:
+        recovery_state["lastChargedGeneration"] = None
     batch.update(
         {
-            "status": target_status,
-            "error": error,
+            "status": "remediation_pending" if recovery_kind == "remediation" else "retry_pending",
+            "error": None if allow_manual_override else error,
             "activeStage": None,
             "startedAt": None,
-            "completedAt": manifest.get("updatedAt") if (non_retryable or retry_exhausted) else None,
+            "completedAt": None,
             "recovery": recovery_state,
         }
     )
-    if non_retryable or retry_exhausted:
-        manifest["status"] = "blocked"
+    if recovery_kind == "remediation":
+        advance_dispatch_generation(batch)
+        (run_dir(workspace, feature, run_id) / "dispatch" / f"{batch_id}.json").unlink(missing_ok=True)
     return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
 
 
@@ -370,11 +578,11 @@ def _recover_stale_active_batches_locked(
     timeout_seconds = max(1, int(manifest.get("timeoutPerBatch", 3600)))
     recovered: list[dict[str, str]] = []
     for raw_batch_id, batch in manifest.get("batches", {}).items():
-        if not isinstance(batch, dict) or raw_batch_id in delivery_owned:
+        if not isinstance(batch, dict) or raw_batch_id in delivery_owned or _is_terminal_operator_blocked(batch):
             continue
         dispatch = batch.get("dispatch") or {}
         consumed_grant = (dispatch.get("generation") == batch.get("dispatchGeneration", 1)
-                          and dispatch.get("status") in {"completed", "failed", "retry_pending", "expired", "revoked"})
+                          and dispatch.get("status") in {"completed", "failed", "retry_pending", "remediation_pending", "expired", "revoked"})
         failed_pending_grant = (batch.get("status") == "pending"
                                 and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
                                 and dispatch.get("status") in {"failed", "retry_pending", "expired", "revoked"})
@@ -406,6 +614,7 @@ def _recover_stale_active_batches_locked(
             batch_id,
             batch,
             error=f"parallel_batch_recovery:{reason}",
+            generation=int(batch.get("dispatchGeneration", 1)),
         )
         recovered.append({"batchId": batch_id, "reason": reason})
     return recovered
@@ -420,14 +629,14 @@ def _recover_blocked_batches_locked(
     current_invocation_id: str | None = None,
     allow_new_invocation_retry: bool = False,
 ) -> list[str]:
-    """Requeue legacy failures without stealing a live worker or delivery."""
+    """Requeue legacy failures without stealing a live worker or reopening operator escalations."""
     recovered = []
     now = time.time()
     resolved_inv = _current_invocation_id(manifest, current_invocation_id)
     for batch_id, batch in manifest.get("batches", {}).items():
         if not isinstance(batch, dict) or batch.get("status") not in {"blocked", "failed"}:
             continue
-        if _is_non_retryable_blocked(batch):
+        if _is_terminal_operator_blocked(batch):
             continue
         if _is_retry_exhausted_blocked(batch, resolved_inv, allow_new_invocation_retry=allow_new_invocation_retry):
             continue
@@ -455,7 +664,8 @@ def _recover_blocked_batches_locked(
             invocation_id=resolved_inv,
         )
         batch["recovery"]["retryAttempts"] = int(recovery.get("retryAttempts", 0))
-        recovered.append(str(batch_id))
+        if batch.get("status") == "retry_pending":
+            recovered.append(str(batch_id))
     return recovered
 
 
@@ -1166,7 +1376,11 @@ def schedule(
             dispatch = batch.get("dispatch") or {}
             if (dispatch.get("status") == "running" and dispatch.get("generation") == batch.get("dispatchGeneration", 1)
                     and dispatch.get("expiresEpoch", 0) <= time.time()
-                    and batch.get("status") in {"pending", "leased", "running", "sealed", "ready_to_candidate"}):
+                    and batch.get("status") in {"pending", "leased", "running", "sealed", "ready_to_candidate", "remediation_pending"}):
+                if batch.get("status") == "remediation_pending":
+                    from hooks.parallel_delivery import execution_running
+                    if execution_running(workspace, feature, run_id, batch_id):
+                        continue
                 _mark_retry_pending_locked(workspace, feature, run_id, manifest, batch_id, batch, error="dispatch_claim_expired")
                 dispatch["status"] = "expired"
                 save_manifest(workspace, feature, run_id, manifest)
@@ -1302,6 +1516,16 @@ def schedule(
         scoped_mergeable = _scoped_batch_ids(manifest, mergeable, workspace_refs)
         scoped_implementation_recovery = _scoped_batch_ids(manifest, implementation_recovery, workspace_refs)
         scoped_stage_recovery = _scoped_batch_ids(manifest, stage_recovery, workspace_refs)
+        all_remediation = [
+            str(raw_id)
+            for raw_id, batch in batches.items()
+            if isinstance(batch, dict)
+            and batch.get("status") == "remediation_pending"
+            and str(raw_id) not in withheld_batches
+            and batch.get("lease") is None
+            and unresolved_dependency(batch) is None
+        ]
+        scoped_remediation = _scoped_batch_ids(manifest, all_remediation, workspace_refs)
         scoped_excluded_implementation_recovery = [
             item
             for item in excluded_implementation_recovery
@@ -1482,6 +1706,20 @@ def schedule(
             ],
             "allStageRecoveryBatches": all_stage_recovery,
             "excludedStageRecoveryBatches": scoped_excluded_stage_recovery,
+            "remediationBatches": [
+                {
+                    "batchId": batch_id,
+                    "worktreePath": manifest["batches"][batch_id].get("worktreePath"),
+                    "branchName": manifest["batches"][batch_id].get("branchName"),
+                    "recoveryKind": "remediation",
+                    "remediationKind": (manifest["batches"][batch_id].get("recovery") or {}).get("remediationKind") or "unattributed_changes",
+                    "remediationAttempts": int((manifest["batches"][batch_id].get("recovery") or {}).get("remediationAttempts", 0)),
+                    "attempt": int((manifest["batches"][batch_id].get("recovery") or {}).get("remediationAttempts", 0)) + 1,
+                    "preserveWorktree": True,
+                    "reprovision": False,
+                }
+                for batch_id in scoped_remediation
+            ],
             "blockedBatches": sorted(
                 str(batch_id)
                 for batch_id, batch in manifest.get("batches", {}).items()
@@ -1573,11 +1811,13 @@ def mark_batch(
             dispatch_auth = {}
         validate_cli_dispatch(manifest, batch, batch_id, dispatch_auth, "batch")
         previous = batch.get("status")
+        if _is_terminal_operator_blocked(batch) and status != "blocked":
+            raise ValueError(f"parallel_batch_escalated_terminal:{batch_id}")
         terminal = {"merged", "failed", "blocked", "cancelled"}
         # `failed` was emitted by older workers before retry_pending existed.
-        # Permit it (and a retry-exhausted block) to re-enter the controlled
-        # recovery path; only a real merged/cancelled delivery stays immutable.
-        retrying_terminal = previous in {"failed", "blocked"} and status == "retry_pending"
+        # Permit non-escalated legacy failures to re-enter recovery; merged,
+        # cancelled and operator-escalated blocks stay immutable here.
+        retrying_terminal = previous in {"failed", "blocked"} and status == "retry_pending" and not _is_terminal_operator_blocked(batch)
         if previous in terminal and previous != status and not retrying_terminal:
             raise ValueError(f"parallel_batch_terminal:{batch_id}:{previous}")
         if status in {"running", "sealed", "ready_to_candidate"}:
@@ -1603,6 +1843,7 @@ def mark_batch(
                 batch,
                 error=str(details.get("error") or batch.get("error") or "batch_execution_failed"),
                 previous_status=str(previous or ""),
+                charge_failure=bool(details.get("error")),
             )
         else:
             batch["status"] = status
@@ -1713,6 +1954,10 @@ def resume_run(
     *,
     workflow_invocation_id: str | None = None,
     manual: bool = False,
+    reopen_batches: list[str] | None = None,
+    reopen_candidates: list[str] | None = None,
+    reopen_sync_refs: list[str] | None = None,
+    reopen_finalization: bool = False,
 ) -> dict[str, Any]:
     """Idempotently resume only batches that do not already own a result."""
     if workflow_invocation_id is not None and not re.fullmatch(r"[a-f0-9]{32}", workflow_invocation_id):
@@ -1726,10 +1971,29 @@ def resume_run(
             if manual:
                 result["manualRetryBatches"] = []
             return result
-        queued = _queue_manual_retries(workspace, feature, run_id, workflow_invocation_id=workflow_invocation_id) if manual else []
+        reopened_candidates = (
+            _reopen_candidates(workspace, feature, run_id, reopen_candidates, workflow_invocation_id=workflow_invocation_id)
+            if reopen_candidates
+            else []
+        )
+        queued = (
+            _queue_manual_retries(
+                workspace,
+                feature,
+                run_id,
+                workflow_invocation_id=workflow_invocation_id,
+                reopen_batches=reopen_batches,
+                reopen_sync_refs=reopen_sync_refs,
+                reopen_finalization=reopen_finalization,
+            )
+            if (manual or reopen_batches or reopen_sync_refs or reopen_finalization)
+            else []
+        )
         result = _resume_run(workspace, feature, run_id, workspace_refs, workflow_invocation_id)
-        if manual:
-            result["manualRetryBatches"] = queued
+        if workflow_invocation_id and result.get("status") != "superseded":
+            _close_prepare_ledger(workspace, feature, run_id, workflow_invocation_id)
+        if manual or reopened_candidates or queued:
+            result["manualRetryBatches"] = sorted(set([*queued, *reopened_candidates]))
         return result
 
 
@@ -1761,7 +2025,8 @@ def _resume_run(workspace: Path, feature: str, run_id: str, workspace_refs: list
             if needs_report(initial):
                 initial["status"] = "running"
                 initial.pop("mainPromotion", None)
-                initial.pop("workflowCompletedAt", None)
+                if not (initial.get("finalEvidenceAggregate") or {}).get("evidenceStateDigest"):
+                    initial.pop("workflowCompletedAt", None)
                 save_manifest(workspace, feature, run_id, initial)
     if isolated(initial):
         initialize_integrations(workspace, feature, run_id)
@@ -2136,6 +2401,12 @@ def _resume_run(workspace: Path, feature: str, run_id: str, workspace_refs: list
                 recovery["exhaustedReported"] = True
                 retry_exhausted.append(str(batch_id))
                 continue
+            if batch.get("status") == "remediation_pending":
+                _clear_retry_lease_locked(workspace, feature, run_id, str(batch_id), batch)
+                dispatch = batch.get("dispatch") or {}
+                if dispatch.get("status") in {"remediation_pending", "failed", "revoked", "expired", "completed"}:
+                    advance_dispatch_generation(batch)
+                continue
             if batch.get("status") != "retry_pending":
                 continue
             if (
@@ -2143,35 +2414,23 @@ def _resume_run(workspace: Path, feature: str, run_id: str, workspace_refs: list
                 and current_invocation is not None
                 and recovery.get("retryInvocationId") != current_invocation
             ):
+                # Preserve cross-restart transientRetryAttempts and unclassifiedRetryAttempts!
                 recovery = {
                     **recovery,
-                    "invocationRetryAttempts": 0,
                     "retryInvocationId": current_invocation,
                 }
-                recovery.pop("exhaustedInvocationId", None)
-                recovery.pop("maxAutomaticAttempts", None)
-                recovery.pop("nextAction", None)
-                recovery.pop("exhaustedReported", None)
                 batch["recovery"] = recovery
-            inv_attempts = int(recovery.get("invocationRetryAttempts", 0))
-            if (inv_attempts >= MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS
+            from hooks.parallel_failure import MAX_TRANSIENT_EXTRA_RETRIES
+            trans_attempts = int(recovery.get("transientRetryAttempts", 0))
+            if (trans_attempts > MAX_TRANSIENT_EXTRA_RETRIES
                     and recovery.get("reasonCode") != "parallel_worktree_provision_lock_busy"):
-                exhausted_owner = (
-                    recovery.get("retryInvocationId")
-                    if "retryInvocationId" in recovery
-                    else current_invocation
+                _escalate_batch_locked(
+                    workspace, feature, run_id, manifest, str(batch_id), batch,
+                    error=str(batch.get("error") or recovery.get("lastError") or "transient_retry_budget_exhausted"),
+                    reason_code="transient_retry_budget_exhausted",
+                    category="transient_exhausted",
+                    classification="transient",
                 )
-                batch["status"] = "blocked"
-                batch["activeStage"] = None
-                batch["completedAt"] = manifest.get("updatedAt")
-                batch["recovery"] = {
-                    **recovery,
-                    "status": "retry_exhausted",
-                    "maxAutomaticAttempts": MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS,
-                    "exhaustedInvocationId": exhausted_owner,
-                    "exhaustedReported": True,
-                    "nextAction": "inspect_unresolved_batches_then_resume",
-                }
                 retry_exhausted.append(str(batch_id))
                 continue
             implementation_resume = (
@@ -2245,7 +2504,11 @@ def _resume_run(workspace: Path, feature: str, run_id: str, workspace_refs: list
             isinstance(item, dict) and item.get("status") == "blocked"
             for item in manifest.get("batches", {}).values()
         )
-        manifest["status"] = "blocked" if has_blocked and not retry_resumed else "running"
+        has_remediation = any(
+            isinstance(item, dict) and item.get("status") == "remediation_pending"
+            for item in manifest.get("batches", {}).values()
+        )
+        manifest["status"] = "blocked" if has_blocked and not (retry_resumed or has_remediation) else "running"
         save_manifest(workspace, feature, run_id, manifest)
         for item in stale_recovered[active_stale_recovered:]:
             append_event(
@@ -2276,6 +2539,8 @@ def _resume_run(workspace: Path, feature: str, run_id: str, workspace_refs: list
 
 
 def can_manually_resume_batch(batch: dict[str, Any]) -> bool:
+    if _is_escalated_blocked(batch):
+        return False
     return batch.get("status") in {"retry_pending", "failed", "blocked"}
 
 
@@ -2286,16 +2551,108 @@ def manual_resume_run(
     workspace_refs: list[str] | None = None,
     *,
     workflow_invocation_id: str | None = None,
+    reopen_batches: list[str] | None = None,
+    reopen_candidates: list[str] | None = None,
+    reopen_sync_refs: list[str] | None = None,
+    reopen_finalization: bool = False,
 ) -> dict[str, Any]:
-    """Explicitly re-admit retryable Batches after an operator intervention.
+    """Explicitly re-admit retryable or operator-named Batches/Candidates."""
+    return resume_run(
+        workspace,
+        feature,
+        run_id,
+        workspace_refs,
+        workflow_invocation_id=workflow_invocation_id,
+        manual=True,
+        reopen_batches=reopen_batches,
+        reopen_candidates=reopen_candidates,
+        reopen_sync_refs=reopen_sync_refs,
+        reopen_finalization=reopen_finalization,
+    )
 
-    Retain the failed Worktree, evidence and cumulative retry counter, then let
-    ``resume_run`` perform its normal integrity checks and scheduling.
-    This never revives merge conflicts, cancellation,
-    or generic blocked states because those need a more specific repair path.
-    """
-    return resume_run(workspace, feature, run_id, workspace_refs, workflow_invocation_id=workflow_invocation_id,
-                      manual=True)
+
+def _reopen_candidates(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    specs: list[str],
+    *,
+    workflow_invocation_id: str | None = None,
+) -> list[str]:
+    """Reopen conflicted Merge Train candidates via resume or discard, then release withheld Batches."""
+    from hooks import parallel_merge_train as train
+
+    reopened_batches: list[str] = []
+    for spec in specs:
+        parts = [part.strip() for part in str(spec or "").rsplit(":", 2)]
+        if len(parts) != 3 or not parts[0] or parts[2] not in {"resume", "rebuild"}:
+            raise ValueError(f"invalid_reopen_candidate_spec:{spec}")
+        repo_ref, wave_raw, mode = parts
+        normalized_wave = wave_raw.removeprefix("wave-")
+        try:
+            wave = int(normalized_wave)
+        except ValueError as exc:
+            raise ValueError(f"invalid_reopen_candidate_wave:{spec}") from exc
+        manifest = load_manifest(workspace, feature, run_id)
+        record = train._record(manifest, repo_ref, wave) or (manifest.get("mergeTrains") or {}).get(f"{repo_ref}:{wave}")
+        if not isinstance(record, dict):
+            raise ValueError(f"no_candidate_record:{repo_ref}:{wave}")
+        if record.get("promotedSha") or record.get("planWriterErrors"):
+            raise ValueError(f"candidate_plan_recovery_required:{repo_ref}:{wave}")
+        batch_ids = [str(bid) for bid in (record.get("batchIds") or []) if isinstance(bid, str) and bid.strip()]
+        outcome = (
+            train.resume_candidate(workspace, feature, run_id, wave, repo_ref)
+            if mode == "resume"
+            else train.discard_candidate(workspace, feature, run_id, wave, repo_ref)
+        )
+        if not outcome.get("success"):
+            raise ValueError(str(outcome.get("error") or f"candidate_reopen_failed:{repo_ref}:{wave}:{mode}"))
+        with run_lock(workspace, feature, run_id):
+            manifest = load_manifest(workspace, feature, run_id)
+            if workflow_invocation_id is not None:
+                inv_ids = manifest.setdefault("workflowInvocationIds", [])
+                if workflow_invocation_id not in inv_ids:
+                    inv_ids.append(workflow_invocation_id)
+            for bid in batch_ids:
+                batch = (manifest.get("batches") or {}).get(bid)
+                if not isinstance(batch, dict):
+                    continue
+                if batch.get("mergeCommitSha"):
+                    batch["status"] = "merged"
+                    continue
+                recovery = dict(batch.get("recovery") or {})
+                for key in (
+                    "nonRetryable", "escalatedAt", "escalationCategory", "rootCause",
+                    "hookBlockCode", "nextAction", "pendingAttempt", "lastChargedGeneration",
+                ):
+                    recovery.pop(key, None)
+                recovery.update({
+                    "transientRetryAttempts": 0,
+                    "unclassifiedRetryAttempts": 0,
+                    "candidateConflictAttempts": 0,
+                    "manualRetryAttempts": int(recovery.get("manualRetryAttempts", 0)) + 1,
+                    "lastManualRetryAt": manifest.get("updatedAt"),
+                    "status": "rescheduled",
+                    "kind": "integration_resume",
+                    "resumeStatus": "ready_to_candidate",
+                })
+                batch.update({
+                    "status": "ready_to_candidate",
+                    "error": None,
+                    "completedAt": None,
+                    "recovery": recovery,
+                })
+                batch.pop("deliveryQueue", None)
+                _clear_retry_lease_locked(workspace, feature, run_id, bid, batch)
+                advance_dispatch_generation(batch)
+                reopened_batches.append(bid)
+            manifest["status"] = "running"
+            save_manifest(workspace, feature, run_id, manifest)
+        append_event(
+            workspace, feature, run_id, "candidate_escalation_reopened",
+            repositoryRef=repo_ref, wave=wave, mode=mode, batchIds=batch_ids,
+        )
+    return reopened_batches
 
 
 def _queue_manual_retries(
@@ -2304,8 +2661,13 @@ def _queue_manual_retries(
     run_id: str,
     *,
     workflow_invocation_id: str | None = None,
+    reopen_batches: list[str] | None = None,
+    reopen_sync_refs: list[str] | None = None,
+    reopen_finalization: bool = False,
 ) -> list[str]:
     manually_queued: list[str] = []
+    explicit_ids = [str(b).strip() for b in (reopen_batches or []) if str(b).strip()]
+    explicit_set = set(explicit_ids)
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in INACTIVE_RUN_STATES:
@@ -2315,19 +2677,55 @@ def _queue_manual_retries(
             if workflow_invocation_id not in invocation_ids:
                 invocation_ids.append(workflow_invocation_id)
         resolved_inv = _current_invocation_id(manifest, workflow_invocation_id)
+
+        if explicit_set:
+            for bid in explicit_ids:
+                if bid not in (manifest.get("batches") or {}):
+                    raise ValueError(f"parallel_batch_not_found:{bid}")
+            for train_key, train in (manifest.get("mergeTrains") or {}).items():
+                if not isinstance(train, dict) or train.get("status") not in {"candidate_conflicted", "needs_resolution"}:
+                    continue
+                held = explicit_set.intersection(str(x) for x in (train.get("batchIds") or []))
+                if held:
+                    raise ValueError(f"candidate_reopen_required:{train_key}")
+
+        changed = False
+        if reopen_sync_refs:
+            from hooks.parallel_workspace_queue import reopen_sync_jobs_locked
+            for ref in reopen_sync_refs:
+                if reopen_sync_jobs_locked(manifest, None if ref == "*" else ref):
+                    changed = True
+        if reopen_finalization and "finalization" in manifest:
+            manifest.pop("finalization", None)
+            changed = True
+
         for raw_batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict):
                 continue
             batch_id = str(raw_batch_id)
             recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
-            if not can_manually_resume_batch(batch):
-                continue
-            batch["recovery"] = {
+            if explicit_set:
+                if batch_id not in explicit_set:
+                    continue
+                if batch.get("status") in {"merged", "cancelled"}:
+                    raise ValueError(f"parallel_batch_not_reopenable:{batch_id}:{batch.get('status')}")
+            else:
+                if not can_manually_resume_batch(batch):
+                    continue
+            cleaned_recovery = {
                 **recovery,
                 "manualRetryAttempts": int(recovery.get("manualRetryAttempts", 0)) + 1,
                 "lastManualRetryAt": manifest.get("updatedAt"),
+                "transientRetryAttempts": 0,
+                "unclassifiedRetryAttempts": 0,
+                "remediationAttempts": 0,
+                "reviewRepairRounds": 0,
+                "lastChargedGeneration": None,
                 "status": "manual_retry_queued",
             }
+            for stale in ("nonRetryable", "escalatedAt", "escalationCategory", "rootCause", "hookBlockCode", "nextAction"):
+                cleaned_recovery.pop(stale, None)
+            batch["recovery"] = cleaned_recovery
             _mark_retry_pending_locked(
                 workspace,
                 feature,
@@ -2342,12 +2740,203 @@ def _queue_manual_retries(
                 invocation_id=resolved_inv,
             )
             manually_queued.append(batch_id)
+            changed = True
         if manually_queued:
             manifest["status"] = "running"
+        if changed:
             save_manifest(workspace, feature, run_id, manifest)
     for batch_id in manually_queued:
-        append_event(workspace, feature, run_id, "batch_manual_retry_queued", batchId=batch_id)
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "batch_escalation_reopened" if batch_id in explicit_set else "batch_manual_retry_queued",
+            batchId=batch_id,
+        )
     return manually_queued
+
+
+def prepare_state_path(workspace: Path, feature: str) -> Path:
+    return feature_dir(workspace, feature) / ".runtime" / "workflow-prepare-state.json"
+
+
+def read_prepare_ledger(
+    workspace: Path, feature: str, *, plan_digest_value: str, contract_digest_value: str,
+) -> dict[str, Any]:
+    """Read the current binding without reconciling an in-flight attempt."""
+    try:
+        state = json.loads(prepare_state_path(workspace, feature).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(state, dict) or state.get("bindingKey") != f"{plan_digest_value}:{contract_digest_value}":
+        return {}
+    return state
+
+
+def _prepare_run_receipt(workspace: Path, feature: str, plan_digest_value: str, attempt: dict) -> str | None:
+    active_id = get_active_run(workspace, feature)
+    if active_id is None or attempt.get("resume"):
+        return None
+    try:
+        manifest = load_manifest(workspace, feature, active_id)
+    except (OSError, ValueError):
+        return None
+    if manifest.get("planDigest") != plan_digest_value:
+        return None
+    if attempt.get("number") is not None and attempt.get("invocationId") not in manifest.get("workflowInvocationIds", []):
+        return None
+    return active_id
+
+
+def reconcile_prepare_ledger(
+    workspace: Path,
+    feature: str,
+    *,
+    plan_digest_value: str,
+    contract_digest_value: str,
+    invocation_id: str | None = None,
+    begin_attempt: bool = False,
+    reopen: bool = False,
+    attempt_number: int | None = None,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Track pre-run prepare attempts across crashes before any runId exists."""
+    from hooks.json_writer_common import atomic_write_json
+    from hooks.parallel_failure import MAX_TRANSIENT_EXTRA_RETRIES
+
+    path = prepare_state_path(workspace, feature)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    binding_key = f"{plan_digest_value}:{contract_digest_value}"
+    with FileLock(path.with_suffix(".lock"), timeout=5):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        if not isinstance(state, dict) or state.get("bindingKey") != binding_key or reopen:
+            state = {
+                "bindingKey": binding_key,
+                "transientFailures": 0,
+                "chargedAttemptIds": [],
+                "escalated": False,
+                "lastError": None,
+                "inFlightAttempt": None,
+            }
+        # P0: Did a prior in-flight prepare actually succeed on disk before its response was lost?
+        in_flight = state.get("inFlightAttempt")
+        attempt_key = f"{invocation_id}:prepare" + (f":{attempt_number}" if attempt_number is not None else "")
+        if begin_attempt and isinstance(in_flight, dict) and in_flight.get("attemptId") == attempt_key:
+            return state
+        if isinstance(in_flight, dict):
+            active_id = _prepare_run_receipt(workspace, feature, plan_digest_value, in_flight)
+            if active_id:
+                state["inFlightAttempt"] = None
+                state["reconciledRunId"] = active_id
+                state["reconciledAttemptId"] = in_flight.get("attemptId")
+            else:
+                attempt_id = str(in_flight.get("attemptId") or "")
+                charged = list(state.get("chargedAttemptIds") or [])
+                if attempt_id and attempt_id not in charged:
+                    charged.append(attempt_id)
+                    state["chargedAttemptIds"] = charged[-20:]
+                    state["transientFailures"] = int(state.get("transientFailures", 0)) + 1
+                    state["lastError"] = state.get("lastError") or "prepare_interrupted_before_run_created"
+                    if state["transientFailures"] > MAX_TRANSIENT_EXTRA_RETRIES:
+                        state["escalated"] = True
+                        state["escalationCategory"] = "prepare_transient_exhausted"
+                state["inFlightAttempt"] = None
+        if begin_attempt and not state.get("escalated") and invocation_id:
+            state["inFlightAttempt"] = {
+                "attemptId": attempt_key,
+                "invocationId": invocation_id,
+                "bindingKey": binding_key,
+                "startedEpoch": time.time(),
+                "number": attempt_number,
+                "resume": resume,
+            }
+        atomic_write_json(path, state)
+        return state
+
+
+def record_prepare_attempt_failure(
+    workspace: Path,
+    feature: str,
+    *,
+    plan_digest_value: str,
+    contract_digest_value: str,
+    attempt_id: str,
+    error: str,
+    deterministic: bool = False,
+) -> dict[str, Any]:
+    """Charge or escalate a failed prepare attempt unless its durable run receipt already exists."""
+    from hooks.json_writer_common import atomic_write_json
+    from hooks.parallel_failure import MAX_TRANSIENT_EXTRA_RETRIES, classify_error_signal
+
+    path = prepare_state_path(workspace, feature)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    binding_key = f"{plan_digest_value}:{contract_digest_value}"
+    with FileLock(path.with_suffix(".lock"), timeout=5):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        if not isinstance(state, dict) or state.get("bindingKey") != binding_key:
+            raise ValueError("workflow_prepare_binding_changed")
+        in_flight = state.get("inFlightAttempt") or {}
+        if in_flight.get("attemptId") != attempt_id:
+            run_id = state.get("reconciledRunId") if state.get("reconciledAttemptId") == attempt_id else None
+            return {**state, "reconciledRunId": run_id}
+        active_id = _prepare_run_receipt(workspace, feature, plan_digest_value, in_flight)
+        if active_id:
+            state["inFlightAttempt"] = None
+            state["reconciledRunId"] = active_id
+            state["reconciledAttemptId"] = attempt_id
+            atomic_write_json(path, state)
+            return {**state, "reconciled": True, "runId": active_id}
+        bucket, reason_code, _ = classify_error_signal(error)
+        charged = list(state.get("chargedAttemptIds") or [])
+        if deterministic or bucket in {"non_retryable", "precondition"}:
+            state.update({
+                "escalated": True,
+                "escalationCategory": "precondition" if deterministic else bucket,
+                "reasonCode": reason_code,
+                "lastError": error,
+                "inFlightAttempt": None,
+            })
+        elif bucket != "contention" and attempt_id not in charged:
+            charged.append(attempt_id)
+            state["chargedAttemptIds"] = charged[-20:]
+            state["transientFailures"] = int(state.get("transientFailures", 0)) + 1
+            state["lastError"] = error
+            state["inFlightAttempt"] = None
+            if state["transientFailures"] > MAX_TRANSIENT_EXTRA_RETRIES:
+                state.update({
+                    "escalated": True,
+                    "escalationCategory": "prepare_transient_exhausted",
+                    "reasonCode": "transient_retry_budget_exhausted",
+                })
+        elif bucket == "contention":
+            state["inFlightAttempt"] = None
+        atomic_write_json(path, state)
+        return {**state, "reconciled": False}
+
+
+def _close_prepare_ledger(workspace: Path, feature: str, run_id: str, invocation_id: str | None) -> None:
+    from hooks.json_writer_common import atomic_write_json
+
+    path = prepare_state_path(workspace, feature)
+    if not path.is_file():
+        return
+    try:
+        with FileLock(path.with_suffix(".lock"), timeout=2):
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(state, dict) and (state.get("inFlightAttempt") or {}).get("invocationId") == invocation_id:
+                state["reconciledAttemptId"] = (state.get("inFlightAttempt") or {}).get("attemptId")
+                state["reconciledRunId"] = run_id
+                state["inFlightAttempt"] = None
+                state["completedRunId"] = run_id
+                atomic_write_json(path, state)
+    except Exception:
+        pass
 
 
 def _invocation_run_id(workspace: Path, feature: str, invocation_id: str | None) -> str | None:
@@ -2388,6 +2977,7 @@ def ensure_run(
             if workspace_refs:
                 result = schedule(workspace, feature, str(result["runId"]), workspace_refs=workspace_refs)
             result["reused"] = False
+            _close_prepare_ledger(workspace, feature, str(result["runId"]), workflow_invocation_id)
             return result
         except ValueError as exc:
             # Another concurrent ensure may have created the durable run after
@@ -2410,6 +3000,7 @@ def ensure_run(
         workflow_invocation_id=workflow_invocation_id,
     )
     result["reused"] = True
+    _close_prepare_ledger(workspace, feature, str(active_run_id), workflow_invocation_id)
     return result
 
 
@@ -2422,7 +3013,7 @@ _WORKFLOW_STATUS_FIELDS = (
     "controlProtocolVersion", "controlRevision", "cleanupPending", "workspaceSync",
     "integrationMode", "integrationWorkspaces", "mainPromotion",
     "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
-    "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",
+    "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches", "remediationBatches",
     "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",
     "maxParallel", "activeWorkers", "observedEpochMs", "dispatchDiagnostics", "dispatchGrants", "batchTaskIds",
 )
@@ -2434,6 +3025,12 @@ _WORKFLOW_ISSUE_FIELDS = (
     "issueId", "kind", "batchId", "stage", "failureType", "message",
     "disposition", "blocksWorkflow", "status", "evidenceId", "batchCommit",
     "createdAt",
+)
+_WORKFLOW_RECOVERY_FIELDS = (
+    "status", "retryAttempts", "transientRetryAttempts", "unclassifiedRetryAttempts",
+    "remediationAttempts", "reviewRepairRounds", "lastChargedGeneration",
+    "lastError", "failureClassification", "failureFingerprint", "reasonCode",
+    "nextAction", "escalatedAt", "escalationCategory", "rootCause", "hookBlockCode",
 )
 
 
@@ -2447,6 +3044,8 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
     issues = issues if isinstance(issues, list) else []
     result = {key: scheduled[key] for key in _WORKFLOW_STATUS_FIELDS if key in scheduled}
     result["dispatchDiagnostics"] = scheduled.get("dispatchDiagnostics") or {}
+    if isinstance(manifest.get("finalization"), dict):
+        result["finalization"] = manifest["finalization"]
     result["batchWorkspaces"] = {
         batch_id: {key: workspace.get(key) for key in _WORKFLOW_WORKSPACE_FIELDS}
         for batch_id, workspace in scheduled.get("batchWorkspaces", {}).items()
@@ -2466,7 +3065,7 @@ def _workflow_status_view(scheduled: dict[str, Any], manifest: dict[str, Any]) -
                 "mergeCommitSha": batch.get("mergeCommitSha"),
                 "recovery": {
                     key: (batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}).get(key)
-                    for key in ("status", "retryAttempts", "lastError", "failureClassification", "failureFingerprint", "reasonCode", "nextAction")
+                    for key in _WORKFLOW_RECOVERY_FIELDS
                 },
             }
             for batch_id, batch in batches.items()
@@ -2518,6 +3117,11 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--workflow-view", action="store_true", help="emit only fields consumed by the fixed Code Workflow")
         if name in {"ensure", "resume", "manual-resume", "status"}:
             item.add_argument("--workflow-invocation-id")
+        if name == "manual-resume":
+            item.add_argument("--reopen-batch", action="append", dest="reopen_batches", help="explicitly reopen an escalated Batch")
+            item.add_argument("--reopen-candidate", action="append", dest="reopen_candidates", help="reopen candidate via <repoRef>:<wave>:<resume|rebuild>")
+            item.add_argument("--reopen-sync", action="append", dest="reopen_sync_refs", help="reopen escalated workspaceSync jobs for <repositoryRef>")
+            item.add_argument("--reopen-finalization", action="store_true", help="reopen escalated finalization state")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
     mark.add_argument("--feature", required=True)
@@ -2531,10 +3135,40 @@ def main(argv: list[str] | None = None) -> int:
     mark.add_argument("--error")
     mark.add_argument("--dispatch-generation", type=int)
     mark.add_argument("--dispatch-token")
+    for name in ("prepare-attempt", "prepare-failure"):
+        item = subparsers.add_parser(name)
+        item.add_argument("--workspace")
+        item.add_argument("--feature", required=True)
+        item.add_argument("--plan-digest", required=True)
+        item.add_argument("--contract-digest", required=True)
+        item.add_argument("--workflow-invocation-id", required=True)
+        item.add_argument("--attempt", type=int, required=True)
+        if name == "prepare-attempt":
+            item.add_argument("--resume", action="store_true")
+        else:
+            item.add_argument("--error-b64", required=True)
+            item.add_argument("--deterministic", action="store_true")
     args = parser.parse_args(argv)
     try:
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
+        if args.command in {"prepare-attempt", "prepare-failure"}:
+            invocation = args.workflow_invocation_id
+            if not re.fullmatch(r"[a-f0-9]{32}", invocation) or not 1 <= args.attempt <= 3:
+                raise ValueError("workflow_prepare_attempt_invalid")
+            binding = {"plan_digest_value": args.plan_digest, "contract_digest_value": args.contract_digest}
+            if args.command == "prepare-attempt":
+                result = reconcile_prepare_ledger(
+                    workspace, feature, **binding, begin_attempt=True, invocation_id=invocation,
+                    attempt_number=args.attempt, resume=args.resume,
+                )
+            else:
+                result = record_prepare_attempt_failure(
+                    workspace, feature, **binding, attempt_id=f"{invocation}:prepare:{args.attempt}",
+                    error=base64.b64decode(args.error_b64, validate=True).decode("utf-8"),
+                    deterministic=args.deterministic,
+                )
+            return _emit(True, **result)
         if args.command == "validate":
             return _emit(True, **validate_plan_for_parallel(workspace, feature))
         if args.command == "create":
@@ -2591,6 +3225,10 @@ def main(argv: list[str] | None = None) -> int:
                     args.run_id,
                     workspace_refs=args.workspace_refs,
                     workflow_invocation_id=args.workflow_invocation_id,
+                    reopen_batches=args.reopen_batches,
+                    reopen_candidates=args.reopen_candidates,
+                    reopen_sync_refs=args.reopen_sync_refs,
+                    reopen_finalization=args.reopen_finalization,
                 ),
             )
         if args.command == "list":

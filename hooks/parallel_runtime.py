@@ -42,7 +42,7 @@ def batch_occupies_scheduler_slot(batch: object) -> bool:
     if not isinstance(batch, dict):
         return False
     status = batch.get("status")
-    if status in {"retry_pending", "failed", "blocked", "cancelled", "merged"}:
+    if status in {"retry_pending", "remediation_pending", "failed", "blocked", "cancelled", "merged"}:
         return False
     dispatch = batch.get("dispatch") or {}
     if (dispatch.get("status") == "running"
@@ -559,6 +559,14 @@ def append_event(workspace: Path, feature: str, run_id: str, event: str, **detai
 @contextmanager
 def run_lock(workspace: Path, feature: str, run_id: str, *, timeout: float | None = None) -> Iterator[None]:
     with FileLock(run_dir(workspace, feature, run_id) / ".lock",
+                  timeout=DEFAULT_RUN_LOCK_TIMEOUT_SECONDS if timeout is None else timeout):
+        yield
+
+
+@contextmanager
+def worktree_lock(workspace: Path, feature: str, run_id: str, batch_id: str, *, timeout: float | None = None) -> Iterator[None]:
+    _safe_id(batch_id)
+    with FileLock(run_dir(workspace, feature, run_id) / "worktree-locks" / f"{batch_id}.lock",
                   timeout=DEFAULT_RUN_LOCK_TIMEOUT_SECONDS if timeout is None else timeout):
         yield
 
@@ -1105,7 +1113,9 @@ def workflow_report_pending(manifest: dict[str, Any]) -> bool:
             or (manifest.get("mainPromotion") or {}).get("status") in {"promoting", "merged"}):
         return False
     from hooks.parallel_workspace_sync import workspace_sync_pending
-    return not manifest.get("workflowCompletedAt") or workspace_sync_pending(manifest)
+    finalization = manifest.get("finalization")
+    return (not manifest.get("workflowCompletedAt") or workspace_sync_pending(manifest)
+            or (isinstance(finalization, dict) and finalization.get("status") != "completed"))
 
 
 def get_active_run(workspace: Path, feature: str) -> str | None:

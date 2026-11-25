@@ -847,14 +847,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.code_run_id:
-        from hooks.parallel_runtime import INACTIVE_RUN_STATES, load_manifest, run_lock
+        from hooks.parallel_runtime import INACTIVE_RUN_STATES, load_manifest, run_lock, save_manifest
         try:
             with run_lock(workspace, feature, args.code_run_id):
                 manifest = load_manifest(workspace, feature, args.code_run_id)
                 if manifest.get("status") in INACTIVE_RUN_STATES:
                     print(json.dumps({"ok": False, "status": manifest["status"], "error": "code_run_inactive"}))
                     return 1
-                return _update(args, workspace, feature)
+                result = _update(args, workspace, feature)
+                finalization = manifest.get("finalization")
+                if result == 0 and not args.dry_run and isinstance(finalization, dict):
+                    finalization.update(status="completed", inFlightAttempt=None)
+                    save_manifest(workspace, feature, args.code_run_id, manifest)
+                return result
         except (OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 1

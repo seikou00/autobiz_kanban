@@ -217,6 +217,17 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, finish_wor
         manifest["status"] = (
             "blocked" if blocking_errors else "succeeded_with_issues" if report["hasIssues"] else "succeeded"
         )
+        if blocking_errors:
+            fin = manifest.get("finalization")
+            if isinstance(fin, dict):
+                fin.update({
+                    "status": "escalated_to_operator",
+                    "escalatedAt": report["createdAt"],
+                    "escalationCategory": "blocking_errors",
+                    "lastError": ",".join(report["blockingErrors"]),
+                    "inFlightAttempt": None,
+                })
+            report["escalated"] = True
         if not blocking_errors:
             from hooks.parallel_integration import assert_integration, await_confirmation, isolated, promotion_view
             if finish_workflow:
@@ -227,6 +238,10 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str, *, finish_wor
                         assert_integration(binding)
                 manifest.pop("mainPromotion", None)
                 manifest["workflowCompletedAt"] = report["createdAt"]
+                fin = manifest.get("finalization")
+                if isinstance(fin, dict) and isinstance(fin.get("inFlightAttempt"), dict):
+                    if fin["inFlightAttempt"].get("step") == "aggregate":
+                        fin["inFlightAttempt"] = None
             else:
                 await_confirmation(manifest)
             report.update(promotion_view(manifest))

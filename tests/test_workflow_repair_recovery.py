@@ -99,7 +99,9 @@ class RepairRecoveryTest(unittest.TestCase):
         self.assertEqual(issue["evidenceId"], first["evidenceId"])
         evidence = json.loads(Path(self.batch()["stageStates"]["review"]["evidencePath"]).read_text())
         self.assertEqual(evidence["metadata"]["reviewAdvisories"], first["advisories"])
-        self.assertEqual(review_checkpoint(*self.args)["utestPreparation"]["status"], "test_required")
+        checkpoint = review_checkpoint(*self.args)
+        self.assertEqual(checkpoint["status"], "passed")
+        self.assertNotIn("utestPreparation", checkpoint)
 
     def test_proven_defect_with_advisory_still_requires_implementation_repair(self):
         result = finish_review(*self.args, decision="failed", message="source.py:1 proven defect",
@@ -115,7 +117,7 @@ class RepairRecoveryTest(unittest.TestCase):
         fail_stage(*self.args, "review", failure_type=failure_type, message=message)
         result = review_checkpoint(*self.args)
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["utestPreparation"]["status"], "test_required")
+        self.assertNotIn("utestPreparation", result)
         self.assertEqual(result["advisories"][0]["message"], message)
         self.assertEqual(self.batch()["stageStates"]["implement"]["status"], "passed")
         self.assertNotEqual(self.batch()["status"], "blocked")

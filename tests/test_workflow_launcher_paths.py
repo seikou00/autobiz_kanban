@@ -170,6 +170,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 },
             },
             "runtimeContractDigest": result["workflowArgs"]["runtimeContractDigest"],
+            "planDigest": result["planDigest"],
             "taskCardId": "Z990692-294",
             "resumeMode": "automatic",
             "resumeRunId": None,

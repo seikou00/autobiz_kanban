@@ -151,7 +151,9 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             eligible = batch_id in stage_recovery_batches(manifest)
         elif source == "implementation_recovery":
             from hooks.parallel_batch_scheduler import _implementation_resume_details
-            eligible = batch.get("status") not in {"blocked", "failed", "retry_pending", "merged", "cancelled"} and _implementation_resume_details(manifest, batch_id, batch) is not None
+            eligible = batch.get("status") not in {"blocked", "failed", "retry_pending", "remediation_pending", "merged", "cancelled"} and _implementation_resume_details(manifest, batch_id, batch) is not None
+        elif source == "remediation":
+            eligible = batch.get("status") == "remediation_pending"
         else:
             raise ValueError("parallel_dispatch_source_invalid")
         if not eligible:
@@ -163,16 +165,25 @@ def claim(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             if batches.get(dep, {}).get("status") != "merged" or not batches.get(dep, {}).get("mergeCommitSha"):
                 return denied("dependencies_unmerged")
         token = uuid.uuid4().hex
+        now = time.time()
         metadata = {"generation": expected, "status": "running", "worker": worker,
-                    "claimedEpoch": time.time(),
+                    "claimedEpoch": now,
                     "requestId": request_id, "invocationId": resolved_invocation_id,
                     "tokenSha256": hashlib.sha256(token.encode()).hexdigest(),
-                    "expiresEpoch": time.time() + max(60, ttl), "ttlSeconds": max(60, ttl), "source": source}
+                    "expiresEpoch": now + max(60, ttl), "ttlSeconds": max(60, ttl), "source": source}
         path = run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")
         atomic_write_json(path, {**metadata, "ownerToken": token})
         if resolved_invocation_id and not invocation_ids:
             manifest["workflowInvocationIds"] = [resolved_invocation_id]
         batch["dispatch"] = metadata
+        recovery = batch.setdefault("recovery", {})
+        if isinstance(recovery, dict):
+            recovery["pendingAttempt"] = {
+                "generation": expected,
+                "source": source,
+                "targetCommitSha": batch.get("commitSha"),
+                "claimedEpoch": now,
+            }
         save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "dispatch_claimed", batchId=batch_id, generation=expected,
                  worker=worker, invocationId=resolved_invocation_id)
@@ -199,6 +210,8 @@ def finish(workspace: Path, feature: str, run_id: str, batch_id: str, expected: 
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if batch.get("status") == "merged" and batch.get("mergeCommitSha"):
             outcome = "completed"
+        if outcome == "completed" and isinstance(batch.get("recovery"), dict):
+            batch["recovery"].pop("pendingAttempt", None)
         current.update(status=outcome, completedEpoch=time.time())
         save_manifest(workspace, feature, run_id, manifest)
         path = run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")
@@ -210,11 +223,14 @@ def finish(workspace: Path, feature: str, run_id: str, batch_id: str, expected: 
 def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: int,
           token: str, error: str) -> dict:
     """Fence failure cleanup as well as success: an old worker cannot reclaim a new lease."""
-    from hooks.parallel_batch_scheduler import _mark_retry_pending_locked
+    from hooks.parallel_batch_scheduler import _is_terminal_operator_blocked, _mark_retry_pending_locked
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest["batches"][batch_id]
         current = batch.get("dispatch") or {}
+        if _is_terminal_operator_blocked(batch) and generation(batch) == expected and current.get("tokenSha256") == hashlib.sha256(token.encode()).hexdigest():
+            return {"success": True, "status": "blocked", "batchId": batch_id, "reused": True,
+                    "reasonCode": (batch.get("recovery") or {}).get("reasonCode")}
         if (manifest.get("status") in INACTIVE_RUN_STATES
                 or generation(batch) != expected or current.get("generation") != expected
                 or current.get("tokenSha256") != hashlib.sha256(token.encode()).hexdigest()):
@@ -222,11 +238,14 @@ def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
         if batch.get("status") == "merged" and batch.get("mergeCommitSha"):
             if current.get("status") != "completed":
                 current.update(status="completed", completedEpoch=time.time())
+                if isinstance(batch.get("recovery"), dict):
+                    batch["recovery"].pop("pendingAttempt", None)
                 save_manifest(workspace, feature, run_id, manifest)
                 (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
             return {"success": True, "status": "merged", "batchId": batch_id, "reused": True}
-        if current.get("status") in {"retry_pending", "failed"} and batch.get("status") in {"retry_pending", "blocked"}:
-            return {"success": True, "status": batch["status"], "batchId": batch_id, "reused": True}
+        if current.get("status") in {"retry_pending", "remediation_pending", "failed", "revoked"} and batch.get("status") in {"retry_pending", "remediation_pending", "blocked"}:
+            return {"success": True, "status": batch["status"], "batchId": batch_id, "reused": True,
+                    "reasonCode": (batch.get("recovery") or {}).get("reasonCode")}
         if manifest.get("controlProtocolVersion", 1) >= 2:
             from hooks.parallel_delivery import execution_running
             if execution_running(workspace, feature, run_id, batch_id):
@@ -235,8 +254,19 @@ def defer(workspace: Path, feature: str, run_id: str, batch_id: str, expected: i
             return {"success": True, "status": "stale_owner_ignored", "batchId": batch_id}
         if batch.get("status") == "merged":
             return {"success": True, "status": "merged", "batchId": batch_id}
-        _mark_retry_pending_locked(workspace, feature, run_id, manifest, batch_id, batch, error=error)
-        current.update(status="retry_pending" if batch["status"] == "retry_pending" else "failed")
+        if _is_terminal_operator_blocked(batch):
+            current.update(status="revoked", completedEpoch=time.time())
+            save_manifest(workspace, feature, run_id, manifest)
+            (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
+            return {"success": True, "status": "blocked", "batchId": batch_id, "reused": True,
+                    "reasonCode": (batch.get("recovery") or {}).get("reasonCode")}
+        _mark_retry_pending_locked(
+            workspace, feature, run_id, manifest, batch_id, batch, error=error, generation=expected
+        )
+        if batch["status"] in {"sealed", "ready_to_candidate", "merged"}:
+            current.update(status="completed", completedEpoch=time.time())
+        else:
+            current.update(status=batch["status"] if batch["status"] in {"retry_pending", "remediation_pending"} else "failed")
         save_manifest(workspace, feature, run_id, manifest)
         (run_dir(workspace, feature, run_id) / "dispatch" / (batch_id + ".json")).unlink(missing_ok=True)
     append_event(workspace, feature, run_id, "dispatch_deferred", batchId=batch_id,

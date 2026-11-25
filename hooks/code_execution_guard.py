@@ -26,6 +26,10 @@ ACTIVE_CODE_RUN_STATUSES = frozenset({"started", "in_progress", "implementation_
 GUARD_VERSION = "code-stage-v3"
 FRONTEND_VALIDATION_TOOLS = {"vite", "webpack", "tsc", "vue-tsc", "eslint", "jest", "vitest", "pytest"}
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 try:
     from hooks.code_shell_analysis import analyze_script, normalize_path, absolute_path, executable, Invocation
 except ImportError:  # Direct hook execution from the plugin hooks directory.
@@ -358,8 +362,26 @@ def _is_compile_writer(argv: list[str]) -> bool:
 
 def _block_reason(prefix: str, failures: list[dict[str, Any]], directory: str,
                   batch: dict[str, Any] | None, runs: list[dict[str, str]], command_kind: str,
-                  tool_input: dict[str, Any]) -> str:
+                  tool_input: dict[str, Any], payload: dict[str, Any] | None = None) -> str:
     codes = list(dict.fromkeys(failure["code"] for failure in failures))
+    try:
+        from hooks.parallel_failure import record_hook_block
+        first_failure = failures[0] if failures else {}
+        record_hook_block(
+            workspace=_workspace_root(),
+            feature=str(os.environ.get("FEATURE_ID", "") or "").strip() or None,
+            hook_name="code_execution_guard",
+            error_code=str(first_failure.get("code") or prefix),
+            blocked_tool=str((payload or {}).get("tool_name") or (payload or {}).get("toolName") or "execute"),
+            command=_command(payload or {}, tool_input),
+            executable_name=str(first_failure.get("executable") or ""),
+            target_path=directory,
+            run_id_hint=str(batch["runId"]) if isinstance(batch, dict) and batch.get("runId") else None,
+            batch_id_hint=str(batch["batchId"]) if isinstance(batch, dict) and batch.get("batchId") else None,
+            host_dispatch_auth=(payload or {}).get("hostDispatchAuth") if isinstance((payload or {}).get("hostDispatchAuth"), dict) else None,
+        )
+    except Exception:
+        pass
     details = {
         "guardVersion": GUARD_VERSION, "guardPath": str(Path(__file__).resolve()),
         "failedChecks": codes, "failures": failures,
@@ -410,7 +432,7 @@ def guard(payload: dict[str, Any]) -> str | None:
             if not absolute_path(directory) and (active or batches):
                 failure = {"code": "EXECUTION_CWD_UNRESOLVED", "reason": "执行目录是相对路径，但工具未提供绝对 workspaceRoot；无法核对 TASK 绑定，请提供实际 workspaceRoot 或明确的 cd 目录"}
                 return _block_reason("CODE_EXECUTION_VALIDATION_FORBIDDEN", [failure], directory, None,
-                                     [run for runs in active.values() for run in runs], "unresolved_directory", tool_input)
+                                     [run for runs in active.values() for run in runs], "unresolved_directory", tool_input, payload)
             continue  # Preserve authorization boundaries of unrelated workspaces.
         if batch and batch["testRunning"] is True:
             continue
@@ -455,7 +477,7 @@ def guard(payload: dict[str, Any]) -> str | None:
         if failures:
             return _block_reason("BATCH_STAGE_VALIDATION_FORBIDDEN" if batch else "CODE_EXECUTION_VALIDATION_FORBIDDEN",
                                  failures, directory, batch, [*matching_runs, *bound_runs],
-                                 "production_compile" if compile_only else "validation" if invocation else "unsupported_shell_form", tool_input)
+                                 "production_compile" if compile_only else "validation" if invocation else "unsupported_shell_form", tool_input, payload)
     return None
 
 

@@ -237,14 +237,16 @@ class DispatchGrantTest(unittest.TestCase):
     def test_utest_recovery_preserves_progress_and_reacquires_slot(self):
         self._assert_sealed_stage_recovery_reacquires_slot("test")
 
-    def test_preconditions_are_rechecked_without_a_terminal_retry_limit(self):
+    def test_preconditions_escalate_immediately_until_explicit_reopen(self):
+        from hooks.parallel_batch_scheduler import manual_resume_run
         owner = self.claim()
         result = defer(self.workspace, "alpha", self.run, "B001", 1, owner["ownerToken"], "engineering_handoff_identity_mismatch")
-        self.assertEqual("retry_pending", result["status"])
+        self.assertEqual("blocked", result["status"])
         batch = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]
-        self.assertEqual("pending_retry", batch["recovery"]["status"])
+        self.assertEqual("escalated_to_operator", batch["recovery"]["status"])
         self.assertEqual("precondition", batch["recovery"]["failureClassification"])
-        self.assertEqual(["B001"], resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"])
+        self.assertEqual([], resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"])
+        self.assertEqual(["B001"], manual_resume_run(self.workspace, "alpha", self.run, reopen_batches=["B001"])["rescheduledRetryBatches"])
 
     def _review_checkpoint(self):
         owner, worktree, branch = self._single_slot_worktree()
@@ -262,7 +264,7 @@ class DispatchGrantTest(unittest.TestCase):
         from hooks.parallel_batch_stage import finish_review
         owner, worktree, commit = self._review_checkpoint()
         original = load_manifest(self.workspace, "alpha", self.run)["batches"]["B001"]["stageStates"]
-        for gen in range(1, 7):
+        for gen in range(1, 3):
             result = defer(self.workspace, "alpha", self.run, "B001", gen, owner["ownerToken"],
                            "review_stage_not_finalized:B001:incomplete")
             self.assertEqual(result["status"], "retry_pending")
@@ -275,7 +277,7 @@ class DispatchGrantTest(unittest.TestCase):
             self.assertEqual(owner["status"], "claimed")
         self.assertEqual(finish_review(self.workspace, "alpha", self.run, "B001", decision="passed")["status"], "passed")
         # Simulate a lost return after finish-review persisted its decision.
-        defer(self.workspace, "alpha", self.run, "B001", 7, owner["ownerToken"], "lost_review_response")
+        defer(self.workspace, "alpha", self.run, "B001", 3, owner["ownerToken"], "lost_review_response")
         resumed = resume_run(self.workspace, "alpha", self.run)
         self.assertEqual(resumed["stageRecoveryBatches"][0]["nextStage"], "delivery")
         self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree,

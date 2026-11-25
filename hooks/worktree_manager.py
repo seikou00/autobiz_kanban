@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.parallel_runtime import (
     append_event, global_worktrees_root, lease_path, load_manifest, plan_digest,
-    renew_lease, run_dir, run_lock, save_manifest,
+    renew_lease, run_dir, run_lock, save_manifest, worktree_lock,
 )
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
 from hooks.git_runtime import git_command
@@ -500,10 +500,12 @@ def provision_parallel_worktree(
 ) -> dict[str, Any]:
     """Queue for provisioning within the Workflow's five-minute budget."""
     try:
-        return _provision_parallel_worktree(artifact_workspace, feature, run_id, batch_id)
+        with worktree_lock(artifact_workspace, feature, run_id, batch_id, timeout=PROVISION_LOCK_TIMEOUT_SECONDS):
+            return _provision_parallel_worktree(artifact_workspace, feature, run_id, batch_id)
     except TimeoutError as exc:
-        lock_path = run_dir(artifact_workspace, feature, run_id) / ".lock"
-        if str(exc) != "file_lock_timeout:" + str(lock_path):
+        run_lock_path = run_dir(artifact_workspace, feature, run_id) / ".lock"
+        wt_lock_path = run_dir(artifact_workspace, feature, run_id) / "worktree-locks" / f"{batch_id}.lock"
+        if str(exc) not in {"file_lock_timeout:" + str(run_lock_path), "file_lock_timeout:" + str(wt_lock_path)}:
             raise
         return {
             "success": False,
@@ -511,7 +513,7 @@ def provision_parallel_worktree(
             "error": "parallel_worktree_provision_lock_busy",
             "retryable": True,
             "retryAfterSeconds": GIT_INDEX_LOCK_RETRY_DELAY_SECONDS,
-            "readiness": {"failureKind": "run_lock_contention", "lockPath": str(lock_path),
+            "readiness": {"failureKind": "run_lock_contention", "lockPath": str(exc).removeprefix("file_lock_timeout:"),
                           "waitTimeoutSeconds": PROVISION_LOCK_TIMEOUT_SECONDS},
         }
 
@@ -857,6 +859,26 @@ def seal_parallel_batch(
     commit_summary: str | None = None,
 ) -> dict[str, Any]:
     """Commit a Batch worktree for Review or after UTest changes."""
+    with worktree_lock(artifact_workspace, feature, run_id, batch_id, timeout=PROVISION_LOCK_TIMEOUT_SECONDS):
+        return _seal_parallel_batch(
+            artifact_workspace, feature, run_id, batch_id, repo_path, owner_token,
+            purpose=purpose, commit_stage=commit_stage, commit_summary=commit_summary,
+        )
+
+
+def _seal_parallel_batch(
+    artifact_workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    repo_path: Path | None,
+    owner_token: str,
+    *,
+    purpose: str = "implementation",
+    commit_stage: str | None = None,
+    commit_summary: str | None = None,
+) -> dict[str, Any]:
+    """Inner seal implementation under worktree_lock."""
     if purpose not in {"review", "implementation"}:
         return {"success": False, "error": f"parallel_batch_seal_purpose_invalid:{purpose}"}
     try:
@@ -1054,6 +1076,19 @@ def remove_parallel_worktree(
     force: bool = False,
 ) -> dict[str, Any]:
     """Remove a plugin-owned native Worktree after delivery or failure."""
+    with worktree_lock(artifact_workspace, feature, run_id, batch_id, timeout=PROVISION_LOCK_TIMEOUT_SECONDS):
+        return _remove_parallel_worktree(artifact_workspace, feature, run_id, batch_id, force=force)
+
+
+def _remove_parallel_worktree(
+    artifact_workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Inner remove implementation under worktree_lock."""
     with run_lock(artifact_workspace, feature, run_id):
         try:
             manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)

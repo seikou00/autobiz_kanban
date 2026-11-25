@@ -14,7 +14,13 @@ from hooks.parallel_repository import coordinates
 from hooks.parallel_runtime import INACTIVE_RUN_STATES, load_manifest, run_lock, save_manifest, utc_now
 
 RETRY_DELAYS = (5, 30, 120)
-MAX_WORKSPACE_SYNC_ATTEMPTS = 20
+MAX_WORKSPACE_SYNC_ATTEMPTS = 3
+MAX_WORKSPACE_SYNC_CONFLICT_ATTEMPTS = 2
+DETERMINISTIC_SYNC_ERRORS = (
+    "workspace_sync_source_branch_changed",
+    "workspace_sync_source_merge_in_progress",
+    "workspace_sync_integration_history_changed",
+)
 OWNER_TTL = 15 * 60
 DONE = {"synced", "covered"}
 
@@ -57,11 +63,11 @@ def next_job(jobs: list[dict]) -> dict | None:
         return running
     # A newer cumulative target may cover an older publication that is in
     # backoff; only a verified successful receipt marks that older job covered.
-    ready = next((job for job in remaining if job["status"] != "failed"
+    ready = next((job for job in remaining if job["status"] not in {"failed", "escalated_sync"}
                   and job.get("nextAttemptEpoch", 0) <= time.time()), None)
     if ready is not None:
         return ready
-    return next((job for job in remaining if job["status"] != "failed"), remaining[-1] if remaining else None)
+    return next((job for job in remaining if job["status"] not in {"failed", "escalated_sync"}), remaining[-1] if remaining else None)
 
 
 def summary_locked(manifest: dict, ref: str) -> dict:
@@ -86,7 +92,7 @@ def summary_locked(manifest: dict, ref: str) -> dict:
         result.pop("error", None)
         result.pop("jobId", None)
         result["retryAfterSeconds"] = 0
-    result["success"] = result["status"] not in {"failed", "retry_wait"}
+    result["success"] = result["status"] not in {"failed", "escalated_sync", "retry_wait"}
     manifest["workspaceSync"][ref] = result
     return result
 
@@ -101,7 +107,13 @@ def _is_stale_resolver(manifest: dict, job: dict, resolver: str) -> bool:
     return False
 
 
+def _is_job_escalated(job: dict) -> bool:
+    return bool(job.get("escalated") is True or job.get("status") == "escalated_sync")
+
+
 def _is_resolver_exhausted(job: dict, resolver: str) -> bool:
+    if _is_job_escalated(job):
+        return True
     exhausted_resolvers = job.get("exhaustedResolvers")
     if isinstance(exhausted_resolvers, list) and resolver in exhausted_resolvers:
         return True
@@ -122,6 +134,24 @@ def _record_resolver(job: dict, resolver: str) -> None:
     job["resolverHistory"] = history
 
 
+def reopen_sync_jobs_locked(manifest: dict, ref: str | None = None) -> list[str]:
+    reopened: list[str] = []
+    queues = manifest.get("workspaceSyncQueue") or {}
+    refs = [ref] if ref else list(queues.keys())
+    for repo_ref in refs:
+        for job in queues.get(repo_ref, []):
+            if not isinstance(job, dict) or job.get("status") in DONE:
+                continue
+            if job.get("status") in {"failed", "escalated_sync"} or job.get("escalated"):
+                job.update(status="queued", jobFailures=0, invocationFailures=0, conflictFailures=0, nextAttemptEpoch=0)
+                for key in ("escalated", "escalationCategory", "exhaustedResolver", "exhaustedResolvers", "resolverFailures", "maxAttempts", "owner"):
+                    job.pop(key, None)
+                reopened.append(str(job.get("jobId") or repo_ref))
+        if repo_ref in (manifest.get("repositories") or {}):
+            summary_locked(manifest, repo_ref)
+    return reopened
+
+
 def _failure(
     manifest: dict,
     ref: str,
@@ -130,11 +160,12 @@ def _failure(
     failure_id: str,
     resolver: str | None = None,
 ) -> dict:
-    if job["status"] in DONE or job["status"] == "failed":
+    if job["status"] in DONE or job["status"] in {"failed", "escalated_sync"}:
         return summary_locked(manifest, ref)
     if not any(item.get("failureId") == failure_id for item in job["errors"]):
         count = job.get("failures", 0) + 1
         resolver_failures = dict(job.get("resolverFailures") or {})
+        prior_job_failures = int(job.get("jobFailures", 0)) + 1
         if resolver is not None:
             prior = resolver_failures.get(
                 resolver,
@@ -144,16 +175,25 @@ def _failure(
             resolver_failures[resolver] = inv_count
         else:
             inv_count = 1
-        exhausted = inv_count >= MAX_WORKSPACE_SYNC_ATTEMPTS
+        deterministic = any(code in str(error or "") for code in DETERMINISTIC_SYNC_ERRORS)
+        was_conflicted = manifest.get("workspaceSync", {}).get(ref, {}).get("status") == "conflicted" or "needs_resolution" in str(error or "")
+        conflict_count = int(job.get("conflictFailures", 0)) + (1 if was_conflicted else 0)
+        exhausted = (
+            deterministic
+            or (was_conflicted and conflict_count >= MAX_WORKSPACE_SYNC_CONFLICT_ATTEMPTS)
+            or prior_job_failures >= MAX_WORKSPACE_SYNC_ATTEMPTS
+        )
         job.update(
             failures=count,
-            invocationFailures=inv_count,
+            jobFailures=prior_job_failures,
+            conflictFailures=conflict_count,
+            invocationFailures=prior_job_failures,
             failureResolver=resolver,
             resolverFailures=resolver_failures,
             error=error,
             lastFailureId=failure_id,
-            status="failed" if exhausted else "retry_wait",
-            nextAttemptEpoch=0 if exhausted else time.time() + RETRY_DELAYS[min(inv_count - 1, len(RETRY_DELAYS) - 1)],
+            status="escalated_sync" if exhausted else "retry_wait",
+            nextAttemptEpoch=0 if exhausted else time.time() + RETRY_DELAYS[min(prior_job_failures - 1, len(RETRY_DELAYS) - 1)],
         )
         if exhausted:
             exhausted_list = list(job.get("exhaustedResolvers") or [])
@@ -161,10 +201,20 @@ def _failure(
                 exhausted_list.append(resolver)
             job["exhaustedResolvers"] = exhausted_list
             job["exhaustedResolver"] = resolver
-            job["maxAttempts"] = MAX_WORKSPACE_SYNC_ATTEMPTS
+            job["escalated"] = True
+            job["escalationCategory"] = (
+                "deterministic_sync_error"
+                if deterministic
+                else "sync_conflict_exhausted"
+                if was_conflicted
+                else "sync_transient_exhausted"
+            )
+            job["maxAttempts"] = MAX_WORKSPACE_SYNC_CONFLICT_ATTEMPTS if was_conflicted else MAX_WORKSPACE_SYNC_ATTEMPTS
         else:
             job.pop("exhaustedResolver", None)
             job.pop("maxAttempts", None)
+            job.pop("escalated", None)
+            job.pop("escalationCategory", None)
         job["errors"].append({"error": error, "at": utc_now(), "attempt": job["attempts"], "failureId": failure_id})
         job.pop("owner", None)
     return summary_locked(manifest, ref)
@@ -201,6 +251,11 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 result = summary_locked(manifest, ref)
                 save_manifest(workspace, feature, run_id, manifest)
                 return result
+            if action == "reopen":
+                reopen_sync_jobs_locked(manifest, ref)
+                result = summary_locked(manifest, ref)
+                save_manifest(workspace, feature, run_id, manifest)
+                return result
             if job_id and job_id != job["jobId"]:
                 return {**summary_locked(manifest, ref), "reasonCode": "workspace_sync_stale_job"}
             if _is_stale_resolver(manifest, job, resolver):
@@ -221,7 +276,7 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 return result
             if action == "fail":
                 if (
-                    job["status"] == "failed"
+                    job["status"] in {"failed", "escalated_sync"}
                     or _is_resolver_exhausted(job, resolver)
                     or (job.get("owner") is not None and job.get("owner") != resolver)
                     or (job.get("owner") is None and job.get("failureResolver") not in {None, resolver})
@@ -233,7 +288,7 @@ def operate(workspace: Path, feature: str, run_id: str, repository_ref: str, res
                 return result
             if _is_resolver_exhausted(job, resolver):
                 if job["status"] not in DONE:
-                    job["status"] = "failed"
+                    job["status"] = "escalated_sync" if job.get("escalated") else "failed"
                     job["nextAttemptEpoch"] = 0
                 result = summary_locked(manifest, ref)
                 save_manifest(workspace, feature, run_id, manifest)

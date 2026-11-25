@@ -7,6 +7,7 @@ from pathlib import Path
 
 FILES = ("skills/autodev/autodev-code/references/task-execution.md",
          "hooks/parallel_delivery.py", "hooks/parallel_cleanup.py", "hooks/parallel_repository.py",
+         "hooks/workflow_remediation.py",
          "skills/autodev/autodev-code/references/frontend-route.md",
          "skills/autodev/autodev-reviewer/SKILL.md", "skills/autodev/autodev-e2e/SKILL.md",
          "skills/autodev/autodev-e2e/reference/execution.md", "hooks/e2e_reuse.py", "hooks/compile_coverage.py",

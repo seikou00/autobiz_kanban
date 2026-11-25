@@ -579,6 +579,19 @@ def run_state_done(payload: dict) -> int:
         "状态文件不允许通过 edit_file/write_file 直接修改；"
         "state.json 是主事实源，STATE.md 是自动生成视图。请使用 hooks/update_checkpoint.py 推进 checkpoint。"
     )
+    try:
+        from hooks.parallel_failure import record_hook_block
+        record_hook_block(
+            workspace=managed_state_path.parent.parent,
+            feature=str(os.environ.get("FEATURE_ID", "") or "").strip() or None,
+            hook_name="state_checkpoint",
+            error_code="DIRECT_STATE_FILE_EDIT_BLOCKED",
+            blocked_tool=str(payload.get("tool_name") or payload.get("toolName") or "write_file"),
+            target_path=managed_state_path,
+            host_dispatch_auth=payload.get("hostDispatchAuth") if isinstance(payload.get("hostDispatchAuth"), dict) else None,
+        )
+    except Exception:
+        pass
     hook_log(f"direct_state_edit_blocked tool_name={payload.get('tool_name', '')!r}")
     return block(reason, reason)
 
@@ -599,6 +612,20 @@ def run_autodev_lifecycle(payload: dict) -> int:
         errors.extend(validate_lifecycle(workspace_root, old_rows, new_rows))
 
     if errors:
+        try:
+            from hooks.parallel_failure import record_hook_block
+            first_feature = changes[0][0] if changes else (str(os.environ.get("FEATURE_ID", "") or "").strip() or None)
+            record_hook_block(
+                workspace=workspace_root,
+                feature=first_feature,
+                hook_name="state_checkpoint",
+                error_code="AUTODEV_LIFECYCLE_BLOCKED",
+                blocked_tool=str(payload.get("tool_name") or payload.get("toolName") or "write_file"),
+                target_path=state_path,
+                host_dispatch_auth=payload.get("hostDispatchAuth") if isinstance(payload.get("hostDispatchAuth"), dict) else None,
+            )
+        except Exception:
+            pass
         append_checkpoint_hook_logs(
             workspace_root,
             changes,

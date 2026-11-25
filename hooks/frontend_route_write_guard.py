@@ -145,7 +145,45 @@ def current_checkpoint(workspace: Path, feature: str) -> str:
     return checkpoint if isinstance(checkpoint, str) else ""
 
 
+_CURRENT_PAYLOAD: dict | None = None
+
+
+def _classify_write_block_code(reason: str) -> str:
+    lowered = reason.lower()
+    if ".task-runs artifacts are runner-owned" in lowered:
+        return "TASK_RUN_DIRECT_EDIT_FORBIDDEN"
+    if "requires exactly one active task run" in lowered:
+        return "MISSING_ACTIVE_TASK_RUN"
+    if "authorization invalid" in lowered or "identity mismatch" in lowered:
+        return "TASK_RUN_INTEGRITY_INVALID"
+    if "does not authorize source writes" in lowered or "does not permit business source writes" in lowered:
+        return "TASK_RUN_MODE_OR_STATUS_FORBIDDEN"
+    if "merge" in lowered and "resolution" in lowered:
+        return "MERGE_RESOLUTION_WRITE_FORBIDDEN"
+    if "test" in lowered:
+        return "TEST_ASSET_WRITE_FORBIDDEN"
+    return "FRONTEND_ROUTE_WRITE_BLOCKED"
+
+
 def block(reason: str, *, system_message: str | None = None) -> int:
+    try:
+        from hooks.parallel_failure import record_hook_block
+        payload = _CURRENT_PAYLOAD if isinstance(_CURRENT_PAYLOAD, dict) else {}
+        tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        cwd = Path(payload.get("cwd") or Path.cwd()).resolve(strict=False)
+        raw_paths = extract_candidate_paths(tool_input)
+        target = normalize_path(raw_paths[0], cwd) if raw_paths else None
+        record_hook_block(
+            workspace=workspace_from_payload(payload),
+            feature=current_feature() or None,
+            hook_name="frontend_route_write_guard",
+            error_code=_classify_write_block_code(reason),
+            blocked_tool=str(payload.get("tool_name") or payload.get("toolName") or "write_file"),
+            target_path=target,
+            host_dispatch_auth=payload.get("hostDispatchAuth") if isinstance(payload.get("hostDispatchAuth"), dict) else None,
+        )
+    except Exception:
+        pass
     print(reason, file=sys.stderr)
     json.dump(
         {
@@ -545,10 +583,12 @@ def validate_code_task_run_write(
 
 
 def main() -> int:
+    global _CURRENT_PAYLOAD
     raw_input = read_stdin_text()
     if not raw_input.strip():
         return 0
     payload = json.loads(raw_input)
+    _CURRENT_PAYLOAD = payload if isinstance(payload, dict) else None
     cwd = Path(payload.get("cwd") or Path.cwd()).resolve(strict=False)
     candidate_paths = [
         normalize_path(raw_path, cwd)

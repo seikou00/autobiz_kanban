@@ -519,7 +519,7 @@ class DeliveryTest(unittest.TestCase):
     def test_merge_failure_can_resume_after_repeated_failure_and_a_new_generation(self):
         self.create()
         args, _ = self.delivery()
-        for attempt in range(5):
+        for attempt in range(2):
             if attempt:
                 generation = self.manifest()["batches"]["B001"]["dispatchGeneration"]
                 owner = claim(self.workspace, "alpha", self.run, "B001", generation, "merge_candidate", f"retry-{attempt}")
@@ -529,19 +529,21 @@ class DeliveryTest(unittest.TestCase):
                     settle_delivery(*args[:6])
             defer(*args[:6], "candidate creation interrupted")
             self.assertEqual(self.manifest()["batches"]["B001"]["status"], "retry_pending")
-            if attempt < 2:
-                # An old scheduler could leave either kind of retry block on
-                # this same immutable delivery. Automatic resume must retain it.
-                manifest = self.manifest()
-                batch = manifest["batches"]["B001"]
-                batch["status"] = "blocked"
-                batch["recovery"]["status"] = ("retry_exhausted", "unchanged_failure")[attempt]
-                batch["recovery"]["maxAutomaticAttempts"] = 2
-                save_manifest(self.workspace, "alpha", self.run, manifest)
             resumed = resume_run(self.workspace, "alpha", self.run)
             self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
-        self.assertEqual(self.manifest()["batches"]["B001"]["recovery"]["retryAttempts"], 5)
-        generation = resumed["dispatchGrants"]["B001"]
+        # Third transient failure exhausts the 1+2 automatic budget and escalates to operator.
+        generation = self.manifest()["batches"]["B001"]["dispatchGeneration"]
+        owner = claim(self.workspace, "alpha", self.run, "B001", generation, "merge_candidate", "retry-2")
+        args = (*args[:4], generation, owner["ownerToken"], args[6])
+        with patch.object(train, "_build_candidate", side_effect=RuntimeError("candidate creation interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "candidate creation interrupted"):
+                settle_delivery(*args[:6])
+        defer(*args[:6], "candidate creation interrupted")
+        self.assertEqual(self.manifest()["batches"]["B001"]["status"], "blocked")
+        self.assertEqual(self.manifest()["batches"]["B001"]["recovery"]["status"], "escalated_to_operator")
+        self.assertEqual(resume_run(self.workspace, "alpha", self.run)["rescheduledRetryBatches"], [])
+        reopened = manual_resume_run(self.workspace, "alpha", self.run, reopen_batches=["B001"])
+        generation = reopened["dispatchGrants"]["B001"]
         owner = claim(self.workspace, "alpha", self.run, "B001", generation, "merge_candidate", "resume")
         merged = settle_delivery(*args[:4], generation, owner["ownerToken"])
         self.assertEqual(merged["status"], "merged")

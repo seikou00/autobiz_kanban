@@ -26,7 +26,13 @@ from hooks.json_writer_common import atomic_write_json, feature_dir, resolve_wor
 from hooks.workflow_sandbox_contract import validate_workflow_source
 from hooks.engineering_contract import runtime_contract
 from hooks.commit_message import normalize_task_card_id  # noqa: E402
-from hooks.parallel_batch_scheduler import can_manually_resume_batch, validate_plan_for_parallel  # noqa: E402
+from hooks.parallel_batch_scheduler import (  # noqa: E402
+    _is_terminal_operator_blocked,
+    can_manually_resume_batch,
+    read_prepare_ledger,
+    reconcile_prepare_ledger,
+    validate_plan_for_parallel,
+)
 from hooks.parallel_dispatch import active_claim  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     batch_workspace_ref,
@@ -232,6 +238,8 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
         config["parallelSchedulingMode"] = mode
     if isinstance(max_parallel, int) and not isinstance(max_parallel, bool) and max_parallel > 0:
         config["maxParallel"] = max_parallel
+    if isinstance(raw.get("enableUnattributedRemediation"), bool):
+        config["enableUnattributedRemediation"] = raw["enableUnattributedRemediation"]
     if isinstance(resolution, dict):
         max_attempts = resolution.get("maxAttempts")
         enable_auto_resolve = resolution.get("enableAutoResolve")
@@ -431,9 +439,25 @@ def analyze_batches(
     workspace: Path | None = None,
     task_card_id: str | None = None,
     workflow_workspace: Path | None = None,
+    *,
+    reopen_batches: list[str] | None = None,
+    reopen_candidates: list[str] | None = None,
+    reopen_sync_refs: list[str] | None = None,
+    reopen_prepare: bool = False,
+    reopen_finalization: bool = False,
 ) -> dict:
     """Return the fixed workflow entrypoint for every valid pending Batch."""
     selected_task_card_id = normalize_task_card_id(task_card_id)
+    explicit_reopen_batches = [str(item).strip() for item in (reopen_batches or []) if str(item).strip()]
+    explicit_reopen_candidates = [str(item).strip() for item in (reopen_candidates or []) if str(item).strip()]
+    explicit_reopen_sync_refs = [str(item).strip() for item in (reopen_sync_refs or []) if str(item).strip()]
+    has_explicit_reopen = bool(
+        explicit_reopen_batches
+        or explicit_reopen_candidates
+        or explicit_reopen_sync_refs
+        or reopen_prepare
+        or reopen_finalization
+    )
     try:
         script_root = (plugin_path or ROOT).expanduser().resolve()
         artifact_workspace = resolve_workspace(workspace)
@@ -518,6 +542,89 @@ def analyze_batches(
                                         and active_manifest.get("batches")
                                         and all(b.get("status") == "merged" for b in active_manifest["batches"].values())
                                         and workflow_report_pending(active_manifest))
+        manifest_batches = (active_manifest or {}).get("batches") if isinstance((active_manifest or {}).get("batches"), dict) else {}
+        withheld_map: dict[str, str] = {}
+        for train_key, train_record in ((active_manifest or {}).get("mergeTrains") or {}).items():
+            if not isinstance(train_record, dict) or train_record.get("status") not in {"candidate_conflicted", "needs_resolution"}:
+                continue
+            for held_bid in train_record.get("batchIds") or []:
+                withheld_map[str(held_bid)] = str(train_key)
+        if explicit_reopen_batches and active_manifest is not None:
+            for requested_bid in explicit_reopen_batches:
+                if requested_bid in withheld_map:
+                    return {
+                        "useWorkflow": False,
+                        "strategy": "blocked",
+                        "batchCount": 0,
+                        "batches": [],
+                        "runId": active_run_id,
+                        "workflowScript": None,
+                        "canStartWorkflow": False,
+                        "reason": f"candidate_reopen_required:{withheld_map[requested_bid]}",
+                        "requiredAction": "reopen_candidate",
+                    }
+        if active_manifest is not None and manifest_batches and not has_explicit_reopen:
+            finalization_escalated = ((active_manifest.get("finalization") or {}).get("status") == "escalated_to_operator")
+            if finalization_escalated and all(
+                isinstance(b, dict) and b.get("status") == "merged" for b in manifest_batches.values()
+            ):
+                return {
+                    "useWorkflow": False,
+                    "strategy": "blocked",
+                    "batchCount": 0,
+                    "batches": [],
+                    "runId": active_run_id,
+                    "status": active_manifest.get("status", "blocked"),
+                    "workflowScript": None,
+                    "canStartWorkflow": False,
+                    "reason": f"workflow_finalization_escalated:{active_run_id}",
+                    "requiredAction": "resolve_finalization_blocker_then_reopen",
+                }
+            merged_ids = {
+                str(bid)
+                for bid, b in manifest_batches.items()
+                if isinstance(b, dict) and b.get("status") == "merged"
+            }
+            escalated_ids = {
+                str(bid)
+                for bid, b in manifest_batches.items()
+                if isinstance(b, dict) and _is_terminal_operator_blocked(b)
+            }
+            completable_ids = set(merged_ids)
+            progressed = True
+            while progressed:
+                progressed = False
+                for raw_bid, b in manifest_batches.items():
+                    bid = str(raw_bid)
+                    if (
+                        not isinstance(b, dict)
+                        or bid in completable_ids
+                        or bid in escalated_ids
+                        or bid in withheld_map
+                        or b.get("status") == "cancelled"
+                    ):
+                        continue
+                    if b.get("status") in {"blocked", "failed"} and not can_manually_resume_batch(b):
+                        continue
+                    deps = b.get("dependencies") or []
+                    if all(dep in completable_ids for dep in deps):
+                        completable_ids.add(bid)
+                        progressed = True
+            if completable_ids == merged_ids and not final_validation_pending and (escalated_ids or withheld_map):
+                return {
+                    "useWorkflow": False,
+                    "strategy": "blocked",
+                    "batchCount": 0,
+                    "batches": [],
+                    "runId": active_run_id,
+                    "status": active_manifest.get("status", "blocked"),
+                    "workflowScript": None,
+                    "canStartWorkflow": False,
+                    "escalatedBatchIds": sorted(escalated_ids),
+                    "withheldBatchIds": sorted(withheld_map),
+                    "reason": f"workflow_escalated_to_operator:{active_run_id}:{','.join(sorted(escalated_ids | set(withheld_map)))}",
+                    "requiredAction": "resolve_escalated_batches_then_reopen",
+                }
         # Recovery is not one generic retry: an unsealed but verified dirty
         # implementation Worktree and a sealed Review checkpoint both
         # resume in place, while a clean failed dispatch needs operator
@@ -531,12 +638,28 @@ def analyze_batches(
             and batch["recovery"].get("kind") == "implementation_resume"
             and batch.get("status") in {"retry_pending", "pending"}
         }
+        remediation_recovery_batch_ids = {
+            str(batch_id)
+            for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
+            if isinstance(batch, dict) and batch.get("status") == "remediation_pending"
+        }
         retry_recovery_batch_ids = {
             str(batch_id)
             for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
             if isinstance(batch, dict)
             and can_manually_resume_batch(batch)
         } - implementation_recovery_batch_ids
+        if active_manifest is not None and explicit_reopen_batches:
+            retry_recovery_batch_ids |= set(explicit_reopen_batches)
+        if active_manifest is not None and explicit_reopen_candidates:
+            trains = active_manifest.get("mergeTrains") or {}
+            for spec in explicit_reopen_candidates:
+                parts = [p.strip() for p in spec.rsplit(":", 2)]
+                if len(parts) >= 2:
+                    raw_wave = parts[1].removeprefix("wave-")
+                    wave_key = f"{parts[0]}:wave-{int(raw_wave):03d}" if raw_wave.isdigit() else f"{parts[0]}:{parts[1]}"
+                    train_record = trains.get(wave_key) or trains.get(f"{parts[0]}:{parts[1]}") or {}
+                    retry_recovery_batch_ids |= {str(x) for x in (train_record.get("batchIds") or [])}
         stage_recovery_batch_ids = set(stage_recovery_batches(active_manifest or {}))
         delivery_recovery_batch_ids = {
             str(batch_id) for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
@@ -551,13 +674,23 @@ def analyze_batches(
         recovery_batch_ids = (
             retry_recovery_batch_ids
             | implementation_recovery_batch_ids
+            | remediation_recovery_batch_ids
             | stage_recovery_batch_ids
             | delivery_recovery_batch_ids
             | active_execution_batch_ids
         )
         recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
-        manual_resume = bool(active_run_id and retry_recovery_batch_ids)
-        has_durable_recovery = bool(active_run_id and (recovery_batch_ids or final_validation_pending))
+        manual_resume = bool(
+            active_run_id
+            and (
+                retry_recovery_batch_ids
+                or explicit_reopen_batches
+                or explicit_reopen_candidates
+                or explicit_reopen_sync_refs
+                or reopen_finalization
+            )
+        )
+        has_durable_recovery = bool(active_run_id and (recovery_batch_ids or final_validation_pending or manual_resume))
         visible_batch_ids = {batch["id"] for batch in valid_batches}
         launch_batches = [
             *valid_batches,
@@ -648,6 +781,37 @@ def analyze_batches(
             runtime_workspace,
             runtime_script["workflowScript"],
         )
+        computed_plan_digest = plan_digest(bundle)
+        invocation_id = uuid.uuid4().hex
+        prepare_binding = {
+            "plan_digest_value": computed_plan_digest,
+            "contract_digest_value": deployment["runtimeContract"]["digest"],
+        }
+        if active_manifest is None or reopen_prepare:
+            prepare_state = reconcile_prepare_ledger(
+                artifact_workspace,
+                feature,
+                **prepare_binding,
+                invocation_id=invocation_id if active_manifest is None else None,
+                begin_attempt=(active_manifest is None),
+                reopen=reopen_prepare,
+                attempt_number=1,
+            )
+        else:
+            prepare_state = read_prepare_ledger(artifact_workspace, feature, **prepare_binding)
+        if prepare_state.get("escalated"):
+            return {
+                "useWorkflow": False,
+                "strategy": "blocked",
+                "batchCount": 0,
+                "batches": [],
+                "artifactWorkspace": str(artifact_workspace),
+                "workflowScript": None,
+                "canStartWorkflow": False,
+                "prepareState": prepare_state,
+                "reason": f"workflow_prepare_escalated:{prepare_state.get('reasonCode') or prepare_state.get('escalationCategory') or 'exhausted'}",
+                "requiredAction": "resolve_prepare_blocker_then_reopen",
+            }
         common_result = {
             "useWorkflow": True,
             "strategy": "fixed",
@@ -664,7 +828,7 @@ def analyze_batches(
             "workflowHostGitRoots": workspace_contract["workflowHostGitRoots"],
             "codeWorkspaceSource": workspace_contract["codeWorkspaceSource"],
             "workspaceContractPath": workspace_contract["workspaceContractPath"],
-            "planDigest": plan_digest(bundle),
+            "planDigest": computed_plan_digest,
             "batchExecutionPlan": _batch_execution_plan(
                 launch_batches,
                 workspace_contract["codeWorkspaces"],
@@ -679,6 +843,30 @@ def analyze_batches(
         }
         runtime_config = _load_runtime_config(artifact_workspace)
         max_parallel = runtime_config["maxParallel"]
+        workflow_args: dict[str, Any] = {
+            "feature": feature,
+            "workflowInvocationId": invocation_id,
+            "pluginPath": str(script_root),
+            "artifactWorkspace": str(artifact_workspace),
+            "codeWorkspaces": workspace_contract["codeWorkspaces"],
+            "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
+            "maxParallel": max_parallel,
+            "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+            "runtimeConfig": runtime_config,
+            "runtimeContractDigest": deployment["runtimeContract"]["digest"],
+            "planDigest": computed_plan_digest,
+            "taskCardId": selected_task_card_id,
+            "resumeMode": "manual" if manual_resume else "automatic",
+            "resumeRunId": active_run_id,
+        }
+        if explicit_reopen_batches:
+            workflow_args["reopenBatches"] = explicit_reopen_batches
+        if explicit_reopen_candidates:
+            workflow_args["reopenCandidates"] = explicit_reopen_candidates
+        if explicit_reopen_sync_refs:
+            workflow_args["reopenSyncRefs"] = explicit_reopen_sync_refs
+        if reopen_finalization:
+            workflow_args["reopenFinalization"] = True
         # This is the complete payload for one platform workflow, whether the
         # plan has one or many physical Git roots.  The scheduler owns the
         # cross-repository DAG and the fixed script's `parallel()` starts an
@@ -686,21 +874,7 @@ def analyze_batches(
         return {
             **common_result,
             "executionMode": "fixed",
-            "workflowArgs": {
-                "feature": feature,
-                "workflowInvocationId": uuid.uuid4().hex,
-                "pluginPath": str(script_root),
-                "artifactWorkspace": str(artifact_workspace),
-                "codeWorkspaces": workspace_contract["codeWorkspaces"],
-                "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
-                "maxParallel": max_parallel,
-                "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
-                "runtimeConfig": runtime_config,
-                "runtimeContractDigest": deployment["runtimeContract"]["digest"],
-                "taskCardId": selected_task_card_id,
-                "resumeMode": "manual" if manual_resume else "automatic",
-                "resumeRunId": active_run_id,
-            },
+            "workflowArgs": workflow_args,
             "reason": (
                 f"fixed_workflow_for_manual_recovery:{active_run_id}:{','.join(sorted(recovery_batch_ids))}"
                 if manual_resume
@@ -736,6 +910,16 @@ def main() -> int:
         help="Mounted workspace allowed to load the workflow; defaults to the launch current directory",
     )
     parser.add_argument("--task-card-id", required=True, help="task card selected before starting the workflow")
+    parser.add_argument("--reopen-batch", action="append", default=[], help="Explicitly reopen an escalated Batch ID")
+    parser.add_argument(
+        "--reopen-candidate",
+        action="append",
+        default=[],
+        help="Explicitly reopen a conflicted candidate (<repositoryRef>:<wave>:<resume|rebuild>)",
+    )
+    parser.add_argument("--reopen-sync", action="append", default=[], help="Explicitly reopen an escalated workspace sync ref")
+    parser.add_argument("--reopen-prepare", action="store_true", help="Reset an escalated pre-run prepare ledger")
+    parser.add_argument("--reopen-finalization", action="store_true", help="Reset an escalated finalization ledger")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     args = parser.parse_args()
 
@@ -745,6 +929,11 @@ def main() -> int:
         Path(args.workspace) if args.workspace else None,
         args.task_card_id,
         Path(args.workflow_workspace) if args.workflow_workspace else Path.cwd(),
+        reopen_batches=args.reopen_batch,
+        reopen_candidates=args.reopen_candidate,
+        reopen_sync_refs=args.reopen_sync,
+        reopen_prepare=args.reopen_prepare,
+        reopen_finalization=args.reopen_finalization,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

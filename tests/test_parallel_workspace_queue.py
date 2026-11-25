@@ -65,8 +65,8 @@ class WorkspaceQueueTest(unittest.TestCase):
     def test_legacy_exhausted_job_is_covered_by_later_success_without_retry(self):
         self.merge("B001")
         epoch = 10000000000
-        with patch.object(sync, "sync_workspace", side_effect=OSError("write permission denied")) as calls:
-            for attempt, delay in enumerate((5, 30, 120, 120)):
+        with patch.object(sync, "sync_workspace", side_effect=OSError("temporary disk outage")) as calls:
+            for attempt, delay in enumerate((5, 30)):
                 with patch.object(queue.time, "time", return_value=epoch):
                     result = self.process()
                     self.assertEqual(result["retryAfterSeconds"], delay)
@@ -76,12 +76,12 @@ class WorkspaceQueueTest(unittest.TestCase):
                         self.assertEqual(self.process()["status"], "retry_wait")
                         self.assertEqual(calls.call_count, attempt + 1)
                 epoch += delay + 1
-        self.assertEqual(result["queue"][0]["failures"], 4)
-        self.assertIn("permission denied", result["error"])
+            with patch.object(queue.time, "time", return_value=epoch):
+                result = self.process()
+                self.assertEqual(result["status"], "escalated_sync")
+        self.assertEqual(result["queue"][0]["failures"], 3)
+        self.assertIn("temporary disk outage", result["error"])
         self.assertEqual(self.manifest()["batches"]["B001"]["status"], "merged")
-        manifest = self.manifest()
-        manifest["workspaceSyncQueue"]["default"][0]["status"] = "failed"
-        save_manifest(self.workspace, "alpha", self.run, manifest)
         self.merge("B002")
         with patch.object(sync, "sync_workspace", wraps=sync.sync_workspace) as calls:
             result = self.process()
@@ -89,29 +89,30 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(result["status"], "synced")
         self.assertEqual([job["status"] for job in result["queue"]], ["covered", "synced"])
         self.assertEqual(result["queue"][0]["coveredBy"], result["queue"][1]["jobId"])
-        self.assertEqual(len(result["queue"][0]["errors"]), 4)
+        self.assertEqual(len(result["queue"][0]["errors"]), 3)
         self.assertEqual(result["pendingBatchIds"], [])
         self.assertTrue((self.repo / "B001.txt").exists())
         self.assertTrue((self.repo / "B002.txt").exists())
 
-    def test_publication_retries_beyond_old_limits_and_recovers_a_legacy_failed_job(self):
+    def test_publication_escalates_at_3_and_recovers_after_explicit_reopen(self):
         self.merge("B001")
         epoch = 10000000000
         with patch.object(sync, "sync_workspace", side_effect=OSError("temporary outage")):
-            for attempt in range(7):
+            for attempt in range(2):
                 with patch.object(queue.time, "time", return_value=epoch):
                     result = self.process()
                 self.assertEqual(result["status"], "retry_wait")
                 self.assertEqual(result["queue"][0]["failures"], attempt + 1)
                 epoch += result["retryAfterSeconds"] + 1
-        manifest = self.manifest()
-        job_id = manifest["workspaceSyncQueue"]["default"][0]["jobId"]
-        manifest["workspaceSyncQueue"]["default"][0]["status"] = "failed"
-        save_manifest(self.workspace, "alpha", self.run, manifest)
+            with patch.object(queue.time, "time", return_value=epoch):
+                escalated = self.process()
+            self.assertEqual(escalated["status"], "escalated_sync")
+        job_id = self.manifest()["workspaceSyncQueue"]["default"][0]["jobId"]
+        reopened = queue.operate(self.workspace, "alpha", self.run, "default", "resolver", action="reopen")
+        self.assertEqual(reopened["status"], "queued")
         result = self.process()
         self.assertEqual(result["status"], "synced", result)
         self.assertEqual(result["queue"][0]["jobId"], job_id)
-        self.assertEqual(result["queue"][0]["failures"], 7)
         with patch.object(sync, "sync_workspace", side_effect=AssertionError("must not republish")):
             self.assertEqual(self.process()["status"], "synced")
 
@@ -140,7 +141,7 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.merge("B002")
         self.assertEqual(validate_merge_resolution_write(self.workspace, "alpha", Path(conflict["worktreePath"]) / "B001.txt"), 0)
         epoch = 10000000000
-        for attempt in range(4):
+        for attempt in range(2):
             with patch.object(queue.time, "time", return_value=epoch):
                 self.process(action="fail", job_id=conflict["jobId"], error="resolver failed", failure_id=str(attempt))
             epoch += 200
@@ -231,48 +232,31 @@ class WorkspaceQueueTest(unittest.TestCase):
         self.assertEqual(result["error"], detail)
         self.assertEqual(self.manifest()["batches"]["B001"]["status"], "merged")
 
-    def test_publication_stops_after_20_failures_and_retries_only_on_next_workflow_start(self):
+    def test_publication_stops_after_3_failures_across_restarts_until_explicit_reopen(self):
         self.merge("B001")
         epoch = 10000000000
-        with patch.object(sync, "sync_workspace", side_effect=OSError("disk full 20")) as calls:
-            for attempt in range(1, 21):
+        with patch.object(sync, "sync_workspace", side_effect=OSError("disk full")) as calls:
+            for attempt in range(1, 4):
                 with patch.object(queue.time, "time", return_value=epoch):
                     result = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
-                if attempt < 20:
+                if attempt < 3:
                     self.assertEqual(result["status"], "retry_wait")
                     epoch += result["retryAfterSeconds"] + 1
                 else:
-                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual(result["status"], "escalated_sync")
                     self.assertFalse(result["success"])
-                    self.assertIn("disk full 20", result["error"])
-            self.assertEqual(calls.call_count, 20)
-            # Same workflow invocation must NOT retry anymore after 20 failures.
+                    self.assertIn("disk full", result["error"])
+            self.assertEqual(calls.call_count, 3)
             with patch.object(queue.time, "time", return_value=epoch + 1000):
                 same_inv = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
-                self.assertEqual(same_inv["status"], "failed")
-                self.assertIn("disk full 20", same_inv["error"])
-                same_retry = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1", action="retry")
-                self.assertEqual(same_retry["status"], "failed")
-                # A late fail receipt from another resolver must not clear exhausted state
-                # or let inv-1 perform a 21st sync.
-                late_fail = queue.operate(
-                    self.workspace, "alpha", self.run, "default", "other-resolver",
-                    action="fail", error="late error", failure_id="late-1",
-                )
-                self.assertEqual(late_fail["status"], "failed")
-                self.assertEqual(late_fail["reasonCode"], "workspace_sync_stale_resolver")
-                after_late = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
-                self.assertEqual(after_late["status"], "failed")
-            self.assertEqual(calls.call_count, 20)
-            with patch.object(queue.time, "time", return_value=epoch):
+                self.assertEqual(same_inv["status"], "escalated_sync")
+                # A new resolver/restart must NOT reset the jobId-scoped budget to 20!
                 new_launch = queue.operate(self.workspace, "alpha", self.run, "default", "inv-2")
-                self.assertEqual(new_launch["status"], "retry_wait")
-                stale = queue.operate(self.workspace, "alpha", self.run, "default", "inv-1")
-                self.assertEqual(stale["reasonCode"], "workspace_sync_stale_resolver")
-                self.assertEqual(stale["queue"], new_launch["queue"])
-            self.assertEqual(calls.call_count, 21)
-        with patch.object(queue.time, "time", return_value=epoch + new_launch["retryAfterSeconds"] + 1):
-            recovered = queue.operate(self.workspace, "alpha", self.run, "default", "inv-2")
+                self.assertEqual(new_launch["status"], "escalated_sync")
+            self.assertEqual(calls.call_count, 3)
+        reopened = queue.operate(self.workspace, "alpha", self.run, "default", "inv-2", action="reopen")
+        self.assertEqual(reopened["status"], "queued")
+        recovered = queue.operate(self.workspace, "alpha", self.run, "default", "inv-2")
         self.assertEqual(recovered["status"], "synced")
 
 

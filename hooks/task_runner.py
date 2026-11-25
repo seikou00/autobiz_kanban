@@ -2385,6 +2385,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command != "inspect" and getattr(args, "parallel_run_id", None):
+        resolved_lock = None
+        try:
+            workspace, feature, _ = _resolve(args)
+            feat_dir = _feature_dir(workspace, feature)
+            plan = load_plan_bundle(feat_dir)
+            batch_id = plan.task_batches.get(args.task_id)
+            if batch_id and (feat_dir / ".parallel-runs" / args.parallel_run_id).is_dir():
+                from hooks.parallel_runtime import worktree_lock
+                resolved_lock = worktree_lock(workspace, feature, args.parallel_run_id, str(batch_id), timeout=30)
+        except Exception:
+            resolved_lock = None
+        if resolved_lock is not None:
+            with resolved_lock:
+                return args.func(args)
     return args.func(args)
 
 

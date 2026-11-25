@@ -31,9 +31,9 @@ python -X utf8 "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}"
 - 实现前读取 `references/task-execution.md`；当前 Task 的上游事实通过 `code_task_context.py` 获取，不重读整个 Plan。已有有效工程事实直接复用，未知或失效的 API 才定向 lookup/resolve/query。
 - 当前 TASK `uiRequired=true` 时才读取 `references/frontend-route.md` 和其中指定的短前端规则；实现完成前调用受控 frontend_verification.py，复用未变源码的结果，按需工程检查/预览。无高保真稿正常按规格实现。后端不加载 HTML/parser，不在 Workflow 启动前解析全局前端 Route。
 - 生产代码在 TASK start 成功后修改；Code 不生成测试、不执行行为测试。后端每个 TASK 必须完成当前源码的 production-only compile 并登记真实输出，才能 `finish-implementation`。前端不新增编译要求。
-- Review 独立且只读，只审当前 Batch 生产实现。既有一次定向生产修复后完成纯编译、封存和 `single_repair_accepted`，直接进入候选集成，不派发第二次 Review。
+- Review 独立且只读，只审当前 Batch 生产实现。第 1 轮定向生产修复完成纯编译与封存后走 `single_repair_accepted`；若基于持久化 `REPAIR_CONTEXT.json` 开启第 2 轮补充返修，则必须对新封存提交执行受控真实复审（`finish-review`），仍未通过立即熔断升级。
 - Review checkpoint 通过后直接进入交付 gate，不创建 UTest/E2E 阶段或 skipped 证据。
-- 固定 Workflow 启动后不调用 `request_user_input` 或额外等待确认。内部差异按已有契约与现有依赖最小兼容处理，超出权限/契约时报告具体阻断，不伪造成功。
+- 固定 Workflow 启动后不调用 `request_user_input` 或额外等待确认。确定性故障、预算耗尽或自愈无进展均按局部熔断写入 `escalated_to_operator`（仅阻塞自身与下游依赖，独立 Batch 正常排空并在 `escalations` 如实汇报）；人工处理阻塞根因后，只能通过 `workflow_launcher.py` / `manual-resume` 显式点名重开（`--reopen-batch <B>`、`--reopen-candidate <repoRef>:<wave>:resume|rebuild`、`--reopen-sync <ref>`、`--reopen-prepare`、`--reopen-finalization`）。
 
 ## 收口与合入
 

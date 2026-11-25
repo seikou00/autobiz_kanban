@@ -593,7 +593,7 @@ def sync_all(workspace: Path, feature: str, run_id: str) -> list[dict]:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sync", "complete", "process", "complete-job", "fail", "retry"))
+    parser.add_argument("action", choices=("sync", "complete", "process", "complete-job", "fail", "retry", "reopen"))
     for name in ("workspace", "feature", "run-id", "repository-ref"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--resolver-id")
@@ -606,11 +606,11 @@ def main(argv=None):
         if args.action == "complete" and not args.attempt_id:
             raise ValueError("workspace_sync_attempt_required")
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
-        if args.action in {"process", "complete-job", "fail", "retry"}:
+        if args.action in {"process", "complete-job", "fail", "retry", "reopen"}:
             from hooks.parallel_workspace_queue import operate
-            if not args.resolver_id:
+            if not args.resolver_id and args.action != "reopen":
                 raise ValueError("workspace_sync_resolver_required")
-            result = operate(workspace, feature, args.run_id, args.repository_ref, args.resolver_id,
+            result = operate(workspace, feature, args.run_id, args.repository_ref, args.resolver_id or "operator-reopen",
                              action="complete" if args.action == "complete-job" else args.action,
                              job_id=args.job_id, attempt_id=args.attempt_id, failure_id=args.failure_id,
                              error=base64.b64decode(args.error_base64, validate=True).decode("utf-8") if args.error_base64 else None)

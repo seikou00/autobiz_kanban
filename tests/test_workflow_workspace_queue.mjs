@@ -50,27 +50,27 @@ test('independent repositories publish while another repository is waiting', asy
   await c.drainWorkspaceSync();
 });
 
-test('durable publication retries pass the old limit and preserve warnings until success', async () => {
+test('durable publication retries within the 1+2 transient budget and preserves warnings until success', async () => {
   let calls = 0;
-  const { c, state, waits } = harness(async () => ++calls < 8
-    ? receipt('repo', 'retry_wait', { success: false, error: 'disk error', retryAfterSeconds: [5, 30, 120][Math.min(calls - 1, 2)] })
+  const { c, state, waits } = harness(async () => ++calls < 3
+    ? receipt('repo', 'retry_wait', { success: false, error: 'disk error', retryAfterSeconds: [5, 30][Math.min(calls - 1, 1)] })
     : receipt('repo', 'synced'));
   await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
-  assert.equal(calls, 8);
-  assert.equal(waits.reduce((total, ms) => total + ms, 0), 5000 + 30000 + 5 * 120000);
+  assert.equal(calls, 3);
+  assert.equal(waits.reduce((total, ms) => total + ms, 0), 5000 + 30000);
   assert.equal(state.results.get('repo').status, 'synced');
   assert.ok(state.notifications.some(item => item.status === 'retry_wait' && item.error === 'disk error'));
 });
 
-test('publication survives repeated model and failure-persistence outages without losing its receipt', async () => {
+test('publication survives 2 model and failure-persistence outages without losing its receipt', async () => {
   let processCalls = 0;
   const { c, state, waits } = harness(async (_, options) => {
     if (options.label.startsWith('workspace-sync-warning-')) throw new Error('failure persistence unavailable');
-    if (++processCalls <= 9) throw new Error('model unavailable');
+    if (++processCalls <= 2) throw new Error('model unavailable');
     return receipt('repo', 'synced', { lastSyncedSha: 'same-delivery' });
   });
   await c.synchronizeUserWorkspace(receipt('repo', 'queued', { targetSha: 'same-delivery' }));
-  assert.equal(processCalls, 10);
+  assert.equal(processCalls, 3);
   assert.equal(state.results.get('repo').lastSyncedSha, 'same-delivery');
   assert.ok(waits.every(ms => ms > 0 && ms <= 60000));
 });
@@ -150,11 +150,11 @@ test('cancellation ends a pending publication with no failure retry', async () =
   assert.equal(state.notifications.length, 0);
 });
 
-test('publication stops after 20 attempts in one workflow launch and returns failure reason', async () => {
+test('publication stops after 3 attempts (1+2) and preserves escalated_sync status', async () => {
   let processCalls = 0;
   const { c, state, waits } = harness(async (_, options) => {
     if (options.label.startsWith('workspace-sync-warning-')) {
-      return receipt('repo', processCalls >= 20 ? 'failed' : 'retry_wait', {
+      return receipt('repo', processCalls >= 3 ? 'escalated_sync' : 'retry_wait', {
         success: false, error: `sync write error ${processCalls}`, retryAfterSeconds: 5,
       });
     }
@@ -162,16 +162,16 @@ test('publication stops after 20 attempts in one workflow launch and returns fai
     throw new Error(`sync write error ${processCalls}`);
   });
   const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
-  assert.equal(processCalls, 20);
-  assert.equal(result.status, 'failed');
+  assert.equal(processCalls, 3);
+  assert.equal(result.status, 'escalated_sync');
   assert.equal(result.success, false);
-  assert.match(result.error, /sync write error 20/);
-  assert.equal(waits.length, 19);
-  assert.equal(state.results.get('repo').status, 'failed');
+  assert.match(result.error, /sync write error 3/);
+  assert.equal(waits.length, 2);
+  assert.equal(state.results.get('repo').status, 'escalated_sync');
 });
 
-test('busy responses do not consume failure budget and re-enqueue shares exhausted quota', async () => {
-  // Part 1: 25 busy polls followed by synced succeed without failing at 20.
+test('busy responses do not consume failure budget and re-enqueue shares exhausted 3-attempt quota', async () => {
+  // Part 1: 25 busy polls followed by synced succeed without failing at 3.
   {
     let calls = 0;
     const { c, state } = harness(async () => ++calls <= 25
@@ -183,8 +183,7 @@ test('busy responses do not consume failure budget and re-enqueue shares exhaust
     assert.equal(state.results.get('repo').lastSyncedSha, 'done');
   }
 
-  // Part 2: When both process and fail stay unavailable, re-enqueuing in the same
-  // resolver reuses the exhausted 20-attempt budget instead of running 40 calls.
+  // Part 2: Re-enqueuing the same target reuses the exhausted 3-attempt budget instead of running 6 calls.
   {
     let processCalls = 0;
     const { c } = harness(async (_, options) => {
@@ -196,42 +195,41 @@ test('busy responses do not consume failure budget and re-enqueue shares exhaust
     });
     const first = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
     assert.equal(first.status, 'failed');
-    assert.equal(processCalls, 20);
+    assert.equal(processCalls, 3);
 
     const second = await c.synchronizeUserWorkspace(receipt('repo', 'queued'));
     assert.equal(second.status, 'failed');
-    assert.equal(processCalls, 20);
+    assert.equal(processCalls, 3);
   }
 });
 
-test('a new resolver does not inherit backoff failures from an earlier launch', async () => {
+test('jobId-scoped durable failures persist across resolver restarts and exhaust at 3', async () => {
   let calls = 0;
   const { c } = harness(async (_, { label }) => {
     if (label.startsWith('workspace-sync-warning-')) throw new Error('persistence unavailable');
     calls += 1;
     if (calls === 1) return receipt('repo', 'retry_wait', {
       success: false, jobId: 'A', retryAfterSeconds: 5,
-      queue: [{ jobId: 'A', status: 'retry_wait', failureResolver: 'previous-owner', invocationFailures: 19 }],
+      queue: [{ jobId: 'A', status: 'retry_wait', failureResolver: 'previous-owner', failures: 2, invocationFailures: 2 }],
     });
-    if (calls === 2) throw new Error('first failure this launch');
-    return receipt('repo', 'synced');
+    throw new Error('third failure exhausts job A across restart');
   });
   const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued', { jobId: 'A' }));
-  assert.equal(calls, 3);
-  assert.equal(result.status, 'synced');
+  assert.equal(calls, 2);
+  assert.equal(result.status, 'failed');
 });
 
 test('a late failure for an older job does not consume the next job budget', async () => {
   let calls = 0;
   const { c } = harness(async (_, { label }) => {
     if (label.startsWith('workspace-sync-warning-')) {
-      if (calls === 20) return receipt('repo', 'queued', { jobId: 'B', reasonCode: 'workspace_sync_stale_job' });
+      if (calls === 3) return receipt('repo', 'queued', { jobId: 'B', reasonCode: 'workspace_sync_stale_job' });
       return receipt('repo', 'retry_wait', { success: false, jobId: 'A', error: 'job A failed', retryAfterSeconds: 5 });
     }
-    if (++calls <= 20) throw new Error('job A process unavailable');
+    if (++calls <= 3) throw new Error('job A process unavailable');
     return receipt('repo', 'synced', { lastSyncedSha: 'B' });
   });
   const result = await c.synchronizeUserWorkspace(receipt('repo', 'queued', { jobId: 'A' }));
-  assert.equal(calls, 21);
+  assert.equal(calls, 4);
   assert.equal(result.status, 'synced');
 });

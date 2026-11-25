@@ -14,6 +14,7 @@ export const meta = {
 const DEFAULT_MAX_PARALLEL = 5;
 const DEFAULT_BATCH_TIMEOUT_SECONDS = 4 * 60 * 60;
 const MAX_WORKFLOW_RETRY_ATTEMPTS = 20;
+const MAX_WORKFLOW_TRANSIENT_ATTEMPTS = 3;
 // Idle dispatch workers keep checking the durable scheduler snapshot while
 // another Batch lifecycle is still running. Completion-triggered refreshes
 // remain the fast path; this bounded poll closes the gap when readiness changes
@@ -125,6 +126,22 @@ const IMPLEMENTATION_RECOVERY_ENTRY_SCHEMA = {
   ],
   additionalProperties: true
 };
+const REMEDIATION_RECOVERY_ENTRY_SCHEMA = {
+  type: "object",
+  properties: {
+    batchId: { type: "string" },
+    worktreePath: { type: ["string", "null"] },
+    branchName: { type: ["string", "null"] },
+    startSha: { type: ["string", "null"] },
+    recoveryKind: { const: "remediation" },
+    remediationKind: { type: ["string", "null"] },
+    remediationAttempts: { type: "number" },
+    preserveWorktree: { type: "boolean" },
+    reprovision: { type: "boolean" }
+  },
+  required: ["batchId", "worktreePath", "branchName", "recoveryKind", "preserveWorktree", "reprovision"],
+  additionalProperties: true
+};
 const WORKFLOW_MANIFEST_SCHEMA = {
   type: "object",
   properties: {
@@ -147,11 +164,20 @@ const WORKFLOW_MANIFEST_SCHEMA = {
             properties: {
               status: { type: ["string", "null"] },
               retryAttempts: { type: ["number", "null"] },
+              transientRetryAttempts: { type: ["number", "null"] },
+              unclassifiedRetryAttempts: { type: ["number", "null"] },
+              remediationAttempts: { type: ["number", "null"] },
+              reviewRepairRounds: { type: ["number", "null"] },
+              lastChargedGeneration: { type: ["number", "null"] },
               lastError: { type: ["string", "null"] },
               failureClassification: { type: ["string", "null"] },
               failureFingerprint: { type: ["string", "null"] },
               reasonCode: { type: ["string", "null"] },
-              nextAction: { type: ["string", "null"] }
+              nextAction: { type: ["string", "null"] },
+              escalatedAt: { type: ["string", "null"] },
+              escalationCategory: { type: ["string", "null"] },
+              rootCause: { type: ["string", "null"] },
+              hookBlockCode: { type: ["string", "null"] }
             },
             additionalProperties: false
           }
@@ -160,6 +186,7 @@ const WORKFLOW_MANIFEST_SCHEMA = {
         additionalProperties: false
       }
     },
+    finalization: { type: ["object", "null"], additionalProperties: true },
     mergeTrains: {
       type: "object",
       additionalProperties: {
@@ -231,6 +258,7 @@ const WORKSPACE_SYNC_SCHEMA = {
       jobId: { type: "string" }, repositoryRef: { type: "string" }, targetSha: { type: "string" },
       batchIds: { type: "array", items: { type: "string" } }, sequence: { type: "integer" },
       status: { type: "string" }, attempts: { type: "integer" }, failures: { type: "integer" },
+      conflictFailures: { type: "integer" }, escalated: { type: "boolean" },
       invocationFailures: { type: "integer" }, failureResolver: { type: ["string", "null"] },
       error: { type: "string" }, coveredBy: { type: "string" }, nextAttemptEpoch: { type: "number" },
       errors: { type: "array", items: { type: "object", properties: {
@@ -263,6 +291,11 @@ const SCHEDULER_RESULT_SCHEMA = {
       type: "array",
       items: STAGE_RECOVERY_ENTRY_SCHEMA
     },
+    remediationBatches: {
+      type: "array",
+      items: REMEDIATION_RECOVERY_ENTRY_SCHEMA
+    },
+    finalization: { type: ["object", "null"], additionalProperties: true },
     retryPendingBatches: { type: "array", items: { type: "string" } },
     blockedBatches: { type: "array", items: { type: "string" } },
     rescheduledRetryBatches: { type: "array", items: { type: "string" } },
@@ -305,7 +338,7 @@ const SCHEDULER_RESULT_SCHEMA = {
   anyOf: [
     { required: [
       "runId", "status", "scheduledGroups", "readyBatches", "allReadyBatches",
-      "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches",
+      "mergeableBatches", "implementationRecoveryBatches", "stageRecoveryBatches", "remediationBatches",
       "retryPendingBatches", "blockedBatches", "parallelGroups", "allParallelGroups",
       "maxParallel", "dispatchGrants", "batchTaskIds", "batchWorkspaces"
     ], properties: { ok: { const: true }, success: { const: true } } },
@@ -352,6 +385,9 @@ const FINALIZATION_RESULT_SCHEMA = {
     repairRequired: { type: "boolean" }, batchIds: { type: "array", items: { type: "string" } },
     cleanupPending: { type: "array", items: CLEANUP_PENDING_ITEM_SCHEMA },
     workspaceSync: { type: "array", items: WORKSPACE_SYNC_SCHEMA },
+    finalization: { type: ["object", "null"], additionalProperties: true },
+    aggregateReceipt: { type: ["object", "null"], additionalProperties: true },
+    codeCheckpointReceipt: { type: ["object", "null"], additionalProperties: true },
     ok: { type: "boolean" }, error: { type: "string" }
   },
   // Preserve command errors too; validate every successful field before use.
@@ -448,6 +484,7 @@ const VERIFICATION_SCHEMA = {
     errors: { type: "array", items: { type: "string" } },
     hasDeferredIssues: { type: "boolean" },
     hasBlockingDeferredIssues: { type: "boolean" },
+    escalated: { type: "boolean" },
     deferredIssues: { type: "array", items: { type: "object" } },
   },
   required: [],
@@ -776,6 +813,7 @@ function joinPath(base, ...parts) {
 
 const input = unwrap(args);
 const runtimeContractDigest = input.runtimeContractDigest;
+const workflowPlanDigest = input.planDigest;
 const feature = input.feature;
 const workflowInvocationId = input.workflowInvocationId;
 const pluginPath = input.pluginPath;
@@ -784,6 +822,10 @@ const codeWorkspaces = input.codeWorkspaces || (input.codeWorkspace ? { default:
 const taskCardId = input.taskCardId;
 const resumeMode = input.resumeMode === "manual" ? "manual" : "automatic";
 const resumeRunId = input.resumeRunId;
+const reopenBatches = Array.isArray(input.reopenBatches) ? input.reopenBatches.filter(usableString) : [];
+const reopenCandidates = Array.isArray(input.reopenCandidates) ? input.reopenCandidates.filter(usableString) : [];
+const reopenSyncRefs = Array.isArray(input.reopenSyncRefs) ? input.reopenSyncRefs.filter(usableString) : [];
+const reopenFinalization = input.reopenFinalization === true;
 const workflowHostGitRoot = input.workflowHostGitRoot;
 let maxParallel = Number.isInteger(input.maxParallel) && input.maxParallel > 0
   ? input.maxParallel
@@ -829,6 +871,7 @@ const worktreeManagerPath = joinPath(pluginPath, "hooks/worktree_manager.py");
 const lifecyclePath = joinPath(pluginPath, "hooks/parallel_batch_lifecycle.py");
 const stagePath = joinPath(pluginPath, "hooks/parallel_batch_stage.py");
 const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
+const remediationPath = joinPath(pluginPath, "hooks/workflow_remediation.py");
 // Every child below runs after the caller has supplied the task-card ID and
 // started this fixed Workflow. Keep the no-interaction contract at the call
 // boundary so adding a later phase cannot accidentally reintroduce a user
@@ -896,14 +939,35 @@ function retryPendingBatchesOf(scheduler) {
 
 phase("准备");
 let prepared;
-for (let attempt = 1; !prepared && attempt <= MAX_WORKFLOW_RETRY_ATTEMPTS; attempt += 1) {
+const reopenCliArgs = [
+  ...reopenBatches.map(item => `--reopen-batch "${item.trim()}"`),
+  ...reopenCandidates.map(item => `--reopen-candidate "${item.trim()}"`),
+  ...reopenSyncRefs.map(item => `--reopen-sync "${item.trim()}"`),
+  ...(reopenFinalization ? ["--reopen-finalization"] : []),
+].join(" ");
+for (let attempt = 1; !prepared && attempt <= MAX_WORKFLOW_TRANSIENT_ATTEMPTS; attempt += 1) {
+let contractVerified = false;
+let prepareEscalated = false;
+const ledgerArgs = /^[a-f0-9]{64}$/.test(workflowPlanDigest) && /^[a-f0-9]{64}$/.test(runtimeContractDigest)
+  && /^[a-f0-9]{32}$/.test(workflowInvocationId)
+  ? `--workspace "${artifactWorkspace}" --feature "${feature}" --plan-digest "${workflowPlanDigest}" --contract-digest "${runtimeContractDigest}" --workflow-invocation-id "${workflowInvocationId}" --attempt ${attempt}`
+  : null;
 try {
+  if (ledgerArgs) {
+    const ledger = requireSuccess(await workflowAgent(
+      `只执行 python -X utf8 "${schedulerPath}" prepare-attempt ${ledgerArgs}${resumeRunId ? " --resume" : ""}。原样返回 JSON。`,
+      { label: "reserve-prepare-attempt", phase: "准备" }
+    ), "reserve prepare attempt");
+    prepareEscalated = ledger.escalated === true;
+    if (prepareEscalated) throw new Error(ledger.lastError || "workflow_prepare_escalated");
+  }
   requireSuccess(await workflowAgent(
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/engineering_context.py")}" contract --expected-digest "${runtimeContractDigest}"。原样返回 JSON；失败时停止并重新运行 launcher，不创建 Batch、不探索工程、不修改任何文件。`,
     { label: "verify-engineering-deployment", phase: "准备" }
   ), "engineering deployment");
+  contractVerified = true;
   const prepareCommand = resumeRunId
-    ? `python -X utf8 "${schedulerPath}" ${resumeMode === "manual" ? "manual-resume" : "resume"} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}" --workflow-invocation-id "${workflowInvocationId}"`
+    ? `python -X utf8 "${schedulerPath}" ${resumeMode === "manual" ? "manual-resume" : "resume"} --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}" --workflow-invocation-id "${workflowInvocationId}"${reopenCliArgs ? ` ${reopenCliArgs}` : ""}`
     : `python -X utf8 "${schedulerPath}" ensure ` +
       `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
       `--task-card-id "${taskCardId.trim()}" --workflow-invocation-id "${workflowInvocationId}" ` +
@@ -919,26 +983,54 @@ try {
     { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), "scheduler ensure");
 } catch (error) {
-  if (attempt >= MAX_WORKFLOW_RETRY_ATTEMPTS) {
+  const errStr = String(error);
+  const deterministicPrepare = (!contractVerified && /utest_runtime_deployment_changed|runtime_contract_incomplete|workflow_runtime_contract_missing/i.test(errStr))
+    || /candidate_reopen_required|parallel_plan_contract_changed|parallel_batch_not_found|parallel_batch_not_reopenable/i.test(errStr);
+  if (ledgerArgs && !prepareEscalated) {
+    try {
+      const state = requireSuccess(await workflowAgent(
+        `只执行 python -X utf8 "${schedulerPath}" prepare-failure ${ledgerArgs} --error-b64 "${encodeFailure(errStr)}"${deterministicPrepare ? " --deterministic" : ""}。原样返回 JSON。`,
+        { label: "record-prepare-failure", phase: "准备" }
+      ), "record prepare failure");
+      prepareEscalated = state.escalated === true;
+      const recoveredRunId = state.runId || state.reconciledRunId;
+      if (contractVerified && typeof recoveredRunId === "string" && /^[A-Za-z0-9._-]+$/.test(recoveredRunId)) {
+        prepared = requireSchedulerResult(await workflowAgent(
+          `只执行 python -X utf8 "${schedulerPath}" status --workflow-view --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${recoveredRunId}" --workflow-invocation-id "${workflowInvocationId}"。原样返回 JSON。`,
+          { label: "recover-prepare-receipt", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
+        ), "recover prepare receipt");
+        break;
+      }
+    } catch (ledgerError) {
+      phase(`准备记账待对账：${errorText(ledgerError)}`);
+    }
+  }
+  if (prepareEscalated || deterministicPrepare || attempt >= MAX_WORKFLOW_TRANSIENT_ATTEMPTS) {
     return {
       ok: false,
       feature,
       runId: resumeRunId || null,
-      finalStatus: "scheduler_prepare_failed",
-      error: String(error),
+      finalStatus: prepareEscalated || deterministicPrepare ? "blocked_escalated" : "scheduler_prepare_failed",
+      error: errStr,
       retryAttempts: attempt,
+      escalations: [{
+        scope: "prepare",
+        category: deterministicPrepare ? "precondition" : "prepare_transient_exhausted",
+        error: errStr,
+        reopenCommand: "--reopen-prepare",
+      }],
       unresolved: {
         batches: [],
         mergeCandidates: [],
         deferredIssues: [],
-        schedulerFailures: [{ phase: "prepare", attempt, error: String(error) }],
+        schedulerFailures: [{ phase: "prepare", attempt, error: errStr }],
       },
-      nextAction: "retry_scheduler_prepare",
+      nextAction: prepareEscalated || deterministicPrepare ? "resolve_prepare_blocker_then_reopen" : "retry_scheduler_prepare",
     };
   }
   // Ensure reuses a run even when the original command succeeded but its
   // model response was lost. Never create a replacement run on transport failure.
-  phase(`准备恢复：${String(error)}`);
+  phase(`准备恢复：${errStr}`);
   await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
 }
 }
@@ -1017,6 +1109,8 @@ let scheduledGroups = normalizeScheduledGroups(prepared.scheduledGroups || []);
 let mergeableBatches = (prepared.mergeableBatches || []).filter(usableString);
 let implementationRecoveryBatches = (prepared.implementationRecoveryBatches || []).filter(result => result && usableString(result.batchId));
 let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId));
+let remediationBatches = (prepared.remediationBatches || []).filter(result => result && usableString(result.batchId));
+let lastFinalizationReady = null;
 let retryPendingBatches = retryPendingBatchesOf(prepared);
 const retryPriorityBatchIds = new Set(
   [
@@ -1152,6 +1246,9 @@ function observeLifecycleResult(batchId, source, value, generation) {
     markBatchResolved(batchId);
     return result;
   }
+  if (status === "remediation_pending" || status === "remediation_resolved") {
+    return result;
+  }
   if (
     !result
     || result.unparsedStructuredOutput === true
@@ -1161,12 +1258,16 @@ function observeLifecycleResult(batchId, source, value, generation) {
     const isCurrentGeneration = !Number.isInteger(dispatchGrants[batchId])
       || !Number.isInteger(generation)
       || generation >= dispatchGrants[batchId];
-    let exhausted = false;
-    if (isCurrentGeneration && typeof batchInvocationRetryControl !== "undefined") {
-      const maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
+    const terminalEscalated = status === "blocked";
+    let exhausted = terminalEscalated;
+    if (isCurrentGeneration && typeof batchInvocationRetryControl !== "undefined"
+        && (terminalEscalated || !observation.durable || !result.finalized)) {
+      const maxAttempts = typeof MAX_WORKFLOW_TRANSIENT_ATTEMPTS === "number"
+        ? MAX_WORKFLOW_TRANSIENT_ATTEMPTS
+        : (typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 3);
       const count = (batchInvocationRetryControl.failures.get(batchId) || 0) + 1;
       batchInvocationRetryControl.failures.set(batchId, count);
-      if (count >= maxAttempts) {
+      if (terminalEscalated || count >= maxAttempts) {
         batchInvocationRetryControl.exhausted.add(batchId);
         quarantinedBatchIds.add(batchId);
         exhausted = true;
@@ -1176,7 +1277,7 @@ function observeLifecycleResult(batchId, source, value, generation) {
       kind: "batch",
       batchId,
       status: exhausted ? "blocked" : observation.status,
-      recoveryStatus: exhausted ? "retry_exhausted" : undefined,
+      recoveryStatus: terminalEscalated ? "escalated_to_operator" : (exhausted ? "retry_exhausted" : undefined),
       durable: observation.durable,
       error: observation.error || result,
       source,
@@ -1228,7 +1329,8 @@ function applySchedulerState(scheduler) {
   dispatchGrants = scheduler.dispatchGrants || {};
   if (typeof batchInvocationRetryControl !== "undefined" && scheduler.manifest && scheduler.manifest.batches) {
     for (const [batchId, batch] of Object.entries(scheduler.manifest.batches)) {
-      if (batch && batch.status === "blocked" && batch.recovery && batch.recovery.status === "retry_exhausted") {
+      if (batch && batch.status === "blocked" && batch.recovery
+          && ["retry_exhausted", "escalated_to_operator", "blocked_non_retryable"].includes(batch.recovery.status)) {
         batchInvocationRetryControl.exhausted.add(batchId);
         quarantinedBatchIds.add(batchId);
       }
@@ -1256,6 +1358,9 @@ function applySchedulerState(scheduler) {
   mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
   implementationRecoveryBatches = (scheduler.implementationRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
   stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
+  if (typeof remediationBatches !== "undefined") {
+    remediationBatches = (scheduler.remediationBatches || []).filter(result => result && isValidBatchId(result.batchId));
+  }
   retryPendingBatches = retryPendingBatchesOf(scheduler);
   for (const batchId of Array.isArray(scheduler.rescheduledRetryBatches) ? scheduler.rescheduledRetryBatches : []) {
     if (isValidBatchId(batchId)) retryPriorityBatchIds.add(batchId);
@@ -1651,28 +1756,38 @@ async function reworkDeliveryImplementation(recovery) {
   const failureContext = recovery && typeof recovery.failureContext === "object" && recovery.failureContext !== null
     ? recovery.failureContext
     : null;
+  let requireActualReview = false;
   if (failureContext) {
     const preparation = requireSuccess(await workflowAgent(
       `只执行 python -X utf8 "${stagePath}" prepare-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --failed-stage "${failureContext.failedStage}"。由 Runtime 核对已登记缺陷、打开必要阶段或对账既有修复提交。只返回 JSON，不修改代码、不领取 lease、不启动 TASK。`,
       { label: `prepare-repair-${batchId}`, phase: "Batch 阶段", schema: {
         type: "object", properties: { success: { type: "boolean" }, ok: { type: "boolean" }, error: { type: "string" }, status: { type: "string" },
+          requireActualReview: { type: "boolean" },
           batchId: { type: "string" }, worktreePath: { type: "string" }, branchName: { type: "string" }, commitSha: { type: "string" } },
         required: [], additionalProperties: false
       } }
     ), `prepare repair ${batchId}`);
     if (preparation.success !== true || preparation.batchId !== batchId
         || preparation.worktreePath !== batchWorktree || preparation.branchName !== batchBranch
-        || !usableString(preparation.commitSha) || !["ready", "reused"].includes(preparation.status)) {
+        || !usableString(preparation.commitSha) || !["ready", "reused", "review_required"].includes(preparation.status)) {
       throw new Error(`parallel_repair_preparation_invalid:${batchId}`);
     }
     if (preparation.status === "reused") return { ...preparation, status: "success", repairReused: true };
+    if (preparation.status === "review_required") return { ...preparation, status: "success", repairReused: true, requireActualReview: true };
+    requireActualReview = preparation.requireActualReview === true;
   }
-  const repaired = requireSuccess(await workflowAgent(
+  const result = await workflowAgent(
     implementationPrompt(batchId, batchWorktree, batchBranch, taskIds, batchWorkspaceRef, taskWorkspace,
       failureContext ? "rework" : "resume"),
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
-  ), `implementation rework ${batchId}`);
-  return { ...repaired, repairReused: false };
+  );
+  const reported = unwrap(result);
+  if (reported.status === "failed" && reported.batchId === batchId && reported.worktreePath === batchWorktree
+      && reported.branchName === batchBranch && usableString(reported.errorMessage)
+      && (!usableString(reported.commitSha) || reported.commitSha === recovery.commitSha)) {
+    return { ...reported, repairReused: false, requireActualReview };
+  }
+  return { ...requireSuccess(result, `implementation rework ${batchId}`), repairReused: false, requireActualReview };
 }
 
 async function recordSingleRepairResolution(recovery, repaired) {
@@ -1709,33 +1824,33 @@ async function blockImplementationFinding(delivery, staged, disposition) {
 }
 
 async function runDeliveryWithImplementationRepair(batchResult, initialOptions = {}) {
-  let delivery = batchResult;
-  const repairedStages = new Set();
-  let options = initialOptions;
-  for (;;) {
-    const staged = await runDeliveryReviewAndGate(delivery, options);
-    if (staged.status === "ready_to_candidate") return staged;
-    if (staged.status !== "implementation_rework_required") {
-      throw new Error(`unexpected_delivery_stage_result:${JSON.stringify(staged)}`);
-    }
-    if (!SINGLE_REPAIRABLE_STAGES.has(staged.failedStage) || repairedStages.has(staged.failedStage)) {
-      const deferred = await blockImplementationFinding(delivery, staged, "single_repair_already_used");
-      return { ...deferred, batchId: delivery.batchId, status: (deferred && deferred.status) || "retry_pending", failedStage: staged.failedStage };
-    }
-    repairedStages.add(staged.failedStage);
-    // Review -> one production repair -> seal -> next
-    // stage.  A repaired stage is recorded explicitly and never rerun in this
-    // first-version policy.
-    const priorCommitSha = delivery.commitSha;
-    const repaired = await reworkDeliveryImplementation(staged.recovery);
-    if (!usableString(repaired.commitSha) || (repaired.commitSha === priorCommitSha && repaired.repairReused !== true)) {
-      const deferred = await blockImplementationFinding(delivery, staged, "no_new_commit");
-      return { ...deferred, batchId: delivery.batchId, status: (deferred && deferred.status) || "retry_pending", failedStage: staged.failedStage };
-    }
-    delivery = repaired;
-    await recordSingleRepairResolution(staged.recovery, repaired);
-    options = { reviewResolvedByRepair: true };
+  const staged = initialOptions.repairFinding || await runDeliveryReviewAndGate(batchResult, initialOptions);
+  if (staged.status === "ready_to_candidate") return staged;
+  if (staged.status !== "implementation_rework_required") {
+    throw new Error(`unexpected_delivery_stage_result:${JSON.stringify(staged)}`);
   }
+  if (!SINGLE_REPAIRABLE_STAGES.has(staged.failedStage)) {
+    return blockImplementationFinding(batchResult, staged, "repair_stage_not_supported");
+  }
+  const recovery = staged.recovery;
+  const hasSeal = result => usableString(result.commitSha)
+    && (result.commitSha !== batchResult.commitSha || result.repairReused === true);
+  let repaired = await reworkDeliveryImplementation(recovery);
+  let requireActualReview = repaired.requireActualReview === true;
+  if (!hasSeal(repaired) && !requireActualReview && usableString(recovery.failureContext?.repairContextPath)) {
+    await requireSuccess(await workflowAgent(
+      `只执行 python -X utf8 "${stagePath}" reopen-second-repair --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchResult.batchId}"。由 Runtime 持久化第 2 轮返修门禁，原样返回 JSON。`,
+      { label: `reopen-second-repair-${batchResult.batchId}`, phase: "Batch 阶段" }
+    ), `reopen second repair ${batchResult.batchId}`);
+    requireActualReview = true;
+    repaired = await reworkDeliveryImplementation(recovery);
+  }
+  if (!hasSeal(repaired)) return blockImplementationFinding(batchResult, staged, repaired.errorMessage || "no_new_commit");
+  if (!requireActualReview) await recordSingleRepairResolution(recovery, repaired);
+  const reviewed = await runDeliveryReviewAndGate(repaired, { reviewResolvedByRepair: !requireActualReview });
+  return reviewed.status === "implementation_rework_required"
+    ? blockImplementationFinding(repaired, reviewed, "repair_budget_exhausted")
+    : reviewed;
 }
 
 async function continueRecoveredDelivery(recovery) {
@@ -1747,10 +1862,9 @@ async function continueRecoveredDelivery(recovery) {
       : {};
     return runDeliveryWithImplementationRepair(recovery, initialOptions);
   }
-  const repaired = await reworkDeliveryImplementation(recovery);
-  await recordSingleRepairResolution(recovery, repaired);
-  const options = { reviewResolvedByRepair: true };
-  return runDeliveryReviewAndGate(repaired, options);
+  return runDeliveryWithImplementationRepair(recovery, {
+    repairFinding: { status: "implementation_rework_required", failedStage: recovery.failureContext.failedStage, recovery },
+  });
 }
 
 async function resolveMergeCandidate(repositoryRef, wave, label, executionPhase) {
@@ -1769,8 +1883,9 @@ async function resolveMergeCandidate(repositoryRef, wave, label, executionPhase)
     },
     required: ["success"], additionalProperties: true,
   };
+  const workflowRetryArg = typeof label === "string" && label.startsWith("final-repair-candidate-") ? " --workflow-retry" : "";
   const prepared = unwrap(await workflowAgent(
-    `准备既有 Merge Train 候选的冲突解决：执行 python -X utf8 "${mergeTrainPath}" prepare-resolution ${bindingArgs} --attempt-id "${label}" --workflow-retry。` +
+    `准备既有 Merge Train 候选的冲突解决：执行 python -X utf8 "${mergeTrainPath}" prepare-resolution ${bindingArgs} --attempt-id "${label}"${workflowRetryArg}。` +
     `运行清单位置已知：${JSON.stringify(`${artifactWorkspace}/.autobizdevops/features/${feature}/.parallel-runs/${runId}/manifest.json`)}。无需搜索目录或读取插件源码定位产物。` +
     `完整保留命令返回的 runDir、manifestPath、contextPath、contextDigest、identityDigest、repositoryRef、wave、conflictedFiles；上下文包由插件准备。` +
     `使用 execute 的默认合法工作区，不把工具 cwd/workdir 切换到候选；候选目录由插件内部处理。只执行这个插件命令并返回 stdout JSON；失败时返回原始结果，不得自行解决、暂存或提交，不得创建候选或修改集成分支、基线分支。`,
@@ -2013,16 +2128,16 @@ async function runWorkspaceSyncQueue(initial) {
     ));
     if (result && result.repositoryRef === ref && inactiveRun(result)) return result;
     if (!result || typeof result.success !== "boolean" || result.repositoryRef !== ref
-        || (!["retry_wait", "failed"].includes(result.status) && hasFailureSignal(result)) || !["queued", "running", "pending", "retry_wait", "failed", "busy", "conflicted", "refresh_required", "synced", "skipped"].includes(result.status)) {
+        || (!["retry_wait", "failed", "escalated_sync"].includes(result.status) && hasFailureSignal(result)) || !["queued", "running", "pending", "retry_wait", "failed", "escalated_sync", "busy", "conflicted", "refresh_required", "synced", "skipped"].includes(result.status)) {
       throw new Error(`workspace_sync_receipt_invalid:${errorText(result)}`);
     }
     return result;
   };
-  const maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
+  const maxAttempts = typeof MAX_WORKFLOW_TRANSIENT_ATTEMPTS === "number" ? MAX_WORKFLOW_TRANSIENT_ATTEMPTS : 3;
   const failureCounts = workspaceSyncControl.failureCounts || (workspaceSyncControl.failureCounts = new Map());
   const resolverKey = typeof workflowInvocationId === "string" && workflowInvocationId ? workflowInvocationId : "default";
   const repoFailKey = `${resolverKey}:repo:${ref}`;
-  const jobFailKey = jobId => `${resolverKey}:job:${jobId}`;
+  const jobFailKey = jobId => `job:${jobId}`;
   const activeKeyOf = state => usableString(state && state.jobId) ? jobFailKey(state.jobId) : repoFailKey;
   const previousResult = workspaceSyncControl.results.get(ref);
   const hasNewerTarget = Boolean(
@@ -2032,10 +2147,10 @@ async function runWorkspaceSyncQueue(initial) {
       || (usableString(initial && initial.desiredSha) && initial.desiredSha !== previousResult.desiredSha && initial.desiredSha !== previousResult.targetSha))
   );
   if ((usableString(initial && initial.jobId) && (failureCounts.get(jobFailKey(initial.jobId)) || 0) >= maxAttempts)
-      || (!usableString(initial && initial.jobId) && (failureCounts.get(repoFailKey) || 0) >= maxAttempts)
-      || (previousResult && previousResult.status === "failed" && previousResult.exhaustedResolver === resolverKey && !hasNewerTarget)) {
+      || (!usableString(initial && initial.jobId) && (failureCounts.get(repoFailKey) || 0) >= maxAttempts && !hasNewerTarget)
+      || (previousResult && ["failed", "escalated_sync"].includes(previousResult.status) && !hasNewerTarget)) {
     const previous = previousResult || initial;
-    const exhaustedReceipt = { ...previous, ...initial, success: false, status: "failed", hasPending: true,
+    const exhaustedReceipt = { ...previous, ...initial, success: false, status: previous.status === "escalated_sync" ? "escalated_sync" : "failed", hasPending: true,
       exhaustedResolver: resolverKey,
       retryAttempts: maxAttempts, error: previous.error || initial.error || "workspace_sync_retry_limit_exceeded", retryAfterSeconds: 0 };
     workspaceSyncControl.results.set(ref, exhaustedReceipt);
@@ -2107,35 +2222,35 @@ async function runWorkspaceSyncQueue(initial) {
         const queueJob = Array.isArray(current.queue) && usableString(current.jobId)
           ? current.queue.find(item => item && item.jobId === current.jobId)
           : null;
-        if (queueJob && queueJob.failureResolver === resolverKey && Number.isInteger(queueJob.invocationFailures)) {
-          failureCounts.set(key, Math.max(failureCounts.get(key) || 0, queueJob.invocationFailures));
+        if (queueJob && Number.isInteger(queueJob.failures)) {
+          failureCounts.set(key, Math.max(failureCounts.get(key) || 0, queueJob.failures));
         } else if (!queueJob) {
           failureCounts.set(key, (failureCounts.get(key) || 0) + 1);
         }
-      } else if (current.status === "failed") {
+      } else if (["failed", "escalated_sync"].includes(current.status)) {
         failureCounts.set(key, maxAttempts);
       }
     }
     const currentFailures = failureCounts.get(key) || 0;
     if (currentFailures >= maxAttempts && !["synced", "skipped"].includes(current.status) && !inactiveRun(current)) {
-      current = { ...current, success: false, status: "failed", hasPending: true,
+      current = { ...current, success: false, status: current.status === "escalated_sync" ? "escalated_sync" : "failed", hasPending: true,
         exhaustedResolver: resolverKey,
         retryAttempts: currentFailures, error: current.error || "workspace_sync_retry_limit_exceeded", retryAfterSeconds: 0 };
-    } else if (current.status === "failed" && !current.exhaustedResolver) {
+    } else if (["failed", "escalated_sync"].includes(current.status) && !current.exhaustedResolver) {
       current = { ...current, exhaustedResolver: resolverKey };
     }
     workspaceSyncControl.results.set(ref, current);
     if (inactiveRun(current)) return current;
     for (const job of current.queue || []) {
-      if (job.status === "failed" && !workspaceSyncControl.notifications.some(item => item.jobId === job.jobId && item.status === "failed")) {
-        workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: job.jobId, status: "failed", error: job.error, batchIds: job.batchIds });
+      if (["failed", "escalated_sync"].includes(job.status) && !workspaceSyncControl.notifications.some(item => item.jobId === job.jobId && item.status === job.status)) {
+        workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: job.jobId, status: job.status, error: job.error, batchIds: job.batchIds });
       }
     }
-    if (current.error || ["retry_wait", "failed"].includes(current.status)) {
+    if (current.error || ["retry_wait", "failed", "escalated_sync"].includes(current.status)) {
       workspaceSyncControl.notifications.push({ repositoryRef: ref, jobId: current.jobId, status: current.status,
         error: current.error, retryAfterSeconds: current.retryAfterSeconds, pendingBatchIds: current.pendingBatchIds });
     }
-    if (["synced", "skipped", "failed"].includes(current.status)) return current;
+    if (["synced", "skipped", "failed", "escalated_sync"].includes(current.status)) return current;
     if (workspaceSyncControl.finishing) {
       if (current.lastSyncedSha && current.lastSyncedSha !== previousSyncedSha) finalPasses = 0;
       else if (++finalPasses >= 3) return current;
@@ -2457,6 +2572,40 @@ async function runLifecycleSafely(batchId, source, execute, fallback = {}, gener
   }
 }
 
+async function runRemediationBatchLifecycle(remediation) {
+  const batchId = remediation.batchId;
+  const grant = activeDispatchGrants.get(batchId);
+  if (!grant) throw new Error(`remediation_dispatch_grant_missing:${batchId}`);
+  const authArgs = `--dispatch-generation ${grant.generation} --dispatch-token "${grant.ownerToken}"`;
+  const inspected = requireSuccess(await workflowAgent(
+    `只执行 python -X utf8 "${remediationPath}" inspect-unattributed --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ${authArgs}。由 Runtime 在独占 worktree 锁下核验快照并重放未完成 WAL。原样返回完整 JSON。`,
+    { label: `remediation-inspect-${batchId}`, phase: "Batch 阶段" }
+  ), `inspect remediation ${batchId}`);
+  let verified = inspected.outcome === "escalated" ? inspected : null;
+  if (!verified && Array.isArray(inspected.unattributedFiles) && inspected.unattributedFiles.length > 0) {
+    if (!/^[a-f0-9]{64}$/.test(inspected.snapshotDigest)) throw new Error(`remediation_snapshot_invalid:${batchId}`);
+    const pathsArg = encodeFailure(JSON.stringify(inspected.unattributedFiles));
+    const healed = unwrap(await workflowAgent(
+      `Batch ${batchId} 检测到未归属前置变更：${JSON.stringify(inspected.unattributedFiles)}（已归属保护文件=${JSON.stringify(inspected.claimedFiles || [])}，严禁触碰）。` +
+      `若这些未归属文件可安全归档并恢复至 startSha，只执行 python -X utf8 "${remediationPath}" archive-and-restore-unattributed --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ${authArgs} --expected-snapshot-digest "${inspected.snapshotDigest}" --paths-b64 "${pathsArg}"；` +
+      `若无法安全恢复则执行 python -X utf8 "${remediationPath}" escalate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ${authArgs} --reason "unresolvable_unattributed_changes"。禁止直接运行裸 git reset/clean 或手工编辑文件。原样返回 JSON。`,
+      { label: `remediation-heal-${batchId}`, phase: "Batch 阶段" }
+    ));
+    if (healed.success === true && healed.outcome === "escalated") verified = healed;
+  }
+  verified ||= requireSuccess(await workflowAgent(
+    `只执行 python -X utf8 "${remediationPath}" verify-remediation --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" ${authArgs}。由 Runtime StageProgressValidator 核验未归属文件是否减少或清零。原样返回完整 JSON。`,
+    { label: `remediation-verify-${batchId}`, phase: "Batch 阶段" }
+  ), `verify remediation ${batchId}`);
+  if (verified.schedulerSnapshot) {
+    applySchedulerState(requireSchedulerResult(verified.schedulerSnapshot, `remediation snapshot ${batchId}`));
+    if (typeof deliveryControl !== "undefined") deliveryControl.finalized.set(batchId, grant.generation);
+  }
+  if (verified.outcome === "resolved") return { batchId, status: "remediation_resolved", durable: true };
+  if (verified.outcome === "partial_progress") return { batchId, status: "remediation_pending", durable: true };
+  return { batchId, status: "blocked", reason: verified.reasonCode || "remediation_escalated", durable: true };
+}
+
 function runnableScheduledBatchIds() {
   return normalizeScheduledGroups(scheduledGroups)
     .flat()
@@ -2491,10 +2640,17 @@ function takeNextRunnableLifecycle(claimedBatchIds, runningBatchIds = new Set())
   const scheduledBatchIds = runnableScheduledBatchIds();
   const implementationRecoveries = runnableImplementationRecoveries();
   const recoveries = runnableStageRecoveries();
+  const rawRemediations = typeof remediationBatches !== "undefined" && Array.isArray(remediationBatches)
+    ? remediationBatches
+    : (typeof lastScheduler === "object" && lastScheduler && Array.isArray(lastScheduler.remediationBatches)
+      ? lastScheduler.remediationBatches
+      : []);
+  const remediations = rawRemediations.filter(item => item && !quarantinedBatchIds.has(item.batchId));
   const mergeable = runnableMergeableBatchIds();
   const recoveredBatchIds = new Set([
     ...implementationRecoveries.map(item => item.batchId),
     ...recoveries.map(item => item.batchId),
+    ...remediations.map(item => item.batchId),
   ]);
   const mergeableBatchIds = new Set(mergeable);
   const claim = job => {
@@ -2528,6 +2684,15 @@ function takeNextRunnableLifecycle(claimedBatchIds, runningBatchIds = new Set())
       source: "implementation_recovery",
       execute: () => runImplementationRecoveryLifecycle(recovery),
       fallback: recovery,
+    });
+  }
+  for (const remediation of remediations) {
+    if (mergeableBatchIds.has(remediation.batchId)) continue;
+    candidates.push({
+      batchId: remediation.batchId,
+      source: "remediation",
+      execute: () => runRemediationBatchLifecycle(remediation),
+      fallback: remediation,
     });
   }
   for (const batchId of scheduledBatchIds) {
@@ -2658,6 +2823,7 @@ function dispatchHasPotentialWork(state) {
     || (Array.isArray(state.mergeableBatches) && state.mergeableBatches.some(unexhausted))
     || (Array.isArray(state.implementationRecoveryBatches) && state.implementationRecoveryBatches.some(item => item && unexhausted(item.batchId)))
     || (Array.isArray(state.stageRecoveryBatches) && state.stageRecoveryBatches.some(item => item && unexhausted(item.batchId)))
+    || (Array.isArray(state.remediationBatches) && state.remediationBatches.some(item => item && unexhausted(item.batchId)))
     || (Array.isArray(state.retryPendingBatches) && state.retryPendingBatches.some(unexhausted))
     || (Number.isInteger(state.activeWorkers) && state.activeWorkers > 0)
   );
@@ -2797,7 +2963,7 @@ async function runDispatchWorker(workerIndex, claimedBatchIds, drainLabel, dispa
           dispatcherState.ranAny = true;
           const result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback, job.generation);
           if (result && result.status === "queued") claimedBatchIds.delete(job.grantKey);
-          outcome = result && result.status === "retry_pending" ? "retry_pending" : result && ["merged", "ready_to_candidate"].includes(result.status) ? "completed" : "failed";
+          outcome = result && result.status === "retry_pending" ? "retry_pending" : result && ["merged", "ready_to_candidate", "remediation_resolved", "remediation_pending"].includes(result.status) ? "completed" : "failed";
         } else if (["capacity_full", "running", "business_lease_held", "resource_or_stage_conflict", "delivery_queue_wait"].includes(acquired.reasonCode)) {
           claimedBatchIds.delete(job.grantKey);
           claimDeferred = true;
@@ -2971,6 +3137,8 @@ function unresolvedBatchDetails(scheduler = lastScheduler) {
       status: batch.status || "unknown",
       error: batch.error || recovery.lastError,
       retryAttempts: Number.isInteger(recovery.retryAttempts) ? recovery.retryAttempts : 0,
+      transientRetryAttempts: Number.isInteger(recovery.transientRetryAttempts) ? recovery.transientRetryAttempts : 0,
+      remediationAttempts: Number.isInteger(recovery.remediationAttempts) ? recovery.remediationAttempts : 0,
       worktreePath: batch.worktreePath,
       branchName: batch.branchName,
       commitSha: batch.commitSha,
@@ -2978,17 +3146,23 @@ function unresolvedBatchDetails(scheduler = lastScheduler) {
       blockedBy,
       blocks,
       recoveryStatus: recovery.status,
+      escalationCategory: recovery.escalationCategory || null,
+      reasonCode: recovery.reasonCode || null,
+      rootCause: recovery.rootCause || null,
+      hookBlockCode: recovery.hookBlockCode || null,
+      escalatedAt: recovery.escalatedAt || null,
     });
   }
   for (const record of activeUnresolvedRecords()) {
     if (!isValidBatchId(record.batchId) || ["cleanup", "deferred_issue", "validation", "scheduler"].includes(record.kind)) continue;
     if (batchMap[record.batchId]?.status === "merged" && usableString(batchMap[record.batchId].mergeCommitSha)) continue;
     const existing = byId.get(record.batchId) || { batchId: record.batchId, dependencies: [], blockedBy: [], blocks: [] };
+    const isTerminal = ["retry_exhausted", "escalated_to_operator"].includes(record.recoveryStatus);
     byId.set(record.batchId, {
       ...existing,
-      status: record.recoveryStatus === "retry_exhausted" ? "blocked" : (existing.status || record.status || "unresolved"),
+      status: isTerminal ? "blocked" : (existing.status || record.status || "unresolved"),
       recoveryStatus: record.recoveryStatus || existing.recoveryStatus,
-      error: (record.recoveryStatus === "retry_exhausted" && record.error) || existing.error || record.error,
+      error: (isTerminal && record.error) || existing.error || record.error,
       worktreePath: existing.worktreePath || record.worktreePath,
       branchName: existing.branchName || record.branchName,
       durable: record.durable === true,
@@ -3092,9 +3266,73 @@ function completionReport({
     }
   }
   const workspaceSyncPending = [...workspaceSync.values()].filter(item => !["synced", "skipped"].includes(item.status));
+  const candidateHeldBatchIds = new Set(
+    mergeCandidates
+      .filter(item => ["candidate_conflicted", "needs_resolution"].includes(item.status))
+      .flatMap(item => Array.isArray(item.batchIds) ? item.batchIds : [])
+  );
+  const escalations = [
+    ...batches
+      .filter(batch => ["escalated_to_operator", "blocked_non_retryable", "retry_exhausted"].includes(batch.recoveryStatus))
+      .map(batch => ({
+        scope: "batch",
+        batchId: batch.batchId,
+        category: batch.escalationCategory || batch.recoveryStatus,
+        reasonCode: batch.reasonCode,
+        hookBlockCode: batch.hookBlockCode,
+        error: batch.rootCause || batch.error,
+        blocksDownstream: batch.blocks,
+        worktreePath: batch.worktreePath,
+        reopenCommand: candidateHeldBatchIds.has(batch.batchId)
+          ? "--reopen-candidate <repositoryRef>:<wave>:resume|rebuild"
+          : `--reopen-batch ${batch.batchId}`,
+      })),
+    ...mergeCandidates
+      .filter(item => ["candidate_conflicted", "needs_resolution"].includes(item.status))
+      .map(item => ({
+        scope: "merge_candidate",
+        repositoryRef: item.repositoryRef,
+        wave: item.wave,
+        batchIds: item.batchIds,
+        conflictedFiles: item.conflictedFiles,
+        worktreePath: item.worktreePath,
+        error: typeof errorText === "function" ? errorText(item.error) : String(item.error || ""),
+        reopenCommand: `--reopen-candidate ${item.repositoryRef}:${item.wave}:resume|rebuild`,
+      })),
+    ...workspaceSyncPending
+      .filter(item => item.status === "escalated_sync")
+      .map(item => ({
+        scope: "workspace_sync",
+        repositoryRef: item.repositoryRef,
+        jobId: item.jobId,
+        error: item.error,
+        reopenCommand: `--reopen-sync ${item.repositoryRef}`,
+      })),
+  ];
+  const resolvedManifest = typeof manifestFromScheduler === "function"
+    ? manifestFromScheduler(scheduler)
+    : (scheduler && scheduler.manifest);
+  const latestFinalization = typeof lastFinalizationReady === "object" && lastFinalizationReady?.finalization;
+  const manifestFinalization = latestFinalization || resolvedManifest?.finalization || scheduler?.finalization;
+  const finalizationEscalated = manifestFinalization?.status === "escalated_to_operator";
+  if (finalizationEscalated || verification?.escalated === true) {
+    escalations.push({
+      scope: "finalization",
+      category: finalizationEscalated ? manifestFinalization.escalationCategory || "finalization_escalated" : "blocking_errors",
+      error: (finalizationEscalated && manifestFinalization.lastError) || verification?.blockingErrors?.join(",") || verification?.error,
+      reopenCommand: "--reopen-finalization",
+    });
+  }
   if (["succeeded", "succeeded_with_issues"].includes(finalStatus) && workspaceSyncPending.length) {
     finalStatus = "succeeded_with_issues";
-    nextAction = "resume_workspace_sync";
+    nextAction = workspaceSyncPending.some(item => item.status === "escalated_sync")
+      ? "resolve_workspace_sync_then_reopen"
+      : "resume_workspace_sync";
+  } else if (finalStatus === "completed_with_unresolved" && escalations.length > 0) {
+    finalStatus = "blocked_escalated";
+    if (!nextAction || nextAction === "inspect_unresolved_batches_then_resume") {
+      nextAction = "resolve_escalated_batches_then_reopen";
+    }
   }
   const ok = ["succeeded", "succeeded_with_issues"].includes(finalStatus);
   const failureReasons = [
@@ -3133,6 +3371,7 @@ function completionReport({
     },
     retryPendingBatches: batches.filter(batch => batch.status === "retry_pending").map(batch => batch.batchId),
     blockedBatches: batches.filter(batch => ["blocked", "needs_resolution"].includes(batch.status)).map(batch => batch.batchId),
+    escalations,
     deferredIssues,
     finalRepair: {
       attempted: true,
@@ -3275,18 +3514,23 @@ async function attemptFinalCandidateRepair(record) {
   }
 }
 
-async function prepareDeliveryFinalization(label) {
+async function prepareDeliveryFinalization(label, attempt = {}) {
   try {
+    const options = attempt.id ? `--request-id "${attempt.id}" --step ${attempt.step}` : "--observe-only";
+    const blocked = attempt.blockedCheckpoint ? ` --blocked-checkpoint "${attempt.blockedCheckpoint}"` : "";
     const result = requireSuccess(await workflowAgent(
-      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" prepare-finalization --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。原样返回 success、status、repairRequired、batchIds；不返回调度快照，不执行测试或清理。`,
+      `只执行 python -X utf8 "${pluginPath}/hooks/parallel_delivery.py" prepare-finalization --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${options}${blocked}。原样返回完整 JSON，不执行测试或清理。`,
       { label, phase: "最终修复与报告", schema: FINALIZATION_RESULT_SCHEMA }
     ), "prepare finalization");
     if (inactiveRun(result)) return result;
     if (result.success !== true || !Array.isArray(result.batchIds)
-        || !["ready", "repair_required"].includes(result.status)
+        || !["ready", "repair_required", "escalated_to_operator"].includes(result.status)
         || result.repairRequired !== (result.status === "repair_required")
         || (result.status === "ready" && result.batchIds.length)) throw new Error("parallel_finalization_result_invalid");
     for (const sync of result.workspaceSync || []) enqueueWorkspaceSync(sync);
+    if (typeof lastFinalizationReady !== "undefined" && ["ready", "escalated_to_operator"].includes(result.status)) {
+      lastFinalizationReady = result;
+    }
     return result;
   } catch (error) {
     recordSchedulerFailure(label, error);
@@ -3301,8 +3545,12 @@ async function runFinalRepairAndReport() {
   if (v2 && !admission) return null;
   if (inactiveRun(admission)) return admission;
   const initial = await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
-  if (!initial) return null;
   if (inactiveRun(initial)) return initial;
+  if (admission?.status === "escalated_to_operator") {
+    const snapshot = initial || lastScheduler;
+    return snapshot ? { ...snapshot, finalization: admission.finalization } : null;
+  }
+  if (!initial) return null;
   if (admission && admission.status === "ready") return initial;
   await persistUndurableBatchFailures();
   for (const batch of (typeof unresolvedBatchDetails === "function" ? unresolvedBatchDetails() : [])) {
@@ -3375,6 +3623,7 @@ async function runFinalRepairAndReport() {
   if (v2 && final && allWorkflowDeliveriesMerged(final)) {
     const ready = await prepareDeliveryFinalization("prepare-delivery-finalization-after-repair");
     if (inactiveRun(ready)) return ready;
+    if (ready?.status === "escalated_to_operator") return { ...final, finalization: ready.finalization };
     if (!ready || ready.status !== "ready") return null;
     return readSchedulerState("final-repair-admitted-snapshot", "最终修复与报告");
   }
@@ -3395,18 +3644,20 @@ async function runUntilDeliveriesComplete() {
       final = await runFinalRepairAndReport();
       if (final) final = applySchedulerState(final);
       if (inactiveRun(lastScheduler)) return lastScheduler;
+      if (final?.finalization?.status === "escalated_to_operator") return final;
       if (allWorkflowDeliveriesMerged(final)) return final;
       const batches = Object.values(final && final.manifest && final.manifest.batches || {});
       const requiresOperator = batches.some(batch => (batch.status === "blocked"
         && batch.recovery && (batch.recovery.status === "blocked_non_retryable"
           || batch.recovery.status === "retry_exhausted"
+          || batch.recovery.status === "escalated_to_operator"
           || batch.recovery.failureClassification === "non_retryable"))
         || batch.status === "needs_resolution")
         || batchInvocationRetryControl.exhausted.size > 0;
       const isUnexhausted = batchId => !batchInvocationRetryControl.exhausted.has(batchId);
       const runnable = ["readyBatches", "mergeableBatches", "retryPendingBatches"].some(
           key => Array.isArray(final && final[key]) && final[key].some(isUnexhausted))
-        || ["implementationRecoveryBatches", "stageRecoveryBatches"].some(
+        || ["implementationRecoveryBatches", "stageRecoveryBatches", "remediationBatches"].some(
           key => Array.isArray(final && final[key]) && final[key].some(item => item && isUnexhausted(item.batchId)));
       if (requiresOperator && !runnable && final && final.activeWorkers === 0) return final;
     } catch (error) {
@@ -3438,19 +3689,52 @@ await drainWorkspaceSync();
 
 if (inactiveRun(finalScheduler) || !allWorkflowDeliveriesMerged(finalScheduler)) {
   const stopped = inactiveRun(finalScheduler);
+  const finalizationBlocked = !stopped && finalScheduler?.finalization?.status === "escalated_to_operator";
   return completionReport({
-    finalStatus: stopped ? finalScheduler.status : "completed_with_unresolved",
+    finalStatus: stopped ? finalScheduler.status : finalizationBlocked ? "blocked_escalated" : "completed_with_unresolved",
     scheduler: finalScheduler || lastScheduler,
-    nextAction: stopped ? "none" : "inspect_unresolved_batches_then_resume",
+    nextAction: stopped ? "none" : finalizationBlocked ? "resolve_finalization_blocker_then_reopen" : "inspect_unresolved_batches_then_resume",
   });
 }
 
 async function runFinalValidation() {
 phase("最终汇总");
-const maxAttempts = typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20;
-let verification;
-for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+const maxAttempts = typeof MAX_WORKFLOW_TRANSIENT_ATTEMPTS === "number"
+  ? MAX_WORKFLOW_TRANSIENT_ATTEMPTS
+  : (typeof MAX_WORKFLOW_RETRY_ATTEMPTS === "number" ? MAX_WORKFLOW_RETRY_ATTEMPTS : 20);
+const readyState = typeof lastFinalizationReady === "object" && lastFinalizationReady ? lastFinalizationReady : null;
+const durableFinalization = typeof prepareDeliveryFinalization === "function" && Boolean(readyState?.finalization)
+  && typeof workflowInvocationId === "string" && /^[a-f0-9]{32}$/.test(workflowInvocationId);
+const reconcileFinalization = async (step, attempt, blockedCheckpoint = null) => {
+  if (!durableFinalization) return null;
+  const id = attempt == null ? null : `${workflowInvocationId}:${step}:${attempt}`;
+  const state = await prepareDeliveryFinalization(`finalization-${step}-${attempt ?? "reconcile"}`, { id, step, blockedCheckpoint });
+  if (!state || !["ready", "escalated_to_operator"].includes(state.status)) {
+    throw new Error(`finalization_${step}_ledger_unavailable`);
+  }
+  return state;
+};
+if (readyState && readyState.status === "escalated_to_operator") {
+  return completionReport({
+    finalStatus: "blocked_escalated",
+    scheduler: finalScheduler || lastScheduler,
+    verification: { error: readyState.finalization && readyState.finalization.lastError || "finalization_escalated" },
+    nextAction: "resolve_finalization_blocker_then_reopen",
+  });
+}
+let verification = readyState && readyState.aggregateReceipt && typeof readyState.aggregateReceipt === "object"
+  ? readyState.aggregateReceipt
+  : null;
+for (let attempt = 1; !verification && attempt <= maxAttempts; attempt += 1) {
 try {
+  const admission = await reconcileFinalization("aggregate", attempt);
+  if (admission?.status === "escalated_to_operator") {
+    throw Object.assign(new Error(admission.finalization?.lastError || "finalization_escalated"), { escalated: true });
+  }
+  if (admission?.aggregateReceipt) {
+    verification = admission.aggregateReceipt;
+    break;
+  }
   verification = unwrap(await workflowAgent(
     `执行 python -X utf8 "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --finish-workflow。` +
     `只汇总当前集成提交的交付与 Review 证据，不创建验证 Worktree 或准备测试环境。这是 evidence 审计汇总：禁止执行任何编译、测试或 E2E 命令。passed=false 表示校验未通过，保留全部 errors 如实报告，不重跑前面阶段、不改写旧 Evidence；ok=true 且 blockingErrors 为空时直接完成，不询问用户是否合并或验收，不执行 promote、commit 或 reset。原样返回 JSON，完整保留 Runtime 本次读取的 workspaceSync 和 repositoryHeads，禁止用之前的同步回执替换。`,
@@ -3466,21 +3750,33 @@ try {
       || !Array.isArray(verification.workspaceSync) || !verification.repositoryHeads
       || typeof verification.repositoryHeads !== "object" || Array.isArray(verification.repositoryHeads)
       || verification.blockingErrors.length) {
-    throw new Error(`evidence_aggregate_incomplete:${JSON.stringify(verification)}`);
+    const failedAgg = new Error(`evidence_aggregate_incomplete:${JSON.stringify(verification)}`);
+    failedAgg.escalated = Boolean(verification && verification.escalated === true);
+    throw failedAgg;
   }
   break;
 } catch (error) {
   recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error });
-  if (attempt >= maxAttempts) {
+  let escalated = error?.escalated === true;
+  if (!escalated && attempt >= maxAttempts) {
+    const settled = await reconcileFinalization("aggregate", null).catch(() => null);
+    if (settled?.aggregateReceipt) {
+      verification = settled.aggregateReceipt;
+      break;
+    }
+    escalated = settled?.status === "escalated_to_operator";
+  }
+  if (escalated || attempt >= maxAttempts) {
     return completionReport({
-      finalStatus: "completed_with_validation_failure",
+      finalStatus: escalated ? "blocked_escalated" : "completed_with_validation_failure",
       scheduler: finalScheduler || lastScheduler,
       verification: verification && typeof verification === "object"
         ? { ...verification, error: errorText(error), retryAttempts: attempt }
         : { error: errorText(error), retryAttempts: attempt },
-      nextAction: "inspect_evidence_aggregate_failure",
+      nextAction: escalated ? "resolve_finalization_blocker_then_reopen" : "inspect_evidence_aggregate_failure",
     });
   }
+  verification = null;
   await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
 }
 }
@@ -3492,8 +3788,19 @@ for (const record of unresolvedRecords) {
 }
 
 const hasAuditIssues = verification.hasIssues || verification.hasDeferredIssues || !verification.passed || verification.errors.length > 0;
+if (readyState && readyState.codeCheckpointReceipt && readyState.codeCheckpointReceipt.new_checkpoint === "code_done") {
+  verification.codeCheckpoint = readyState.codeCheckpointReceipt;
+} else {
 for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
 try {
+  const admission = await reconcileFinalization("code_done", attempt);
+  if (admission?.status === "escalated_to_operator") {
+    throw Object.assign(new Error(admission.finalization?.lastError || "finalization_escalated"), { escalated: true });
+  }
+  if (admission?.codeCheckpointReceipt) {
+    verification.codeCheckpoint = admission.codeCheckpointReceipt;
+    break;
+  }
   const checkpoint = unwrap(await workflowAgent(
     `只执行 python -X utf8 "${joinPath(pluginPath, "hooks/update_checkpoint.py")}" --feature "${feature}" --checkpoint code_done --json --code-run-id "${runId}"。` +
     `使用插件环境中的 artifact workspace "${artifactWorkspace}"，不传 --workspace、不手改状态文件、不跳过现有产物和证据校验。清理 pending 不阻止 Code 完成；成功后不启动下一阶段、不询问用户是否合并。原样返回 JSON。`,
@@ -3508,17 +3815,29 @@ try {
   }
   break;
 } catch (error) {
-  if (attempt >= maxAttempts) {
+  const deterministicCheckpoint = /autodev artifact hook failed|postcheck|blocked_by_hook|evidence_integrity/i.test(errorText(error));
+  let escalated = error?.escalated === true || deterministicCheckpoint;
+  if (deterministicCheckpoint || (!escalated && attempt >= maxAttempts)) {
+    const blocked = deterministicCheckpoint && durableFinalization ? `${workflowInvocationId}:code_done:${attempt}` : null;
+    const settled = await reconcileFinalization("code_done", null, blocked).catch(() => null);
+    if (settled?.codeCheckpointReceipt) {
+      verification.codeCheckpoint = settled.codeCheckpointReceipt;
+      break;
+    }
+    escalated ||= settled?.status === "escalated_to_operator";
+  }
+  if (escalated || attempt >= maxAttempts) {
     recordUnresolved({ kind: "validation", status: "code_checkpoint_failed", durable: false, error });
     return completionReport({
-      finalStatus: "completed_with_checkpoint_failure",
+      finalStatus: escalated ? "blocked_escalated" : "completed_with_checkpoint_failure",
       scheduler: finalScheduler || lastScheduler,
       verification: { ...verification, checkpointError: errorText(error), retryAttempts: attempt },
-      nextAction: "retry_code_checkpoint",
+      nextAction: escalated ? "resolve_finalization_blocker_then_reopen" : "retry_code_checkpoint",
     });
   }
   phase(`完成登记恢复：${errorText(error)}`);
   await waitWorkspaceSyncRetry(Math.min(30, attempt * 5));
+}
 }
 }
 return completionReport({

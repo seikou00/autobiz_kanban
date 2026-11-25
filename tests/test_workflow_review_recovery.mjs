@@ -112,3 +112,38 @@ test("an implementer cannot claim Runtime repair reuse through its own response"
   const result = await c.reworkDeliveryImplementation({ ...delivery, failureContext: { failedStage: "review", message: "finding" } });
   assert.equal(result.repairReused, false);
 });
+
+test("a first repair without a seal opens round two and reviews the new seal", async () => {
+  const { c, load } = harness();
+  load("async function reworkDeliveryImplementation(", "async function recordSingleRepairResolution(");
+  load("async function runDeliveryWithImplementationRepair(", "async function continueRecoveredDelivery(");
+  c.batchTaskWorkspace = () => "/tree";
+  c.implementationPrompt = () => "repair";
+  const finding = { status: "implementation_rework_required", failedStage: "review",
+    recovery: { ...delivery, failureContext: { failedStage: "review", repairContextPath: "/repair.json" } } };
+  const events = [];
+  c.runDeliveryReviewAndGate = async (candidate, options) => {
+    events.push(["review", candidate.commitSha, options.reviewResolvedByRepair === true]);
+    return candidate.commitSha === delivery.commitSha ? finding : { status: "ready_to_candidate" };
+  };
+  c.workflowAgent = async (_, { label }) => {
+    if (label.startsWith("prepare-repair-")) {
+      return { ...delivery, status: "ready", success: true,
+        requireActualReview: events.some(([event]) => event === "reopen-second-repair-B001") };
+    }
+    if (label === "reopen-second-repair-B001") {
+      events.push([label]);
+      return { success: true };
+    }
+    assert.equal(label, "rework-implement-B001");
+    events.push(["repair"]);
+    return events.filter(([event]) => event === "repair").length === 1
+      ? { ...delivery, status: "failed", errorMessage: "compile failed" }
+      : { ...delivery, status: "success", commitSha: "second-seal" };
+  };
+  c.recordSingleRepairResolution = async () => assert.fail("second repair requires a real Review");
+  assert.equal((await c.runDeliveryWithImplementationRepair(delivery)).status, "ready_to_candidate");
+  assert.deepEqual(events, [
+    ["review", delivery.commitSha, false], ["repair"], ["reopen-second-repair-B001"], ["repair"], ["review", "second-seal", false],
+  ]);
+});

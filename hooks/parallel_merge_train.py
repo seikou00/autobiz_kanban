@@ -923,11 +923,23 @@ def prepare_resolution(workspace: Path, feature: str, run_id: str, wave: int, re
             if previous and (previous.get("parents") != parents or previous.get("outsideDiffDigest") != outside):
                 raise ValueError("candidate_resolution_git_state_changed")
             same_attempt = bool(attempt_id and previous.get("status") == "running" and previous.get("attemptId") == attempt_id)
-            if not workflow_retry and not same_attempt and context.attempts >= maximum:
+            effective_limit = maximum + (1 if workflow_retry else 0)
+            if not same_attempt and context.attempts >= effective_limit:
                 if previous:
                     previous["status"] = "exhausted"
-                    record["status"] = "needs_resolution"
-                    save_manifest(workspace, feature, run_id, manifest)
+                record["status"] = "needs_resolution"
+                from hooks.parallel_batch_scheduler import _escalate_batch_locked
+                for bid in context.batch_ids:
+                    batch_entry = (manifest.get("batches") or {}).get(bid)
+                    if isinstance(batch_entry, dict) and batch_entry.get("status") != "merged":
+                        _escalate_batch_locked(
+                            workspace, feature, run_id, manifest, bid, batch_entry,
+                            error="max_resolution_attempts_exceeded",
+                            reason_code="max_resolution_attempts_exceeded",
+                            category="candidate_conflict_exhausted",
+                            classification="precondition",
+                        )
+                save_manifest(workspace, feature, run_id, manifest)
                 raise ValueError("max_resolution_attempts_exceeded")
             locations = prepare_context(workspace, feature, run_id, manifest, record, path, files, parents)
             record["resolutionContext"] = locations

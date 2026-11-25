@@ -35,8 +35,8 @@ class BatchControlOperationsTest(unittest.TestCase):
         self.assertEqual(finish_review(*args, decision='passed')['evidenceId'], passed['evidenceId'])
         self.assertEqual(prepare_review(*args)['requiredAction'], 'reuse_review_result')
         checkpoint = review_checkpoint(*args)
-        self.assertEqual(checkpoint['utestPreparation']['status'], 'test_required')
-        self.assertEqual([a['batchId'] for a in checkpoint['utestPreparation']['assignments']], ['B001'])
+        self.assertEqual(checkpoint['status'], 'passed')
+        self.assertNotIn('utestPreparation', checkpoint)
 
     def test_triage_never_prepares_utest(self):
         f = self.feature()
@@ -44,7 +44,8 @@ class BatchControlOperationsTest(unittest.TestCase):
         prepare_review(*args)
         finish_review(*args, decision='needs_triage', message='T001 missing public contract')
         checkpoint = review_checkpoint(*args)
-        self.assertEqual(checkpoint['status'], 'needs_triage')
+        self.assertEqual(checkpoint['status'], 'passed')
+        self.assertEqual(checkpoint['advisories'][0]['type'], 'needs_triage')
         self.assertNotIn('utestPreparation', checkpoint)
 
     def test_stale_dispatch_cannot_use_combined_operations(self):

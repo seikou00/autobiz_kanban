@@ -55,6 +55,18 @@ function harness() {
   return c;
 }
 
+test("durable provision contention does not exhaust the local failure budget", () => {
+  const c = harness();
+  for (let generation = 1; generation <= 3; generation += 1) {
+    c.applySchedulerState(snapshot(generation, "pending", generation * 1000));
+    c.observeLifecycleResult("B002", "initial", {
+      status: "retry_pending", durable: true,
+      finalized: { status: "retry_pending", reasonCode: "parallel_worktree_provision_lock_busy" },
+    }, generation);
+  }
+  assert.equal(vm.runInContext('batchInvocationRetryControl.exhausted.has("B002")', c), false);
+});
+
 test("a consumed claim refreshes to the next generation before starting delivery", async () => {
   const c = harness(), events = [];
   let current = snapshot(3, "pending", 1000);
@@ -217,8 +229,8 @@ test("B002 reaches implementation despite a late old failure while B001 is still
   assert.deepEqual(events, ["resume:B002:2", "claim:B002:2", "implement:B002:T004", "finish:B002:2"]);
 });
 
-test("repeated model failures recover within 20 attempts and stop at 20 with failure reason", async () => {
-  // Case 1: 19 failures followed by success on attempt 20 still merges.
+test("repeated transient model failures recover within 3 attempts (1+2) and escalate at 3 with structured escalations", async () => {
+  // Case 1: 2 transient failures followed by success on attempt 3 still merges.
   {
     const c = harness();
     let attempts = 0, generation = 1, epoch = 0;
@@ -242,18 +254,18 @@ test("repeated model failures recover within 20 attempts and stop at 20 with fai
       status: action === "claim" ? "claimed" : "finished", batchId: job.batchId, ownerToken: "owner" });
     c.runInitialBatchLifecycle = async batchId => {
       attempts += 1;
-      current = state(attempts < 20 ? "retry_pending" : "merged");
-      return { batchId, status: attempts < 20 ? "retry_pending" : "merged", durable: true,
-        reason: attempts < 20 ? "empty_agent_output" : undefined };
+      current = state(attempts < 3 ? "retry_pending" : "merged");
+      return { batchId, status: attempts < 3 ? "retry_pending" : "merged", durable: true,
+        reason: attempts < 3 ? "empty_agent_output" : undefined };
     };
     c.waitForDispatchChange = async () => assert.fail("ready retries must continue dispatching");
     await c.runDispatchWorker(1, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
-    assert.equal(attempts, 20);
+    assert.equal(attempts, 3);
     assert.equal(c.lastScheduler.manifest.batches.B002.status, "merged");
     assert.equal(c.activeUnresolvedRecords().length, 0);
   }
 
-  // Case 2: 20 failures stop retrying immediately and surface the failure reason.
+  // Case 2: 3 transient failures stop retrying immediately and surface structured escalation.
   {
     const c = harness();
     vm.runInContext(source.slice(source.indexOf("function manifestFromScheduler("),
@@ -277,10 +289,17 @@ test("repeated model failures recover within 20 attempts and stop at 20 with fai
     c.applySchedulerState(current);
     c.agent = async (_, options) => {
       if (options.label.endsWith("resume-retry-pending")) {
-        if (attempts >= 20) {
+        if (attempts >= 3) {
           current = state("blocked");
-          current.manifest.batches.B002.error = "empty_agent_output_20";
-          current.manifest.batches.B002.recovery = { status: "retry_exhausted", retryAttempts: 20, lastError: "empty_agent_output_20" };
+          current.manifest.batches.B002.error = "empty_agent_output_3";
+          current.manifest.batches.B002.recovery = {
+            status: "escalated_to_operator",
+            retryAttempts: 3,
+            transientRetryAttempts: 3,
+            escalationCategory: "transient_exhausted",
+            reasonCode: "transient_retry_budget_exhausted",
+            lastError: "empty_agent_output_3",
+          };
           return { ...current, retryExhaustedBatches: ["B002"], rescheduledRetryBatches: [] };
         }
         generation += 1;
@@ -293,18 +312,23 @@ test("repeated model failures recover within 20 attempts and stop at 20 with fai
       status: action === "claim" ? "claimed" : "finished", batchId: job.batchId, ownerToken: "owner" });
     c.runInitialBatchLifecycle = async batchId => {
       attempts += 1;
-      assert.ok(attempts <= 20, "must not retry beyond 20 attempts in a single workflow launch");
+      assert.ok(attempts <= 3, "must not retry beyond 3 attempts (1+2) in a single workflow launch");
       current = state("retry_pending");
       return { batchId, status: "retry_pending", durable: true, reason: `empty_agent_output_${attempts}` };
     };
     c.waitForDispatchChange = async () => assert.fail("exhausted batch must stop without idle polling");
     await c.runDispatchWorker(1, new Set(), "drain", { active: 0, ranAny: false, runningBatchIds: new Set() });
-    assert.equal(attempts, 20);
-    assert.equal(c.schedulerCycles, 20);
+    assert.equal(attempts, 3);
+    assert.equal(c.schedulerCycles, 3);
     const report = c.completionReport({ finalStatus: "completed_with_unresolved", scheduler: c.lastScheduler });
     assert.equal(report.ok, false);
+    assert.equal(report.finalStatus, "blocked_escalated");
+    assert.equal(report.nextAction, "resolve_escalated_batches_then_reopen");
     assert.deepEqual(Array.from(report.blockedBatches), ["B002"]);
-    assert.match(report.error, /empty_agent_output_20/);
+    assert.equal(report.escalations.length, 1);
+    assert.equal(report.escalations[0].batchId, "B002");
+    assert.equal(report.escalations[0].reopenCommand, "--reopen-batch B002");
+    assert.match(report.error, /empty_agent_output_3/);
   }
 });
 
@@ -567,4 +591,26 @@ test("final repair shares the 20-attempt resume budget across dispatch and outer
   // Calling runFinalRepairAndReport again in the same invocation makes 0 additional resume calls.
   await c.runFinalRepairAndReport();
   assert.equal(resumeCalls, 20);
+});
+
+test("remediationBatches claim source=remediation and Round-2 repair forces actual Review", async () => {
+  const c = harness();
+  const snap = snapshot(2, "remediation_pending", 2000);
+  snap.scheduledGroups = [];
+  snap.readyBatches = [];
+  snap.allReadyBatches = [];
+  snap.retryPendingBatches = [];
+  snap.remediationBatches = [{
+    batchId: "B002",
+    worktreePath: "/worktrees/B002",
+    branchName: "b2",
+    recoveryKind: "remediation",
+    preserveWorktree: true,
+    reprovision: false,
+  }];
+  c.applySchedulerState(snap);
+  const job = c.takeNextRunnableLifecycle(new Set(), new Set());
+  assert.equal(job.batchId, "B002");
+  assert.equal(job.source, "remediation");
+  assert.equal(job.generation, 2);
 });

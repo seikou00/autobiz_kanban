@@ -459,7 +459,111 @@ def finalization_inputs(manifest: dict) -> dict:
             "planDigest": manifest["planDigest"]}
 
 
-def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
+def _reconcile_finalization_locked(
+    workspace: Path, feature: str, run_id: str, manifest: dict, heads: dict[str, str], *,
+    begin_attempt: bool = True, request_id: str | None = None, blocked_checkpoint: str | None = None,
+    requested_step: str | None = None,
+) -> dict:
+    """Reconcile finalization durable receipts (P0) and pre-dispatch inFlightAttempt crashes (P3/P2)."""
+    from board_core.state_store import load_state_json_records_result
+    from hooks.parallel_evidence_aggregate import evidence_state_digest, repository_heads
+    from hooks.parallel_failure import MAX_TRANSIENT_EXTRA_RETRIES
+
+    heads_digest = hashlib.sha256(json.dumps(heads, sort_keys=True).encode()).hexdigest()
+    ev_digest = evidence_state_digest(manifest)
+    fin = manifest.get("finalization")
+    if not isinstance(fin, dict) or fin.get("headsDigest") != heads_digest:
+        fin = {
+            "headsDigest": heads_digest,
+            "status": "pending",
+            "transientFailures": 0,
+            "chargedAttemptIds": [],
+            "inFlightAttempt": None,
+        }
+    manifest["finalization"] = fin
+
+    # P0 check 1: durable final-evidence-aggregate.json matching repositoryHeads + evidenceStateDigest.
+    aggregate_receipt = None
+    agg_path = run_dir(workspace, feature, run_id) / "final-evidence-aggregate.json"
+    if agg_path.is_file() and manifest.get("workflowCompletedAt"):
+        try:
+            saved = json.loads(agg_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(saved, dict)
+                and saved.get("repositoryHeads") == repository_heads(manifest)
+                and saved.get("evidenceStateDigest") == ev_digest
+                and not saved.get("blockingErrors")
+            ):
+                aggregate_receipt = {"ok": True, "success": True, **saved, "reconciled": True}
+        except (OSError, json.JSONDecodeError):
+            aggregate_receipt = None
+
+    # P0 check 2: durable state.json code_done checkpoint.
+    checkpoint_receipt = None
+    try:
+        state_res = load_state_json_records_result(workspace)
+        if state_res.exists and not state_res.fatal_errors:
+            rec = state_res.records.get(feature)
+            if isinstance(rec, dict) and rec.get("checkpoint") == "code_done":
+                checkpoint_receipt = {"ok": True, "new_checkpoint": "code_done", "reconciled": True}
+    except Exception:
+        checkpoint_receipt = None
+
+    in_flight = fin.get("inFlightAttempt")
+    if isinstance(in_flight, dict):
+        step = in_flight.get("step")
+        attempt_id = str(in_flight.get("attemptId") or "")
+        receipt_satisfied = (
+            (step == "aggregate" and aggregate_receipt is not None)
+            or (step == "code_done" and checkpoint_receipt is not None)
+        )
+        if receipt_satisfied:
+            fin["inFlightAttempt"] = None
+        elif step == "code_done" and blocked_checkpoint == attempt_id:
+            fin.update(status="escalated_to_operator", escalatedAt=utc_now(),
+                       escalationCategory="checkpoint_blocking_error", lastError="code_done_checkpoint_blocked",
+                       inFlightAttempt=None)
+        elif not request_id or request_id != attempt_id:
+            charged = list(fin.get("chargedAttemptIds") or [])
+            if attempt_id and attempt_id not in charged:
+                charged.append(attempt_id)
+                fin["chargedAttemptIds"] = charged[-20:]
+                fin["transientFailures"] = int(fin.get("transientFailures", 0)) + 1
+                fin["lastError"] = f"finalization_{step or 'step'}_interrupted_before_receipt"
+                if fin["transientFailures"] > MAX_TRANSIENT_EXTRA_RETRIES:
+                    fin["status"] = "escalated_to_operator"
+                    fin["escalatedAt"] = utc_now()
+                    fin["escalationCategory"] = "finalization_transient_exhausted"
+            fin["inFlightAttempt"] = None
+
+    if checkpoint_receipt is not None and aggregate_receipt is not None:
+        fin["status"] = "completed"
+        fin["inFlightAttempt"] = None
+    next_step = "code_done" if aggregate_receipt is not None else "aggregate"
+    if (begin_attempt and not fin.get("inFlightAttempt") and fin.get("status") not in {"completed", "escalated_to_operator"}
+            and requested_step in {None, next_step}):
+        seq = int(fin.get("attemptSequence", 0)) + 1
+        fin["attemptSequence"] = seq
+        fin["status"] = "running"
+        fin["inFlightAttempt"] = {
+            "step": next_step,
+            "attemptId": request_id or f"{manifest.get('activeInvocationId') or run_id}:{next_step}:{seq}",
+            "repositoryHeadsDigest": heads_digest,
+            "evidenceStateDigest": ev_digest,
+            "startedAt": utc_now(),
+        }
+    return {
+        "finalization": fin,
+        "aggregateReceipt": aggregate_receipt,
+        "codeCheckpointReceipt": checkpoint_receipt,
+    }
+
+
+def prepare_finalization(
+    workspace: Path, feature: str, run_id: str, *, reopen: bool = False,
+    begin_attempt: bool = True, request_id: str | None = None, blocked_checkpoint: str | None = None,
+    requested_step: str | None = None,
+) -> dict:
     from hooks.plan_json import load_plan_bundle
     from hooks.json_writer_common import feature_dir
     from hooks.parallel_integration import assert_integration, git
@@ -485,6 +589,23 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
             heads[ref] = git(repo, "rev-parse", "HEAD")
             if heads[ref] != binding.get("headSha"):
                 raise ValueError("delivery_finalization_head_changed")
+        if reopen:
+            manifest.pop("finalization", None)
+        reconciled = _reconcile_finalization_locked(
+            workspace, feature, run_id, manifest, heads,
+            begin_attempt=begin_attempt, request_id=request_id, blocked_checkpoint=blocked_checkpoint,
+            requested_step=requested_step,
+        )
+        fin = reconciled["finalization"]
+        if fin.get("status") == "escalated_to_operator":
+            save_manifest(workspace, feature, run_id, manifest)
+            return {
+                "success": True,
+                "status": "escalated_to_operator",
+                "repairRequired": False,
+                "batchIds": [],
+                "finalization": fin,
+            }
         receipt = finalization_inputs(manifest)
         receipt["digest"] = hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()
         manifest["finalizationReceipt"] = receipt
@@ -492,8 +613,14 @@ def prepare_finalization(workspace: Path, feature: str, run_id: str) -> dict:
         workspace_sync = [request_sync_locked(manifest, ref) for ref, binding in manifest["repositories"].items()
                           if binding.get("integrationRepositoryRef", ref) == ref]
         save_manifest(workspace, feature, run_id, manifest)
-    return {"success": True, "status": "ready", "repairRequired": False,
-            "batchIds": [], "cleanupPending": pending(manifest), "workspaceSync": workspace_sync}
+    out = {"success": True, "status": "ready", "repairRequired": False,
+           "batchIds": [], "cleanupPending": pending(manifest), "workspaceSync": workspace_sync,
+           "finalization": fin}
+    if reconciled["aggregateReceipt"] is not None:
+        out["aggregateReceipt"] = reconciled["aggregateReceipt"]
+    if reconciled["codeCheckpointReceipt"] is not None:
+        out["codeCheckpointReceipt"] = reconciled["codeCheckpointReceipt"]
+    return out
 
 
 def upgrade_protocol(workspace: Path, feature: str, run_id: str) -> dict:
@@ -532,6 +659,12 @@ def build_parser():
         command = commands.add_parser(action)
         for name in ("workspace", "feature", "run-id"):
             command.add_argument("--" + name, required=True)
+        if action == "prepare-finalization":
+            command.add_argument("--reopen", action="store_true")
+            command.add_argument("--observe-only", action="store_true")
+            command.add_argument("--request-id")
+            command.add_argument("--blocked-checkpoint")
+            command.add_argument("--step", choices=("aggregate", "code_done"))
         if action == "settle-delivery":
             for name in ("batch-id", "dispatch-token"):
                 command.add_argument("--" + name, required=True)
@@ -549,7 +682,11 @@ def main(argv=None):
             result = settle_delivery(workspace, feature, args.run_id, args.batch_id, args.dispatch_generation,
                                      args.dispatch_token, args.expected_commit, reviewed_candidate=args.reviewed_candidate)
         elif args.action == "prepare-finalization":
-            result = prepare_finalization(workspace, feature, args.run_id)
+            result = prepare_finalization(
+                workspace, feature, args.run_id, reopen=args.reopen, begin_attempt=not args.observe_only,
+                request_id=args.request_id, blocked_checkpoint=args.blocked_checkpoint,
+                requested_step=args.step,
+            )
         else:
             result = upgrade_protocol(workspace, feature, args.run_id)
     except (OSError, ValueError, KeyError) as exc:

@@ -12,6 +12,10 @@ import sys
 import hashlib
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 PROTECTED_ROOT_FILES = {
     "ARTIFACT_CATALOG.json",
@@ -25,6 +29,7 @@ PROTECTED_ROOT_FILES = {
 }
 PROTECTED_RUNTIME_FILES = {
     "CRITIC_REVIEWS.jsonl",
+    "workflow-prepare-state.json",
 }
 PROTECTED_EVIDENCE_FILES = {"EVIDENCE.jsonl", "EVIDENCE.index.json"}
 PROTECTED_STATE_FILES = {"state.json"}
@@ -84,7 +89,7 @@ def protected_path(raw_path):
         return True
     if ".parallel-runs" in candidate_parts:
         index = candidate_parts.index(".parallel-runs")
-        if len(candidate_parts) > index + 2 and candidate_parts[index + 2] in {"utest", "engineering", "dispatch"}:
+        if len(candidate_parts) > index + 2 and candidate_parts[index + 2] in {"utest", "engineering", "dispatch", "recovery-archives", "diagnostics"}:
             return True
     if (
         candidate.name in PROTECTED_RUNTIME_FILES
@@ -143,7 +148,7 @@ def _mentions_protected_artifact(command):
     markers = PROTECTED_ROOT_FILES | PROTECTED_RUNTIME_FILES | PROTECTED_EVIDENCE_FILES | PROTECTED_STATE_FILES
     normalized = command.replace("\\", "/")
     return "/frontend-verification/" in normalized or "/frontend-route/" in normalized or "/.engineering/" in normalized or (".parallel-runs/" in normalized and any(
-        marker in normalized for marker in ("/utest/", "/engineering/", "/dispatch/"))) or PROTECTED_DRAFT_MARKER in normalized or any(
+        marker in normalized for marker in ("/utest/", "/engineering/", "/dispatch/", "/recovery-archives/", "/diagnostics/"))) or PROTECTED_DRAFT_MARKER in normalized or any(
         marker in command for marker in markers
     )
 
@@ -197,12 +202,30 @@ def _mutates(command):
     return bool(re.search(r"(?:^|[\s;&|])(?:[012]?>>?)\s*\S", command))
 
 
+def _record_block(payload, error_code, target_path=None, command=""):
+    try:
+        from hooks.parallel_failure import record_hook_block
+        record_hook_block(
+            workspace=_workspace_root(),
+            feature=str(os.environ.get("FEATURE_ID", "") or "").strip() or None,
+            hook_name="runtime_artifact_guard",
+            error_code=error_code,
+            blocked_tool=str((payload or {}).get("tool_name") or (payload or {}).get("toolName") or "execute"),
+            command=command,
+            target_path=target_path,
+            host_dispatch_auth=(payload or {}).get("hostDispatchAuth") if isinstance((payload or {}).get("hostDispatchAuth"), dict) else None,
+        )
+    except Exception:
+        pass
+
+
 def guard(payload):
     tool_name = str(payload.get("tool_name") or payload.get("toolName") or "")
     tool_input = _tool_input(payload)
     if tool_name in {"write_file", "edit_file", "apply_patch", "Write", "Edit"}:
         for path in _candidate_paths(tool_input):
             if protected_path(path):
+                _record_block(payload, "RUNTIME_ARTIFACT_DIRECT_WRITE", target_path=path)
                 return _guard_reason(
                     "RUNTIME_ARTIFACT_OWNED: {} 只能由对应 Runtime writer 生成；修复：调用 hooks 下的专用 writer/runner。".format(path)
                 )
@@ -216,10 +239,12 @@ def guard(payload):
         if "evidence_store" in command or any(
             Path(token).name == "evidence_store.py" for token in words
         ):
+            _record_block(payload, "EVIDENCE_STORE_DIRECT_APPEND", command=command)
             return _guard_reason(
                 "RUNTIME_ARTIFACT_OWNED: 禁止直接 append Evidence；修复：使用 task/test runner 记录真实执行。"
             )
         if _mentions_protected_artifact(command) and _mutates(command):
+            _record_block(payload, "RUNTIME_ARTIFACT_COMMAND_MUTATION", command=command)
             return _guard_reason(
                 "RUNTIME_ARTIFACT_OWNED: 命令将修改 Runtime-owned 产物；修复：使用对应 Runtime writer/runner。"
             )
