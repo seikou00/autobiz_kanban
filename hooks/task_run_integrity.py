@@ -34,6 +34,8 @@ TASK_RUN_OPTIONAL_INTEGRITY_FIELDS = (
     "repairContext",
     "executionMode",
     "parallelRunId",
+    "codeSessionRunId",
+    "codeSessionThreadId",
     "productionCompileRequired",
     "frontendVerificationVersion",
     "compileAttempts",

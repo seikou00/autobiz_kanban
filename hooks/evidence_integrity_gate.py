@@ -223,6 +223,16 @@ def _check_completion(
             for value in latest_changed_files
             if isinstance(value, str) and value.strip()
         }
+        if isinstance(latest_record, dict) and latest_record.get("completionMode") == "verified_existing":
+            digests = latest_record.get("supportingFileDigests")
+            supporting = latest_record.get("supportingFiles")
+            if isinstance(digests, dict) and isinstance(supporting, list):
+                for value in supporting:
+                    if not isinstance(value, str):
+                        continue
+                    digest = digests.get(value)
+                    if isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+                        evidence_files.add(value.replace("\\", "/").lstrip("./"))
         for expected_file in expected_files:
             if not isinstance(expected_file, str) or not expected_file.strip():
                 continue
@@ -264,6 +274,25 @@ def _check_batch_completion(
     batch_plans = plan.get("_bundleBatches")
     if not isinstance(batch_plans, dict):
         return ["missing_batch_plan_projection"]
+
+    ledger = feature_dir / ".task-runs" / "code-dialogues.json" if feature_dir is not None else None
+    if ledger is not None and ledger.is_file():
+        try:
+            state = json.loads(ledger.read_text(encoding="utf-8"))
+            for batch_id, batch in batch_plans.items():
+                entry = state["batches"].get(batch_id) or {}
+                if (
+                    batch.get("status") != "done" or not entry.get("receiptId")
+                    or batch.get("deliveryReceiptId") != entry["receiptId"]
+                    or batch.get("deliveryRunId") != state["id"] or not entry.get("reviewSummary")
+                    or entry.get("implementationEvidenceIds") != {
+                        task["id"]: task.get("latestImplementationEvidenceId") for task in batch["tasks"]
+                    }
+                ):
+                    errors.append(f"{batch_id}.code_dialogue_review_missing")
+        except (OSError, ValueError, KeyError, TypeError):
+            return ["code_dialogue_review_ledger_invalid"]
+        return errors
 
     # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
     # Only the merger records the delivery and transitions the task from

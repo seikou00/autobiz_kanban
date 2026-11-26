@@ -247,6 +247,7 @@ def build_context(
     feature: str,
     task_id: str,
     code_workspaces: list[Path] | None = None,
+    checkout_session: bool = False,
 ) -> WriterResult:
     base = feature_dir(workspace, feature)
     plan_path = base / PLAN_FILE
@@ -421,7 +422,7 @@ def build_context(
             "visualSourceRefs": task.get("uiRefs", {}).get("visualSourceRefs", []),
             "missingVisualInputPolicy": "continue_spec_driven_report_gap",
         }
-    if code_workspaces:
+    if code_workspaces and not checkout_session:
         try:
             repositories = resolve_repositories(code_workspaces)
             runtime_ignore_issues = [
@@ -477,6 +478,10 @@ def build_context(
         if not code_workspaces
         else "repair_context_errors_before_start"
     )
+    data_out["implementationAllowed"] = start_allowed
+    data_out["startAllowed"] = start_allowed
+    if checkout_session:
+        return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)
     data_out["retryContextArgv"] = _context_argv(workspace, feature, task_id, code_workspaces or [])
     data_out["startArgv"] = _start_argv(
         workspace,
@@ -484,8 +489,6 @@ def build_context(
         task_id,
         code_workspaces[0] if code_workspaces else None,
     )
-    data_out["implementationAllowed"] = start_allowed
-    data_out["startAllowed"] = start_allowed
     data_out["engineeringContext"] = {
         "argvPrefix": [sys.executable, "-X", "utf8", str(Path(__file__).with_name("engineering_context.py")), "prepare"],
         "bindingArguments": ["--workspace", str(workspace), "--feature", feature,
@@ -506,6 +509,7 @@ def _cmd_context(args: argparse.Namespace) -> int:
             feature=feature,
             task_id=args.task_id,
             code_workspaces=code_workspaces,
+            checkout_session=args.checkout_session,
         )
     except WriterError as exc:
         result = fail("path_resolution_failed", str(exc))
@@ -516,6 +520,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Resolve a plan task into code-stage context.")
     parser.add_argument("--workspace", help="产物工作区根目录，默认由 PLUGIN_WORKSPACE/PROJECT_DIR 推导")
     parser.add_argument("--feature", help="Feature ID，默认读取 FEATURE_ID")
+    parser.add_argument("--checkout-session", action="store_true", help="当前原仓库的 Code Batch 对话")
     parser.add_argument("--task-id", required=True, help="Task ID，例如 T001")
     parser.add_argument("--code-workspace", action="append", help="业务代码仓库路径，可重复传入")
     return parser

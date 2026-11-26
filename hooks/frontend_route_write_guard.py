@@ -568,6 +568,10 @@ def validate_code_task_run_write(
             "active task run path identity mismatch",
             system_message="活动 task run 的路径身份与密封内容不一致，禁止据此授权写代码。",
         )
+    dialogue = run.get("codeSessionThreadId")
+    hook_session = (_CURRENT_PAYLOAD or {}).get("session_id") or os.environ.get("SESSION_ID")
+    if dialogue and hook_session != dialogue:
+        return block("Code TASK belongs to a different conversation", system_message="请回到当前 Batch 对话修改源码。")
     if run.get("status") != "started":
         return block(
             f"task run status={run.get('status')} does not authorize source writes",

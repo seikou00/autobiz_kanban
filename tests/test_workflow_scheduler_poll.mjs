@@ -168,8 +168,8 @@ test("child phases limit managed background execution to plugin Python scripts",
 
 test("Bash compilation keeps its foreground execution and exit-code recording", () => {
   const protocol = readFileSync(new URL("../skills/autodev/autodev-code/references/task-execution.md", import.meta.url), "utf8");
-  const guidance = protocol.split("## 后端纯编译\n")[1];
-  assert.match(guidance, /在前台 Bash 执行同一 argv/);
+  const guidance = protocol.split("## 后端生产编译\n")[1];
+  assert.match(guidance, /在模块目录前台运行同一命令/);
   assert.match(guidance, /PIPESTATUS/);
   assert.match(guidance, /record-compile/);
   assert.doesNotMatch(guidance, /run_in_background|task_output/);

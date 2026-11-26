@@ -85,6 +85,8 @@ def protected_path(raw_path):
     candidate_parts = candidate.parts
     if {"frontend-verification", "frontend-route"}.intersection(candidate_parts) and ".autobizdevops" in candidate_parts:
         return True
+    if ".task-runs" in candidate_parts and candidate.name in {"code-dialogues.json", "code-dialogues.lock"}:
+        return True
     if ".engineering" in candidate_parts and ".autobizdevops" in candidate_parts:
         return True
     if ".parallel-runs" in candidate_parts:
@@ -147,7 +149,7 @@ def _words(command):
 def _mentions_protected_artifact(command):
     markers = PROTECTED_ROOT_FILES | PROTECTED_RUNTIME_FILES | PROTECTED_EVIDENCE_FILES | PROTECTED_STATE_FILES
     normalized = command.replace("\\", "/")
-    return "/frontend-verification/" in normalized or "/frontend-route/" in normalized or "/.engineering/" in normalized or (".parallel-runs/" in normalized and any(
+    return "code-dialogues.json" in normalized or "code-dialogues.lock" in normalized or "/frontend-verification/" in normalized or "/frontend-route/" in normalized or "/.engineering/" in normalized or (".parallel-runs/" in normalized and any(
         marker in normalized for marker in ("/utest/", "/engineering/", "/dispatch/", "/recovery-archives/", "/diagnostics/"))) or PROTECTED_DRAFT_MARKER in normalized or any(
         marker in command for marker in markers
     )

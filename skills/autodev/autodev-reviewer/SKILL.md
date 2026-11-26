@@ -1,6 +1,6 @@
 ---
 name: autodev-reviewer
-description: 固定 Code Workflow 内部的独立 Batch 生产代码审查，使用持久化阶段结果交接。
+description: 历史固定 Code Workflow 的独立 Batch 审查协议。当前 Code Batch 的 Review 在执行该批的对话内完成。
 version: v2.0
 ---
 

@@ -1078,7 +1078,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         workspace_contract = workspace_contracts[batch_id]
         status = _batch_status(batch_tasks)
         if (batch_tasks and all(normalize_status(task.get("status")) == "done" for task in batch_tasks)
-                and previous.get("mergeCommitSha") and previous.get("deliveryRunId")):
+                and (previous.get("mergeCommitSha") or previous.get("deliveryReceiptId")) and previous.get("deliveryRunId")):
             status = "done"
         execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
@@ -1102,6 +1102,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             **({"atomicGroupId": atomic_group_id, "batchRationale": batch_rationale} if is_atomic_group else {}),
             **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
             **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
+            **({"deliveryReceiptId": previous["deliveryReceiptId"]} if "deliveryReceiptId" in previous else {}),
             **({"mergedAt": previous.get("mergedAt")} if "mergedAt" in previous else {}),
             "startedAt": previous.get("startedAt"),
             "completedAt": previous.get("completedAt") if status == "done" else None,
@@ -1130,6 +1131,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 "status": status,
                 **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
                 **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
+                **({"deliveryReceiptId": previous["deliveryReceiptId"]} if "deliveryReceiptId" in previous else {}),
             }
         )
     root["batches"] = root_entries
@@ -1827,15 +1829,12 @@ def mark_parallel_batch_tasks_merged(
     feature: str,
     batch_id: str,
     *,
-    merge_commit_sha: str,
+    merge_commit_sha: str = "",
     delivery_run_id: str,
+    delivery_receipt_id: str = "",
 ) -> WriterResult:
-    """Complete a parallel Batch only after its sealed delivery is merged.
-
-    Review, UTest and Merge Train form the only delivery path that moves
-    parallel Tasks from ``implemented`` to ``done``.
-    """
-    if not merge_commit_sha:
+    """Move implemented tasks to done after recording the batch's delivery."""
+    if not merge_commit_sha and not delivery_receipt_id:
         return fail("parallel_merge_commit_sha_required", batch_id, path=_path(workspace, feature))
     if not delivery_run_id:
         return fail("parallel_delivery_run_id_required", batch_id, path=_path(workspace, feature))
@@ -1865,9 +1864,15 @@ def mark_parallel_batch_tasks_merged(
                     f"batch={batch_id};task={task.get('id')};status={status}",
                     path=_path(workspace, feature),
                 )
-        batch_plan["mergeCommitSha"] = merge_commit_sha
+        if delivery_receipt_id:
+            if batch_plan.get("deliveryReceiptId") not in {None, delivery_receipt_id}:
+                return fail("code_session_delivery_receipt_mismatch", batch_id, path=_path(workspace, feature))
+            batch_plan["deliveryReceiptId"] = delivery_receipt_id
+            batch_plan["completedAt"] = _utc_now()
+        else:
+            batch_plan["mergeCommitSha"] = merge_commit_sha
+            batch_plan["mergedAt"] = _utc_now()
         batch_plan["deliveryRunId"] = delivery_run_id
-        batch_plan["mergedAt"] = _utc_now()
         data["status"] = "in_progress"
         data["activeBatchId"] = None
         data["nextBatchId"] = None

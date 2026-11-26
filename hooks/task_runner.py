@@ -7,8 +7,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -29,6 +32,7 @@ from hooks.plan_json import (  # noqa: E402
     load_plan_bundle,
     normalize_status,
     task_contract_sha256,
+    task_set_digest,
     task_execution_mode,
     task_execution_lane,
     task_workspace_roots,
@@ -59,6 +63,8 @@ from hooks.task_run_integrity import (  # noqa: E402
     task_run_integrity_sha256,
 )
 from hooks.code_execution_guard import _production_compile_argv, _maven_arguments  # noqa: E402
+
+code_session_binding: ContextVar[dict[str, str] | None] = ContextVar("code_session_binding", default=None)
 
 
 class TaskRunnerError(ValueError):
@@ -113,6 +119,15 @@ def _assert_parallel_context(
     lease_token: str | None,
     code_workspace: Path | list[Path] | None = None,
 ) -> None:
+    session = code_session_binding.get()
+    if session is not None:
+        requested = [code_workspace] if isinstance(code_workspace, Path) else code_workspace
+        if (parallel_run_id is not None or session["workspace"] != str(workspace)
+                or session["feature"] != feature or session["batchId"] != batch_id
+                or not requested or len(requested) != 1
+                or resolve_git_root(requested[0]) != Path(session["repoRoot"])):
+            raise TaskRunnerError("code_session_task_binding_mismatch")
+        return
     if parallel_run_id is None:
         return
     if not lease_token:
@@ -154,7 +169,6 @@ def _active_parallel_batch_runs(feature_dir: Path, parallel_run_id: str, batch_i
         ):
             active.append(f"{item.get('taskId', path.parent.name)}:{item.get('runId', path.stem)}")
     return sorted(active)
-
 
 def _begin_parallel_implementation(workspace: Path, feature: str, parallel_run_id: str | None, batch_id: str) -> None:
     if parallel_run_id is None:
@@ -368,7 +382,7 @@ def _require_parallel_workflow_for_multi_batch(
     parallel_run_id: str | None,
 ) -> None:
     """Prevent the legacy one-active-batch runner from serializing a DAG."""
-    if parallel_run_id is not None:
+    if parallel_run_id is not None or code_session_binding.get() is not None:
         return
     batch_ids = _unfinished_batch_ids(bundle)
     if len(batch_ids) > 1:
@@ -634,6 +648,8 @@ def _assert_repositories_match(state: dict[str, Any], repositories: RepositoryMa
 
 def _git_snapshot(repo: Path) -> dict[str, str | None]:
     try:
+        if code_session_binding.get() is not None:
+            return capture_file_snapshot(repo, exclude_feature_artifacts=True)
         return capture_file_snapshot(repo)
     except RepositorySnapshotError as exc:
         raise TaskRunnerError(str(exc)) from exc
@@ -703,6 +719,7 @@ def _historical_task_file_changes(
     if not run_dir.is_dir():
         return []
     historical: list[dict[str, str]] = []
+    session = code_session_binding.get()
     for run_path in sorted(run_dir.glob("*.json")):
         if run_path.stem == current_run_id:
             continue
@@ -711,6 +728,8 @@ def _historical_task_file_changes(
         except (OSError, json.JSONDecodeError) as exc:
             raise TaskRunnerError(f"invalid_historical_task_run:{run_path.name}") from exc
         if not isinstance(state, dict) or state.get("taskId") != task_id:
+            continue
+        if session is not None and state.get("codeSessionRunId") != session["runId"]:
             continue
         abort_changes = state.get("fileChangesAtAbort")
         run_changes = state.get("fileChanges")
@@ -931,11 +950,12 @@ def _start_task_unlocked(
     lease_token: str | None = None,
     workspace_ref: str | None = None,
 ) -> dict[str, Any]:
+    session = code_session_binding.get()
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(
         feature_dir,
         task_id,
-        require_active_batch=require_active_batch and parallel_run_id is None,
+        require_active_batch=require_active_batch and parallel_run_id is None and session is None,
     )
     _require_parallel_workflow_for_multi_batch(plan, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
@@ -971,7 +991,8 @@ def _start_task_unlocked(
             requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
         )
     repositories = _resolve_repositories(requested_workspaces, workspace_ref)
-    _assert_runtime_artifacts_ignored(repositories)
+    if session is None:
+        _assert_runtime_artifacts_ignored(repositories)
     scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
     workspace_roots = task_workspace_roots(task)
     _assert_workspace_ref_matches(task.get("workspaceRef"), scope_workspaces, contract_name=task_id)
@@ -996,39 +1017,26 @@ def _start_task_unlocked(
         )
     execution_mode = task_execution_mode(task)
     declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
-    # A Batch worktree legitimately remains dirty after an earlier Task has
-    # finished: those files are already bound to that Task's evidence. Any
-    # other dirty business file predates this Task's start snapshot. Starting
-    # now would make the change invisible at finish time and can wrongly bind
-    # it to a sibling Task, so fail before writing a run or mutating the Plan.
-    # A forced abort may retain only the current Task's durable diff; it is
-    # never a blanket exemption for later unrelated edits.
-    dirty_paths = _repository_worktree_changes(repositories)
-    in_workspace_dirty_paths = [
-        path for path in dirty_paths
-        if _paths_within_workspace_contexts([path], scope_workspaces)
-    ]
-    claimed_paths = _claimed_batch_change_paths(
-        feature_dir,
-        plan,
-        batch_id,
-        excluding_task_id=task_id,
-    )
-    claimed_paths.update(_changed_files(_historical_task_file_changes(
-        feature_dir,
-        task_id,
-        "",
-    )))
-    unattributed_paths = sorted(set(in_workspace_dirty_paths) - claimed_paths)
-    if unattributed_paths:
-        raise TaskRunnerError(
-            "prestart_unattributed_changes_detected:" + ",".join(unattributed_paths),
-            requiredAction="recover_prestart_changes_in_clean_worktree",
-            taskId=task_id,
-            batchId=batch_id,
-            unattributedFiles=unattributed_paths,
-            claimedFiles=sorted(claimed_paths),
+    if session is None:
+        # Worktree runs allow changes already recorded by this Batch's tasks.
+        in_workspace_dirty_paths = {
+            path for path in _repository_worktree_changes(repositories)
+            if _paths_within_workspace_contexts([path], scope_workspaces)
+        }
+        claimed_paths = _claimed_batch_change_paths(
+            feature_dir, plan, batch_id, excluding_task_id=task_id,
         )
+        claimed_paths.update(_changed_files(_historical_task_file_changes(feature_dir, task_id, "")))
+        unattributed_paths = sorted(in_workspace_dirty_paths - claimed_paths)
+        if unattributed_paths:
+            raise TaskRunnerError(
+                "prestart_unattributed_changes_detected:" + ",".join(unattributed_paths),
+                requiredAction="recover_prestart_changes_in_clean_worktree",
+                taskId=task_id,
+                batchId=batch_id,
+                unattributedFiles=unattributed_paths,
+                claimedFiles=sorted(claimed_paths),
+            )
     repository_state = _repository_state(repositories)
 
     _begin_parallel_implementation(workspace, feature, parallel_run_id, batch_id)
@@ -1062,6 +1070,9 @@ def _start_task_unlocked(
         state["frontendVerificationVersion"] = 1
     if parallel_run_id is not None:
         state["parallelRunId"] = parallel_run_id
+    if session is not None:
+        state["codeSessionRunId"] = session["runId"]
+        state["codeSessionThreadId"] = session["threadId"]
     pending_revalidation = task.get("pendingRevalidation")
     if isinstance(pending_revalidation, dict):
         state["revalidation"] = dict(pending_revalidation)
@@ -1076,7 +1087,7 @@ def _start_task_unlocked(
         task_id,
         "in_progress",
         expected_task_contract_sha256=str(state["taskContractSha256"]),
-        parallel=parallel_run_id is not None,
+        parallel=parallel_run_id is not None or session is not None,
     )
     if not result.ok:
         state["status"] = "aborted"
@@ -1097,6 +1108,12 @@ def _load_run(feature_dir: Path, task_id: str, run_id: str) -> tuple[Path, dict[
     if not isinstance(state, dict):
         raise TaskRunnerError(f"invalid_task_run:{run_id}")
     _verify_task_run_integrity(state)
+    session = code_session_binding.get()
+    if state.get("codeSessionRunId") is not None or session is not None:
+        if (session is None or state.get("codeSessionRunId") != session["runId"]
+                or state.get("codeSessionThreadId") != session["threadId"]
+                or state.get("batchId") != session["batchId"]):
+            raise TaskRunnerError("code_session_task_binding_mismatch")
     return path, state
 
 
@@ -1296,6 +1313,7 @@ def _implementation_record(
     repair_context: dict[str, Any] | None,
     prior_evidence_id: str | None = None,
     compile_evidence_id: str | None = None,
+    supporting_file_digests: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     changed_files = _changed_files(file_changes)
     no_code_change = completion_mode == "verified_existing"
@@ -1328,6 +1346,8 @@ def _implementation_record(
         record["priorEvidenceId"] = prior_evidence_id
     if isinstance(compile_evidence_id, str):
         record["productionCompileEvidenceId"] = compile_evidence_id
+    if supporting_file_digests:
+        record["supportingFileDigests"] = supporting_file_digests
     return record
 
 
@@ -1345,6 +1365,7 @@ def _finish_implementation_unlocked(
     lease_token: str | None = None,
     workspace_ref: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
+    session = code_session_binding.get()
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
@@ -1482,6 +1503,13 @@ def _finish_implementation_unlocked(
             resolvedScopePaths=scope_paths,
         )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
+    supporting_digests = {}
+    if session is not None:
+        for relative in normalized_supporting:
+            digest = final_repositories[0]["snapshot"].get(relative)
+            if not digest:
+                raise TaskRunnerError(f"supporting_file_not_in_snapshot:{relative}")
+            supporting_digests[relative] = digest
     if cumulative_file_changes or transient_validation_files:
         if execution_mode == "external_dependency":
             raise TaskRunnerError(
@@ -1599,6 +1627,7 @@ def _finish_implementation_unlocked(
                     transient_validation_files=transient_validation_files,
                     supporting_files=normalized_supporting,
                     no_change_why=no_code_change_why,
+                    supporting_file_digests=supporting_digests,
                     repair_context=repair_context,
                     prior_evidence_id=prior_evidence_id,
                     compile_evidence_id=next((item.get("evidenceId") for item in state.get("compileAttempts", [])
@@ -1614,7 +1643,7 @@ def _finish_implementation_unlocked(
         task_id,
         evidence_id,
         expected_task_contract_sha256=str(state.get("taskContractSha256", "")),
-        parallel=parallel_run_id is not None,
+        parallel=parallel_run_id is not None or session is not None,
     )
     if not result.ok:
         raise TaskRunnerError("implementation_plan_binding_failed")
@@ -1755,12 +1784,15 @@ def _prior_aborted_run_conflict(
     repositories: RepositoryMap,
     current_state: dict[str, Any],
 ) -> tuple[str, list[str]] | None:
+    session = code_session_binding.get()
     for path in sorted(_runs_dir(feature_dir, str(task.get("id"))).glob("*.json")):
         try:
             prior = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if prior.get("runId") == current_run_id or prior.get("status") != "aborted":
+            continue
+        if session is not None and prior.get("codeSessionRunId") != session["runId"]:
             continue
         changed = prior.get("changedFilesAtAbort")
         if not isinstance(changed, list):
@@ -2026,7 +2058,10 @@ def start_task_repair(
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
         # Load plan and task
-        bundle, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=parallel_run_id is None)
+        bundle, batch_id, task = _load_plan_and_task(
+            feature_dir, task_id,
+            require_active_batch=parallel_run_id is None and code_session_binding.get() is None,
+        )
         _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
 
         # Verify task status (allow both implemented and done)
@@ -2320,9 +2355,198 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _code_dialogue_ledger(feature_dir: Path) -> Path:
+    return feature_dir / ".task-runs" / "code-dialogues.json"
+
+
+def _read_code_dialogues(feature_dir: Path) -> dict[str, Any]:
+    path = _code_dialogue_ledger(feature_dir)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _code_dialogue_thread() -> str:
+    thread = os.environ.get("SESSION_ID", "").strip()
+    if not thread or len(thread) > 128:
+        raise TaskRunnerError("code_dialogue_requires_platform_session")
+    return thread
+
+
+def _code_dialogue_checkpoint(workspace: Path, feature: str, checkpoint: str) -> None:
+    from board_core.state import load_state_rows
+    if load_state_rows(workspace).get(feature) == checkpoint:
+        return
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8", str(ROOT / "hooks" / "update_checkpoint.py"),
+         "--feature", feature, "--checkpoint", checkpoint, "--json"],
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+    )
+    if result.returncode:
+        raise TaskRunnerError("code_dialogue_checkpoint_rejected", checkpoint=checkpoint,
+                              output=(result.stdout or result.stderr).strip())
+
+
+def _next_code_dialogue_batch(ordered: list[dict], reviewed: set[str]) -> dict | None:
+    return next((item for item in ordered if item["id"] not in reviewed
+                 and set(item.get("deps", [])) <= reviewed), None)
+
+
+def _code_dialogue_handoff(batch_id: str, next_batch: dict | None, entries: dict) -> int:
+    notice = f"Batch {batch_id} 已完成 Review 并登记交付。"
+    if next_batch is None:
+        return _emit(True, status="batch_done", batchId=batch_id, notice=notice + "剩余批次暂不可执行。")
+    next_id = next_batch["id"]
+    title = next_batch.get("title") or ""
+    label = f"{next_id} {title}".strip()
+    owner = entries.get(next_id, {}).get("threadId")
+    if owner:
+        notice += f"下一批 {label} 已分配，请在该批对话中继续。"
+    else:
+        notice += f"请在看板新开一个 Code 对话，继续执行下一批 {label}。"
+    return _emit(True, status="batch_done", batchId=batch_id, nextBatchId=next_id, nextBatchTitle=title,
+                 **({"nextThreadId": owner} if owner else {}), notice=notice)
+
+
+def _cmd_code_dialogue(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
+        feature_dir = _feature_dir(workspace, feature)
+        thread = _code_dialogue_thread()
+        with FileLock(_code_dialogue_ledger(feature_dir).with_suffix(".lock")):
+            plan = load_plan_bundle(feature_dir)
+            workspaces = plan.root.get("codeWorkspaces") or {}
+            if plan.root.get("taskSetStatus") != "finalized" or not plan.batches:
+                raise TaskRunnerError("code_dialogue_requires_finalized_plan")
+            if len(workspaces) != 1:
+                raise TaskRunnerError("code_dialogue_requires_one_repository")
+            workspace_ref, checkout = next(iter(workspaces.items()))
+            code = Path(checkout).resolve(strict=True)
+            repo = resolve_git_root(code)
+            digest = task_set_digest(plan.root, plan.batches)
+            state = _read_code_dialogues(feature_dir)
+            if not state:
+                if any(normalize_status(task.get("status")) != "todo" for task in plan.tasks):
+                    raise TaskRunnerError("code_dialogue_requires_code_rollback_for_old_execution")
+                state = {"id": "code-dialogue-" + uuid.uuid4().hex, "digest": digest, "batches": {}}
+            if state["digest"] != digest:
+                raise TaskRunnerError("code_dialogue_plan_changed")
+            entries = state["batches"]
+            ordered = plan.root["batches"]
+            reviewed = {
+                item["id"] for item in ordered
+                if normalize_status(item.get("status")) == "done"
+                and item.get("deliveryReceiptId") == entries.get(item["id"], {}).get("receiptId")
+                and entries.get(item["id"], {}).get("receiptId")
+            }
+            previous_id = next((key for key, entry in entries.items() if entry["threadId"] == thread), None)
+            if len(reviewed) == len(ordered):
+                _code_dialogue_checkpoint(workspace, feature, "code_done")
+                return _emit(True, status="code_done", notice="全部批次已通过 Review，Code 已完成。")
+            batch = _next_code_dialogue_batch(ordered, reviewed)
+            if previous_id in reviewed:
+                return _code_dialogue_handoff(previous_id, batch, entries)
+            if not batch:
+                raise TaskRunnerError("code_dialogue_no_ready_batch")
+            batch_id = batch["id"]
+            entry = entries.get(batch_id)
+            if entry and entry["threadId"] != thread:
+                raise TaskRunnerError("code_dialogue_already_assigned", batchId=batch_id, threadId=entry["threadId"])
+            tasks = plan.batches[batch_id]["tasks"]
+            if args.command == "next-code-batch":
+                if normalize_status(batch.get("status")) == "done":
+                    raise TaskRunnerError("code_dialogue_requires_code_rollback_for_old_delivery")
+                _code_dialogue_checkpoint(workspace, feature, "code_in_progress")
+                entries.setdefault(batch_id, {"threadId": thread})
+                atomic_write_json(_code_dialogue_ledger(feature_dir), state)
+                title = batch.get("title") or ""
+                label = f"{batch_id} {title}".strip()
+                task_list = [{"taskId": task["id"], "title": task.get("title") or "", "status": task["status"]}
+                             for task in tasks]
+                task_lines = "\n".join(f"- {item['taskId']} {item['title']}".rstrip() for item in task_list)
+                return _emit(True, status="execute_batch", batchId=batch_id, title=title,
+                             notice=f"当前对话开始执行 Batch {label}。\n\n本批 TASK\n\n{task_lines}",
+                             codeWorkspace=str(code), repoRoot=str(repo), workspaceRef=workspace_ref,
+                             tasks=task_list)
+            summary = args.review_summary.strip()
+            if not summary or not entry or args.batch_id != batch_id:
+                raise TaskRunnerError("code_dialogue_requires_matching_batch_and_review")
+            implementations = {task["id"]: task.get("latestImplementationEvidenceId") for task in tasks}
+            if any(normalize_status(task.get("status")) != "implemented" or not implementations[task["id"]]
+                   for task in tasks):
+                raise TaskRunnerError("code_dialogue_tasks_not_implemented", batchId=batch_id)
+            records = {record["evidenceId"]: record for record in read_records(stream_path(feature_dir))}
+            reviewed_files = {}
+            for task_id, evidence_id in implementations.items():
+                evidence = records.get(evidence_id) or {}
+                task_run_id = evidence.get("taskRunId") or evidence.get("runId")
+                if not isinstance(task_run_id, str) or Path(task_run_id).name != task_run_id:
+                    raise TaskRunnerError("code_dialogue_task_evidence_invalid", taskId=task_id)
+                path = _runs_dir(feature_dir, task_id) / (task_run_id + ".json")
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                _verify_task_run_integrity(saved)
+                if (saved.get("implementationEvidenceId") != evidence_id
+                        or saved.get("codeSessionRunId") != state["id"]
+                        or saved.get("codeSessionThreadId") != thread):
+                    raise TaskRunnerError("code_dialogue_task_evidence_invalid", taskId=task_id)
+                files = [*evidence.get("changedFiles", []), *evidence.get("supportingFiles", [])]
+                reviewed_files.update({path: saved["finalSnapshot"].get(path) for path in files})
+            snapshot = capture_file_snapshot(repo, exclude_feature_artifacts=True)
+            changed = sorted(path for path, sha in reviewed_files.items() if snapshot.get(path) != sha)
+            if changed:
+                raise TaskRunnerError("code_dialogue_reviewed_source_changed", changedFiles=changed)
+            receipt = entry.get("receiptId") or "code-dialogue-" + uuid.uuid4().hex
+            entry.update(receiptId=receipt, reviewSummary=summary, implementationEvidenceIds=implementations)
+            atomic_write_json(_code_dialogue_ledger(feature_dir), state)
+            from hooks.plan_writer import mark_parallel_batch_tasks_merged
+            result = mark_parallel_batch_tasks_merged(workspace, feature, batch_id,
+                                                       delivery_run_id=state["id"], delivery_receipt_id=receipt)
+            if not result.ok:
+                raise TaskRunnerError("code_dialogue_delivery_failed", errors=result.errors)
+            if len(reviewed) + 1 == len(ordered):
+                _code_dialogue_checkpoint(workspace, feature, "code_done")
+                return _emit(True, status="code_done", batchId=batch_id,
+                             notice=f"最后一批 {batch_id} 已通过 Review，Code 已完成。")
+            return _code_dialogue_handoff(batch_id, _next_code_dialogue_batch(ordered, reviewed | {batch_id}), entries)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return _emit_error(exc)
+
+
+def _run_code_dialogue_task(args: argparse.Namespace, workspace: Path, feature: str, state_path: Path) -> int:
+    try:
+        with FileLock(state_path.with_suffix(".lock")):
+            state = _read_code_dialogues(state_path.parent.parent)
+            plan = load_plan_bundle(state_path.parent.parent)
+            if state["digest"] != task_set_digest(plan.root, plan.batches):
+                raise TaskRunnerError("code_dialogue_plan_changed")
+            batch_id = plan.task_batches.get(args.task_id)
+            thread = _code_dialogue_thread()
+            entry = state["batches"].get(batch_id, {})
+            if entry.get("threadId") != thread or entry.get("receiptId"):
+                raise TaskRunnerError("code_dialogue_task_not_assigned", taskId=args.task_id, batchId=batch_id)
+            workspace_ref, code = next(iter(plan.root["codeWorkspaces"].items()))
+            args.workspace_ref = workspace_ref
+            repo = resolve_git_root(Path(code).resolve(strict=True))
+            token = code_session_binding.set(dict(workspace=str(workspace), feature=feature, batchId=batch_id,
+                                                  runId=state["id"], repoRoot=str(repo), threadId=thread))
+            try:
+                return args.func(args)
+            finally:
+                code_session_binding.reset(token)
+    except (OSError, ValueError) as exc:
+        return _emit_error(exc)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = RuntimeArgumentParser(description="Implement structured code tasks")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    for name in ("next-code-batch", "finish-code-batch"):
+        batch = subparsers.add_parser(name)
+        batch.add_argument("--workspace")
+        batch.add_argument("--feature")
+        if name == "finish-code-batch":
+            batch.add_argument("--batch-id", required=True)
+            batch.add_argument("--review-summary", required=True)
+        batch.set_defaults(func=_cmd_code_dialogue)
 
     def common(subparser: argparse.ArgumentParser, *, needs_run: bool = False) -> None:
         subparser.add_argument("--workspace")
@@ -2385,6 +2609,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "task_id", None) and not args.parallel_run_id and os.environ.get("SESSION_ID"):
+        try:
+            workspace, feature, _ = _resolve(args)
+            ledger = _code_dialogue_ledger(_feature_dir(workspace, feature))
+        except (OSError, ValueError) as exc:
+            return _emit_error(exc)
+        if ledger.is_file():
+            return _run_code_dialogue_task(args, workspace, feature, ledger)
     if args.command != "inspect" and getattr(args, "parallel_run_id", None):
         resolved_lock = None
         try:

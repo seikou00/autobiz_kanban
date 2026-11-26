@@ -56,7 +56,7 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 文件写入 | 默认直接写项目目标目录，不再默认产出 `output/transfer/<task-stem>.tsx`、`output/transfer/<task-stem>.less` |
 | 页面级抽取 | 页面级代码生成必须包含主线可维护性处理 |
 | 同页多片段 | 先统一页面级分区，再落到一个主页面和同目录局部组件 |
-| 主线边界 | 上述主线处理必须在 HTML 主线内完成，不再依赖后续 `/autodev-reviewer` 补齐 |
+| 主线边界 | 在本批实现阶段完成上述处理，再执行同一对话的 Review |
 
 | write_todos 页面模块清单 | 规则 |
 | --- | --- |
@@ -200,7 +200,7 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | 替换粒度 | 一次只对一个区域做组件替换，逐区评估 |
 | 文档层命中 | 先按项目文档理解用途 / props / 示例，再用真实源码确认导入路径 |
 | 基础组件层 | 项目自身组件体系（前 3 层）无法覆盖时才进入已安装组件库层 |
-| 新依赖 | 固定 Code Workflow 不安装新依赖也不请求用户确认；复用已有组件或原生实现，并记录非阻断降级 |
+| 新依赖 | 复用已有组件或原生实现，并记录非阻断降级 |
 | 汇报要求 | 记录复用或降级方案；新增依赖必须为“不涉及” |
 | 图表场景 | 统一按 `frontend-policy.md` §图表来源顺序 |
 
@@ -274,7 +274,7 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | 同页多片段 | 先统一页面壳层、分区边界和共享数据语义，再决定哪些区域拆成局部组件 |
 | 主线抽取 | 在主线里完成局部组件、函数、常量、helper / type / hook / 图表配置抽取 |
 | Assets 映射表应用 | Stage 2 开始前必须读取 `.frontend/html-analysis/<task-stem>-assets-mapping.json`，按当前映射保留真实资源并接入项目；候选替换须有视觉/组件证据 |
-| Stage 2 收尾 | Stage 2 结束前必须再做一轮样式细节收尾，不得把明显的 padding、边框、圆角、阴影、字色、字号、文本内容、间距、对齐问题留到后续 `/autodev-reviewer` |
+| Stage 2 收尾 | Stage 2 结束前完成 padding、边框、圆角、阴影、字色、字号、文本内容、间距和对齐的样式复核 |
 | 最终交付 | 直接写入项目目标目录 |
 | write_todos 贯穿 | Stage 1 先列页面级模块清单，并单独列脚本清单；Stage 2 再按清单逐项完成模块落盘，防止实现遗漏 |
 
@@ -401,7 +401,7 @@ HTML 类型：<type>
 图表来源：project chart rules / local charts / installed chart library / user-specified chart library / default ECharts solution
 图表类型映射：<区域 / 语义 -> 最终图表类型>
 是否触发 ECharts：是 / 否
-新增依赖：不涉及（固定 Code Workflow 禁止新增依赖与用户确认）
+新增依赖：不涉及（复用已有组件或原生实现）
 统一前端回检输入：target=<生成/修改的源码文件或目录>; sourceHtml=<原始 HTML 路径>; analysis=<.frontend/html-analysis/*.json 或 none>; plan=<PLAN.md 或 none>; uiLibraryTarget=<project|antd|antd-mobile|native>; antdMode=<required|selected|notApplicable>; auditRequired=<true|false>
 验证：通过 / 待修正
 ```

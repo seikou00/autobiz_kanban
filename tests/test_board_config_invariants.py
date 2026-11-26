@@ -442,10 +442,10 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_default_code_material_is_small_and_conditional_references_resolve(self):
         root = ROOT / "skills/autodev/autodev-code"
         self.assertLess((root / "SKILL.md").stat().st_size, 10000)
-        for filename in ("task-execution.md", "frontend-route.md", "batch-workflow-guide.md"):
+        for filename in ("task-execution.md", "frontend-route.md"):
             self.assertTrue((root / "references" / filename).is_file())
         code = next(node for _, node in _iter_nodes(_board_config()) if node.get("id") == "dev.code")
-        self.assertEqual(code["runtimePolicy"]["agentMode"], "workflow")
+        self.assertEqual(code["runtimePolicy"]["agentMode"], "solo")
 
     def test_code_exploration_cache_is_not_a_code_output(self) -> None:
         code = next(

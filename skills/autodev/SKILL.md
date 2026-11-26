@@ -1,6 +1,6 @@
 ---
 name: autodev
-description: Autodev Dev 阶段根路由器。以 board_config 编译出的 checkpoint 路由 Specs、Design、Plan、可选详细设计和固定 Code Workflow。
+description: Autodev Dev 阶段根路由器。按 Board checkpoint 路由 Specs、Design、Plan、可选详细设计和 Code。
 version: v1.2.0
 ---
 
@@ -17,28 +17,14 @@ python -X utf8 "${pluginPath}/read_state_json.py" --feature "${feature}"
 python -X utf8 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
-根路由只路由 Board 中声明的节点：Specs、Technical Design、Plan、可选 Detailed
-Design、Code。`review` 是固定 Code Workflow 的 Batch
-子阶段，不是 Board 节点，也不允许写入独立 checkpoint。
+根路由只路由 Board 中声明的节点。每个 Code Batch 在自己的对话里完成实现与 Review。
 
 ```text
 prd_done → specs → design → plan → [detail design] → code → cicd
-                                             └─ Code 内部：implement → review → merge → evidence aggregate
 ```
 
 ## Code 阶段
 
-进入 `/autodev-code` 后，先执行其“Code 入口：先获取看板 ID”：缺少有效 ID 时直接让用户填写，已提供或恢复同一 Run 时复用；拿到有效 ID 后才进行准入检查、推进 checkpoint、捕获基线和启动 Workflow。
+`/autodev-code` 通过 `task_runner.py next-code-batch` 领取当前批次，使用 Plan 绑定的仓库和分支。在本对话实现、编译并 Review，发现问题时修复后复验，再登记交付。UTest 和 E2E 在各自阶段执行。
 
-编码开始后，全局 checkpoint 只保持 `code_in_progress`，直到固定
-Workflow 已完成所有交付 Batch 与证据聚合，再推进到 `code_done`。
-
-- `task_runner start` 仅授权当前实现 TASK 的生产代码写入；已 implemented 的
-  TASK 不得为测试重新启动 run。
-- Code Workflow 不包含 UTest 或 E2E 子阶段，不创建测试资产或跳过证据。
-- 不得调用 `/autodev-reviewer`、`/autodev-utest`、`/autodev-e2e` 或
-  `/autodev-verify` 来创建独立阶段或推进 `review_*`、`unit_test_*`、`e2e_*`、
-  `verify_*` checkpoint。
-
-失败时由固定 Workflow 记录 Batch evidence 或生成 `needs_fix`；Plan 契约问题才
-回到 `plan_in_progress`。Code 完成后按 `resolve_next_skill.py` 进入 CI/CD。
+中间批次交付后，按 Runner 的提示新开对话继续。最后一批通过门禁后才更新 `code_done`，再由 Board 路由到 CI/CD。

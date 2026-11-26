@@ -178,45 +178,11 @@ def test_fixed_workflow_entrypoint():
     if "batch-compile" in content or "skip-batch-compile" in content or "compileStatus" in content:
         print("✗ 固定 Workflow 仍保留 Batch compile 路径或状态")
         return False
-    references = ROOT / "skills" / "autodev" / "autodev-code" / "references"
-    protocol = (references / "task-execution.md").read_text(encoding="utf-8")
-    protocol_checks = [
-        "禁止创建、修改或删除测试源码",
-        "禁止额外构建、打包、typecheck、lint、测试、E2E",
-        "git symbolic-ref --quiet --short HEAD",
-        "--ttl-seconds <timeoutPerBatch> --lease-guard",
-        "--require-lease-guard",
-        "--batch-worktree <batchWorktree>",
-        "--code-workspace <taskWorkspace>",
-        "仅 valid=true",
-        "seal --purpose review",
-        "parallel_git_index_lock_busy",
-        "parallel_git_index_lock_recovery_failed",
-        "先清理陈旧 run，再开始任何修复",
-        "implementation_rework_stale_run",
-        "依赖须为 implemented/done",
-        "当前 TASK 为 todo 时执行普通",
-        "携带 `--repair-mode`",
-        "`repair.failure`",
-        "prepare-compile",
-        "record-compile",
-        "GUARD_DIAGNOSTICS.failures",
-        "compile_status",
-        "--log-exit-code",
-    ]
-    missing_protocol = [check for check in protocol_checks if check not in protocol]
-    if missing_protocol:
-        print(f"✗ Batch 文件协议缺少: {', '.join(missing_protocol)}")
-        return False
     if "repository_coordinator" in launcher or "coordinatorManaged" in content:
         print("✗ 多仓库路径仍会拆分为 coordinator 子 Workflow")
         return False
     if "await parallel(Array.from({ length: poolSize }" not in content:
         print("✗ 固定 Workflow 未在内部并行启动 Batch agent")
-        return False
-    frontend_protocol = (references / "frontend-route.md").read_text(encoding="utf-8")
-    if "以 `taskContract.uiRequired` 为唯一条件" not in protocol or "--start-route-run" not in frontend_protocol:
-        print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
     review_prompt = content.find("对已草稿封存的 Batch")
     if review_prompt < 0 or "runBatchUtestAndSeal" in content or "begin-e2e" in content or "finish-e2e" in content:
@@ -807,48 +773,18 @@ vm.runInContext(source.slice(agentStart, agentEnd), context);
 
 
 def test_skill_integration():
-    """测试技能集成。"""
-    print("测试 10: 技能集成")
-    print("-" * 60)
-
-    skill_file = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
-
-    if not skill_file.exists():
-        print(f"✗ 技能文件不存在: {skill_file}")
+    """The current Code skill uses the regular conversation's task runner."""
+    content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+    required = ("next-code-batch", "finish-code-batch", "每条对话只执行一个 Batch", "在本对话 Review")
+    missing = [step for step in required if step not in content]
+    router = (ROOT / "skills/autodev/SKILL.md").read_text(encoding="utf-8")
+    retired = [entry for entry in ("workflow_launcher.py", "workflowArgs", "taskCardId", "看板 ID")
+               if entry in content or entry in router]
+    if missing or retired:
+        print(f"✗ Code 对话入口不符: missing={missing}, retired={retired}")
         return False
-
-    content = skill_file.read_text(encoding="utf-8")
-
-    checks = [
-        ("workflow_launcher.py", "启动器引用"),
-        ("workflowArgs", "固定 Workflow 启动参数"),
-        ("原生 Worktree", "隔离工作区"),
-        ("uiRequired=true", "按 Task 选择前端 Route"),
-        ("仅首次缺失时", "复用已知看板 ID"),
-        ("固定 Workflow 启动后不调用 `request_user_input`", "执行期间无人工确认"),
-        ("前后端 UTest 和 E2E 当前全部移出 Workflow", "前后端测试阶段移除"),
-        ("不另外调用测试技能或命令补跑", "禁止另走测试入口"),
-        ("不再请求合并或验收确认", "最终汇总无人工确认"),
-    ]
-    all_passed = True
-    for pattern, description in checks:
-        if pattern in content:
-            print(f"✓ {description}")
-        else:
-            print(f"✗ 缺少 {description}")
-            all_passed = False
-    reviewer = (ROOT / "agents" / "reviewer.md").read_text(encoding="utf-8")
-    if "不自行修改或要求用户确认" not in reviewer:
-        print("✗ Reviewer 未保留自主执行边界")
-        all_passed = False
-
-    launcher = (ROOT / "hooks" / "workflow_launcher.py").read_text(encoding="utf-8")
-    if 'parser.add_argument("--task-card-id", required=True' not in launcher:
-        print("✗ Launcher 不再要求启动前提供看板 ID")
-        all_passed = False
-
-    print()
-    return all_passed
+    print("✓ Code 对话通过 TASK Runner 领取、Review 和交付")
+    return True
 
 
 def main():

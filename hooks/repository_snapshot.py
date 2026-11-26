@@ -187,7 +187,7 @@ def hash_file(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
+def capture_file_snapshot(repo: Path, *, exclude_feature_artifacts: bool = False) -> dict[str, str | None]:
     completed = subprocess.run(
         git_command(
             "-C",
@@ -199,6 +199,7 @@ def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
             "--",
             ".",
             *RUNTIME_EXCLUDES,
+            *([":(exclude,glob)**/.autobizdevops/**"] if exclude_feature_artifacts else []),
         ),
         capture_output=True,
         check=False,

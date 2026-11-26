@@ -701,19 +701,11 @@
         "skill": "autodev-code",
         "order": 60,
         "runtimePolicy": {
-          "agentMode": "workflow",
+          "agentMode": "solo",
           "toolCustomConfig": {
             "task": {
-              "enabled": true
+              "enabled": false
             }
-          },
-          "subagentConfig": {
-            "disabledBuiltinSubagents": [
-              "verification"
-            ],
-            "customSubagentFiles": [
-              "agents/verification.md"
-            ]
           }
         },
         "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码；PLAN.md 任务状态与完成记录就地回写（无独立文档产物；执行协议以 autodev-code skill 正文为准）",
