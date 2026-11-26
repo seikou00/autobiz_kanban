@@ -15,7 +15,14 @@ from unittest import mock
 from hooks import task_runner as runner
 from hooks.code_shell_analysis import analyze_script
 from hooks.evidence_store import read_records, stream_path, EvidenceStoreError
-from tests.test_task_runner import _workspace, _start, _run, _configure_frontend_without_batch_compile, _verify_frontend
+from tests.test_task_runner import (
+    _configure_frontend_without_batch_compile,
+    _refresh_parallel_pipeline,
+    _run,
+    _start,
+    _verify_frontend,
+    _workspace,
+)
 
 
 class CodeCompileResultTest(unittest.TestCase):
@@ -210,7 +217,46 @@ class FrontendCompileExemptionTest(unittest.TestCase):
             state = _start(workspace, code)
             (code / "production.ts").write_text("export const ready = true;\n", encoding="utf-8")
             self.assertFalse(state["productionCompileRequired"])
+            with self.assertRaisesRegex(runner.TaskRunnerError, "production_compile_not_required"):
+                runner.prepare_compile(workspace, "alpha", "T001", code, state["runId"],
+                                       argv=["mvn", "compile"], execution_cwd=code)
             checked = _verify_frontend(workspace, code, state["runId"], "production.ts")
             self.assertEqual(checked.returncode, 0, checked.stdout)
             self.assertTrue(runner.finish_implementation(workspace, "alpha", "T001", code, state["runId"],
                                                         no_code_change_why=None, supporting_files=[])[0])
+
+
+class CodeDialogueCompileTest(unittest.TestCase):
+    def test_prepare_and_record_infer_task_and_workspace_from_dialogue_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, code = _workspace(root)
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["codeWorkspaces"] = {"default": str(code)}
+            plan["batches"][0]["workspaceRef"] = "default"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            _refresh_parallel_pipeline(feature_dir)
+            (workspace / ".autobizdevops" / "state.json").write_text(json.dumps({
+                "alpha": {"feature": "alpha", "owner": "test", "checkpoint": "code_in_progress",
+                          "stage": "", "iteration": "1", "updated_at": "2026-06-29 12:00:00"},
+            }), encoding="utf-8")
+            common = ["--workspace", str(workspace), "--feature", "alpha"]
+            with mock.patch.dict(os.environ, {"SESSION_ID": "code-dialogue-1"}):
+                assigned = _run("next-code-batch", *common)
+                self.assertEqual(assigned.returncode, 0, assigned.stdout + assigned.stderr)
+                state = _start(workspace, code)
+                compile_args = [*common, "--run-id", state["runId"]]
+                prepare_args = [*compile_args, "--execution-cwd", str(code), "--", "mvn", "compile", "-o"]
+                with mock.patch.dict(os.environ, {"SESSION_ID": "other-dialogue"}):
+                    blocked = _run("prepare-compile", *prepare_args)
+                    self.assertEqual(json.loads(blocked.stdout)["error"], "code_dialogue_task_not_assigned")
+                prepared = _run("prepare-compile", *prepare_args)
+                self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                attempt = json.loads(prepared.stdout)
+                log = root / "compile.log"
+                log.write_text("compiled\n", encoding="utf-8")
+                recorded = _run("record-compile", *compile_args, "--attempt-id", attempt["attemptId"],
+                                "--exit-code", "0", "--log-exit-code", "0", "--output-file", str(log))
+                self.assertEqual(recorded.returncode, 0, recorded.stdout + recorded.stderr)
+                self.assertTrue(json.loads(recorded.stdout)["passed"])

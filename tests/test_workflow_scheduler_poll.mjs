@@ -166,13 +166,14 @@ test("child phases limit managed background execution to plugin Python scripts",
   }
 });
 
-test("Bash compilation keeps its foreground execution and exit-code recording", () => {
+test("preparation uses monitored background execution and Bash compilation stays in the foreground", () => {
   const protocol = readFileSync(new URL("../skills/autodev/autodev-code/references/task-execution.md", import.meta.url), "utf8");
   const guidance = protocol.split("## 后端生产编译\n")[1];
   assert.match(guidance, /在模块目录前台运行同一命令/);
   assert.match(guidance, /PIPESTATUS/);
   assert.match(guidance, /record-compile/);
-  assert.doesNotMatch(guidance, /run_in_background|task_output/);
+  assert.match(guidance, /run_in_background: true.*prepare-compile.*monitor/);
+  assert.match(guidance, /run_in_background: false.*PIPESTATUS/);
 });
 
 function initialLifecycleHarness() {

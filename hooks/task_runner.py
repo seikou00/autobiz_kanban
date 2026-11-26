@@ -1155,6 +1155,8 @@ def _compile_context(workspace: Path, feature: str, task_id: str, code_workspace
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("status") not in {"started", "in_progress"} or state.get("executionMode") != "code":
         raise TaskRunnerError("compile_task_run_inactive", reason=f"TASK run 状态为 {state.get('status')}、executionMode={state.get('executionMode')}，不能登记生产编译")
+    if task_execution_lane(task) != "backend":
+        raise TaskRunnerError("production_compile_not_required", reason="前端 TASK 使用前端回检。")
     if state.get("parallelRunId") != parallel_run_id or state.get("batchId") != batch_id:
         raise TaskRunnerError("compile_task_batch_binding_mismatch", reason="编译结果必须属于当前 TASK 的同一 Batch/run")
     if state.get("taskContractSha256") != task_contract_sha256(task):
@@ -2513,12 +2515,15 @@ def _cmd_code_dialogue(args: argparse.Namespace) -> int:
 def _run_code_dialogue_task(args: argparse.Namespace, workspace: Path, feature: str, state_path: Path) -> int:
     try:
         with FileLock(state_path.with_suffix(".lock")):
-            state = _read_code_dialogues(state_path.parent.parent)
-            plan = load_plan_bundle(state_path.parent.parent)
+            feature_dir = state_path.parent.parent
+            state = _read_code_dialogues(feature_dir)
+            plan = load_plan_bundle(feature_dir)
             if state["digest"] != task_set_digest(plan.root, plan.batches):
                 raise TaskRunnerError("code_dialogue_plan_changed")
-            batch_id = plan.task_batches.get(args.task_id)
             thread = _code_dialogue_thread()
+            batch_id = plan.task_batches.get(args.task_id) if args.task_id else next(
+                (key for key, value in state["batches"].items() if value["threadId"] == thread), None,
+            )
             entry = state["batches"].get(batch_id, {})
             if entry.get("threadId") != thread or entry.get("receiptId"):
                 raise TaskRunnerError("code_dialogue_task_not_assigned", taskId=args.task_id, batchId=batch_id)
@@ -2528,6 +2533,18 @@ def _run_code_dialogue_task(args: argparse.Namespace, workspace: Path, feature: 
             token = code_session_binding.set(dict(workspace=str(workspace), feature=feature, batchId=batch_id,
                                                   runId=state["id"], repoRoot=str(repo), threadId=thread))
             try:
+                if args.command in {"prepare-compile", "record-compile"}:
+                    if not args.task_id:
+                        matches = [
+                            task["id"] for task in plan.batches[batch_id]["tasks"]
+                            if any(path.stem == args.run_id for path in _runs_dir(feature_dir, task["id"]).glob("*.json"))
+                        ]
+                        if len(matches) != 1:
+                            raise TaskRunnerError("compile_run_not_unique_in_current_batch", runId=args.run_id, batchId=batch_id)
+                        args.task_id = matches[0]
+                    if not args.code_workspace:
+                        _, task_run = _load_run(feature_dir, args.task_id, args.run_id)
+                        args.code_workspace = task_run["requestedCodeWorkspaces"]
                 return args.func(args)
             finally:
                 code_session_binding.reset(token)
@@ -2548,11 +2565,11 @@ def build_parser() -> argparse.ArgumentParser:
             batch.add_argument("--review-summary", required=True)
         batch.set_defaults(func=_cmd_code_dialogue)
 
-    def common(subparser: argparse.ArgumentParser, *, needs_run: bool = False) -> None:
+    def common(subparser: argparse.ArgumentParser, *, needs_run: bool = False, infer_compile_context: bool = False) -> None:
         subparser.add_argument("--workspace")
         subparser.add_argument("--feature")
-        subparser.add_argument("--task-id", required=True)
-        subparser.add_argument("--code-workspace", required=True, action="append")
+        subparser.add_argument("--task-id", required=not infer_compile_context)
+        subparser.add_argument("--code-workspace", required=not infer_compile_context, action="append")
         subparser.add_argument("--parallel-run-id")
         subparser.add_argument("--lease-token")
         subparser.add_argument("--workspace-ref")
@@ -2571,13 +2588,13 @@ def build_parser() -> argparse.ArgumentParser:
     finish_implementation_parser.set_defaults(func=_cmd_finish_implementation)
 
     prepare = subparsers.add_parser("prepare-compile", help="Bind a direct Bash compile to current sources; does not execute it")
-    common(prepare, needs_run=True)
+    common(prepare, needs_run=True, infer_compile_context=True)
     prepare.add_argument("--execution-cwd", required=True)
     prepare.add_argument("argv", nargs=argparse.REMAINDER)
     prepare.set_defaults(func=_cmd_prepare_compile)
 
     record = subparsers.add_parser("record-compile", help="Record an existing Bash compiler result without rerunning it")
-    common(record, needs_run=True)
+    common(record, needs_run=True, infer_compile_context=True)
     record.add_argument("--attempt-id", required=True)
     record.add_argument("--exit-code", type=int, required=True)
     record.add_argument("--log-exit-code", type=int, required=True)
@@ -2609,14 +2626,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if getattr(args, "task_id", None) and not args.parallel_run_id and os.environ.get("SESSION_ID"):
+    if hasattr(args, "task_id") and not args.parallel_run_id and os.environ.get("SESSION_ID"):
         try:
-            workspace, feature, _ = _resolve(args)
+            workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
             ledger = _code_dialogue_ledger(_feature_dir(workspace, feature))
         except (OSError, ValueError) as exc:
             return _emit_error(exc)
         if ledger.is_file():
             return _run_code_dialogue_task(args, workspace, feature, ledger)
+    if args.command in {"prepare-compile", "record-compile"} and (not args.task_id or not args.code_workspace):
+        return _emit(False, error="compile_context_not_bound",
+                     reason="请在当前批次对话内使用 TASK runId。独立调用需要 --task-id 和 --code-workspace。")
     if args.command != "inspect" and getattr(args, "parallel_run_id", None):
         resolved_lock = None
         try:

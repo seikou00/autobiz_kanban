@@ -2,7 +2,7 @@
 name: autodev-code
 description: 在当前仓库的普通对话中执行一个 Code Batch，完成编译与同会话 Review。
 version: v3.1
-allowed-tools: execute read_file grep glob write_file edit_file write_todos
+allowed-tools: execute monitor read_file grep glob write_file edit_file write_todos
 ---
 
 # /autodev-code
