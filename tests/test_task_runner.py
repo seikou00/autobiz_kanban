@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.plan_json import task_contract_sha256, task_set_digest  # noqa: E402
+from hooks.plan_json import load_plan_bundle, task_contract_sha256, task_set_digest  # noqa: E402
 from hooks import plan_writer as plan_writer_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
 from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
@@ -305,21 +308,27 @@ def _configure_frontend_without_batch_compile(feature_dir: Path) -> None:
     _refresh_parallel_pipeline(feature_dir)
 
 
-def _add_second_compile_only_batch(feature_dir: Path) -> None:
+def _append_compile_only_batch(feature_dir: Path) -> None:
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    previous = root["batches"][-1]
+    index = len(root["batches"]) + 1
+    batch_id, task_id = f"B{index:03}", f"T{index:03}"
+    scenario_ref = f"specs/next/spec.md#SCN-{index:03}"
     first = _read_batch(feature_dir)
-    second_task = copy.deepcopy(first["tasks"][0])
-    second_task.update(
+    task = copy.deepcopy(first["tasks"][0])
+    task.update(
         {
-            "id": "T002",
+            "id": task_id,
             "title": "deliver next behavior",
             "status": "todo",
-            "deps": ["T001"],
-            "specRefs": ["specs/next/spec.md#REQ-002", "specs/next/spec.md#SCN-002"],
+            "deps": [previous["taskIds"][-1]],
+            "specRefs": [f"specs/next/spec.md#REQ-{index:03}", scenario_ref],
             "acceptanceCriteria": [
                 {
-                    "id": "AC-T002-01",
+                    "id": f"AC-{task_id}-01",
                     "text": "next behavior is observable",
-                    "scenarioRefs": ["specs/next/spec.md#SCN-002"],
+                    "scenarioRefs": [scenario_ref],
                 }
             ],
             "evidenceIds": [],
@@ -331,47 +340,44 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
             "implementationRevision": 0,
         }
     )
-    second = copy.deepcopy(first)
-    second.update(
+    batch = copy.deepcopy(first)
+    batch.update(
         {
-            "batchId": "B002",
+            "batchId": batch_id,
             "title": "next",
             "status": "todo",
             "taskCount": 1,
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
-            "taskIds": ["T002"],
+            "taskIds": [task_id],
             "deliveryKind": "single_task",
             "startedAt": None,
             "completedAt": None,
-            "tasks": [second_task],
+            "tasks": [task],
         }
     )
-    second_path = feature_dir / "plans" / "B002" / "plan.json"
-    second_path.parent.mkdir(parents=True)
-    second_path.write_text(
-        json.dumps(second, ensure_ascii=False, indent=2) + "\n",
+    batch_path = feature_dir / "plans" / batch_id / "plan.json"
+    batch_path.parent.mkdir(parents=True)
+    batch_path.write_text(
+        json.dumps(batch, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
-    root_path = feature_dir / "plan.json"
-    root = json.loads(root_path.read_text(encoding="utf-8"))
     root["activeBatchId"] = None
     root["nextBatchId"] = None
     root["batches"].append(
         {
-            "id": "B002",
-            "path": "plans/B002/plan.json",
+            "id": batch_id,
+            "path": f"plans/{batch_id}/plan.json",
             "title": "next",
             "specRoots": ["specs/next/spec.md"],
             "executionLane": "backend",
-            "deps": ["B001"],
-            "taskIds": ["T002"],
+            "deps": [previous["id"]],
+            "taskIds": [task_id],
             "deliveryKind": "single_task",
             "status": "todo",
         }
     )
-    root["taskSetDigest"] = task_set_digest(root, {"B001": first, "B002": second})
     root_path.write_text(
         json.dumps(root, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -390,6 +396,81 @@ def _record_compile_fixture(workspace: Path, code: Path, state: dict, *, task_id
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_code_dialogues_follow_batch_order_across_multiple_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, first_repo = _workspace(Path(tmp) / "first")
+            _, _, second_repo = _workspace(Path(tmp) / "second")
+            _, _, third_repo = _workspace(Path(tmp) / "third")
+            repositories = {"third": third_repo, "second": second_repo, "first": first_repo}
+            batch_refs = ("first", "second", "third", "first")
+            _configure_review_only(feature_dir)
+            for _ in batch_refs[1:]:
+                _append_compile_only_batch(feature_dir)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["codeWorkspaces"] = {ref: str(repo) for ref, repo in repositories.items()}
+            for batch, ref in zip(root["batches"], batch_refs):
+                batch["workspaceRef"] = ref
+                batch_path = feature_dir / batch["path"]
+                plan = json.loads(batch_path.read_text(encoding="utf-8"))
+                for task in plan["tasks"]:
+                    task["workspaceRef"] = ref
+                    task["scope"]["workspaceRoots"] = {ref: "."}
+                batch_path.write_text(json.dumps(plan), encoding="utf-8")
+            root_path.write_text(json.dumps(root), encoding="utf-8")
+            _refresh_parallel_pipeline(feature_dir)
+
+            def run(thread: str, command: str, *args: str) -> dict:
+                output = io.StringIO()
+                with patch.dict("os.environ", {"SESSION_ID": thread}), redirect_stdout(output):
+                    result = task_runner_module.main([
+                        command, "--workspace", str(workspace), "--feature", "alpha", *args,
+                    ])
+                self.assertEqual(result, 0, output.getvalue())
+                return json.loads(output.getvalue())
+
+            def progress() -> dict:
+                return task_runner_module.inspect_code_dialogue_progress(
+                    load_plan_bundle(feature_dir), feature_dir
+                )
+
+            with patch.object(task_runner_module, "_code_dialogue_checkpoint") as checkpoint:
+                for index, ref in enumerate(batch_refs, 1):
+                    repo = repositories[ref]
+                    batch_id, task_id = f"B{index:03}", f"T{index:03}"
+                    thread = f"{batch_id}-thread"
+                    self.assertEqual(progress(), {
+                        "completedCodeBatches": index - 1, "codeDialogueWorkspace": str(repo),
+                    })
+                    batch = run(thread, "next-code-batch")
+                    self.assertEqual(
+                        (batch["batchId"], batch["workspaceRef"], batch["codeWorkspace"]),
+                        (batch_id, ref, str(repo.resolve())),
+                    )
+                    task_args = ("--task-id", task_id, "--code-workspace", str(repo))
+                    started = run(thread, "start", *task_args)
+                    (repo / f"{task_id}.txt").write_text(f"{ref} implementation\n", encoding="utf-8")
+                    run_args = ("--run-id", started["runId"])
+                    attempt = run(thread, "prepare-compile", *run_args,
+                                  "--execution-cwd", str(repo), "--", "mvn", "compile")
+                    compile_log = workspace / "compile.log"
+                    compile_log.write_text("fixture compile passed\n", encoding="utf-8")
+                    run(thread, "record-compile", *run_args, "--attempt-id", attempt["attemptId"],
+                        "--exit-code", "0", "--log-exit-code", "0", "--output-file", str(compile_log))
+                    run(thread, "finish-implementation", *task_args, *run_args)
+                    finished = run(thread, "finish-code-batch", "--batch-id", batch_id,
+                                   "--review-summary", "Verified batch implementation")
+                    if index < len(batch_refs):
+                        self.assertEqual(finished["status"], "batch_done")
+                        self.assertEqual(finished["nextBatchId"], f"B{index + 1:03}")
+                    else:
+                        self.assertEqual(finished["status"], "code_done")
+
+                from hooks.evidence_integrity_gate import check_code_done
+                self.assertEqual(check_code_done(feature_dir), [])
+                self.assertEqual(progress(), {"completedCodeBatches": len(batch_refs)})
+                self.assertEqual(checkpoint.call_args.args[2], "code_done")
+
     def test_review_only_plan_finishes_implementation_and_merges_without_batch_compile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -575,7 +656,7 @@ class TaskRunnerTest(unittest.TestCase):
     def test_multiple_batches_reject_direct_task_start_without_parallel_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _add_second_compile_only_batch(feature_dir)
+            _append_compile_only_batch(feature_dir)
             removed_session = _run(
                 "code-session", "--workspace", str(workspace), "--feature", "alpha",
             )

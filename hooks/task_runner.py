@@ -42,7 +42,7 @@ from hooks.plan_writer import (  # noqa: E402
     record_task_implementation,
     set_task_execution_status,
 )
-from hooks.parallel_runtime import load_manifest, renew_lease  # noqa: E402
+from hooks.parallel_runtime import batch_workspace_ref, load_manifest, renew_lease  # noqa: E402
 from hooks.parallel_batch_stage import begin_implementation  # noqa: E402
 from hooks.parallel_batch_scheduler import (  # noqa: E402
     assert_batch_worktree_isolated,
@@ -2387,9 +2387,39 @@ def _code_dialogue_checkpoint(workspace: Path, feature: str, checkpoint: str) ->
                               output=(result.stdout or result.stderr).strip())
 
 
+def _reviewed_code_dialogue_batches(ordered: list[dict], entries: dict) -> set[str]:
+    return {
+        item["id"] for item in ordered
+        if normalize_status(item.get("status")) == "done"
+        and item.get("deliveryReceiptId") == entries.get(item["id"], {}).get("receiptId")
+        and entries.get(item["id"], {}).get("receiptId")
+    }
+
+
+def _code_dialogue_batch_workspace(plan: PlanBundle, batch_id: str) -> tuple[str, str]:
+    workspace_ref = batch_workspace_ref(plan.batches[batch_id])
+    checkout = (plan.root.get("codeWorkspaces") or {}).get(workspace_ref)
+    if not workspace_ref or not checkout:
+        raise TaskRunnerError("code_dialogue_batch_workspace_missing", batchId=batch_id, workspaceRef=workspace_ref)
+    return workspace_ref, checkout
+
+
 def _next_code_dialogue_batch(ordered: list[dict], reviewed: set[str]) -> dict | None:
     return next((item for item in ordered if item["id"] not in reviewed
                  and set(item.get("deps", [])) <= reviewed), None)
+
+
+def inspect_code_dialogue_progress(plan: PlanBundle, feature_dir: Path) -> dict[str, str | int]:
+    if plan.root.get("taskSetStatus") != "finalized" or not plan.batches:
+        return {}
+    ordered = plan.root["batches"]
+    entries = _read_code_dialogues(feature_dir).get("batches", {})
+    reviewed = _reviewed_code_dialogue_batches(ordered, entries)
+    progress: dict[str, str | int] = {"completedCodeBatches": len(reviewed)}
+    batch = _next_code_dialogue_batch(ordered, reviewed)
+    if batch is not None:
+        _, progress["codeDialogueWorkspace"] = _code_dialogue_batch_workspace(plan, batch["id"])
+    return progress
 
 
 def _code_dialogue_handoff(batch_id: str, next_batch: dict | None, entries: dict) -> int:
@@ -2415,14 +2445,8 @@ def _cmd_code_dialogue(args: argparse.Namespace) -> int:
         thread = _code_dialogue_thread()
         with FileLock(_code_dialogue_ledger(feature_dir).with_suffix(".lock")):
             plan = load_plan_bundle(feature_dir)
-            workspaces = plan.root.get("codeWorkspaces") or {}
             if plan.root.get("taskSetStatus") != "finalized" or not plan.batches:
                 raise TaskRunnerError("code_dialogue_requires_finalized_plan")
-            if len(workspaces) != 1:
-                raise TaskRunnerError("code_dialogue_requires_one_repository")
-            workspace_ref, checkout = next(iter(workspaces.items()))
-            code = Path(checkout).resolve(strict=True)
-            repo = resolve_git_root(code)
             digest = task_set_digest(plan.root, plan.batches)
             state = _read_code_dialogues(feature_dir)
             if not state:
@@ -2433,12 +2457,7 @@ def _cmd_code_dialogue(args: argparse.Namespace) -> int:
                 raise TaskRunnerError("code_dialogue_plan_changed")
             entries = state["batches"]
             ordered = plan.root["batches"]
-            reviewed = {
-                item["id"] for item in ordered
-                if normalize_status(item.get("status")) == "done"
-                and item.get("deliveryReceiptId") == entries.get(item["id"], {}).get("receiptId")
-                and entries.get(item["id"], {}).get("receiptId")
-            }
+            reviewed = _reviewed_code_dialogue_batches(ordered, entries)
             previous_id = next((key for key, entry in entries.items() if entry["threadId"] == thread), None)
             if len(reviewed) == len(ordered):
                 _code_dialogue_checkpoint(workspace, feature, "code_done")
@@ -2452,6 +2471,9 @@ def _cmd_code_dialogue(args: argparse.Namespace) -> int:
             entry = entries.get(batch_id)
             if entry and entry["threadId"] != thread:
                 raise TaskRunnerError("code_dialogue_already_assigned", batchId=batch_id, threadId=entry["threadId"])
+            workspace_ref, checkout = _code_dialogue_batch_workspace(plan, batch_id)
+            code = Path(checkout).resolve(strict=True)
+            repo = resolve_git_root(code)
             tasks = plan.batches[batch_id]["tasks"]
             if args.command == "next-code-batch":
                 if normalize_status(batch.get("status")) == "done":
@@ -2527,7 +2549,7 @@ def _run_code_dialogue_task(args: argparse.Namespace, workspace: Path, feature: 
             entry = state["batches"].get(batch_id, {})
             if entry.get("threadId") != thread or entry.get("receiptId"):
                 raise TaskRunnerError("code_dialogue_task_not_assigned", taskId=args.task_id, batchId=batch_id)
-            workspace_ref, code = next(iter(plan.root["codeWorkspaces"].items()))
+            workspace_ref, code = _code_dialogue_batch_workspace(plan, batch_id)
             args.workspace_ref = workspace_ref
             repo = resolve_git_root(Path(code).resolve(strict=True))
             token = code_session_binding.set(dict(workspace=str(workspace), feature=feature, batchId=batch_id,

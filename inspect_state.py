@@ -274,15 +274,8 @@ def build_run_context(workspace: Path, feature: str, config: dict) -> tuple[dict
     if feature_dir is not None and current_node_id in {"dev.plan", "dev.code", "dev.detail_design"}:
         try:
             from hooks.plan_json import load_plan_bundle
-            plan = load_plan_bundle(feature_dir)
-            workspaces = plan.root.get("codeWorkspaces") or {}
-            if plan.root.get("taskSetStatus") == "finalized" and len(workspaces) == 1:
-                output["run"]["codeDialogueWorkspace"] = next(iter(workspaces.values()))
-                output["run"]["completedCodeBatches"] = sum(
-                    item.get("status") == "done"
-                    and str(item.get("deliveryReceiptId", "")).startswith("code-dialogue-")
-                    for item in plan.root["batches"]
-                )
+            from hooks.task_runner import inspect_code_dialogue_progress
+            output["run"].update(inspect_code_dialogue_progress(load_plan_bundle(feature_dir), feature_dir))
         except (OSError, ValueError):
             pass
 
